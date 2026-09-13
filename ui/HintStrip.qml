@@ -40,6 +40,7 @@ Rectangle {
                     { k: "j k", d: "move" },
                     { k: "l", d: "open" },
                     { k: "h", d: "up" },
+                    { k: "Space", d: "quick look" },
                     { k: "/", d: "filter" },
                     { k: ":", d: "command" },
                     { k: "?", d: "keys" }
@@ -48,6 +49,7 @@ Rectangle {
                     { k: "↑ ↓", d: "move" },
                     { k: "Enter", d: "open" },
                     { k: "Backspace", d: "up" },
+                    { k: "Space", d: "quick look" },
                     { k: "/", d: "filter" },
                     { k: ":", d: "command" },
                     { k: "F1", d: "keys" }

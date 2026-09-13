@@ -5,10 +5,12 @@
 pub mod defaults;
 pub mod drop;
 pub mod entry;
+pub mod grep;
 pub mod lister;
 pub mod location;
 pub mod mime;
 pub mod open;
+pub mod peek;
 pub mod search;
 pub mod selection;
 pub mod theme;

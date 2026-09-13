@@ -619,11 +619,11 @@ typ "$SEL/from"; key Return
 wait_for "d['model']['location']" "$SEL/from" >/dev/null
 
 key Home
-key space
-expect "Space selects one entry" "d['selCount']" "1"
+ctrl space            # Space is Quick Look now; the toggle moved here
+expect "Ctrl+Space selects one entry" "d['selCount']" "1"
 
 key Down; key Down
-key space
+ctrl space
 expect "an arrow does NOT drop an explicit selection" "d['selCount']" "2"
 
 key Escape
@@ -663,11 +663,11 @@ fi
 
 # Select three by hand and copy them.
 key Home
-key space
+ctrl space
 key Down; key Down
-key space
+ctrl space
 key Down
-key space
+ctrl space
 expect "three entries selected" "d['selCount']" "3"
 if [[ "$(state "d['hintShown']")" == *"3 selected"* ]]; then
   ok "the status line SHOWS the real count  ($(state "d['hintShown']"))"
@@ -2006,6 +2006,132 @@ stop_gust
 start_gust
 wait_for "d['model']['settled']" "True" 20 >/dev/null
 
+say "12q · Quick Look shows what a file is, without running it"
+stop_gust
+QLDIR="${FIXTURE}-peek"
+rm -rf "$QLDIR"
+mkdir -p "$QLDIR/sub"
+for i in $(seq 1 120); do echo "line $i of the notes file"; done > "$QLDIR/notes.txt"
+printf 'before\033[31mRED\033[0m bell\007 after\n' > "$QLDIR/nasty.txt"
+printf '\x89PNG\r\n\x1a\n not a real png' > "$QLDIR/photo.png"
+head -c 4096 /dev/urandom > "$QLDIR/blob.bin"
+ln -s notes.txt "$QLDIR/pointer"
+printf 'the FINDME token\nand again findme\n' > "$QLDIR/hit-a.txt"
+printf 'findme deeper\n' > "$QLDIR/sub/hit-b.txt"
+printf 'FINDME\x00binary\n' > "$QLDIR/sub/binary-hit.bin"
+printf 'nothing here\n' > "$QLDIR/plain.txt"
+
+start_gust
+wait_for "d['model']['settled']" "True" 20 >/dev/null
+goto "$QLDIR"
+wait_for "d['model']['settled']" "True" 20 >/dev/null
+
+# A long text file: peeked, and honest about being cut short.
+typ "notes"
+expect "cursor on the text file" "d['model']['cursor_name']" "notes.txt"
+key space
+sleep 1.2
+expect "Quick Look opened" "d['quickLookOpen']" "True"
+expect "and named the file" "d['quickLookName']" "notes.txt"
+expect "in words, not a MIME type" "d['quickLookKind']" "Plain text"
+ql_lines="$(state "d['quickLookLines']")"
+[[ "$ql_lines" -gt 0 && "$ql_lines" -le 40 ]] \
+  && ok "the peek is bounded  ($ql_lines lines of 120)" \
+  || bad "peek line count out of bounds: $ql_lines"
+shot "12q-quicklook"
+
+key Escape
+sleep 0.8
+expect "Escape closes Quick Look" "d['quickLookOpen']" "False"
+
+# A file full of terminal escape sequences must be SHOWN, never obeyed.
+typ "nasty"
+key space
+sleep 1.2
+expect "a hostile file still previews" "d['quickLookOpen']" "True"
+shot "12q-nasty"
+key Escape
+sleep 0.8
+
+# A symlink is described, not followed: previewing the target's contents
+# would be a different file than the one selected.
+typ "pointer"
+key space
+sleep 1.2
+ql_kind="$(state "d['quickLookKind']")"
+ql_lines2="$(state "d['quickLookLines']")"
+if [[ "$ql_kind" == *"Link to"* && "$ql_lines2" == "0" ]]; then
+  ok "a symlink is shown, not followed  ($ql_kind)"
+else
+  bad "symlink peek wrong (kind=$ql_kind lines=$ql_lines2)"
+fi
+key Escape
+sleep 0.8
+
+# An image is described without being decoded here; a binary says so.
+typ "photo"
+key space
+sleep 1.2
+expect "an image is named by kind" "d['quickLookKind']" "PNG image"
+expect "and is not decoded into text" "d['quickLookLines']" "0"
+key Escape
+sleep 0.8
+typ "blob"
+key space
+sleep 1.2
+ql_no="$(state "d['quickLookNoPreview']")"
+[[ -n "$ql_no" && "$ql_no" != "None" ]] \
+  && ok "an opaque file says why there is no preview  ($ql_no)" \
+  || bad "a binary file offered no reason for having no preview"
+key Escape
+sleep 0.8
+
+# Space is Quick Look now, so multi-select moved to Ctrl+Space and must
+# still work — a shortcut that silently stops working is a regression.
+key Escape
+sleep 0.5
+ctrl space
+key Down
+ctrl space
+sleep 0.8
+sel_after="$(state "d['selCount']")"
+ql_after="$(state "d['quickLookOpen']")"
+if [[ "$sel_after" -ge 2 && "$ql_after" == "False" ]]; then
+  ok "Ctrl+Space still multi-selects  ($sel_after selected)"
+else
+  bad "Ctrl+Space broke (selected=$sel_after quickLook=$ql_after)"
+fi
+vm wtype -k Escape >/dev/null 2>&1
+sleep 0.5
+
+say "12g · :grep searches inside files, and skips what it should"
+palette_run "grep findme"
+sleep 2.5
+wait_for "d['finding']" "True" 20 >/dev/null
+grep_count="$(state "d['model']['count']")"
+grep_seen="$(state "' '.join(d['model']['visible'])")"
+if [[ "$grep_count" == "2" ]]; then
+  ok "content search found both text matches  ($grep_seen)"
+else
+  bad "expected 2 content matches, got $grep_count ($grep_seen)"
+fi
+if [[ "$grep_seen" == *"hit-b"* ]]; then
+  ok "and it searched below the current folder"
+else
+  bad "content search did not recurse ($grep_seen)"
+fi
+if [[ "$grep_seen" == *"binary-hit"* ]]; then
+  bad "a binary file was searched — grepping disk images costs everything"
+else
+  ok "a binary file holding the same token was skipped"
+fi
+shot "12g-grep"
+
+key Escape
+sleep 1.5
+expect "Escape leaves the results" "d['finding']" "False"
+expect "and the real folder is back" "d['model']['location']" "$QLDIR"
+
 say "13 · nothing executed, nothing crashed, no QML errors"
 [[ -f /tmp/gust-fixture-EXECUTED ]] \
   && bad "SECURITY: a fixture script executed during browsing" \
@@ -2025,13 +2151,13 @@ else
   real_trash_count=0
 fi
 echo "  (real trash entries: $real_trash_count — Gust ran with XDG_DATA_HOME=$FIXTURE/.local/share)"
-for d in "$FIXTURE" "${FIXTURE}-panes"; do
+for d in "$FIXTURE" "${FIXTURE}-panes" "${FIXTURE}-peek"; do
   case "$d" in
     /home/*|/root/*)
       bad "a QA tree was inside a real home: $d" ;;
   esac
 done
-ok "QA ran entirely against $FIXTURE and ${FIXTURE}-panes"
+ok "QA ran entirely against $FIXTURE, ${FIXTURE}-panes and ${FIXTURE}-peek"
 
 stop_gust
 

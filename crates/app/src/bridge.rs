@@ -194,6 +194,15 @@ pub mod qobject {
         /// Leave the results and go back to the folder being browsed.
         #[qinvokable]
         fn find_clear(self: Pin<&mut DirModel>);
+        /// Start a scoped, cancellable CONTENT search. Results stream in as
+        /// entries, exactly as a name find does (DESIGN §6.10).
+        #[qinvokable]
+        fn grep_start(self: Pin<&mut DirModel>, needle: QString);
+        /// What Quick Look should show for a row, as JSON. Reads bytes and
+        /// metadata only: nothing is executed and no link is followed
+        /// (DESIGN §6.9).
+        #[qinvokable]
+        fn peek_row(self: &DirModel, row: i32) -> QString;
         #[qinvokable]
         fn drag_begin(self: Pin<&mut DirModel>, row: i32);
         #[qinvokable]
@@ -1286,6 +1295,94 @@ impl qobject::DirModel {
                 });
             })
             .ok();
+    }
+
+    /// Start a content search. Same scope, cancellation and streaming as a
+    /// name find; a different question asked of each file.
+    fn grep_start(mut self: Pin<&mut Self>, needle: QString) {
+        let needle = needle.to_string();
+        if needle.trim().is_empty() {
+            self.as_mut().find_clear();
+            return;
+        }
+
+        self.as_ref().find_cancel.cancel();
+        let cancel = CancelToken::new();
+        self.as_mut().rust_mut().find_cancel = cancel.clone();
+
+        let key = self.as_ref().key.clone();
+        if self.as_ref().find_origin.is_none() {
+            self.as_mut().rust_mut().find_origin = Some(key.clone());
+        }
+        let gen = self.as_ref().generation;
+
+        self.as_mut().set_finding(true);
+        self.as_mut()
+            .set_find_needle(QString::from(needle.as_str()));
+        self.as_mut().set_status(QString::from(format!(
+            "Searching inside files for \"{needle}\"… Escape to stop"
+        )));
+
+        let Some(thread) = self.as_ref().qt_thread_handle() else {
+            return;
+        };
+        let scope = gust_core::search::SearchScope::recursive(key, 8);
+
+        std::thread::Builder::new()
+            .name("gust-grep".into())
+            .spawn(move || {
+                let (hits, outcome) =
+                    gust_core::grep::grep_contents(&scope, &needle, &cancel, |_| {});
+                if cancel.is_cancelled() {
+                    return;
+                }
+                let n = hits.len();
+                let paths: Vec<PathBuf> = hits.into_iter().map(|h| h.path).collect();
+                let _ = thread.queue(move |mut model| {
+                    Self::publish_find(model.as_mut(), gen, paths);
+                    // Stopping early must be visible: a truncated result that
+                    // looks complete is how someone concludes a file is not
+                    // there when it is (DESIGN §6.10 rule 3).
+                    if outcome == gust_core::grep::GrepOutcome::HitLimit {
+                        model.as_mut().set_notice(QString::from(format!(
+                            "Stopped after {n} files — narrow the search to see the rest"
+                        )));
+                    }
+                });
+            })
+            .ok();
+    }
+
+    /// What Quick Look shows for a row.
+    ///
+    /// Bytes and metadata only. Nothing is executed, no preview script runs,
+    /// no symlink is followed, and untrusted image bytes are described
+    /// rather than decoded here (DESIGN §6.9).
+    fn peek_row(&self, row: i32) -> QString {
+        let Some(path) = self.path_of_row(row) else {
+            return QString::from(r#"{"ok":false}"#);
+        };
+        let p = gust_core::peek::peek(&path);
+        let mut lines = String::from("[");
+        for (i, l) in p.text.iter().enumerate() {
+            if i > 0 {
+                lines.push(',');
+            }
+            lines.push_str(&Self::json_str(l).to_string());
+        }
+        lines.push(']');
+        QString::from(format!(
+            r#"{{"ok":true,"name":{},"kind":{},"kindWords":{},"size":{},"sizeText":{},"mode":{},"lines":{},"truncated":{},"noPreview":{}}}"#,
+            Self::json_str(&p.name),
+            Self::json_str(p.kind.label()),
+            Self::json_str(&p.kind_words),
+            p.size,
+            Self::json_str(&human_size(p.size)),
+            Self::json_str(&p.mode_line),
+            lines,
+            p.truncated,
+            Self::json_str(p.no_preview_reason.as_deref().unwrap_or("")),
+        ))
     }
 
     /// Show what a finished find produced.

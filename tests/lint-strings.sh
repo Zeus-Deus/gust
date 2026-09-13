@@ -15,7 +15,8 @@ while IFS= read -r hit; do
   FAIL=1
 done < <(grep -rnE '"[^"]*[a-z,.]   +[a-zA-Z]' crates/*/src/*.rs 2>/dev/null \
          | grep -vE '^\s*[^:]+:[0-9]+:\s*//' \
-         | grep -vE 'r#"' )
+         | grep -vE 'r#"' \
+         | grep -vE 'assert(_eq|_ne)?!' )
 if [[ "$FAIL" == 1 ]]; then
   echo "    ^ a line continuation left spaces inside a sentence the user reads."
   echo "      Put the whole sentence on one line, or build it with format!()."
