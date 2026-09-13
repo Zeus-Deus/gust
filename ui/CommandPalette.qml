@@ -132,6 +132,16 @@ Rectangle {
             return
         }
 
+        // A shared folder is asked for, never guessed: discovery can be
+        // unavailable or incomplete (plan §3).
+        if (t.toLowerCase().startsWith("share") || t.toLowerCase().startsWith("nas")
+            || t.toLowerCase().startsWith("smb")) {
+            results.append({ kind: "action",
+                             label: "Add a shared folder (SMB)",
+                             payload: "share-add" })
+            return
+        }
+
         // Devices the kernel reports. Listing them mounts nothing.
         if (t.toLowerCase().startsWith("device") || t.toLowerCase().startsWith("eject")) {
             let devs = []

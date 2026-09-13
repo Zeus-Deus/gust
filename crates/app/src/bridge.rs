@@ -177,6 +177,20 @@ pub mod qobject {
         /// no daemon, no network, and Gust never auto-mounts (DESIGN §6.13).
         #[qinvokable]
         fn devices_json(self: &DirModel) -> QString;
+        /// Mount a network share. The password is handed to GIO on stdin and
+        /// is never stored, logged or placed in argv (DESIGN §6.14).
+        #[qinvokable]
+        fn share_mount(
+            self: Pin<&mut DirModel>,
+            address: QString,
+            user: QString,
+            domain: QString,
+            password: QString,
+        ) -> QString;
+        /// Check an address before asking for a password, so a typo is
+        /// caught without the user typing a secret first.
+        #[qinvokable]
+        fn share_check(self: &DirModel, address: QString) -> QString;
         /// Mount a device and browse it. A visible, deliberate action.
         #[qinvokable]
         fn device_mount(self: Pin<&mut DirModel>, path: QString) -> QString;
@@ -956,6 +970,74 @@ impl qobject::DirModel {
             h = (h ^ *b as u32).wrapping_mul(16777619);
         }
         format!("http://127.0.0.1:{}", 45000 + (h % 2000) as u16)
+    }
+
+    // --- network shares (DESIGN §6.14) -----------------------------------
+
+    /// Validate an address without asking for a secret.
+    ///
+    /// Returns "" when it parses, or a sentence about what is wrong. A typo
+    /// should be caught before the user types a password, not after.
+    fn share_check(&self, address: QString) -> QString {
+        use gust_remote::shares::{gvfs_available, parse_address, ShareError, ShareKind};
+        if !gvfs_available() {
+            return QString::from(ShareError::NoGvfs.message());
+        }
+        match parse_address(&address.to_string(), ShareKind::Smb) {
+            Ok(_) => QString::default(),
+            Err(e) => QString::from(e.message()),
+        }
+    }
+
+    /// Mount a share and browse it.
+    ///
+    /// The password arrives here, goes straight into GIO's stdin, and is
+    /// dropped. It is never stored, never logged, never put in argv, and
+    /// never written to Gust's places file — which records the server and
+    /// share only.
+    fn share_mount(
+        mut self: Pin<&mut Self>,
+        address: QString,
+        user: QString,
+        domain: QString,
+        password: QString,
+    ) -> QString {
+        use gust_remote::shares::{mount, parse_address, ShareKind};
+
+        let mut share = match parse_address(&address.to_string(), ShareKind::Smb) {
+            Ok(s) => s,
+            Err(e) => return QString::from(e.message()),
+        };
+        let u = user.to_string();
+        if !u.trim().is_empty() {
+            share.user = Some(u);
+        }
+        let d = domain.to_string();
+        if !d.trim().is_empty() {
+            share.domain = Some(d);
+        }
+
+        let runtime =
+            std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/run/user/1000".to_string());
+
+        // Bounded: a server that never answers must not hang the window.
+        // This runs on the UI thread only because gio is given a deadline;
+        // the listing that follows goes through the normal worker.
+        let result = mount(
+            &share,
+            password.to_string(),
+            &runtime,
+            std::time::Duration::from_secs(25),
+        );
+
+        match result {
+            Ok(mp) => {
+                let q = QString::from(mp.to_string_lossy().as_ref());
+                self.as_mut().navigate(&q);
+                QString::default()
+            }
+            Err(e) => QString::from(e.message()),
+        }
     }
 
     // --- removable devices (DESIGN §6.13) --------------------------------
