@@ -1313,6 +1313,15 @@ Window {
                     win.qaDump("filter-cleared")
                     event.accepted = true; return
                 }
+                // Last rung: abandon a pending copy or cut. Without this a
+                // clipboard could only ever be replaced, never given up —
+                // and clip_clear() had no caller anywhere in the UI.
+                if (dirModel.clip_summary() !== "") {
+                    dirModel.clip_clear()
+                    hints.status = qsTr("Clipboard cleared")
+                    win.qaDump("clip-cleared")
+                    event.accepted = true; return
+                }
                 break
             case Qt.Key_F1:
                 hints.status = win.keyPreset === "vim"

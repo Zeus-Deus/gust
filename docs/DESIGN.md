@@ -828,6 +828,51 @@ Enter on a mixed selection opens only the cursor row, as it always did.
 Executables are refused exactly as they are for a single file (§4). Nothing
 about selecting several files makes running one of them safer.
 
+## 6.19 The clipboard other applications can see
+
+§9's Interop list asks for "current clipboard offers", and §10 records that
+native Qt/GTK clipboard exchange was qualified during the plan's own
+prototyping. Gust's clipboard was internal: Ctrl+C then paste into another
+file manager did nothing, and a copy made elsewhere could not be pasted into
+Gust. That is not a clipboard, it is a variable.
+
+### What goes on the clipboard
+
+Three representations of the same copy, because different desktops read
+different ones:
+
+| Target | Content | Read by |
+|---|---|---|
+| `x-special/gnome-copied-files` | `copy\nfile:///a\nfile:///b` | Nautilus, Nemo, Thunar, most GTK |
+| `text/uri-list` | `file:///a\r\nfile:///b` | Qt/KDE, browsers, drag targets |
+| `text/plain` | the paths, one per line | terminals, editors, anything |
+
+The first line of the GNOME format is the verb — `copy` or `cut` — which is
+how a cut survives the trip to another application. A paste target that
+reads only `text/uri-list` gets a copy, because there is nowhere in that
+format to say otherwise, and silently moving somebody's files because the
+format could not express "cut" would be the worst possible default.
+
+### Reading what others put there
+
+Ctrl+V looks for the same three, in that order. A file manager's cut is
+honoured as a move; a browser's `text/uri-list` is a copy; plain text is
+tried as paths and ignored if they do not exist. Nothing is executed and no
+URI scheme other than `file://` is accepted — a `http://` URI on the
+clipboard is not something to paste into a folder.
+
+### Why a helper process
+
+Qt's clipboard is owned by the GUI thread and a Wayland clipboard offer must
+outlive the moment it is made. `wl-copy` already does exactly this, holds
+the offer for as long as it is needed, and is what the rest of the desktop
+uses. Gust shells out to it with the data on **stdin**, never in argv: a
+file list can be long and a file name can contain anything.
+
+If `wl-copy` is missing, the internal clipboard still works within Gust and
+the status line says the system clipboard is unavailable rather than
+pretending the copy went further than it did.
+
 ## 7. Undo journal
 
 An undo entry records, per affected path: the expected identity

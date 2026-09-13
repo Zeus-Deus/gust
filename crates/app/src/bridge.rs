@@ -2999,8 +2999,19 @@ impl qobject::DirModel {
             return QString::from("nothing to copy");
         }
         let label = clip_label(&paths);
+        // Also offer it to the rest of the desktop, so a copy here can be
+        // pasted in another file manager (DESIGN §6.19). A failure here
+        // does not lose the copy: the internal clipboard still works.
+        let shared =
+            gust_core::clipboard::offer(gust_core::clipboard::ClipVerb::Copy, &paths).is_ok();
         self.as_mut().rust_mut().clipboard = Some((paths, ClipMode::Copy));
-        QString::from(&format!("Copied {label} — paste with Ctrl+V"))
+        if shared {
+            QString::from(&format!("Copied {label} — paste with Ctrl+V"))
+        } else {
+            QString::from(&format!(
+                "Copied {label} — paste with Ctrl+V (only inside Gust)"
+            ))
+        }
     }
 
     fn clip_cut(mut self: Pin<&mut Self>, row: i32) -> QString {
@@ -3010,8 +3021,16 @@ impl qobject::DirModel {
             return QString::from("nothing to cut");
         }
         let label = clip_label(&paths);
+        let shared =
+            gust_core::clipboard::offer(gust_core::clipboard::ClipVerb::Cut, &paths).is_ok();
         self.as_mut().rust_mut().clipboard = Some((paths, ClipMode::Cut));
-        QString::from(&format!("Cut {label} — paste with Ctrl+V"))
+        if shared {
+            QString::from(&format!("Cut {label} — paste with Ctrl+V"))
+        } else {
+            QString::from(&format!(
+                "Cut {label} — paste with Ctrl+V (only inside Gust)"
+            ))
+        }
     }
 
     /// A command invoked on a row acts on that row only when nothing is
@@ -3044,7 +3063,18 @@ impl qobject::DirModel {
         if self.as_ref().job.is_some() {
             return QString::from("another operation is still running");
         }
-        let Some((srcs, mode)) = self.as_ref().clipboard.clone() else {
+        // Gust's own clipboard first; otherwise whatever another
+        // application left on the system clipboard (DESIGN §6.19).
+        let own = self.as_ref().clipboard.clone();
+        let Some((srcs, mode)) = own.or_else(|| {
+            gust_core::clipboard::read().map(|c| {
+                let mode = match c.verb {
+                    gust_core::clipboard::ClipVerb::Cut => ClipMode::Cut,
+                    gust_core::clipboard::ClipVerb::Copy => ClipMode::Copy,
+                };
+                (c.paths, mode)
+            })
+        }) else {
             return QString::from("nothing to paste");
         };
         let Some(dest) = self.as_ref().key.as_path().map(|p| p.to_path_buf()) else {

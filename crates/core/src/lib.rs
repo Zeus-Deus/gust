@@ -2,6 +2,7 @@
 //!
 //! No Qt, no UI. Everything here is safe to call from a worker thread.
 
+pub mod clipboard;
 pub mod defaults;
 pub mod devices;
 pub mod drop;

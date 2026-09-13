@@ -2666,6 +2666,69 @@ sleep 0.5
 
 rm -rf "$MODIR"
 
+say "12c2 · the clipboard other applications can see"
+stop_gust
+CLIPDIR="${FIXTURE}-clip"
+rm -rf "$CLIPDIR"
+mkdir -p "$CLIPDIR/dest"
+printf 'shared\n' > "$CLIPDIR/shared.txt"
+printf 'from elsewhere\n' > "$CLIPDIR/elsewhere.txt"
+
+start_gust
+wait_for "d['model']['settled']" "True" 20 >/dev/null
+goto "$CLIPDIR"
+wait_for "d['model']['settled']" "True" 20 >/dev/null
+
+# Copy in Gust, then read it the way another file manager would.
+typ "shared"
+expect "cursor on the file to copy" "d['model']['cursor_name']" "shared.txt"
+ctrl c
+sleep 1.5
+clip_seen="$(vm wl-paste --no-newline --type x-special/gnome-copied-files 2>/dev/null | tr '\n' ' ')"
+if [[ "$clip_seen" == *"shared.txt"* && "$clip_seen" == copy* ]]; then
+  ok "another application can see Gust's copy  ($clip_seen)"
+else
+  bad "Gust's copy did not reach the system clipboard: '$clip_seen'"
+fi
+
+# A cut must survive as a cut, or another manager would copy when the user
+# asked to move.
+ctrl x
+sleep 1.5
+cut_seen="$(vm wl-paste --no-newline --type x-special/gnome-copied-files 2>/dev/null | head -1)"
+[[ "$cut_seen" == "cut" ]] \
+  && ok "a cut arrives as a cut, not a copy" \
+  || bad "a cut arrived as '$cut_seen'"
+
+# The other direction: what another application leaves, Gust pastes.
+# Gust's OWN clipboard wins (a copy made here must not be overridden), so
+# clear it first — Escape unwinds the selection and the pending clip.
+key Escape
+sleep 0.5
+key Escape
+sleep 0.5
+vm bash -lc 'printf "copy\nfile://'"$CLIPDIR"'/elsewhere.txt" | wl-copy --type x-special/gnome-copied-files &' >/dev/null 2>&1
+sleep 2
+goto "$CLIPDIR/dest"
+wait_for "d['model']['settled']" "True" 20 >/dev/null
+ctrl v
+sleep 3
+wait_for "d['jobRunning']" "False" 20 >/dev/null
+wait_for "d['model']['settled']" "True" 20 >/dev/null
+if [[ -f "$CLIPDIR/dest/elsewhere.txt" ]]; then
+  ok "Gust pasted what another application put on the clipboard"
+else
+  bad "a copy from another application could not be pasted (dest: $(ls "$CLIPDIR/dest" | tr '\n' ' '))"
+fi
+
+# The source must survive a COPY, whoever made it.
+[[ -f "$CLIPDIR/elsewhere.txt" ]] \
+  && ok "and it was a copy: the original is still there" \
+  || bad "a copy from another application MOVED the file"
+
+shot "12c2-clipboard"
+rm -rf "$CLIPDIR"
+
 say "13 · nothing executed, nothing crashed, no QML errors"
 [[ -f /tmp/gust-fixture-EXECUTED ]] \
   && bad "SECURITY: a fixture script executed during browsing" \
@@ -2685,13 +2748,13 @@ else
   real_trash_count=0
 fi
 echo "  (real trash entries: $real_trash_count — Gust ran with XDG_DATA_HOME=$FIXTURE/.local/share)"
-for d in "$FIXTURE" "${FIXTURE}-panes" "${FIXTURE}-peek" "${FIXTURE}-perm" "${FIXTURE}-arch" "${FIXTURE}-bulk" "${FIXTURE}-openwith" "${FIXTURE}-multiopen"; do
+for d in "$FIXTURE" "${FIXTURE}-panes" "${FIXTURE}-peek" "${FIXTURE}-perm" "${FIXTURE}-arch" "${FIXTURE}-bulk" "${FIXTURE}-openwith" "${FIXTURE}-multiopen" "${FIXTURE}-clip"; do
   case "$d" in
     /home/*|/root/*)
       bad "a QA tree was inside a real home: $d" ;;
   esac
 done
-ok "QA ran entirely against $FIXTURE and its -panes/-peek/-perm/-arch/-bulk/-openwith/-multiopen trees"
+ok "QA ran entirely against $FIXTURE and its eight fixture trees"
 
 stop_gust
 
