@@ -173,6 +173,16 @@ pub mod qobject {
         /// Reading a config is not connecting: this opens no socket.
         #[qinvokable]
         fn cloud_suggestions(self: &DirModel) -> QString;
+        /// Removable devices the kernel reports, as JSON. A local read:
+        /// no daemon, no network, and Gust never auto-mounts (DESIGN §6.13).
+        #[qinvokable]
+        fn devices_json(self: &DirModel) -> QString;
+        /// Mount a device and browse it. A visible, deliberate action.
+        #[qinvokable]
+        fn device_mount(self: Pin<&mut DirModel>, path: QString) -> QString;
+        /// Unmount a device. Refuses while a transfer is running.
+        #[qinvokable]
+        fn device_unmount(self: Pin<&mut DirModel>, path: QString) -> QString;
         /// Mount a configured cloud remote and browse it.
         #[qinvokable]
         fn cloud_connect(self: Pin<&mut DirModel>, name: QString) -> QString;
@@ -946,6 +956,133 @@ impl qobject::DirModel {
             h = (h ^ *b as u32).wrapping_mul(16777619);
         }
         format!("http://127.0.0.1:{}", 45000 + (h % 2000) as u16)
+    }
+
+    // --- removable devices (DESIGN §6.13) --------------------------------
+
+    fn devices_json(&self) -> QString {
+        let found = gust_core::devices::list_devices();
+        let can_act = gust_core::devices::udisks_available();
+        let mut out = String::from("[");
+        for (i, d) in found.iter().take(30).enumerate() {
+            if i > 0 {
+                out.push(',');
+            }
+            out.push_str(&format!(
+                r#"{{"name":{},"path":{},"label":{},"state":{},"mountPoint":{},"mounted":{},"empty":{},"canAct":{}}}"#,
+                Self::json_str(&d.name),
+                Self::json_str(&d.path),
+                Self::json_str(&d.display()),
+                Self::json_str(&d.state_text()),
+                Self::json_str(
+                    &d.mount_point
+                        .as_ref()
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or_default()
+                ),
+                d.is_mounted(),
+                d.is_empty_drive(),
+                can_act,
+            ));
+        }
+        out.push(']');
+        QString::from(out)
+    }
+
+    fn device_mount(mut self: Pin<&mut Self>, path: QString) -> QString {
+        use gust_core::devices::{mount_args, udisks_available, DeviceError};
+        if !udisks_available() {
+            return QString::from(DeviceError::NoUdisks.message());
+        }
+        let dev = path.to_string();
+        // The device must be one the kernel actually reports, so a crafted
+        // path cannot be handed to udisks.
+        if !gust_core::devices::list_devices()
+            .iter()
+            .any(|d| d.path == dev)
+        {
+            return QString::from("That device is no longer there.");
+        }
+
+        let out = std::process::Command::new("udisksctl")
+            .args(mount_args(&dev))
+            .stdin(std::process::Stdio::null())
+            .output();
+        let out = match out {
+            Ok(o) => o,
+            Err(e) => return QString::from(format!("Could not mount: {e}")),
+        };
+        if !out.status.success() {
+            let err = String::from_utf8_lossy(&out.stderr);
+            return QString::from(format!(
+                "Could not mount that device: {}",
+                err.lines()
+                    .last()
+                    .unwrap_or("udisks did not say why")
+                    .trim()
+            ));
+        }
+        // udisksctl prints "Mounted /dev/sdb1 at /run/media/...".
+        let said = String::from_utf8_lossy(&out.stdout);
+        if let Some(at) = said.rsplit_once(" at ") {
+            let mount = at.1.trim().trim_end_matches('.').to_string();
+            if std::path::Path::new(&mount).is_dir() {
+                let q = QString::from(mount.as_str());
+                self.as_mut().navigate(&q);
+                return QString::default();
+            }
+        }
+        // Mounted, but the path could not be read back: say so rather than
+        // claiming to have gone somewhere.
+        QString::from("Mounted, but Gust could not tell where. Check the sidebar.")
+    }
+
+    fn device_unmount(mut self: Pin<&mut Self>, path: QString) -> QString {
+        use gust_core::devices::{udisks_available, unmount_args, DeviceError};
+        if !udisks_available() {
+            return QString::from(DeviceError::NoUdisks.message());
+        }
+        let dev = path.to_string();
+
+        // Never pull a filesystem out from under a running transfer.
+        if self.as_ref().job.is_some() {
+            return QString::from(DeviceError::Busy("A transfer".into()).message());
+        }
+
+        // If the user is standing on the device, leave before ejecting it.
+        let here = std::path::PathBuf::from(self.as_ref().location.to_string());
+        let mount = gust_core::devices::list_devices()
+            .into_iter()
+            .find(|d| d.path == dev)
+            .and_then(|d| d.mount_point);
+        if let Some(mp) = &mount {
+            if here.starts_with(mp) {
+                if let Some(home) = std::env::var_os("HOME") {
+                    let q =
+                        QString::from(std::path::PathBuf::from(home).to_string_lossy().as_ref());
+                    self.as_mut().navigate(&q);
+                }
+            }
+        }
+
+        let out = std::process::Command::new("udisksctl")
+            .args(unmount_args(&dev))
+            .stdin(std::process::Stdio::null())
+            .output();
+        match out {
+            Ok(o) if o.status.success() => QString::default(),
+            Ok(o) => {
+                let err = String::from_utf8_lossy(&o.stderr);
+                QString::from(format!(
+                    "Could not eject: {}",
+                    err.lines()
+                        .last()
+                        .unwrap_or("udisks did not say why")
+                        .trim()
+                ))
+            }
+            Err(e) => QString::from(format!("Could not eject: {e}")),
+        }
     }
 
     fn cloud_suggestions(&self) -> QString {

@@ -104,6 +104,45 @@ Window {
     /// what actually happened.
     property var connectedPlaces: []
 
+    /// Removable devices, refreshed when the window opens and after any
+    /// mount or eject. Not polled: a rail that lies about what is attached
+    /// is worse than one that says nothing (DESIGN §6.13).
+    property var deviceList: []
+
+    function refreshDevices() {
+        try {
+            win.deviceList = JSON.parse(dirModel.devices_json())
+        } catch (e) {
+            win.deviceList = []
+        }
+    }
+
+    /// Eject a device. Refused while a transfer is running, because pulling
+    /// a filesystem out from under a copy is how people lose data.
+    function ejectDevice(path) {
+        const err = dirModel.device_unmount(path)
+        if (err !== "") win.alertText = err
+        else hints.status = qsTr("Safe to remove")
+        win.refreshDevices()
+        win.qaDump("device-eject")
+    }
+
+    /// A device row was clicked: browse it if it is mounted, otherwise
+    /// mount it. Gust never mounts anything on its own.
+    function openDevice(path, mounted) {
+        if (mounted) {
+            const d = win.deviceList.find((x) => x.path === path)
+            if (d && d.mountPoint) dirModel.navigate(d.mountPoint)
+            else win.alertText = qsTr("That device is mounted, but Gust could not tell where.")
+            return
+        }
+        hints.status = qsTr("Mounting…")
+        const err = dirModel.device_mount(path)
+        if (err !== "") win.alertText = err
+        win.refreshDevices()
+        win.qaDump("device-mount")
+    }
+
     function refreshPlaces() {
         let names = []
         try {
@@ -818,6 +857,8 @@ Window {
                 model: dirModel
                 onPlaceChosen: (p) => { dirModel.navigate(p); win.focusList() }
                 remotePlaces: win.connectedPlaces
+                devices: win.deviceList
+                onDeviceChosen: (path, mounted) => win.openDevice(path, mounted)
             }
 
             Item {
@@ -1293,6 +1334,12 @@ Window {
                 ? "vim: h/j/k/l move, l open, r rename, y/d/p copy/cut/paste"
                 : "arrows move, Enter open, F2 rename, Ctrl+C/X/V, Ctrl+N new folder"
             else if (a === "noop") { /* nothing to do */ }
+            else if (a.startsWith("device-mount:")) {
+                win.openDevice(a.substring(13), false)
+            }
+            else if (a.startsWith("device-eject:")) {
+                win.ejectDevice(a.substring(13))
+            }
             else if (a.startsWith("grep:")) {
                 dirModel.grep_start(a.substring(5))
                 win.qaDump("grep")
@@ -1604,6 +1651,8 @@ Window {
         dirModel.reload()
         // The folder Gust opens with gets its remembered view too.
         applyRememberedView()
+        // A local read of the kernel's own view: no daemon, no network.
+        win.refreshDevices()
         qaStatePath = qaWriter.env_path("GUST_QA_STATE")
         console.log("GUST_READY location=" + dirModel.location
                     + " count=" + dirModel.count

@@ -2273,6 +2273,48 @@ shot "12d-permanent"
 rm -rf "$DELDIR"
 DELDIR=""
 
+say "12v · devices are discovered without mounting anything"
+# The dangerous mistakes here are offering the system disk as ejectable and
+# mounting something the user did not ask for. Both are checked.
+stop_gust
+start_gust
+wait_for "d['model']['settled']" "True" 20 >/dev/null
+
+mounts_before="$(wc -l < /proc/self/mounts)"
+palette_open
+typ "device"
+sleep 1.2
+dev_said="$(state "' | '.join(d.get('paletteResults') or [])")"
+shot "12v-devices"
+key Escape
+sleep 0.5
+mounts_after="$(wc -l < /proc/self/mounts)"
+
+[[ "$mounts_before" == "$mounts_after" ]] \
+  && ok "listing devices mounted nothing  ($mounts_after mounts, unchanged)" \
+  || bad "the device list changed the mount table ($mounts_before -> $mounts_after)"
+
+# Whatever this machine has, the offer must never include its own storage.
+root_dev="$(findmnt -no SOURCE / 2>/dev/null | sed 's|[0-9]*$||')"
+root_name="$(basename "${root_dev:-none}")"
+if [[ -n "$root_name" && "$root_name" != "none" && "$dev_said" == *"$root_name"* ]]; then
+  bad "the system disk ($root_name) was offered as a removable device"
+else
+  ok "the system disk is not offered as a device"
+fi
+case "$dev_said" in
+  *swap*|*zram*) bad "swap or zram was offered as a device" ;;
+  *)             ok "swap and zram are not offered as devices" ;;
+esac
+
+# The list must say something either way — an empty section with no
+# explanation reads as breakage.
+if [[ -n "$dev_said" ]]; then
+  ok "the device palette says something  ($dev_said)"
+else
+  bad "the device palette produced nothing at all"
+fi
+
 say "13 · nothing executed, nothing crashed, no QML errors"
 [[ -f /tmp/gust-fixture-EXECUTED ]] \
   && bad "SECURITY: a fixture script executed during browsing" \
