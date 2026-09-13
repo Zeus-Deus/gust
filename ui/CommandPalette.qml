@@ -132,6 +132,35 @@ Rectangle {
             return
         }
 
+        // Devices the kernel reports. Listing them mounts nothing.
+        if (t.toLowerCase().startsWith("device") || t.toLowerCase().startsWith("eject")) {
+            let devs = []
+            try { devs = JSON.parse(root.model.devices_json()) } catch (e) { devs = [] }
+            if (devs.length === 0) {
+                results.append({ kind: "action",
+                                 label: "No removable devices attached",
+                                 payload: "noop" })
+                return
+            }
+            for (let i = 0; i < devs.length; i++) {
+                const dv = devs[i]
+                if (dv.empty) {
+                    results.append({ kind: "action",
+                                     label: dv.label + " — " + dv.state,
+                                     payload: "noop" })
+                } else if (dv.mounted) {
+                    results.append({ kind: "action",
+                                     label: "Eject " + dv.label,
+                                     payload: "device-eject:" + dv.path })
+                } else {
+                    results.append({ kind: "action",
+                                     label: "Mount " + dv.label,
+                                     payload: "device-mount:" + dv.path })
+                }
+            }
+            return
+        }
+
         // "find NAME" searches this folder AND BELOW — a different, explicit
         // scope from the filter, which only ever touches the current folder.
         if (t.toLowerCase().startsWith("find ")) {

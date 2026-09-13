@@ -534,6 +534,56 @@ directory named `; rm -rf ~` is a directory name and nothing else. A killed
 child is deliberately **not** reaped — waiting on it would block for exactly
 as long as the stall being escaped.
 
+## 6.13 Devices: USB sticks, discs and phones
+
+Plan §3's "USB and phones" row. Gust discovers volumes and offers Mount and
+Eject as **visible actions**; it never mounts anything on its own.
+
+### Discovery is a local read
+
+The device list comes from `lsblk --json`, which reads the kernel's own view
+and cannot hang on a network. Gust does not talk to UDisks to *enumerate* —
+only to mount and unmount, which are the operations that need privilege and
+a user's intent. Listing devices therefore works on a machine with no UDisks
+daemon at all; the actions are simply unavailable, and say so.
+
+### What counts as a device worth showing
+
+A volume is offered when it is **removable or hotplug** and is not the
+system's own storage. Concretely:
+
+| Shown | Not shown |
+|---|---|
+| USB sticks and drives (`rm` or `hotplug`) | the root disk and its partitions |
+| SD cards | swap, zram |
+| Optical discs, with "no disc" stated | LVM/device-mapper internals |
+| Phones exposing storage | loop devices (an image file is not a device) |
+
+An empty optical drive is listed and described as empty rather than hidden:
+"nothing in the drive" is a fact the user can act on; a missing row is not.
+
+### Mount and eject are the user's decision
+
+Gust never auto-mounts. A device is a row with a visible action, exactly as a
+remote place is. Eject refuses while a transfer is running and says which
+one — pulling a filesystem out from under a copy is how people lose data,
+and a file manager that allows it has not done its job.
+
+### What is deliberately not claimed
+
+Phones over MTP need GVfs and per-device Trust prompts, and NAS/SMB needs a
+GIO mount. Neither is implemented. The plan is explicit that discovery
+"can be unavailable or incomplete" and that showing a device is not a claim
+that it will work — so Gust lists what the kernel reports and does not invent
+support it has not got.
+
+**This has not been qualified against physical hardware.** The VM used for
+qualification has no USB device: its only removable block device is an empty
+virtual optical drive, which is exactly one of the cases above but not the
+common one. The discovery logic is unit-tested against captured `lsblk`
+output from real machines, and the empty-drive case is verified live. Mount
+and eject against a physical stick remain **unproven**.
+
 ## 7. Undo journal
 
 An undo entry records, per affected path: the expected identity

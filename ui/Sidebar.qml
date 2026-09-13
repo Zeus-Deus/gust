@@ -20,6 +20,13 @@ Rectangle {
     /// Aliases of places that are connected right now.
     property var remotePlaces: []
 
+    /// Removable devices the kernel reports. Refreshed by Main; never
+    /// polled from here, because a rail that lies about what is attached is
+    /// worse than one that says nothing.
+    property var devices: []
+    /// The user clicked a device row: mount it, or browse it if mounted.
+    signal deviceChosen(string path, bool mounted)
+
     ListModel {
         id: places
         // Populated at startup from XDG dirs that actually exist.
@@ -108,6 +115,80 @@ Rectangle {
         // none: a clipped line reads as breakage. Hide the whole section
         // rather than letting it bleed past the bottom edge, and keep it
         // reachable by scrolling once there is room to scroll.
+        // Devices — USB sticks, cards and discs. The list is a local read
+        // of the kernel's own view, so it cannot hang; Gust never mounts
+        // anything on its own (DESIGN §6.13).
+        Item {
+            width: 1
+            height: Tokens.spaceXl
+            visible: root.devices.length > 0
+        }
+
+        Text {
+            id: devicesHeader
+            leftPadding: Tokens.rowPaddingX
+            text: qsTr("Devices")
+            color: Tokens.foregroundDim
+            font.family: Tokens.fontFamily
+            font.pixelSize: Tokens.fontCaption
+            visible: root.devices.length > 0
+        }
+
+        Repeater {
+            model: root.devices
+            delegate: Rectangle {
+                required property var modelData
+                width: column.width
+                height: Tokens.rowHeight
+                color: deviceMouse.containsMouse
+                       ? Tokens.withAlpha(Tokens.foreground, 0.06)
+                       : "transparent"
+
+                Column {
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.left: parent.left
+                    anchors.leftMargin: Tokens.rowPaddingX
+                    anchors.right: parent.right
+                    anchors.rightMargin: Tokens.rowPaddingX
+                    spacing: 0
+
+                    Text {
+                        width: parent.width
+                        text: modelData.label
+                        color: Tokens.foreground
+                        font.family: Tokens.fontFamily
+                        font.pixelSize: Tokens.fontBody
+                        elide: Text.ElideRight
+                    }
+                    // State in WORDS as well as position: colour alone is
+                    // not enough to say connected (plan §2 mockup F).
+                    Text {
+                        width: parent.width
+                        text: modelData.state
+                        color: Tokens.foregroundDim
+                        font.family: Tokens.fontFamily
+                        font.pixelSize: Tokens.fontCaption
+                        elide: Text.ElideRight
+                    }
+                }
+
+                MouseArea {
+                    id: deviceMouse
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    // An empty drive has nothing to open, and clicking it
+                    // must not look like a broken button.
+                    onClicked: {
+                        if (modelData.empty) return
+                        root.deviceChosen(modelData.path, modelData.mounted)
+                    }
+                }
+
+                Accessible.role: Accessible.Button
+                Accessible.name: modelData.label + ", " + modelData.state
+            }
+        }
+
         Item {
             width: 1
             height: Tokens.spaceXl
