@@ -21,7 +21,9 @@ Item {
 
         Repeater {
             id: rep
-            model: root.model ? root.model.breadcrumbs() : []
+            // `revision` is read so this re-evaluates on every navigation
+            // AND whenever the pane hands over a different model.
+            model: (root.revision, root.model) ? root.model.breadcrumbs() : []
 
             delegate: Row {
                 spacing: 0
@@ -71,9 +73,14 @@ Item {
         }
     }
 
-    // Rebuild when the location changes.
+    // Rebuild when the location changes. Assigning rep.model here would
+    // DESTROY the binding below and freeze the crumbs on whichever model was
+    // current at the time — switching panes swaps the model without a
+    // locationChanged, and the crumbs kept the other pane's path.
+    property int revision: 0
     Connections {
         target: root.model
-        function onLocationChanged() { rep.model = root.model.breadcrumbs() }
+        function onLocationChanged() { root.revision++ }
     }
+    onModelChanged: root.revision++
 }
