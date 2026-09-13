@@ -270,6 +270,14 @@ pub mod qobject {
         /// Duplicate the row beside itself, e.g. `notes (copy).txt`.
         #[qinvokable]
         fn duplicate_row(self: Pin<&mut DirModel>, row: i32) -> QString;
+        /// Applications that can open the row, as JSON. Read from the
+        /// desktop database, never from a localized command's output
+        /// (DESIGN §6.17).
+        #[qinvokable]
+        fn open_with_list(self: &DirModel, row: i32) -> QString;
+        /// Open the row with a specific desktop entry id.
+        #[qinvokable]
+        fn open_with_id(self: &DirModel, row: i32, id: &QString) -> QString;
         /// Preview a bulk rename over the selection, as JSON. Touches
         /// nothing: the user sees every old → new before anything happens
         /// (DESIGN §6.16).
@@ -993,6 +1001,87 @@ impl qobject::DirModel {
             h = (h ^ *b as u32).wrapping_mul(16777619);
         }
         format!("http://127.0.0.1:{}", 45000 + (h % 2000) as u16)
+    }
+
+    // --- open with (DESIGN §6.17) ----------------------------------------
+
+    /// The MIME type of a path, from the shared MIME database.
+    ///
+    /// `xdg-mime query filetype` prints a bare type with no prose, so there
+    /// is nothing localized to scrape. Bounded, because it reads the file's
+    /// magic bytes and the file may be on a remote.
+    fn mime_of(path: &std::path::Path) -> Option<String> {
+        let out = std::process::Command::new("xdg-mime")
+            .arg("query")
+            .arg("filetype")
+            .arg(path)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let t = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if t.is_empty() || !t.contains('/') {
+            None
+        } else {
+            Some(t)
+        }
+    }
+
+    fn open_with_list(&self, row: i32) -> QString {
+        let Some(path) = self.path_of_row(row) else {
+            return QString::from("[]");
+        };
+        let Some(mime) = Self::mime_of(&path) else {
+            return QString::from("[]");
+        };
+        let found = gust_core::open::with::handlers_for(&mime);
+
+        let mut out = String::from("[");
+        for (i, h) in found.iter().take(20).enumerate() {
+            if i > 0 {
+                out.push(',');
+            }
+            out.push_str(&format!(
+                r#"{{"id":{},"name":{},"default":{},"terminal":{}}}"#,
+                Self::json_str(&h.id),
+                Self::json_str(&h.name),
+                h.is_default,
+                h.terminal
+            ));
+        }
+        out.push(']');
+        QString::from(out)
+    }
+
+    fn open_with_id(&self, row: i32, id: &QString) -> QString {
+        let Some(path) = self.path_of_row(row) else {
+            return QString::from("That item is no longer there.");
+        };
+        let Some(mime) = Self::mime_of(&path) else {
+            return QString::from("Gust could not tell what kind of file that is.");
+        };
+        let wanted = id.to_string();
+
+        // The handler must be one the SYSTEM says can open this type. A
+        // desktop id arriving from anywhere else is not a licence to launch
+        // an arbitrary program.
+        let Some(handler) = gust_core::open::with::handlers_for(&mime)
+            .into_iter()
+            .find(|h| h.id == wanted)
+        else {
+            return QString::from("That application is no longer available.");
+        };
+
+        match gust_core::open::with::launch(&handler, &path) {
+            Ok(name) => {
+                // Reported, not silent: the window does not change, so
+                // without a line here nothing appears to have happened.
+                QString::from(format!("OK:Opened with {name}"))
+            }
+            Err(e) => QString::from(format!("{e}")),
+        }
     }
 
     // --- archives (DESIGN §6.15) -----------------------------------------

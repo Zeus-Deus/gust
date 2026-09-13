@@ -24,6 +24,15 @@ Rectangle {
         input.forceActiveFocus()
         rebuildAndAnnounce("")
     }
+    /// Open with a query already typed, for a key that means one section of
+    /// the palette — "o" for open-with, say.
+    function openWith(query) {
+        visible = true
+        input.text = query
+        input.forceActiveFocus()
+        input.cursorPosition = query.length
+        rebuildAndAnnounce(query)
+    }
     function close() {
         visible = false
         input.text = ""
@@ -132,6 +141,28 @@ Rectangle {
             results.append({ kind: "action",
                              label: "Add cloud storage (opens rclone config)",
                              payload: "cloud-setup" })
+            return
+        }
+
+        // "Open with" lists what the SYSTEM says can open this file. Not a
+        // command line: Gust never runs something the user typed.
+        if (t.toLowerCase().startsWith("open with") || t.toLowerCase() === "open") {
+            let apps = []
+            try { apps = JSON.parse(root.model.open_with_list(root.model.cursor)) }
+            catch (e) { apps = [] }
+            if (apps.length === 0) {
+                results.append({ kind: "action",
+                                 label: "No application is registered for this file",
+                                 payload: "noop" })
+                return
+            }
+            for (let i = 0; i < apps.length; i++) {
+                const a = apps[i]
+                results.append({ kind: "action",
+                                 label: "Open with " + a.name
+                                        + (a.default ? "  (default)" : ""),
+                                 payload: "openwith:" + a.id })
+            }
             return
         }
 

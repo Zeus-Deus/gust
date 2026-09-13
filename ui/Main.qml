@@ -1373,7 +1373,17 @@ Window {
                 case Qt.Key_V: win.setView(win.viewMode === "rows" ? "grid"
                                         : win.viewMode === "grid" ? "columns" : "rows")
                                event.accepted = true; return
-                case Qt.Key_R: win.askRename(); event.accepted = true; return
+                case Qt.Key_R:
+                    // Shift+R is bulk rename over the selection (mockup C);
+                    // plain r renames the one under the cursor.
+                    if (event.modifiers & Qt.ShiftModifier) win.askBulkRename()
+                    else win.askRename()
+                    event.accepted = true; return
+                case Qt.Key_O:
+                    // "o open with…" (mockup B). The palette shows the list,
+                    // because which applications exist depends on the file.
+                    palette.openWith("open with ")
+                    event.accepted = true; return
                 case Qt.Key_X: dirModel.sel_toggle(dirModel.cursor)
                                win.qaDump("select"); event.accepted = true; return
                 case Qt.Key_Y: hints.status = dirModel.clip_copy(dirModel.cursor)
@@ -1505,6 +1515,14 @@ Window {
                 ? "vim: h/j/k/l move, l open, r rename, y/d/p copy/cut/paste"
                 : "arrows move, Enter open, F2 rename, Ctrl+C/X/V, Ctrl+N new folder"
             else if (a === "noop") { /* nothing to do */ }
+            else if (a.startsWith("openwith:")) {
+                const msg = dirModel.open_with_id(dirModel.cursor, a.substring(9))
+                // "OK:" marks success: the window does not change, so
+                // without a line here nothing appears to have happened.
+                if (msg.startsWith("OK:")) hints.status = msg.substring(3)
+                else if (msg !== "") win.alertText = msg
+                win.qaDump("open-with")
+            }
             else if (a === "bulk") {
                 win.askBulkRename()
             }
