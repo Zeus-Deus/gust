@@ -272,6 +272,69 @@ notifying property; derived values (a tab's label) are `readonly property`
 bindings **on the model itself**, never computed in a change handler, because a
 handler can run before the model has published its new value.
 
+### 6.6.2 The lint rule
+
+`tests/lint-qml.sh` now refuses a declarative binding written over a function
+call. The rule exists because this mistake cost two long debugging sessions
+and produced five different-looking symptoms, none of which mentioned
+bindings: an empty list, a missing tab strip, a frozen label, a pane that
+rendered nothing, and a job drawer that kept the colour of a state it had
+left. None logged a warning.
+
+The check skips signal handlers (`on<Capital>:`), object keys inside function
+bodies, `Tokens.qml` (its source emits change notifications so those bindings
+do re-evaluate), and a short allow-list of helpers the window refreshes
+explicitly. When it fires, the fix is a plain property refreshed at the
+points that change it, or a binding on something that notifies.
+
+Adding the rule immediately found two live bugs in `JobDrawer.qml`: the
+drawer's colour and its status word were both function calls, so a job that
+failed or was cancelled still showed "Working" in the running colour.
+
+## 6.7 Two panes
+
+A pane is a column of the window that owns a set of tabs. There are at most
+two, side by side, never arbitrary docking (plan §2). Exactly one pane is
+*active*: it holds keyboard focus, its tab strip is the one being edited, and
+every existing action — navigate, copy, rename, delete — applies to it and to
+nothing else.
+
+### What a pane owns
+
+Each pane has its own tab list, its own active tab index and its own view
+memory. Because a tab already owns location, history, selection, filter and
+view (§6.6), a pane needs no per-pane state beyond "which tabs, which one is
+showing". Splitting therefore moves tabs between two lists; it does not
+introduce a second kind of state.
+
+### The rules
+
+1. **One pane is active.** Focus follows an explicit action (Tab, a click);
+   it never moves because a job finished or a listing settled.
+2. **A second pane is opened deliberately** and closed the same way. Closing
+   a pane moves its tabs into the surviving pane rather than discarding them
+   — a pane is a layout, and closing a layout must not lose a location, still
+   less a running job.
+3. **The single-pane window is unchanged.** With one pane there is no
+   splitter, no pane border, and no hint that panes exist. Chrome that earns
+   nothing is not shown.
+4. **F5 copies and F6 moves to the *other* pane.** Both are ordinary
+   operations through the same engine, journal and undo as any other copy or
+   move (§6.1); neither bypasses a confirmation that a drop would show.
+   With one pane there is no other side, so both refuse with a reason rather
+   than silently doing nothing.
+5. **The destination is named before the operation runs.** "Copy 3 items to
+   Downloads" — never "copy to the other pane", which tells the user nothing
+   about where their files went.
+
+### What is deliberately not in this version
+
+Dragging a tab to a drop target to split, and dragging one outside to detach
+into its own window, are described in the plan. They need Qt drag sessions
+across window boundaries, which is a materially larger piece of work than the
+split itself. The split is reachable from the palette and the keyboard; the
+drag gestures are recorded as unbuilt rather than half-built.
+
 ## 7. Undo journal
 
 An undo entry records, per affected path: the expected identity

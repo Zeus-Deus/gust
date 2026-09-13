@@ -50,9 +50,9 @@ FocusScope {
                         height: parent.height
                         Text {
                             anchors.verticalCenter: parent.verticalCenter
-                            text: "Name" + (root.model.sort_field === "name"
-                                            ? (root.model.sort_ascending ? " ↓" : " ↑") : "")
-                            color: root.model.sort_field === "name" ? Tokens.foregroundBright : Tokens.foregroundDim
+                            text: "Name" + ((root.model ? root.model.sort_field : "") === "name"
+                                            ? ((root.model ? root.model.sort_ascending : true) ? " ↓" : " ↑") : "")
+                            color: (root.model ? root.model.sort_field : "") === "name" ? Tokens.foregroundBright : Tokens.foregroundDim
                             font.family: Tokens.fontFamily
                             font.pixelSize: Tokens.fontSmall
                         }
@@ -72,9 +72,9 @@ FocusScope {
                             anchors.right: parent.right
                             anchors.rightMargin: Tokens.spaceLg
                             anchors.verticalCenter: parent.verticalCenter
-                            text: "Size" + (root.model.sort_field === "size"
-                                            ? (root.model.sort_ascending ? " ↓" : " ↑") : "")
-                            color: root.model.sort_field === "size" ? Tokens.foregroundBright : Tokens.foregroundDim
+                            text: "Size" + ((root.model ? root.model.sort_field : "") === "size"
+                                            ? ((root.model ? root.model.sort_ascending : true) ? " ↓" : " ↑") : "")
+                            color: (root.model ? root.model.sort_field : "") === "size" ? Tokens.foregroundBright : Tokens.foregroundDim
                             font.family: Tokens.fontFamily
                             font.pixelSize: Tokens.fontSmall
                         }
@@ -93,9 +93,9 @@ FocusScope {
                         Text {
                             anchors.right: parent.right
                             anchors.verticalCenter: parent.verticalCenter
-                            text: "Modified" + (root.model.sort_field === "modified"
-                                            ? (root.model.sort_ascending ? " ↓" : " ↑") : "")
-                            color: root.model.sort_field === "modified" ? Tokens.foregroundBright : Tokens.foregroundDim
+                            text: "Modified" + ((root.model ? root.model.sort_field : "") === "modified"
+                                            ? ((root.model ? root.model.sort_ascending : true) ? " ↓" : " ↑") : "")
+                            color: (root.model ? root.model.sort_field : "") === "modified" ? Tokens.foregroundBright : Tokens.foregroundDim
                             font.family: Tokens.fontFamily
                             font.pixelSize: Tokens.fontSmall
                         }
@@ -117,7 +117,7 @@ FocusScope {
                 model: root.model
                 clip: true
                 focus: true
-                currentIndex: root.model.cursor
+                currentIndex: (root.model ? root.model.cursor : 0)
                 // Keep the keyboard cursor visible without animating the view
                 // under the user (reduced-motion friendly).
                 highlightMoveDuration: 0
@@ -140,13 +140,13 @@ FocusScope {
                     // must be separately visible.
                     color: isSelected
                            ? Tokens.withAlpha(Tokens.accent, 0.22)
-                           : (index === root.model.cursor
+                           : (index === (root.model ? root.model.cursor : 0)
                               ? Tokens.withAlpha(Tokens.selectedBackground, Math.max(Tokens.selectedAlpha, 0.14))
                               : (hover.hovered ? Tokens.withAlpha(Tokens.foreground, 0.05) : "transparent"))
 
                     // Focus ring: visible keyboard focus, not colour alone.
                     Rectangle {
-                        visible: index === root.model.cursor
+                        visible: index === (root.model ? root.model.cursor : 0)
                         anchors.left: parent.left
                         width: Math.max(2, Tokens.borderWidth * 2)
                         height: parent.height
@@ -297,14 +297,14 @@ FocusScope {
                     Accessible.role: Accessible.ListItem
                     Accessible.name: name + (isDir ? ", folder" : ", file")
                     Accessible.selectable: true
-                    Accessible.selected: isSelected || index === root.model.cursor
+                    Accessible.selected: isSelected || index === (root.model ? root.model.cursor : 0)
                 }
 
                 // Empty state — never a blank void.
                 Text {
                     anchors.centerIn: parent
                     visible: list.count === 0
-                    text: root.model.filter.length > 0 ? "No match for \"" + root.model.filter + "\""
+                    text: (root.model ? root.model.filter : "").length > 0 ? "No match for \"" + (root.model ? root.model.filter : "") + "\""
                                                        : "This folder is empty"
                     color: Tokens.foregroundDim
                     font.family: Tokens.fontFamily
