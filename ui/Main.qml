@@ -405,6 +405,7 @@ Window {
     }
 
     property int pendingCloseTab: -1
+    property string pendingCloudOff: ""
 
     function activateTab(i) {
         if (i < 0 || i >= tabList.count) return
@@ -1226,6 +1227,10 @@ Window {
         id: palette
         model: dirModel
         onVisibleChanged: win.qaDump("palette")
+        // Also dump when the RESULTS change, not only when the palette
+        // opens and closes: a test that reads the state file after typing
+        // was seeing the snapshot from before anything was typed.
+        onResultsChanged: win.qaDump("palette-results")
         onClosed: win.focusList()
         onNavigateRequested: (p) => { dirModel.navigate(p); win.focusList() }
         onActionRequested: (a) => {
@@ -1251,6 +1256,44 @@ Window {
                 ? "vim: h/j/k/l move, l open, r rename, y/d/p copy/cut/paste"
                 : "arrows move, Enter open, F2 rename, Ctrl+C/X/V, Ctrl+N new folder"
             else if (a === "noop") { /* nothing to do */ }
+            else if (a.startsWith("cloud-on:")) {
+                const cname = a.substring(9)
+                hints.status = qsTr("Connecting to ") + cname + "…"
+                const cerr = dirModel.cloud_connect(cname)
+                if (cerr !== "") win.alertText = cerr
+                win.refreshPlaces()
+                win.qaDump("cloud-connect")
+            }
+            else if (a.startsWith("cloud-off:")) {
+                const cname2 = a.substring(10)
+                // Never force on the first try: unfinished uploads must be
+                // reported, not silently discarded (DESIGN §6.8).
+                const cerr2 = dirModel.cloud_disconnect(cname2, false)
+                // "ASK:" means a decision is available; anything else is a
+                // failure that confirming would only repeat.
+                if (cerr2 !== "" && !cerr2.startsWith("ASK:")) {
+                    win.alertText = cerr2
+                    win.qaDump("cloud-disconnect-failed")
+                } else if (cerr2 !== "") {
+                    win.pendingCloudOff = cname2
+                    confirm.purpose = "clouddirty"
+                    confirm.open(qsTr("Uploads are not finished"),
+                                 cerr2.substring(4),
+                                 qsTr("Disconnect anyway"), true)
+                } else {
+                    win.refreshPlaces()
+                }
+                win.qaDump("cloud-disconnect")
+            }
+            else if (a === "cloud-setup") {
+                // rclone's own config tool, in a terminal. Gust never asks
+                // for a cloud password and never sees one.
+                const serr = dirModel.cloud_setup()
+                if (serr !== "") win.alertText = serr
+                else hints.status = qsTr("Set up your storage in the terminal, "
+                                         + "then run :cloud again")
+                win.qaDump("cloud-setup")
+            }
             else if (a.startsWith("remote-on:")) {
                 const alias = a.substring(10)
                 hints.status = "Connecting to " + alias + "…"
@@ -1290,6 +1333,18 @@ Window {
         onVisibleChanged: win.qaDump("confirm")
         onClosed: win.focusList()
         onAccepted: {
+            if (confirm.purpose === "clouddirty") {
+                // The user was told exactly how many files are unfinished
+                // and chose to go anyway. Only now is force allowed.
+                const cn = win.pendingCloudOff
+                win.pendingCloudOff = ""
+                if (cn === "") return
+                const e = dirModel.cloud_disconnect(cn, true)
+                if (e !== "") win.alertText = e
+                win.refreshPlaces()
+                win.qaDump("cloud-disconnect-forced")
+                return
+            }
             if (confirm.purpose === "closetab") {
                 const i = win.pendingCloseTab
                 win.pendingCloseTab = -1
@@ -1335,6 +1390,18 @@ Window {
             win.qaDump("trashed")
         }
         onRejected: {
+            if (confirm.purpose === "clouddirty") {
+                // The user was told exactly how many files are unfinished
+                // and chose to go anyway. Only now is force allowed.
+                const cn = win.pendingCloudOff
+                win.pendingCloudOff = ""
+                if (cn === "") return
+                const e = dirModel.cloud_disconnect(cn, true)
+                if (e !== "") win.alertText = e
+                win.refreshPlaces()
+                win.qaDump("cloud-disconnect-forced")
+                return
+            }
             if (confirm.purpose === "closetab") {
                 const i = win.pendingCloseTab
                 win.pendingCloseTab = -1
@@ -1404,6 +1471,7 @@ Window {
                 return out
             })(),
             paletteOpen: palette.visible,
+            paletteResults: palette.visible ? palette.resultLabels() : [],
             promptOpen: prompt.visible,
             promptMode: prompt.mode,
             promptError: prompt.errorText,

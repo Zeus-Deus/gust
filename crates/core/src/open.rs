@@ -179,6 +179,46 @@ pub fn open_terminal_here(dir: &Path) -> Result<String, OpenRefusal> {
     Err(OpenRefusal::NoHandler)
 }
 
+/// Run a fixed, known command in a terminal.
+///
+/// Used only for `rclone config`, whose whole job is to ask the user for
+/// credentials that Gust must never see or touch. The command is a compiled-in
+/// constant and its arguments are passed as separate argv entries: no shell is
+/// involved, so nothing here can be turned into command injection, and no
+/// secret ever passes through Gust.
+pub fn run_in_terminal(program: &str, args: &[&str]) -> Result<String, OpenRefusal> {
+    if which(program).is_none() {
+        return Err(OpenRefusal::NoHandler);
+    }
+    let mut candidates: Vec<String> = Vec::new();
+    if let Some(t) = std::env::var_os("TERMINAL") {
+        candidates.push(t.to_string_lossy().into_owned());
+    }
+    for t in ["alacritty", "kitty", "foot", "ghostty", "wezterm"] {
+        candidates.push(t.to_string());
+    }
+
+    for term in candidates {
+        if which(&term).is_none() {
+            continue;
+        }
+        let mut cmd = Command::new(&term);
+        // Every one of these takes "-e PROGRAM ARGS..." as separate argv
+        // entries. None of them needs a shell.
+        cmd.arg("-e").arg(program);
+        for a in args {
+            cmd.arg(a);
+        }
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        if cmd.spawn().is_ok() {
+            return Ok(term);
+        }
+    }
+    Err(OpenRefusal::NoHandler)
+}
+
 /// Reveal `path` by opening its parent folder — used by "show in folder".
 pub fn parent_of(path: &Path) -> Option<&Path> {
     path.parent().filter(|p| !p.as_os_str().is_empty())
@@ -197,6 +237,19 @@ pub fn is_single_argument(path: &OsStr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_terminal_command_never_goes_through_a_shell() {
+        // The guard is structural: run_in_terminal takes a program and a
+        // slice of arguments, so there is no string for a shell to reparse.
+        // This test fails to compile if that signature is ever loosened to
+        // take one command line.
+        fn takes_argv(f: fn(&str, &[&str]) -> Result<String, OpenRefusal>) -> bool {
+            let _ = f;
+            true
+        }
+        assert!(takes_argv(run_in_terminal));
+    }
 
     #[test]
     fn executables_are_never_opened_by_activation() {

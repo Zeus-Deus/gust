@@ -101,6 +101,10 @@ pub mod qobject {
         /// Open a terminal in the current folder.
         #[qinvokable]
         fn open_terminal(self: &DirModel) -> QString;
+        /// Launch `rclone config` in a terminal. Gust never asks for a cloud
+        /// credential itself and never sees one.
+        #[qinvokable]
+        fn cloud_setup(self: &DirModel) -> QString;
 
         #[qinvokable]
         fn breadcrumbs(self: &DirModel) -> QStringList;
@@ -165,6 +169,25 @@ pub mod qobject {
         /// Disconnect a remote place.
         #[qinvokable]
         fn remote_disconnect(self: Pin<&mut DirModel>, alias: QString) -> QString;
+        /// Cloud remotes the INSTALLED rclone has configured, as JSON.
+        /// Reading a config is not connecting: this opens no socket.
+        #[qinvokable]
+        fn cloud_suggestions(self: &DirModel) -> QString;
+        /// Mount a configured cloud remote and browse it.
+        #[qinvokable]
+        fn cloud_connect(self: Pin<&mut DirModel>, name: QString) -> QString;
+        /// Unmount a cloud remote. Refuses while uploads are outstanding
+        /// unless `force`; never lazy-unmounts a dirty mount.
+        #[qinvokable]
+        fn cloud_disconnect(self: Pin<&mut DirModel>, name: QString, force: bool) -> QString;
+        /// A sentence about outstanding uploads on the current location, or
+        /// "" when there is nothing to say. Never claims "uploaded".
+        #[qinvokable]
+        fn cloud_pending_notice(self: &DirModel) -> QString;
+        /// Is a named file confirmed present on the backend at this size?
+        /// The ONLY thing that may be shown as "uploaded".
+        #[qinvokable]
+        fn cloud_confirm_uploaded(self: &DirModel, name: QString) -> bool;
         /// Start a scoped, cancellable find. Results stream in.
         #[qinvokable]
         fn find_start(self: Pin<&mut DirModel>, needle: QString);
@@ -837,6 +860,306 @@ impl qobject::DirModel {
         QString::from(out)
     }
 
+    // --- cloud remotes (DESIGN §6.8) -------------------------------------
+
+    /// Where a cloud remote is mounted. Under the runtime dir, never in the
+    /// user's home, and separate from SSH places so the two cannot collide.
+    fn cloud_mount_point(name: &str) -> Option<std::path::PathBuf> {
+        let base = std::env::var_os("XDG_RUNTIME_DIR")
+            .map(std::path::PathBuf::from)
+            .or_else(|| std::env::var_os("TMPDIR").map(std::path::PathBuf::from))
+            .unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
+        let safe: String = name
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let safe = safe.trim_matches('.').to_string();
+        if safe.is_empty() {
+            return None;
+        }
+        Some(base.join("gust").join("cloud").join(safe))
+    }
+
+    /// The RC address of the mount Gust started for this remote. Loopback
+    /// only: the RC is a privileged control surface (plan §9).
+    fn cloud_rc_addr(name: &str) -> String {
+        // A stable per-remote port derived from the name, in the dynamic
+        // range, so two remotes do not fight over one endpoint.
+        let mut h: u32 = 2166136261;
+        for b in name.as_bytes() {
+            h = (h ^ *b as u32).wrapping_mul(16777619);
+        }
+        format!("http://127.0.0.1:{}", 45000 + (h % 2000) as u16)
+    }
+
+    fn cloud_suggestions(&self) -> QString {
+        let remotes = match gust_remote::cloud::list_remotes(None) {
+            Ok(r) => r,
+            // Cloud storage is optional, so a missing or locked rclone is not
+            // an error to shout about — but it must still SAY SO. Returning
+            // an empty list made "rclone is not installed" look exactly like
+            // "you have no cloud storage", which is how a user ends up
+            // wondering why a documented feature does nothing (plan §8).
+            Err(e) => {
+                return QString::from(format!(
+                    r#"[{{"unavailable":true,"why":{}}}]"#,
+                    Self::json_str(&e.message())
+                ))
+            }
+        };
+        let mut out = String::from("[");
+        for (i, r) in remotes.iter().take(50).enumerate() {
+            if i > 0 {
+                out.push(',');
+            }
+            let connected = Self::cloud_mount_point(&r.name)
+                .map(|p| gust_remote::mount::is_mounted(&p))
+                .unwrap_or(false);
+            out.push_str(&format!(
+                r#"{{"name":{},"backend":{},"connected":{}}}"#,
+                Self::json_str(&r.name),
+                Self::json_str(&r.backend),
+                connected
+            ));
+        }
+        out.push(']');
+        QString::from(out)
+    }
+
+    fn cloud_connect(mut self: Pin<&mut Self>, name: QString) -> QString {
+        let name = name.to_string();
+        if !gust_remote::cloud::rclone_available() {
+            return QString::from(gust_remote::cloud::CloudError::NotInstalled.message());
+        }
+        // The remote must be one the installed rclone actually has.
+        match gust_remote::cloud::list_remotes(None) {
+            Ok(remotes) => {
+                if !remotes.iter().any(|r| r.name == name) {
+                    return QString::from(
+                        gust_remote::cloud::CloudError::NoSuchRemote(name).message(),
+                    );
+                }
+            }
+            Err(e) => return QString::from(e.message()),
+        }
+
+        let Some(mp) = Self::cloud_mount_point(&name) else {
+            return QString::from("That name cannot be used for a place.");
+        };
+        if gust_remote::mount::is_mounted(&mp) {
+            let q = QString::from(mp.to_string_lossy().as_ref());
+            self.as_mut().navigate(&q);
+            return QString::from("");
+        }
+        if std::fs::create_dir_all(&mp).is_err() {
+            return QString::from("Could not prepare a place for that remote.");
+        }
+
+        // --vfs-cache-mode writes is what makes "cached" and "uploaded"
+        // different moments; Gust reports the difference rather than hiding
+        // it. No credential is passed here — rclone reads its own config.
+        let rc = Self::cloud_rc_addr(&name);
+        let rc_bind = rc.trim_start_matches("http://").to_string();
+        let cache = mp.parent().map(|p| p.join(".cache")).unwrap_or_default();
+        let _ = std::fs::create_dir_all(&cache);
+
+        let spawned = std::process::Command::new("rclone")
+            .arg("mount")
+            .arg(format!("{name}:"))
+            .arg(&mp)
+            .arg("--vfs-cache-mode")
+            .arg("writes")
+            .arg("--cache-dir")
+            .arg(&cache)
+            .arg("--rc")
+            .arg("--rc-addr")
+            .arg(&rc_bind)
+            .arg("--rc-no-auth")
+            // NOT --daemon: its readiness handshake reports "daemon exited
+            // with error code 1" over a mount that came up perfectly, and
+            // would report success over one that did not. The mount point
+            // itself is the only trustworthy signal.
+            .env("RCLONE_ASK_PASSWORD", "false")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+
+        let mut child = match spawned {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = std::fs::remove_dir(&mp);
+                return QString::from(format!("Could not start rclone: {e}"));
+            }
+        };
+
+        // A mount appears asynchronously. Wait a bounded moment, watching
+        // both the mount point and the child: if rclone gives up first, say
+        // so rather than waiting out the whole timeout.
+        for _ in 0..60 {
+            if gust_remote::mount::is_mounted(&mp) {
+                let q = QString::from(mp.to_string_lossy().as_ref());
+                self.as_mut().navigate(&q);
+                return QString::from("");
+            }
+            if let Ok(Some(status)) = child.try_wait() {
+                let _ = std::fs::remove_dir(&mp);
+                return QString::from(format!(
+                    "Could not connect to {name}: rclone stopped ({status}). Check it with: rclone lsd {name}:"
+                ));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+        // Still nothing: leave nothing running behind.
+        let _ = child.kill();
+        let _ = std::fs::remove_dir(&mp);
+        QString::from(format!("{name} did not finish connecting."))
+    }
+
+    fn cloud_disconnect(mut self: Pin<&mut Self>, name: QString, force: bool) -> QString {
+        let name = name.to_string();
+        let Some(mp) = Self::cloud_mount_point(&name) else {
+            return QString::from("That name cannot be used for a place.");
+        };
+        if !gust_remote::mount::is_mounted(&mp) {
+            return QString::from(format!("{name} is not connected."));
+        }
+
+        // Never lazy-unmount a dirty mount (plan §9). Ask first, and say how
+        // much work is outstanding.
+        if !force {
+            let rc = Self::cloud_rc_addr(&name);
+            if let Ok(p) = gust_remote::cloud::vfs_pending(&rc, std::time::Duration::from_secs(3)) {
+                if p.has_pending() {
+                    let n = p.queued + p.in_progress;
+                    // "1 file is" / "3 files are": the verb agrees with the
+                    // count, and the whole clause is built rather than
+                    // stitched from fragments that can disagree.
+                    let subject = if n == 1 {
+                        "1 file is".to_string()
+                    } else {
+                        format!("{n} files are")
+                    };
+                    return QString::from(format!(
+                        "ASK:{subject} still waiting to upload. \
+                         Disconnecting now would lose that work."
+                    ));
+                }
+            }
+        }
+
+        // If the user is inside the mount, leave before pulling it away.
+        let here = std::path::PathBuf::from(self.as_ref().location.to_string());
+        if here.starts_with(&mp) {
+            if let Some(home) = std::env::var_os("HOME") {
+                let q = QString::from(std::path::PathBuf::from(home).to_string_lossy().as_ref());
+                self.as_mut().navigate(&q);
+            }
+        }
+
+        // Navigating away is not instant: the listing worker can still hold
+        // the directory open for a moment, and fusermount3 then reports
+        // "Device or resource busy" for a mount nobody is really using.
+        let mut last = String::new();
+        for attempt in 0..8 {
+            if attempt > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(400));
+            }
+            match std::process::Command::new("fusermount3")
+                .arg("-u")
+                .arg(&mp)
+                .output()
+            {
+                Ok(o) if o.status.success() => {
+                    // Only a directory Gust created, under the runtime dir.
+                    let _ = std::fs::remove_dir(&mp);
+                    return QString::from("");
+                }
+                Ok(o) => last = String::from_utf8_lossy(&o.stderr).trim().to_string(),
+                Err(e) => last = e.to_string(),
+            }
+        }
+        // Still busy after several tries. Never lazy-unmount to paper over
+        // this (plan §9): something is genuinely using those files, and
+        // pulling the mount away underneath it would lose data.
+        QString::from(format!(
+            "Could not disconnect {name}: {last}. Close anything using those files and try again."
+        ))
+    }
+
+    fn cloud_pending_notice(&self) -> QString {
+        // Which cloud mount, if any, is this location inside?
+        let Some(name) = self.cloud_remote_here() else {
+            return QString::default();
+        };
+        let rc = Self::cloud_rc_addr(&name);
+        let Ok(p) = gust_remote::cloud::vfs_pending(&rc, std::time::Duration::from_secs(2)) else {
+            return QString::default();
+        };
+        if p.errored > 0 {
+            return QString::from(format!(
+                "{} file{} failed to upload and {} still only on this computer.",
+                p.errored,
+                if p.errored == 1 { "" } else { "s" },
+                if p.errored == 1 { "is" } else { "are" }
+            ));
+        }
+        if p.has_pending() {
+            let n = p.queued + p.in_progress;
+            return QString::from(format!(
+                "{n} file{} not uploaded yet.",
+                if n == 1 { "" } else { "s" }
+            ));
+        }
+        // Deliberately says nothing here. An empty queue is not a receipt,
+        // so it must never be turned into "everything is uploaded".
+        QString::default()
+    }
+
+    fn cloud_confirm_uploaded(&self, name: QString) -> bool {
+        let file = name.to_string();
+        let Some(remote) = self.cloud_remote_here() else {
+            return false;
+        };
+        let Some(mp) = Self::cloud_mount_point(&remote) else {
+            return false;
+        };
+        let here = std::path::PathBuf::from(self.location.to_string());
+        let local = here.join(&file);
+        let Ok(size) = std::fs::metadata(&local).map(|m| m.len()) else {
+            return false;
+        };
+        let Ok(rel) = gust_remote::cloud::relative_to_mount(&mp, &here) else {
+            return false;
+        };
+        let subdir = rel.to_string_lossy().to_string();
+        match gust_remote::cloud::backend_listing(&remote, &subdir, None) {
+            Ok(entries) => gust_remote::cloud::confirmed_on_backend(&entries, &file, size),
+            Err(_) => false,
+        }
+    }
+
+    /// The cloud remote whose mount contains the current location, if any.
+    fn cloud_remote_here(&self) -> Option<String> {
+        let base = std::env::var_os("XDG_RUNTIME_DIR")
+            .map(std::path::PathBuf::from)
+            .or_else(|| std::env::var_os("TMPDIR").map(std::path::PathBuf::from))
+            .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+            .join("gust")
+            .join("cloud");
+        let here = std::path::PathBuf::from(self.location.to_string());
+        let rest = here.strip_prefix(&base).ok()?;
+        rest.components()
+            .next()
+            .map(|c| c.as_os_str().to_string_lossy().to_string())
+    }
+
     /// Connect a remote place, then browse it.
     ///
     /// Returns "" on success or a sentence explaining what went wrong.
@@ -1196,7 +1519,59 @@ impl qobject::DirModel {
 
         if settled && snap.settled {
             self.as_mut().start_thumbnails();
+            self.as_mut().start_cloud_notice();
         }
+    }
+
+    /// Ask rclone, on a worker, whether this cloud location has uploads
+    /// outstanding, and publish the answer as a notice.
+    ///
+    /// Never on the UI thread: this shells out to rclone, which talks to a
+    /// socket. A stuck remote must not freeze the window (DESIGN §9).
+    fn start_cloud_notice(mut self: Pin<&mut Self>) {
+        let Some(remote) = self.as_ref().cloud_remote_here() else {
+            // Leaving a cloud location clears a notice that no longer
+            // applies; a stale "not uploaded yet" is worse than silence.
+            if self.as_ref().notice.to_string().contains("upload") {
+                self.as_mut().set_notice(QString::default());
+            }
+            return;
+        };
+        let Some(thread) = self.as_ref().qt_thread_handle() else {
+            return;
+        };
+        let rc = Self::cloud_rc_addr(&remote);
+        std::thread::spawn(move || {
+            let text = match gust_remote::cloud::vfs_pending(&rc, std::time::Duration::from_secs(3))
+            {
+                Ok(p) if p.errored > 0 => format!(
+                    "{} file{} failed to upload and {} still only on this computer",
+                    p.errored,
+                    if p.errored == 1 { "" } else { "s" },
+                    if p.errored == 1 { "is" } else { "are" }
+                ),
+                Ok(p) if p.has_pending() => {
+                    let n = p.queued + p.in_progress;
+                    format!("{n} file{} not uploaded yet", if n == 1 { "" } else { "s" })
+                }
+                // An empty queue is NOT a receipt, so it says nothing at all
+                // rather than "everything is uploaded" (DESIGN §6.8).
+                Ok(_) => String::new(),
+                Err(_) => String::new(),
+            };
+            let _ = thread.queue(move |mut model| {
+                let had = model.as_ref().notice.to_string();
+                // Only ever replace an upload notice or an empty one, so
+                // this cannot stamp on the bubblewrap capability notice.
+                if text.is_empty() {
+                    if had.contains("upload") {
+                        model.as_mut().set_notice(QString::default());
+                    }
+                } else {
+                    model.as_mut().set_notice(QString::from(&text));
+                }
+            });
+        });
     }
 
     fn navigate(mut self: Pin<&mut Self>, path: &QString) {
@@ -1458,6 +1833,22 @@ impl qobject::DirModel {
         match gust_core::open::open_with_desktop(path, mode) {
             Ok(_opener) => QString::from("file"),
             Err(e) => QString::from(&format!("blocked:{e}")),
+        }
+    }
+
+    /// Launch rclone's own configuration tool. Every provider's setup
+    /// differs and Drive's OAuth is not a template for Proton or Filen
+    /// (plan §3), so Gust delegates rather than reimplementing any of it.
+    fn cloud_setup(&self) -> QString {
+        if !gust_remote::cloud::rclone_available() {
+            return QString::from(gust_remote::cloud::CloudError::NotInstalled.message());
+        }
+        let (bin, args) = gust_remote::cloud::config_command();
+        match gust_core::open::run_in_terminal(bin, &args) {
+            Ok(_) => QString::default(),
+            Err(_) => QString::from(
+                "No terminal found to run rclone config in. Run it yourself, then use :cloud again.",
+            ),
         }
     }
 

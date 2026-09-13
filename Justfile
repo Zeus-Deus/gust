@@ -28,6 +28,7 @@ lint:
     cargo clippy -p gust-app
     ./tests/lint-qml.sh
     ./tests/lint-recipes.sh
+    ./tests/lint-strings.sh
 
 # Desktop QA: drives the REAL window with REAL key events and asserts on the
 # app's own state. Requires a Wayland session (see tests/vmsession).
