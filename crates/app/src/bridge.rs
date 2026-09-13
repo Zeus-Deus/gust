@@ -475,6 +475,21 @@ pub fn startup_location() -> PathBuf {
             .join(path)
     };
 
+    // A stat on a stalled network mount blocks in the kernel, and this runs
+    // before the window exists: Gust would never paint at all. Ask a
+    // killable child first when the path is the kind that can stall
+    // (plan §3 rule 3, DESIGN §6.12).
+    {
+        use gust_core::stall::{probe_if_risky, Reachability, DEFAULT_PROBE_MS};
+        if let Reachability::Stalled { .. } =
+            probe_if_risky(&abs, std::time::Duration::from_millis(DEFAULT_PROBE_MS))
+        {
+            // Start at home rather than not starting. The place is reported
+            // once there is a window to report it in.
+            return home();
+        }
+    }
+
     match std::fs::metadata(&abs) {
         // Pointed at a file: open its folder, which is what the user means.
         Ok(m) if m.is_file() => abs.parent().map(PathBuf::from).unwrap_or_else(home),
@@ -689,6 +704,32 @@ impl qobject::DirModel {
         std::thread::Builder::new()
             .name("gust-list".into())
             .spawn(move || {
+                // A network mount can stop answering, and a readdir on one
+                // blocks in uninterruptible sleep: the cancel token cannot
+                // reach it and neither can SIGTERM. Ask a killable child
+                // first, and only touch the path once it has answered
+                // (plan §3 rule 3, DESIGN §6.12).
+                if let Some(dir) = key.as_path() {
+                    use gust_core::stall::{probe_if_risky, Reachability};
+                    let reach = probe_if_risky(
+                        dir,
+                        std::time::Duration::from_millis(gust_core::stall::DEFAULT_PROBE_MS),
+                    );
+                    if !reach.is_responsive() {
+                        let place = gust_core::stall::place_name_for(dir);
+                        let msg = reach.message(&place);
+                        let _ = thread.queue(move |mut model| {
+                            // The window stays on the folder it could reach.
+                            // Moving the user somewhere else because a remote
+                            // hung would lose their place for them.
+                            model.as_mut().set_settled(true);
+                            model.as_mut().set_status(QString::from("Not responding"));
+                            model.as_mut().set_notice(QString::from(&msg));
+                        });
+                        return;
+                    }
+                }
+
                 // Clean up staging files left by a process that died mid-copy
                 // before listing, so crash debris is never shown and never
                 // accumulates. Only files whose owner is gone are removed.
@@ -1673,6 +1714,20 @@ impl qobject::DirModel {
 
     fn navigate(mut self: Pin<&mut Self>, path: &QString) {
         let p = PathBuf::from(path.to_string());
+        // `is_dir()` is a stat, and a stat on a stalled mount blocks the UI
+        // thread with no way back. A killable child answers first.
+        {
+            use gust_core::stall::{
+                place_name_for, probe_if_risky, Reachability, DEFAULT_PROBE_MS,
+            };
+            let reach = probe_if_risky(&p, std::time::Duration::from_millis(DEFAULT_PROBE_MS));
+            if let Reachability::Stalled { .. } = reach {
+                let msg = reach.message(&place_name_for(&p));
+                self.as_mut().set_notice(QString::from(&msg));
+                self.as_mut().set_status(QString::from("Not responding"));
+                return;
+            }
+        }
         if !p.is_dir() {
             self.as_mut()
                 .set_status(QString::from(&format!("not a directory: {}", p.display())));

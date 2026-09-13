@@ -13,6 +13,7 @@ pub mod open;
 pub mod peek;
 pub mod search;
 pub mod selection;
+pub mod stall;
 pub mod theme;
 pub mod views;
 

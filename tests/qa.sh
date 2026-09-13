@@ -2132,6 +2132,37 @@ sleep 1.5
 expect "Escape leaves the results" "d['finding']" "False"
 expect "and the real folder is back" "d['model']['location']" "$QLDIR"
 
+say "12s · a stall guard that costs local browsing nothing"
+# The probe exists for network mounts. If it fired on ordinary folders, every
+# listing would spawn a child process and browsing would crawl — so the
+# cheapest proof is that local listings are still fast and spawn nothing.
+stop_gust
+start_gust
+wait_for "d['model']['settled']" "True" 20 >/dev/null
+
+# A local fixture must settle quickly. The probe's own bound is 4s, so
+# anything near that means it is firing where it should not.
+# Timing the UI would measure goto()'s own keystrokes (palette, typing,
+# Return, sleeps — about four seconds regardless). The question is whether
+# the guard SPAWNS anything for a local path, so count helpers during a
+# burst of local navigation instead.
+probe_seen=0
+for target in "$FIXTURE/Documents" "$FIXTURE/Downloads" "$FIXTURE/Pictures"; do
+  goto "$target"
+  # A probe child, if one existed, would be alive during the listing.
+  [[ "$(pgrep -x ls 2>/dev/null | wc -l)" -gt 0 ]] && probe_seen=1
+  wait_for "d['model']['settled']" "True" 30 >/dev/null
+done
+[[ "$probe_seen" == "0" ]] \
+  && ok "the stall guard spawns nothing for local folders" \
+  || bad "a probe helper ran for a local folder — every listing would pay for it"
+
+# And no helper process should be left behind by browsing.
+helpers="$(pgrep -x ls 2>/dev/null | wc -l)"
+[[ "$helpers" == "0" ]] \
+  && ok "no probe helper leaked during local browsing" \
+  || bad "$helpers probe helper(s) still running after a local listing"
+
 say "13 · nothing executed, nothing crashed, no QML errors"
 [[ -f /tmp/gust-fixture-EXECUTED ]] \
   && bad "SECURITY: a fixture script executed during browsing" \
