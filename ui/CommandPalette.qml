@@ -144,6 +144,19 @@ Rectangle {
             }
         }
 
+        // "grep NEEDLE" searches what is INSIDE files, not their names.
+        // Explicitly scoped and cancellable, like find (DESIGN §6.10).
+        if (t.toLowerCase().startsWith("grep ")) {
+            const inside = t.substring(5).trim()
+            if (inside.length > 0) {
+                results.append({ kind: "action",
+                                 label: "Search inside files for \"" + inside
+                                        + "\" in this folder and below",
+                                 payload: "grep:" + inside })
+                return
+            }
+        }
+
         // A leading / or ~ is a path, not an action.
         if (t.startsWith("/") || t.startsWith("~")) {
             results.append({ kind: "path", label: "Go to " + t, payload: t,

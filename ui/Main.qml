@@ -496,6 +496,20 @@ Window {
         listFocus.forceActiveFocus()
     }
 
+    /// Open Quick Look for the cursor row, or close it if it is already up.
+    /// Never launches the file: peek_row reads bytes and metadata only.
+    function toggleQuickLook() {
+        if (quickLook.open) {
+            quickLook.hide()
+            win.focusList()
+            win.qaDump("quicklook")
+            return
+        }
+        if (!dirModel || dirModel.count === 0) return
+        quickLook.show(dirModel.peek_row(dirModel.cursor))
+        win.qaDump("quicklook")
+    }
+
     function activateRow(row) {
         const r = dirModel.activate(row)
         if (r.startsWith("blocked:"))
@@ -1009,8 +1023,14 @@ Window {
 
             switch (event.key) {
             case Qt.Key_Space:
-                dirModel.sel_toggle(dirModel.cursor)
-                win.qaDump("select")
+                // Space is Quick Look (the plan's mockups say so in three
+                // places); selection toggling moved to Ctrl+Space.
+                //
+                // Only UNMODIFIED Space: this switch runs before the Ctrl
+                // block below, so without the guard Ctrl+Space opened Quick
+                // Look and keyboard multi-select silently stopped working.
+                if (event.modifiers & Qt.ControlModifier) break
+                win.toggleQuickLook()
                 event.accepted = true; return
             case Qt.Key_Down:  dirModel.move_cursor(step);  event.accepted = true; return
             case Qt.Key_Up:    dirModel.move_cursor(-step); event.accepted = true; return
@@ -1049,6 +1069,16 @@ Window {
                 //
                 // It cancels only THIS window's job — never a globally
                 // pressed Escape reaching some unrelated transfer.
+                //
+                // Quick Look comes first: it is the most recently opened
+                // thing, so Escape must close it before touching a job or
+                // the selection (DESIGN §6.9 rule 4).
+                if (quickLook.open) {
+                    quickLook.hide()
+                    win.focusList()
+                    win.qaDump("quicklook")
+                    event.accepted = true; return
+                }
                 if (dirModel.job_running()) {
                     dirModel.cancel_job()
                     hints.status = qsTr("Cancelling…")
@@ -1079,11 +1109,18 @@ Window {
             case Qt.Key_F1:
                 hints.status = win.keyPreset === "vim"
                     ? "vim: h/j/k/l move, l open, / filter, : command"
-                    : "arrows move, Enter open, Backspace up, / filter, : command"
+                    : "arrows move, Enter open, Space quick look, Backspace up, / filter, : command"
                 event.accepted = true; return
             }
 
             if (event.modifiers & Qt.ControlModifier) {
+                if (event.key === Qt.Key_Space) {
+                    // Multi-select by keyboard: Space itself is now Quick
+                    // Look, so the toggle moved here rather than vanishing.
+                    dirModel.sel_toggle(dirModel.cursor)
+                    win.qaDump("select")
+                    event.accepted = true; return
+                }
                 if (event.key === Qt.Key_A) {
                     dirModel.sel_all()
                     win.qaDump("select")
@@ -1256,6 +1293,10 @@ Window {
                 ? "vim: h/j/k/l move, l open, r rename, y/d/p copy/cut/paste"
                 : "arrows move, Enter open, F2 rename, Ctrl+C/X/V, Ctrl+N new folder"
             else if (a === "noop") { /* nothing to do */ }
+            else if (a.startsWith("grep:")) {
+                dirModel.grep_start(a.substring(5))
+                win.qaDump("grep")
+            }
             else if (a.startsWith("cloud-on:")) {
                 const cname = a.substring(9)
                 hints.status = qsTr("Connecting to ") + cname + "…"
@@ -1322,6 +1363,11 @@ Window {
             else hints.status = a + " is not wired up yet"
             win.focusList()
         }
+    }
+
+    QuickLook {
+        id: quickLook
+        onClosed: win.focusList()
     }
 
     ConfirmDialog {
@@ -1470,6 +1516,12 @@ Window {
                     out.push(win.paneTabs(p).length)
                 return out
             })(),
+            quickLookOpen: quickLook.open,
+            quickLookName: quickLook.info ? quickLook.info.name : "",
+            quickLookKind: quickLook.info ? quickLook.info.kindWords : "",
+            quickLookLines: quickLook.info && quickLook.info.lines
+                            ? quickLook.info.lines.length : 0,
+            quickLookNoPreview: quickLook.info ? quickLook.info.noPreview : "",
             paletteOpen: palette.visible,
             paletteResults: palette.visible ? palette.resultLabels() : [],
             promptOpen: prompt.visible,

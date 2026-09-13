@@ -394,6 +394,66 @@ OneDrive OAuth is not a template for Proton or Filen, and a half-built OAuth
 path that works for one provider is worse than sending the user to
 `rclone config`, which handles every provider correctly.
 
+## 6.9 Quick Look
+
+Space shows what a file *is* without running it (plan §4). It never launches
+the file, never executes a preview script, and never decodes untrusted bytes
+outside the sandbox that already guards thumbnails (§5).
+
+### What it shows
+
+Facts Gust can state without interpreting the file's contents:
+
+- the name, and the kind in words ("PNG image", not "image/png")
+- size and modified time in the same words the list uses
+- the mode line, so a user can see it is a symlink or not writable
+- pixel dimensions for an image, read from the sandboxed thumbnailer's
+  output rather than by decoding here
+- the first few lines for a text file, read as bytes and shown with
+  unprintable characters replaced — never interpreted, never rendered
+- which application would open it, from the same lookup Enter uses, stated
+  as "Opens with imv" and NOT acted upon
+
+For anything else it says what it is and stops. "No preview" is an honest
+answer; a preview that required running the file is not.
+
+### Rules
+
+1. **Space is Quick Look, and selection toggling moves to Ctrl+Space.** The
+   plan's mockups say `space quick look` in three separate places. Multi-
+   select by keyboard keeps working through Ctrl+Space and Shift+arrows.
+2. **The peek is bounded.** Text peeking reads at most 64 KiB and at most
+   the first 40 lines, so a 4 GB log opens instantly.
+3. **Nothing is decoded on the UI thread.** A peek is a worker read that
+   publishes a snapshot, exactly as listing is.
+4. **Escape closes it**, before the selection and before the filter, because
+   it is the most recently opened thing (§4 Escape ladder).
+
+## 6.10 Scoped content search (`:grep`)
+
+`:find` matches names; `:grep` matches *contents* (plan §2, §4). Both are
+explicitly scoped and cancellable, and neither ever starts on its own.
+
+### Rules
+
+1. **It starts where you are**, and broadening is an explicit act. There is
+   no silent recursive crawl, and never one through a cloud mount: a
+   location on a remote is skipped unless the user asked for that location
+   specifically, because content search there means downloading everything.
+2. **Binary files are skipped.** A file is treated as binary if its first
+   8 KiB contain a NUL. Grepping a disk image finds nothing useful and costs
+   everything.
+3. **Bounded per file and overall.** At most 8 MiB read per file, and the
+   search stops at 500 matching files; the result says so rather than
+   pretending it finished.
+4. **Cancellable at any moment**, with the same token the name search uses,
+   and Escape cancels it.
+5. **Results are entries**, published into the same model as `:find`, so
+   Rows, Grid and Columns all work unchanged and so do selection and
+   operations on the results.
+6. **Matches are counted, not concatenated.** The result list shows the file
+   and how many lines matched; Gust does not build a giant text buffer.
+
 ## 7. Undo journal
 
 An undo entry records, per affected path: the expected identity

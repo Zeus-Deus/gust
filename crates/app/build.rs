@@ -8,6 +8,7 @@ fn main() {
     let views = [
         "ui/Main.qml",
         "ui/Pane.qml",
+        "ui/QuickLook.qml",
         "ui/RowsView.qml",
         "ui/IconGridView.qml",
         "ui/ColumnsView.qml",
