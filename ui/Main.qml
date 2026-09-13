@@ -1422,6 +1422,24 @@ Window {
                 ? "vim: h/j/k/l move, l open, r rename, y/d/p copy/cut/paste"
                 : "arrows move, Enter open, F2 rename, Ctrl+C/X/V, Ctrl+N new folder"
             else if (a === "noop") { /* nothing to do */ }
+            else if (a === "compress") {
+                const cerr = dirModel.compress_selection(dirModel.cursor)
+                if (cerr !== "") win.alertText = cerr
+                win.qaDump("compress")
+            }
+            else if (a === "extract") {
+                // Only offer to extract something that looks like an archive:
+                // "Extract here" on a text file would be a button that can
+                // only fail.
+                if (!dirModel.row_is_archive(dirModel.cursor)) {
+                    win.alertText = qsTr("That is not an archive Gust can open.")
+                    win.qaDump("extract-refused")
+                } else {
+                    const xerr = dirModel.extract_row(dirModel.cursor)
+                    if (xerr !== "") win.alertText = xerr
+                    win.qaDump("extract")
+                }
+            }
             else if (a === "share-add") {
                 win.askShareAddress()
             }

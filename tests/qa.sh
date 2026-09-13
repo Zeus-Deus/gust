@@ -2315,6 +2315,101 @@ else
   bad "the device palette produced nothing at all"
 fi
 
+say "12a · archives: compress, extract, and refuse what is unsafe"
+stop_gust
+ARCDIR="${FIXTURE}-arch"
+rm -rf "$ARCDIR"
+mkdir -p "$ARCDIR/src/sub"
+printf 'keep me\n'   > "$ARCDIR/src/good.txt"
+printf 'also fine\n' > "$ARCDIR/src/sub/nested.txt"
+mkfifo "$ARCDIR/src/pipe" 2>/dev/null
+ln -s ../../../etc/passwd "$ARCDIR/src/escape" 2>/dev/null
+printf '#!/bin/sh\n' > "$ARCDIR/src/privileged"
+chmod 4755 "$ARCDIR/src/privileged" 2>/dev/null
+# A hostile archive, built with the same tool Gust reads with.
+( cd "$ARCDIR/src" && bsdtar -cf "$ARCDIR/hostile.tar" -- good.txt sub pipe escape privileged ) 2>/dev/null
+rm -rf "$ARCDIR/src"
+printf 'plain\n' > "$ARCDIR/plain.txt"
+
+start_gust
+wait_for "d['model']['settled']" "True" 20 >/dev/null
+goto "$ARCDIR"
+wait_for "d['model']['settled']" "True" 20 >/dev/null
+
+# Extracting the hostile archive must keep the good file and refuse the rest.
+typ "hostile"
+expect "cursor on the archive" "d['model']['cursor_name']" "hostile.tar"
+palette_run "Extract here"
+sleep 3
+wait_for "d['model']['settled']" "True" 20 >/dev/null
+
+[[ -f "$ARCDIR/good.txt" ]] \
+  && ok "the ordinary file was extracted" \
+  || bad "a safe file was not extracted"
+if [[ -e "$ARCDIR/pipe" ]]; then
+  bad "a FIFO was created from an archive — the plan's own fixture hazard"
+else
+  ok "the FIFO was refused"
+fi
+if [[ -e "$ARCDIR/escape" ]]; then
+  bad "an escaping symlink was created from an archive"
+else
+  ok "the escaping symlink was refused"
+fi
+if [[ -e "$ARCDIR/privileged" ]]; then
+  bad "a setuid file was extracted from an archive"
+else
+  ok "the setuid file was refused"
+fi
+
+# The refusals must be SHOWN, not silently dropped.
+arc_notice="$(state "d.get('notice','')")"
+if [[ "$arc_notice" == *"pipe"* || "$arc_notice" == *"privileged"* ]]; then
+  ok "refused entries are named  ($arc_notice)"
+else
+  bad "refusals were not reported to the user: notice=$arc_notice"
+fi
+
+# No staging directory may survive.
+stray="$(ls -a "$ARCDIR" 2>/dev/null | grep -c '^\.gust-extract' || true)"
+[[ "$stray" == "0" ]] \
+  && ok "no staging directory was left behind" \
+  || bad "$stray staging director(y/ies) survived the extraction"
+
+shot "12a-extract"
+
+# Compressing a file produces a real archive, and does not overwrite one.
+typ "plain"
+expect "cursor on the plain file" "d['model']['cursor_name']" "plain.txt"
+palette_run "Compress to"
+sleep 3
+wait_for "d['model']['settled']" "True" 20 >/dev/null
+if [[ -f "$ARCDIR/plain.txt.tar.zst" ]]; then
+  ok "compressing produced an archive"
+  bsdtar -tf "$ARCDIR/plain.txt.tar.zst" 2>/dev/null | grep -q "plain.txt" \
+    && ok "and it really contains the file" \
+    || bad "the archive does not contain what was selected"
+else
+  bad "no archive was produced (folder: $(ls "$ARCDIR" | tr '\n' ' '))"
+fi
+
+# No half-written archive may be left under a staging name.
+stray2="$(ls -a "$ARCDIR" 2>/dev/null | grep -c '^\.gust-compress' || true)"
+[[ "$stray2" == "0" ]] \
+  && ok "no half-written archive was left behind" \
+  || bad "$stray2 staging archive(s) survived"
+
+# "Extract here" on a non-archive must refuse rather than fail obscurely.
+typ "plain.txt"
+palette_run "Extract here"
+sleep 1.5
+arc_alert="$(state "d.get('alertText','')")"
+[[ -n "$arc_alert" && "$arc_alert" != "None" ]] \
+  && ok "extracting a non-archive is refused with a reason  ($arc_alert)" \
+  || bad "extracting a text file was not refused"
+
+rm -rf "$ARCDIR"
+
 say "13 · nothing executed, nothing crashed, no QML errors"
 [[ -f /tmp/gust-fixture-EXECUTED ]] \
   && bad "SECURITY: a fixture script executed during browsing" \
@@ -2334,13 +2429,13 @@ else
   real_trash_count=0
 fi
 echo "  (real trash entries: $real_trash_count — Gust ran with XDG_DATA_HOME=$FIXTURE/.local/share)"
-for d in "$FIXTURE" "${FIXTURE}-panes" "${FIXTURE}-peek" "${FIXTURE}-perm"; do
+for d in "$FIXTURE" "${FIXTURE}-panes" "${FIXTURE}-peek" "${FIXTURE}-perm" "${FIXTURE}-arch"; do
   case "$d" in
     /home/*|/root/*)
       bad "a QA tree was inside a real home: $d" ;;
   esac
 done
-ok "QA ran entirely against $FIXTURE and its -panes/-peek/-perm trees"
+ok "QA ran entirely against $FIXTURE and its -panes/-peek/-perm/-arch trees"
 
 stop_gust
 

@@ -32,6 +32,8 @@ Rectangle {
     }
 
     readonly property var allActions: [
+        { id: "compress",     label: "Compress to .tar.zst",  hint: "" },
+        { id: "extract",      label: "Extract here",          hint: "" },
         { id: "split",        label: "Split: two panes",      hint: "" },
         { id: "unsplit",      label: "Split: one pane",       hint: "" },
         { id: "send-copy",    label: "Copy to other pane",    hint: "F5" },
