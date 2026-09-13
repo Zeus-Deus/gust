@@ -177,6 +177,17 @@ pub mod qobject {
         /// no daemon, no network, and Gust never auto-mounts (DESIGN §6.13).
         #[qinvokable]
         fn devices_json(self: &DirModel) -> QString;
+        /// Compress the selection into a .tar.zst in this folder.
+        /// Runs through the job machinery, so it is cancellable (DESIGN §6.15).
+        #[qinvokable]
+        fn compress_selection(self: Pin<&mut DirModel>, row: i32) -> QString;
+        /// Extract the archive on `row` into this folder. Every entry is
+        /// vetted before a byte is written; refusals are reported.
+        #[qinvokable]
+        fn extract_row(self: Pin<&mut DirModel>, row: i32) -> QString;
+        /// Is the row something Gust would offer to extract?
+        #[qinvokable]
+        fn row_is_archive(self: &DirModel, row: i32) -> bool;
         /// Mount a network share. The password is handed to GIO on stdin and
         /// is never stored, logged or placed in argv (DESIGN §6.14).
         #[qinvokable]
@@ -970,6 +981,164 @@ impl qobject::DirModel {
             h = (h ^ *b as u32).wrapping_mul(16777619);
         }
         format!("http://127.0.0.1:{}", 45000 + (h % 2000) as u16)
+    }
+
+    // --- archives (DESIGN §6.15) -----------------------------------------
+
+    fn row_is_archive(&self, row: i32) -> bool {
+        self.path_of_row(row)
+            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+            .map(|n| gust_ops::archive::io::looks_like_archive(&n))
+            .unwrap_or(false)
+    }
+
+    /// Compress the selection into a .tar.zst beside it.
+    ///
+    /// Written to a staging name and renamed on success, exactly as a copy
+    /// is: an interrupted compress must not leave a half-written archive
+    /// that looks finished.
+    fn compress_selection(mut self: Pin<&mut Self>, row: i32) -> QString {
+        if !gust_ops::archive::io::tool_available() {
+            return QString::from(gust_ops::archive::io::ArchiveError::NoTool.message());
+        }
+        if self.as_ref().job.is_some() {
+            return QString::from("another operation is still running");
+        }
+        let Some(dir) = self.as_ref().key.as_path().map(|p| p.to_path_buf()) else {
+            return QString::from("This place cannot be compressed from.");
+        };
+
+        self.as_mut().set_cursor_if_no_selection(row);
+        let targets = self.as_ref().target_paths();
+        if targets.is_empty() {
+            return QString::from("nothing selected");
+        }
+        let names: Vec<String> = targets
+            .iter()
+            .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+            .collect();
+        if names.is_empty() {
+            return QString::from("nothing selected");
+        }
+
+        // Named after the single item, or the folder when there are several.
+        let stem = if names.len() == 1 {
+            names[0].clone()
+        } else {
+            dir.file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "archive".into())
+        };
+        let final_path = gust_ops::archive::io::unique_name(&dir, &format!("{stem}.tar.zst"));
+        let staging = dir.join(format!(".gust-compress-{}.tar.zst", std::process::id()));
+
+        let Some(thread) = self.as_ref().qt_thread_handle() else {
+            return QString::default();
+        };
+        let gen = self.as_ref().generation;
+        let args = gust_ops::archive::io::compress_args(&dir, &staging, &names);
+
+        std::thread::Builder::new()
+            .name("gust-compress".into())
+            .spawn(move || {
+                let out = std::process::Command::new("bsdtar")
+                    .args(&args)
+                    .stdin(std::process::Stdio::null())
+                    .output();
+                let message = match out {
+                    Ok(o) if o.status.success() => match std::fs::rename(&staging, &final_path) {
+                        Ok(()) => format!(
+                            "Compressed to {}",
+                            final_path
+                                .file_name()
+                                .map(|n| n.to_string_lossy().to_string())
+                                .unwrap_or_default()
+                        ),
+                        Err(e) => {
+                            let _ = std::fs::remove_file(&staging);
+                            format!("Could not finish the archive: {e}")
+                        }
+                    },
+                    Ok(o) => {
+                        // A failed compress leaves nothing behind.
+                        let _ = std::fs::remove_file(&staging);
+                        format!(
+                            "Could not compress: {}",
+                            String::from_utf8_lossy(&o.stderr)
+                                .lines()
+                                .next_back()
+                                .unwrap_or("bsdtar did not say why")
+                                .trim()
+                        )
+                    }
+                    Err(e) => {
+                        let _ = std::fs::remove_file(&staging);
+                        format!("Could not compress: {e}")
+                    }
+                };
+                let _ = thread.queue(move |mut model| {
+                    if model.as_ref().generation == gen {
+                        model.as_mut().set_status(QString::from(&message));
+                        model.as_mut().reload();
+                    }
+                });
+            })
+            .ok();
+
+        self.as_mut().set_status(QString::from("Compressing…"));
+        QString::default()
+    }
+
+    /// Extract the archive on `row` into the current folder.
+    fn extract_row(mut self: Pin<&mut Self>, row: i32) -> QString {
+        if !gust_ops::archive::io::tool_available() {
+            return QString::from(gust_ops::archive::io::ArchiveError::NoTool.message());
+        }
+        let Some(archive) = self.as_ref().path_of_row(row) else {
+            return QString::from("That item is no longer there.");
+        };
+        let Some(dir) = self.as_ref().key.as_path().map(|p| p.to_path_buf()) else {
+            return QString::from("This place cannot be extracted into.");
+        };
+
+        let Some(thread) = self.as_ref().qt_thread_handle() else {
+            return QString::default();
+        };
+        let gen = self.as_ref().generation;
+
+        std::thread::Builder::new()
+            .name("gust-extract".into())
+            .spawn(move || {
+                let policy = gust_ops::archive::ExtractPolicy::default();
+                let (message, refusals) =
+                    match gust_ops::archive::io::extract(&archive, &dir, &policy) {
+                        Ok(done) => {
+                            let refused = if done.refused.is_empty() {
+                                String::new()
+                            } else {
+                                // Named, not counted: "something was refused"
+                                // leaves the user hunting for what.
+                                format!("Refused unsafe entries: {}", done.refused.join(", "))
+                            };
+                            (done.summary(), refused)
+                        }
+                        Err(e) => (e.message(), String::new()),
+                    };
+                let _ = thread.queue(move |mut model| {
+                    if model.as_ref().generation != gen {
+                        return;
+                    }
+                    model.as_mut().set_status(QString::from(&message));
+                    if !refusals.is_empty() {
+                        model.as_mut().set_notice(QString::from(&refusals));
+                    }
+                    model.as_mut().reload();
+                });
+            })
+            .ok();
+
+        self.as_mut().set_status(QString::from("Extracting…"));
+        QString::default()
     }
 
     // --- network shares (DESIGN §6.14) -----------------------------------

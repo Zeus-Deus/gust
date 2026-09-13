@@ -4,19 +4,51 @@
 # spaces into one long line. The result is a sentence shown to the user with a
 # gap in the middle of it: "Disconnecting now would          lose that work."
 #
-# Nothing else in this codebase legitimately puts a run of spaces inside a
-# user-facing string, so a run of three or more is the signal.
+# The rule is about sentences a USER reads, so it looks only at code outside
+# #[cfg(test)] modules. Test fixtures legitimately contain column-aligned
+# data — a bsdtar listing line is padded by design — and excluding them one
+# pattern at a time was turning the rule into a list of apologies.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 FAIL=0
 echo "checking user-facing strings for collapsed continuations..."
+
 while IFS= read -r hit; do
   echo "    $hit"
   FAIL=1
-done < <(grep -rnE '"[^"]*[a-z,.]   +[a-zA-Z]' crates/*/src/*.rs 2>/dev/null \
-         | grep -vE '^\s*[^:]+:[0-9]+:\s*//' \
-         | grep -vE 'r#"' \
-         | grep -vE 'assert(_eq|_ne)?!' )
+done < <(
+  python3 - <<'PY'
+import re, pathlib
+
+# Three or more spaces inside a string literal, after a word character.
+BAD = re.compile(r'"[^"]*[a-z,.]   +[a-zA-Z]')
+
+for path in sorted(pathlib.Path("crates").glob("*/src/*.rs")):
+    in_test = False
+    depth_at_test = 0
+    depth = 0
+    for n, line in enumerate(path.read_text().splitlines(), 1):
+        stripped = line.strip()
+
+        # Entering a test module: everything inside is fixture data.
+        if stripped.startswith("#[cfg(test)]"):
+            in_test = True
+            depth_at_test = depth
+        # A #[test] function body counts as test code too.
+        if stripped.startswith("#[test]") and not in_test:
+            in_test = True
+            depth_at_test = depth
+
+        if not in_test and not stripped.startswith("//") and "r#\"" not in line:
+            if BAD.search(line):
+                print(f"{path}:{n}:{stripped[:110]}")
+
+        depth += line.count("{") - line.count("}")
+        if in_test and depth <= depth_at_test and ("}" in line):
+            in_test = False
+PY
+)
+
 if [[ "$FAIL" == 1 ]]; then
   echo "    ^ a line continuation left spaces inside a sentence the user reads."
   echo "      Put the whole sentence on one line, or build it with format!()."

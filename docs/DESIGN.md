@@ -634,6 +634,60 @@ test is what caught it.
 
 Anonymous/guest shares and LAN discovery via Avahi.
 
+## 6.15 Archives
+
+Mockup C offers "Compress to .tar.zst", and §4 asks for archive listing
+under Quick Look. The extraction *policy* has existed in `gust-ops` since
+early on with eleven tests behind it; what was missing was anything that
+called it.
+
+### Listing is not extracting
+
+Reading what is inside an archive must never write anything. Gust lists with
+`bsdtar -tv`, parses the result, and shows it — nothing is unpacked to find
+out what is in there. The listing is bounded like every other untrusted
+read: at most 2000 entries are parsed for display.
+
+### Extraction runs the policy, then stages
+
+Every entry is vetted before a byte is written (`archive::vet_entries`):
+
+| Rejected | Why |
+|---|---|
+| `../` or absolute paths | writes outside the destination |
+| FIFOs, devices, sockets | the plan's own fixture produced a FIFO |
+| setuid/setgid modes | a privileged binary from an untrusted archive |
+| links escaping the archive | same as path traversal, one step removed |
+| more than 10k entries or 2 GiB | a zip bomb is a denial of service |
+
+What survives is extracted into a staging directory **inside the
+destination**, so committing it is a same-filesystem rename. A failure
+removes the staging directory: a half-extracted tree that looks like success
+is worse than an error.
+
+**Rejections are shown, not silently dropped.** An archive that contained
+something Gust refused says so, names the entry and the reason, and extracts
+the rest. Silently skipping is how somebody later finds a file missing and
+has no idea why.
+
+### Compressing
+
+`tar -c --zstd` over the selection, into the current folder, through the
+same job machinery as a copy — so it is cancellable, it reports progress,
+and Escape stops it. The archive is written to a staging name and renamed
+into place only on success, exactly as a copy is: an interrupted compress
+leaves no half-written `.tar.zst` looking finished.
+
+Names are passed as arguments after `--`, never interpolated into a string,
+so a file called `--checkpoint-action=exec=sh` is a file name and nothing
+else.
+
+### What is deliberately not built
+
+Encrypted archives, multi-part archives, and writing formats other than
+`.tar.zst`. Reading covers whatever the installed bsdtar reads; a format it
+does not know fails with the reason rather than a guess.
+
 ## 7. Undo journal
 
 An undo entry records, per affected path: the expected identity

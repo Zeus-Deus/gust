@@ -7,6 +7,9 @@
 
 use std::path::{Component, Path, PathBuf};
 
+#[path = "archive_io.rs"]
+pub mod io;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArchiveEntryKind {
     Regular,
