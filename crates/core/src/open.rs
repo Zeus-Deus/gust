@@ -7,6 +7,9 @@
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
+
+#[path = "openwith.rs"]
+pub mod with;
 use std::process::{Command, Stdio};
 
 /// Why an open was refused, in words a person can act on.

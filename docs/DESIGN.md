@@ -748,6 +748,47 @@ renaming them in sequence destroys one of them. Every rename therefore goes
 to a unique temporary name first, then to its final name. A crash between
 phases leaves recoverable temporary names rather than a lost file.
 
+## 6.17 Open with…
+
+Mockup B puts `o open with…` next to `enter open`. Enter uses the default
+handler; this is for the other times.
+
+### The list comes from the desktop database, not from a command's output
+
+`gio mime` prints "Default application for ..." in the system language, and
+§3's rule about not scraping localized prompts applies just as much here.
+The handler list is read from the freedesktop database directly:
+
+1. `mimeinfo.cache` in each application directory maps a MIME type to the
+   desktop entries that registered for it — a machine-readable index with
+   no prose in it.
+2. `mimeapps.list` carries the user's own additions and removals, which
+   take precedence over the system cache.
+3. Each candidate's `.desktop` file supplies the name to show and the
+   command to run.
+
+An entry with `NoDisplay=true` or `Hidden=true` is still a valid handler and
+is still offered: those flags mean "do not show me in the applications menu",
+not "never open a file with me". `imv` is `NoDisplay=true` on this system and
+is exactly what a person wants for an image.
+
+### Launching
+
+The `Exec` line is parsed, not handed to a shell. Field codes are expanded
+per the freedesktop spec — `%f`/`%F` become the path, `%u`/`%U` its file URI,
+and `%i`/`%c`/`%k` are dropped — and every remaining word becomes one argv
+entry. A file called `; rm -rf ~` is one argument and nothing else.
+
+`Terminal=true` entries are launched through a terminal, because an editor
+with no terminal simply vanishes.
+
+### What it will not do
+
+It will not run an arbitrary command the user types. That is a shell prompt
+wearing a file manager's clothes, and Gust already refuses to execute a file
+to find out what it is (§4). The list is applications the system says can
+open this type, plus nothing.
+
 ## 7. Undo journal
 
 An undo entry records, per affected path: the expected identity

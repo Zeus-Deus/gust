@@ -609,6 +609,12 @@ fi
   && ok "SECURITY: no file was executed by opening it" \
   || bad "SECURITY FAILURE: activation executed a file"
 
+# Opening a document really launches the system's handler. Close what this
+# case started, or instances pile up across runs — 47 were alive before this
+# was added, and they made a later assertion blame the wrong thing.
+pkill -f "nvim $OPEN" 2>/dev/null || true
+sleep 0.3
+
 say "10h · Multi-select acts on exactly what is selected"
 SEL="$FIXTURE/multi"
 rm -rf "$SEL"; mkdir -p "$SEL/from" "$SEL/to"
@@ -2519,6 +2525,68 @@ back="$(ls -1 "$BULKDIR" | grep -c '^\(one\|two\|three\)\.txt$' || true)"
 
 rm -rf "$BULKDIR"
 
+say "12o · open with: the system's handlers, and nothing else"
+stop_gust
+OWDIR="${FIXTURE}-openwith"
+rm -rf "$OWDIR"
+mkdir -p "$OWDIR"
+printf 'some text\n' > "$OWDIR/notes.txt"
+printf 'not really a png\n' > "$OWDIR/picture.png"
+
+start_gust
+wait_for "d['model']['settled']" "True" 20 >/dev/null
+goto "$OWDIR"
+wait_for "d['model']['settled']" "True" 20 >/dev/null
+
+typ "notes"
+expect "cursor on the text file" "d['model']['cursor_name']" "notes.txt"
+
+# Count what is already running BEFORE opening the list, so earlier cases
+# that deliberately opened a file are not blamed on this one.
+ow_before="$(pgrep -c -f 'nvim|libreoffice|imv ' 2>/dev/null || true)"
+
+# The palette must list applications the SYSTEM registered, named.
+palette_open
+typ "open with"
+sleep 1.5
+ow_said="$(state "' | '.join(d.get('paletteResults') or [])")"
+shot "12o-open-with"
+if [[ -n "$ow_said" && "$ow_said" != "None" ]]; then
+  ok "open-with lists something  ($ow_said)"
+else
+  bad "open-with produced nothing at all"
+fi
+
+# Whatever is installed, one entry must be marked as the default, or the
+# user cannot tell which one Enter would have used.
+if [[ "$ow_said" == *"(default)"* ]]; then
+  ok "the default handler is marked as such"
+else
+  bad "no handler was marked default: $ow_said"
+fi
+
+# The list is applications, never a command the user could type. A palette
+# that ran arbitrary text would be a shell wearing a file manager's clothes.
+case "$ow_said" in
+  *"Open with"*) ok "every entry is an application, not a command line" ;;
+  *)             bad "the entries do not look like applications: $ow_said" ;;
+esac
+
+key Escape
+sleep 0.6
+
+# Nothing may be launched just by LOOKING at the list. Counted as a
+# DIFFERENCE: earlier cases deliberately open a file, so a global count
+# measures those instead.
+ow_after="$(pgrep -c -f 'nvim|libreoffice|imv ' 2>/dev/null || true)"
+if [[ "${ow_after:-0}" -le "${ow_before:-0}" ]]; then
+  ok "listing handlers launched nothing  (${ow_before:-0} before, ${ow_after:-0} after)"
+else
+  bad "listing handlers started $(( ow_after - ow_before )) application(s)"
+fi
+
+rm -rf "$OWDIR"
+
 say "13 · nothing executed, nothing crashed, no QML errors"
 [[ -f /tmp/gust-fixture-EXECUTED ]] \
   && bad "SECURITY: a fixture script executed during browsing" \
@@ -2538,13 +2606,13 @@ else
   real_trash_count=0
 fi
 echo "  (real trash entries: $real_trash_count — Gust ran with XDG_DATA_HOME=$FIXTURE/.local/share)"
-for d in "$FIXTURE" "${FIXTURE}-panes" "${FIXTURE}-peek" "${FIXTURE}-perm" "${FIXTURE}-arch" "${FIXTURE}-bulk"; do
+for d in "$FIXTURE" "${FIXTURE}-panes" "${FIXTURE}-peek" "${FIXTURE}-perm" "${FIXTURE}-arch" "${FIXTURE}-bulk" "${FIXTURE}-openwith"; do
   case "$d" in
     /home/*|/root/*)
       bad "a QA tree was inside a real home: $d" ;;
   esac
 done
-ok "QA ran entirely against $FIXTURE and its -panes/-peek/-perm/-arch/-bulk trees"
+ok "QA ran entirely against $FIXTURE and its -panes/-peek/-perm/-arch/-bulk/-openwith trees"
 
 stop_gust
 
