@@ -1742,6 +1742,65 @@ key Down; key Down
 expect_contains "cursor still responds in a big folder" "d['model']['cursor_name']" "entry-"
 shot 11-big-dir
 
+say "12t · tabs: independent locations, selections and views"
+stop_gust
+start_gust "$FIXTURE"
+wait_for "d['model']['settled']" "True" 20 >/dev/null
+
+# One tab is not a choice: the strip stays hidden until there are two.
+expect "starts with a single tab" "d['tabCount']" "1"
+
+ctrl t
+expect "Ctrl+T opens a second tab" "d['tabCount']" "2"
+
+# The new tab must be able to go somewhere else entirely.
+goto "$FIXTURE/Downloads"
+wait_for "d['model']['settled']" "True" 20 >/dev/null
+expect "the second tab navigates independently" \
+       "d['model']['location']" "$FIXTURE/Downloads"
+
+# Selection belongs to a tab, not to the window.
+ctrl a
+sleep 0.6
+sel_here="$(state "d['selCount']")"
+ctrl Tab
+sleep 1.4
+sel_there="$(state "d['selCount']")"
+back_loc="$(state "d['model']['location']")"
+if [[ "$sel_here" -gt 0 && "$sel_there" == "0" && "$back_loc" == "$FIXTURE" ]]; then
+  ok "each tab keeps its own selection and location  (had $sel_here, other tab 0)"
+else
+  bad "tab state leaked (here=$sel_here other=$sel_there loc=$back_loc)"
+fi
+
+# A view is remembered per tab, not globally.
+ctrl Tab
+sleep 1.4
+palette_run "Grid"      # opens the palette itself — do not open it first
+sleep 1.0
+v_tab2="$(state "d['view']")"
+ctrl Tab
+sleep 1.4
+v_tab1="$(state "d['view']")"
+ctrl Tab
+sleep 1.4
+v_back="$(state "d['view']")"
+if [[ "$v_tab2" == "grid" && "$v_tab1" == "rows" && "$v_back" == "grid" ]]; then
+  ok "a view is remembered per tab  (grid / rows / grid)"
+else
+  bad "per-tab view wrong (tab2=$v_tab2 tab1=$v_tab1 back=$v_back)"
+fi
+
+shot "12t-tabs"
+
+# Closing the last tab would leave an empty window: it must refuse.
+ctrl w
+sleep 1.0
+expect "Ctrl+W closes a tab" "d['tabCount']" "1"
+ctrl w
+sleep 1.0
+expect "the last tab cannot be closed" "d['tabCount']" "1"
+
 say "13 · nothing executed, nothing crashed, no QML errors"
 [[ -f /tmp/gust-fixture-EXECUTED ]] \
   && bad "SECURITY: a fixture script executed during browsing" \
