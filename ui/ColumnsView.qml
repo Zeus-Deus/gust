@@ -48,7 +48,7 @@ FocusScope {
                         width: parent.width
                         leftPadding: Tokens.rowPaddingX
                         rightPadding: Tokens.rowPaddingX
-                        text: root.model.location_display
+                        text: root.model ? root.model.location_display : ""
                         color: Tokens.foreground
                         font.family: Tokens.fontFamily
                         font.pixelSize: Tokens.fontSmall
@@ -78,7 +78,7 @@ FocusScope {
                     model: root.model
                     clip: true
                     focus: true
-                    currentIndex: root.model.cursor
+                    currentIndex: root.model ? root.model.cursor : 0
                     highlightMoveDuration: 0
                     boundsBehavior: Flickable.StopAtBounds
 
@@ -151,7 +151,8 @@ FocusScope {
 
                     Text {
                         width: parent.width
-                        text: root.model.count > 0 ? root.model.entry_name(root.model.cursor) : ""
+                        text: (root.model && root.model.count > 0)
+                              ? root.model.entry_name(root.model.cursor) : ""
                         color: Tokens.foregroundBright
                         font.family: Tokens.fontFamily
                         font.pixelSize: Tokens.fontSubtitle
@@ -166,7 +167,7 @@ FocusScope {
 
                     Text {
                         width: parent.width
-                        text: root.model.count > 0
+                        text: (root.model ? root.model.count : 0) > 0
                               ? (root.model.is_dir(root.model.cursor) ? "Folder" : "File")
                               : "Nothing selected"
                         color: Tokens.foregroundDim
@@ -176,7 +177,7 @@ FocusScope {
 
                     Text {
                         width: parent.width
-                        text: root.model.count > 0 ? root.model.entry_path(root.model.cursor) : ""
+                        text: (root.model ? root.model.count : 0) > 0 ? root.model.entry_path(root.model.cursor) : ""
                         color: Tokens.foregroundDim
                         font.family: Tokens.fontFamily
                         font.pixelSize: Tokens.fontCaption

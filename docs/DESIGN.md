@@ -241,6 +241,37 @@ substitute Gust chooses on its own (plan §3 rule 2).
 - A refusal is an **alert**, not a status line: the listing that follows
   rewrites status, which is how a failed delete once reported nothing.
 
+## 6.6 Tabs
+
+Each tab owns a location, history, selection, filter and view (plan §2).
+Nothing is shared between tabs except the window itself.
+
+- A tab is **one `DirModel` instance**. The model already holds location,
+  history and selection, so a tab needs no new state type — only its own
+  instance and its own remembered view mode.
+- `dirModel` is a *property* resolving to the active tab's model, so every
+  existing call site keeps working and there is one definition of "current".
+- **A tab never does I/O until it is looked at.** Opening five tabs must not
+  start five listings; a background tab lists when first activated.
+- Closing the last tab closes nothing — the window keeps one tab, because a
+  file manager with no tab has nothing to show.
+- **A running job belongs to the tab that started it.** Closing that tab
+  asks first, exactly as closing the window does; the transfer is never
+  silently abandoned.
+- Tab order is the order they were opened. A new tab opens beside the
+  active one, not at the end, so "open in new tab" lands where the eye is.
+
+### 6.6.1 QML implementation note
+
+Tab state lives in two places that must agree: a `ListModel` (how many tabs,
+their labels) and an `Instantiator` of `DirModel` objects (the actual state).
+The ListModel is authoritative for *count* because `Instantiator.count` and
+`Instantiator.objectAt()` do not notify — a binding over either evaluates once
+and never updates. Anything the UI must track is a property binding on a
+notifying property; derived values (a tab's label) are `readonly property`
+bindings **on the model itself**, never computed in a change handler, because a
+handler can run before the model has published its new value.
+
 ## 7. Undo journal
 
 An undo entry records, per affected path: the expected identity

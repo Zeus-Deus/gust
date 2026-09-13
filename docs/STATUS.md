@@ -45,7 +45,8 @@ Rust 1.98.1, cxx-qt 0.10.0, Mesa llvmpipe (software rendering, Virtio GPU),
 | Keyboard focus returns from every overlay | proven | regression test in `just qa` |
 | Vim preset | built | implemented, not yet asserted in QA |
 | **Per-location view memory** | **proven** | `views::tests` + `just qa` §10r; survives a restart |
-| Tabs, two panes | not started | — |
+| Tabs | **proven** | per-tab location, history, selection, filter and view; Ctrl+T/W/Tab/1-9; last tab cannot be closed; a tab with a running job asks before closing |
+| Two panes | not started | — |
 | 100k benchmark | **proven** | `just bench`: 100k listed+settled in 470 ms (release), first window 155 ms |
 | Listing off the UI thread | **proven** | worker thread + generation-tagged snapshots; names paint before metadata |
 | PSS budget (≤ 90 MiB) | **MISSED — platform floor** | a BARE Qt Quick window costs 155 MiB here; Gust adds ~10 MiB. Needs a GPU machine to judge |

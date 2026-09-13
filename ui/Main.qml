@@ -1,9 +1,49 @@
+import QtQml
 import QtQuick
 import QtQuick.Window
 import com.gust.app
 
 Window {
     id: win
+
+    ListModel {
+        id: tabList
+        ListElement { startPath: ""; label: "…" }
+    }
+
+    // Instantiator, not Repeater: a Repeater needs a visual parent and
+    // creates its items asynchronously, so every binding on `dirModel`
+    // evaluated against null before the first tab existed and the whole
+    // window came up empty.
+    Instantiator {
+        id: tabs
+        model: tabList
+        active: true
+        asynchronous: false
+        // The delegate IS the model. Wrapping it in a QtObject and exposing
+        // the child through an alias left the alias unresolved at the moment
+        // the window's bindings first ran, so `dirModel` was null and every
+        // view came up empty.
+        delegate: DirModel {
+            required property string startPath
+            // A background tab has not listed anything yet. Opening five
+            // tabs must not start five listings (DESIGN §6.6).
+            property bool everActivated: false
+            // The tab's visible name, as a BINDING on this model. Computing
+            // it in a handler read location_display before the model had
+            // published the new value, so labels stayed at the old folder.
+            readonly property string tabLabel: {
+                const p = location_display
+                if (p === "") return "…"
+                const cut = p.lastIndexOf("/")
+                return (cut >= 0 && cut < p.length - 1) ? p.substring(cut + 1) : p
+            }
+            onTabLabelChanged: win.refreshTabLabels()
+        }
+        onObjectAdded: win.refreshActiveModel()
+        onObjectRemoved: win.refreshActiveModel()
+    }
+
 
     // Snapshot of the running job, or null. Read by the drawer and QA.
     property var job: null
@@ -90,7 +130,115 @@ Window {
     readonly property bool dropAsMove: false
     property bool sidebarVisible: true
 
-    DirModel { id: dirModel }
+    // --- tabs ---------------------------------------------------------
+    //
+    // A tab IS a DirModel: the model already owns location, history,
+    // selection and filter, so a tab needs no new state type (DESIGN §6.6).
+    // `dirModel` resolves to the active one, so all 120-odd existing call
+    // sites keep working and there is exactly one definition of "current".
+    property int activeTab: 0
+    // NOT `tabs.objectAt(activeTab)` as a binding: objectAt is a function
+    // call with no change notification, so the binding evaluated once while
+    // the Instantiator was still empty and stayed null forever. It is a
+    // plain property, refreshed whenever the tab set or the active tab
+    // changes.
+    property var dirModel: null
+
+    function refreshActiveModel() {
+        // The Instantiator drops and rebuilds delegates when the tab set
+        // changes; objectAt() is null for those frames. Every binding in the
+        // tree would throw, so hold the last good model until a real one
+        // exists. The UI is never handed a null.
+        const m = tabs.objectAt(win.activeTab)
+        if (m) win.dirModel = m
+        win.refreshTabLabels()
+    }
+
+    /// The visible name of each tab: the last path segment, or "/" at the
+    /// root. Recomputed on every navigation because a tab is named by where
+    /// it currently is.
+    function refreshTabLabels() {
+        for (let i = 0; i < tabList.count; i++) {
+            const m = tabs.objectAt(i)
+            const name = m ? m.tabLabel : "…"
+            if (tabList.get(i).label !== name)
+                tabList.setProperty(i, "label", name)
+        }
+    }
+    onActiveTabChanged: refreshActiveModel()
+    // tabList.count, NOT tabs.count: Instantiator's count does not notify,
+    // so the strip stayed hidden after a second tab appeared. The ListModel
+    // is the source of truth for how many tabs there are.
+    readonly property int tabCount: tabList.count
+
+    // Per-tab view mode. Kept beside the tab rather than in the model,
+    // because the view lives in QML (the model does not duplicate it).
+    property var tabViews: ["rows"]
+
+    function tabModelAt(i) { return tabs.objectAt(i) }
+
+    function newTab(path) {
+        const here = path && path !== "" ? path
+                   : (dirModel ? dirModel.location : "")
+        // Opens BESIDE the active tab, not at the end: "open in new tab"
+        // should land where the eye already is.
+        const at = activeTab + 1
+        tabList.insert(at, { startPath: here, label: "…" })
+        tabViews.splice(at, 0, "rows")
+        activateTab(at)
+        win.qaDump("tab-new")
+    }
+
+    function closeTab(i) {
+        if (tabList.count <= 1) {
+            // A file manager with no tab has nothing to show.
+            hints.status = qsTr("This is the last tab")
+            return
+        }
+        const m = tabModelAt(i)
+        if (m && m.job_running()) {
+            // A running job belongs to the tab that started it. Closing it
+            // asks first, exactly as closing the window does.
+            win.pendingCloseTab = i
+            confirm.purpose = "closetab"
+            confirm.open(qsTr("A transfer is still running"),
+                         qsTr("Closing this tab stops it. Files already copied "
+                              + "are kept; the one in progress is discarded."),
+                         qsTr("Stop and close"), true)
+            win.qaDump("tab-close-blocked")
+            return
+        }
+        tabList.remove(i)
+        tabViews.splice(i, 1)
+        if (activeTab >= tabList.count) activeTab = tabList.count - 1
+        else if (i < activeTab) activeTab -= 1
+        activateTab(activeTab)
+        win.qaDump("tab-close")
+    }
+
+    property int pendingCloseTab: -1
+
+    function activateTab(i) {
+        if (i < 0 || i >= tabList.count) return
+        activeTab = i
+        const it = tabs.objectAt(i)
+        if (it && !it.everActivated) {
+            it.everActivated = true
+            const p = it.startPath
+            if (p && p !== "") it.navigate(p)
+            else it.reload()
+        }
+        win.viewMode = tabViews[i] || "rows"
+        win.focusList()
+        win.qaDump("tab-activate")
+    }
+
+    function nextTab(step) {
+        if (tabList.count <= 1) return
+        let i = (activeTab + step) % tabList.count
+        if (i < 0) i += tabList.count
+        activateTab(i)
+    }
 
     // --- helpers -----------------------------------------------------------
     function currentView() {
@@ -100,6 +248,9 @@ Window {
     }
     function setView(m) {
         viewMode = m
+        // Each tab keeps its own view, so switching tabs restores what that
+        // tab was showing rather than what the last one chose.
+        if (win.activeTab >= 0) win.tabViews[win.activeTab] = m
         // Transient feedback must not outlive what it describes.
         hints.status = ""
         // An EXPLICIT choice, so it is remembered for this location.
@@ -217,6 +368,83 @@ Window {
     // --- layout ------------------------------------------------------------
     Column {
         anchors.fill: parent
+
+        // Tab strip. Hidden with a single tab: one tab is not a choice, and
+        // a strip showing it is chrome that earns nothing.
+        Rectangle {
+            id: tabStrip
+            width: parent.width
+            // Height and visibility both come from the SAME condition. Using
+            // `height: visible ? X : 0` makes height depend on a sibling
+            // binding's evaluation order: visible flipped true while height
+            // stayed 0, so the strip was shown and occupied no space at all.
+            height: win.tabCount > 1 ? Tokens.controlHeight : 0
+            color: Tokens.barBackground
+            visible: win.tabCount > 1
+
+            Rectangle {
+                anchors.bottom: parent.bottom
+                width: parent.width
+                height: Math.max(1, Tokens.borderWidth)
+                color: Tokens.withAlpha(Tokens.border, Tokens.borderAlpha)
+            }
+
+            Row {
+                anchors.left: parent.left
+                anchors.leftMargin: Tokens.rowPaddingX
+                anchors.verticalCenter: parent.verticalCenter
+                spacing: Tokens.spaceSm
+
+                Repeater {
+                    model: tabList
+                    delegate: Rectangle {
+                        // `index` is supplied by the Repeater; `label` comes
+                        // from the ListModel role. Both must be declared or
+                        // the delegate fails to create — silently, leaving an
+                        // empty strip and one line in the log.
+                        required property int index
+                        required property string label
+                        readonly property bool current: index === win.activeTab
+
+                        implicitWidth: Math.min(Math.round(Tokens.rowHeight * 7),
+                                                Math.max(Math.round(Tokens.rowHeight * 3),
+                                                         tabText.implicitWidth
+                                                         + Tokens.spaceLg * 2))
+                        width: implicitWidth
+                        height: Math.round(Tokens.controlHeight * 0.8)
+                        radius: Tokens.radius
+                        color: current ? Tokens.withAlpha(Tokens.foreground, 0.12)
+                                       : "transparent"
+                        border.width: current ? Math.max(1, Tokens.borderWidth) : 0
+                        border.color: Tokens.withAlpha(Tokens.border, Tokens.borderAlpha)
+
+                        Text {
+                            id: tabText
+                            anchors.centerIn: parent
+                            width: parent.width - Tokens.spaceLg
+                            horizontalAlignment: Text.AlignHCenter
+                            elide: Text.ElideMiddle
+                            text: parent.label
+                            color: parent.current ? Tokens.foreground
+                                                  : Tokens.foregroundDim
+                            font.family: Tokens.fontFamily
+                            font.pixelSize: Tokens.fontCaption
+                        }
+
+                        MouseArea {
+                            anchors.fill: parent
+                            acceptedButtons: Qt.LeftButton | Qt.MiddleButton
+                            onClicked: (mouse) => {
+                                if (mouse.button === Qt.MiddleButton)
+                                    win.closeTab(parent.index)
+                                else
+                                    win.activateTab(parent.index)
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         // Header: navigation + breadcrumbs + view switch.
         Rectangle {
@@ -664,6 +892,17 @@ Window {
                 }
                 if (event.key === Qt.Key_H) { dirModel.toggle_hidden(); event.accepted = true; return }
                 if (event.key === Qt.Key_L) { palette.open(); event.accepted = true; return }
+                // Tabs (plan §2). Ctrl+T opens beside this one, Ctrl+W closes
+                // it, Tab / Shift+Tab cycle.
+                if (event.key === Qt.Key_T) { win.newTab(""); event.accepted = true; return }
+                if (event.key === Qt.Key_W) { win.closeTab(win.activeTab); event.accepted = true; return }
+                if (event.key === Qt.Key_Tab) {
+                    win.nextTab((event.modifiers & Qt.ShiftModifier) ? -1 : 1)
+                    event.accepted = true; return
+                }
+                if (event.key === Qt.Key_Backtab) {
+                    win.nextTab(-1); event.accepted = true; return
+                }
                 if (event.key === Qt.Key_R) { dirModel.reload(); event.accepted = true; return }
                 if (event.key === Qt.Key_Z) {
                     const label = dirModel.undo_label()
@@ -849,6 +1088,20 @@ Window {
         onVisibleChanged: win.qaDump("confirm")
         onClosed: win.focusList()
         onAccepted: {
+            if (confirm.purpose === "closetab") {
+                const i = win.pendingCloseTab
+                win.pendingCloseTab = -1
+                if (i < 0) return
+                const m = win.tabModelAt(i)
+                if (m) m.cancel_job()
+                // Give the worker a moment to notice, then close the tab —
+                // the same courtesy the window close already extends.
+                closeTabAfterCancel.target = i
+                closeTabAfterCancel.ticks = 0
+                closeTabAfterCancel.start()
+                win.qaDump("tab-close-confirmed")
+                return
+            }
             if (confirm.purpose === "close") {
                 // The user chose to abandon the transfer. Cancel it first so
                 // the worker stops and its staging file is cleaned up, then
@@ -880,6 +1133,20 @@ Window {
             win.qaDump("trashed")
         }
         onRejected: {
+            if (confirm.purpose === "closetab") {
+                const i = win.pendingCloseTab
+                win.pendingCloseTab = -1
+                if (i < 0) return
+                const m = win.tabModelAt(i)
+                if (m) m.cancel_job()
+                // Give the worker a moment to notice, then close the tab —
+                // the same courtesy the window close already extends.
+                closeTabAfterCancel.target = i
+                closeTabAfterCancel.ticks = 0
+                closeTabAfterCancel.start()
+                win.qaDump("tab-close-confirmed")
+                return
+            }
             if (confirm.purpose === "close") {
                 confirm.purpose = "trash"
                 hints.status = qsTr("Transfer continues")
@@ -908,6 +1175,16 @@ Window {
             filterBarActive: filterBar.filterActive,
             finding: dirModel.finding,
             findNeedle: dirModel.findNeedle,
+            tabCount: win.tabCount,
+            activeTab: win.activeTab,
+            tabPaths: (function () {
+                let out = []
+                for (let i = 0; i < win.tabCount; i++) {
+                    const m = win.tabModelAt(i)
+                    out.push(m ? m.location : "")
+                }
+                return out
+            })(),
             paletteOpen: palette.visible,
             promptOpen: prompt.visible,
             promptMode: prompt.mode,
@@ -934,12 +1211,41 @@ Window {
         qaWriter.write(qaStatePath, JSON.stringify(payload, null, 2))
     }
 
+    // A cancelled job needs a moment to stop and clean up its staging file
+    // before its tab disappears, or the debris outlives the tab that made it.
+    Timer {
+        id: closeTabAfterCancel
+        interval: 150
+        repeat: true
+        property int ticks: 0
+        property int target: -1
+        onTriggered: {
+            ticks += 1
+            const m = win.tabModelAt(target)
+            if (!m || !m.job_running() || ticks > 20) {
+                stop()
+                if (target >= 0 && tabList.count > 1) {
+                    tabList.remove(target)
+                    win.tabViews.splice(target, 1)
+                    if (win.activeTab >= tabList.count)
+                        win.activeTab = tabList.count - 1
+                    win.activateTab(win.activeTab)
+                }
+                target = -1
+                win.qaDump("tab-close")
+            }
+        }
+    }
+
     QaWriter { id: qaWriter }
 
     // Anything that can change what the user sees re-dumps the state.
     Connections {
         target: dirModel
         function onLocationChanged() {
+            win.refreshTabLabels()
+            // A tab's view follows the location it is showing.
+            if (win.activeTab >= 0) win.tabViews[win.activeTab] = win.viewMode
             // Adopt this location's remembered view before anything else
             // reacts to the new folder.
             win.applyRememberedView()
