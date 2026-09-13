@@ -30,6 +30,11 @@ lint:
     ./tests/lint-recipes.sh
     ./tests/lint-strings.sh
 
+# Accessibility and scaling (plan §7): runs the window at three font sizes
+# and reads the live AT-SPI tree a screen reader would read.
+a11y: release
+    GUST_BIN=target/release/gust ./tests/a11y.sh
+
 # Desktop QA: drives the REAL window with REAL key events and asserts on the
 # app's own state. Requires a Wayland session (see tests/vmsession).
 qa: build

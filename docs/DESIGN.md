@@ -454,6 +454,36 @@ explicitly scoped and cancellable, and neither ever starts on its own.
 6. **Matches are counted, not concatenated.** The result list shows the file
    and how many lines matched; Gust does not build a giant text buffer.
 
+## 6.11 Accessibility
+
+Every control carries an `Accessible.role` and an `Accessible.name` that says
+what it does ("Up one folder", not "button3"), and the file list exposes its
+rows as list items rather than anonymous shapes. `tests/a11y.sh` reads the
+live AT-SPI tree — the same interface a screen reader uses — and asserts on
+names and roles, because a declaration in QML is not proof that anything
+reached the bus.
+
+**Qt only joins the accessibility bus when asked.** It needs
+`QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1`, which a screen-reader user's session
+already sets. Gust does **not** set it itself: the project sets no global
+`QT_*` variable on the user's session, and a file manager quietly enabling a
+D-Bus bridge for everyone is not its decision to make. The test enables it
+for its own run.
+
+Font size and spacing come from theme metrics, so the window must work at
+sizes nobody chose while developing. The suite starts, lists and navigates at
+font 9, 12 and 18 with spacing 0.8, 1.0 and 1.3, and fails on any missing
+token.
+
+### 6.11.1 An overlay that fades is still "visible"
+
+`visible: opacity > 0` with an animated opacity means a dialog stays visible
+for the whole fade-out. `focusList()` refuses to move focus while an overlay
+is up, so a prompt that announced its own closure immediately left the window
+with no keyboard focus at all: after cancelling a rename, every subsequent
+key went nowhere. A closing overlay announces itself only once it is really
+gone.
+
 ## 7. Undo journal
 
 An undo entry records, per affected path: the expected identity

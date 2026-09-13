@@ -45,7 +45,18 @@ FocusScope {
     function close() {
         root.opacity = 0
         root.errorText = ""
-        root.closed()
+        // NOT closed() here: `visible` is `opacity > 0` and opacity is
+        // animated, so the prompt is still "visible" for the whole fade.
+        // Anything that refocuses the list checks that flag and would bail
+        // out, leaving the window with no keyboard focus at all.
+        closeWhenGone.start()
+    }
+
+    Timer {
+        id: closeWhenGone
+        interval: Tokens.animFast + 20
+        repeat: false
+        onTriggered: root.closed()
     }
 
     Behavior on opacity { NumberAnimation { duration: Tokens.animFast } }

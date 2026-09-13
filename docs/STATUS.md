@@ -46,6 +46,8 @@ Rust 1.98.1, cxx-qt 0.10.0, Mesa llvmpipe (software rendering, Virtio GPU),
 | Vim preset | built | implemented, not yet asserted in QA |
 | **Per-location view memory** | **proven** | `views::tests` + `just qa` §10r; survives a restart |
 | Tabs | **proven** | per-tab location, history, selection, filter and view; Ctrl+T/W/Tab/1-9; last tab cannot be closed; a tab with a running job asks before closing |
+| Accessibility (AT-SPI) | **proven** | 46 named nodes in the live tree, files exposed as list items, controls named ("Back", "Up one folder", "Rows view"); needs `QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1`, which Gust does not set globally |
+| Font / spacing scaling | **proven** | starts, lists and navigates at font 9/12/18 and spacing 0.8/1.0/1.3 with no missing tokens |
 | Quick Look (Space) | **proven** | bounded text peek, kind in words, mode line; escape sequences shown not obeyed; symlinks described not followed; images described without decoding here; multi-select moved to Ctrl+Space |
 | Content search (`:grep`) | **proven** | scoped, recursive, cancellable; binaries skipped on a NUL sniff; symlinks not followed; bounded per file and overall, and says when it stopped early |
 | Cloud remotes (rclone) | **proven** | discovery reads the installed rclone's config and opens no socket; connect mounts with a VFS write cache; "cached ≠ uploaded" shown as a notice; disconnect refuses while uploads are outstanding and never lazy-unmounts; degrades with a reason when rclone is absent |
