@@ -146,14 +146,31 @@ pub fn copy_regular_file(
     )?;
 
     let stage = staging_name(dst_name);
+    // Record ownership BEFORE the file exists. A staging file with no claim is
+    // never reclaimed by the sweep, so the claim must be durable first.
+    let staged_abs = PathBuf::from(dst_dir.display()).join(&stage);
+    let claim = crate::staging::claim(&staged_abs).ok();
     // Create with the source's permission bits masked to owner-only first;
     // widened at the end. Never world-readable in between.
-    let dst = rustix::fs::openat(
+    let dst = match rustix::fs::openat(
         dst_dir.as_fd(),
         &stage,
         OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC,
         Mode::from_bits_truncate(0o600),
-    )?;
+    ) {
+        Ok(fd) => fd,
+        Err(e) => {
+            if let Some(c) = &claim {
+                crate::staging::release(c);
+            }
+            return Err(e.into());
+        }
+    };
+    if let Some(c) = &claim {
+        // Bind the claim to the object actually created (device + inode), so
+        // reclaiming can prove it is the same file and not a replacement.
+        let _ = crate::staging::confirm(c, &staged_abs);
+    }
 
     let mut written = 0u64;
     let mut buf = vec![0u8; 128 * 1024];
@@ -198,6 +215,9 @@ pub fn copy_regular_file(
 
     if let Err(e) = copy_result {
         let _ = rustix::fs::unlinkat(dst_dir.as_fd(), &stage, rustix::fs::AtFlags::empty());
+        if let Some(c) = &claim {
+            crate::staging::release(c);
+        }
         return Err(e);
     }
 
@@ -205,7 +225,14 @@ pub fn copy_regular_file(
         // Even the final rename can fail (a full directory, a vanished
         // parent). The staging file is ours; do not abandon it.
         let _ = rustix::fs::unlinkat(dst_dir.as_fd(), &stage, rustix::fs::AtFlags::empty());
+        if let Some(c) = &claim {
+            crate::staging::release(c);
+        }
     })?;
+    // Committed under its real name: the claim no longer describes anything.
+    if let Some(c) = &claim {
+        crate::staging::release(c);
+    }
     Ok(written)
 }
 
@@ -216,10 +243,41 @@ pub fn copy_symlink(
     dst_dir: &DirHandle,
     dst_name: &OsStr,
 ) -> OpResult<()> {
+    // Copying a link onto itself would replace the original with a copy of
+    // itself and hand undo a step that removes the user's only link. The
+    // destination must never be the source.
+    if src_name == dst_name {
+        let same_dir = match (src_dir.stat_self(), dst_dir.stat_self()) {
+            (Ok(a), Ok(b)) => a.st_dev == b.st_dev && a.st_ino == b.st_ino,
+            _ => false,
+        };
+        if same_dir {
+            return Err(OpError::Refused(
+                "a link cannot be copied over itself".into(),
+            ));
+        }
+    }
     let target = rustix::fs::readlinkat(src_dir.as_fd(), src_name, Vec::new())?;
     let stage = staging_name(dst_name);
-    rustix::fs::symlinkat(target.as_c_str(), dst_dir.as_fd(), &stage)?;
-    rustix::fs::renameat(dst_dir.as_fd(), &stage, dst_dir.as_fd(), dst_name)?;
+    let staged_abs = PathBuf::from(dst_dir.display()).join(&stage);
+    let claim = crate::staging::claim(&staged_abs).ok();
+    if let Err(e) = rustix::fs::symlinkat(target.as_c_str(), dst_dir.as_fd(), &stage) {
+        if let Some(c) = &claim {
+            crate::staging::release(c);
+        }
+        return Err(e.into());
+    }
+    if let Some(c) = &claim {
+        let _ = crate::staging::confirm(c, &staged_abs);
+    }
+    let r = rustix::fs::renameat(dst_dir.as_fd(), &stage, dst_dir.as_fd(), dst_name);
+    if r.is_err() {
+        let _ = rustix::fs::unlinkat(dst_dir.as_fd(), &stage, rustix::fs::AtFlags::empty());
+    }
+    if let Some(c) = &claim {
+        crate::staging::release(c);
+    }
+    r?;
     Ok(())
 }
 
@@ -566,39 +624,74 @@ mod tests {
 /// belonging to a RUNNING process is another copy in flight, and taking it
 /// would corrupt that copy.
 pub fn sweep_stale_staging(dir: &Path) -> usize {
-    const PREFIX: &str = ".gust-staging-";
-    let Ok(rd) = std::fs::read_dir(dir) else {
-        return 0;
-    };
+    use std::os::unix::fs::MetadataExt;
     let mut removed = 0usize;
 
-    for entry in rd.flatten() {
-        let name = entry.file_name();
-        let Some(name_str) = name.to_str() else {
+    // Ownership comes from the claim store, never from the filename. A file
+    // that merely LOOKS like debris was not created by us and is left alone:
+    // PIDs are recycled, remote PIDs are meaningless locally, and a user is
+    // entitled to name a file whatever they like.
+    for c in crate::staging::load_all() {
+        // Only this directory's debris is this call's business.
+        if c.path.parent() != Some(dir) {
             continue;
-        };
-        let Some(rest) = name_str.strip_prefix(PREFIX) else {
-            continue;
-        };
-        // `<pid>-<original name>`
-        let Some((pid_part, _)) = rest.split_once('-') else {
-            continue;
-        };
-        let Ok(pid) = pid_part.parse::<u32>() else {
-            continue;
-        };
-        if pid_is_alive(pid) {
-            continue; // a copy in flight right now — leave it alone
         }
-        // Only ever a regular file; never follow anything.
-        let Ok(md) = entry.path().symlink_metadata() else {
+        // A live owner in this same boot is a copy in flight right now.
+        if crate::staging::owner_is_live(&c) {
+            continue;
+        }
+        // The claim must describe the object that is actually there.
+        let Ok(md) = c.path.symlink_metadata() else {
+            // The file is already gone; the claim is the only leftover.
             continue;
         };
-        if md.is_file() && std::fs::remove_file(entry.path()).is_ok() {
+        if !md.is_file() {
+            // Never a directory, never a symlink, never followed.
+            continue;
+        }
+        if c.dev == 0 || c.ino == 0 {
+            // An unconfirmed claim cannot prove which object it owns.
+            continue;
+        }
+        if md.dev() != c.dev || md.ino() != c.ino {
+            // Something else occupies that path now. Not ours to remove.
+            continue;
+        }
+        if std::fs::remove_file(&c.path).is_ok() {
             removed += 1;
         }
     }
     removed
+}
+
+/// Remove claim files whose staging file no longer exists and whose owner is
+/// gone, so the claim store cannot grow without bound.
+pub fn prune_dead_claims() -> usize {
+    let mut pruned = 0usize;
+    for c in crate::staging::load_all() {
+        if crate::staging::owner_is_live(&c) {
+            continue;
+        }
+        if c.path.symlink_metadata().is_ok() {
+            continue; // still describes a real file; keep it
+        }
+        // Reconstruct this claim's own file name and drop it.
+        for e in std::fs::read_dir(crate::staging::claims_dir())
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            let Ok(text) = std::fs::read_to_string(e.path()) else {
+                continue;
+            };
+            if text.contains(&format!("path={}", c.path.display()))
+                && std::fs::remove_file(e.path()).is_ok()
+            {
+                pruned += 1;
+            }
+        }
+    }
+    pruned
 }
 
 /// Is this PID still running? Conservative: unknown means "yes, leave it".
@@ -628,16 +721,60 @@ mod sweep_tests {
     #[test]
     fn debris_from_a_dead_process_is_removed() {
         let d = tmp("dead");
-        // PID 999999 is above the default pid_max and cannot be running.
-        fs::write(d.join(".gust-staging-999999-report.pdf"), b"partial").unwrap();
+        // Isolate the claim store so this test owns it.
+        std::env::set_var("XDG_STATE_HOME", d.join("state"));
+
+        // Real debris: a staging file WITH an ownership claim, whose owning
+        // process is gone. A filename alone is deliberately not enough any
+        // more, so the claim is what makes this reclaimable.
+        let debris = d.join(".gust-staging-999999-report.pdf");
+        fs::write(&debris, b"partial").unwrap();
+        let claim = crate::staging::claim(&debris).unwrap();
+        crate::staging::confirm(&claim, &debris).unwrap();
+        // Rewrite the claim so it belongs to a process that cannot be running.
+        {
+            use std::os::unix::fs::MetadataExt;
+            let md = debris.symlink_metadata().unwrap();
+            fs::write(
+                &claim,
+                format!(
+                    "path={}\nboot={}\npid=999999\ndev={}\nino={}\n",
+                    debris.display(),
+                    crate::staging::boot_id(),
+                    md.dev(),
+                    md.ino()
+                ),
+            )
+            .unwrap();
+        }
         fs::write(d.join("real.txt"), b"keep me").unwrap();
 
         assert_eq!(sweep_stale_staging(&d), 1);
-        assert!(!d.join(".gust-staging-999999-report.pdf").exists());
+        assert!(!debris.exists());
         assert_eq!(
             fs::read(d.join("real.txt")).unwrap(),
             b"keep me",
             "ordinary files are never touched"
+        );
+        fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn a_staging_shaped_file_with_no_claim_is_never_removed() {
+        let d = tmp("unclaimed");
+        std::env::set_var("XDG_STATE_HOME", d.join("state"));
+
+        // Exactly the old heuristic's target: the right name shape and a PID
+        // that cannot be alive. Without an ownership record it is somebody
+        // else's file and must survive.
+        let impostor = d.join(".gust-staging-999999-my-thesis.txt");
+        fs::write(&impostor, b"the only copy the user has").unwrap();
+
+        assert_eq!(sweep_stale_staging(&d), 0);
+        assert_eq!(
+            fs::read(&impostor).unwrap(),
+            b"the only copy the user has",
+            "a filename is not an ownership record"
         );
         fs::remove_dir_all(&d).ok();
     }

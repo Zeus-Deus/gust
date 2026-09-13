@@ -127,6 +127,11 @@ pub struct Job {
     pub entries: Vec<JournalEntry>,
     /// Every descendant identity captured at plan time, for subtree-safe undo.
     pub subtree_identities: Vec<(PathBuf, RecordedIdentity)>,
+    /// Paths that already existed at the destination BEFORE this operation
+    /// ran. Undo must never remove these: they are the user's own data that
+    /// a merging copy happened to land beside.
+    #[serde(default)]
+    pub preexisting_at_dest: Vec<PathBuf>,
     pub created_unix: i64,
 }
 
@@ -139,6 +144,7 @@ impl Job {
             conflict_policy: ConflictPolicy::Ask,
             entries: Vec::new(),
             subtree_identities: Vec::new(),
+            preexisting_at_dest: Vec::new(),
             created_unix: now_unix(),
         }
     }

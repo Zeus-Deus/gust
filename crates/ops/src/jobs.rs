@@ -265,6 +265,22 @@ fn run(
             });
         };
 
+        // What already exists at the destination, BEFORE this source is
+        // written. Undo must never remove any of it: a copy into an existing
+        // folder merges, and everything already there is the user's own data.
+        // Recorded per source, because each source has its own destination.
+        {
+            let pre = crate::undo::snapshot_subtree(&dst);
+            let pre_paths: Vec<PathBuf> = pre.keys().cloned().collect();
+            set_rec(&|r| {
+                for p in &pre_paths {
+                    if !r.preexisting_at_dest.contains(p) {
+                        r.preexisting_at_dest.push(p.clone());
+                    }
+                }
+            });
+        }
+
         let outcome = match req {
             Request::Copy { .. } | Request::CopyAs { .. } => {
                 recursive::copy_tree(&src, &dst, policy, &cancel, &mut on_progress).map(Some)
