@@ -117,6 +117,59 @@ Window {
         }
     }
 
+    // --- network shares (DESIGN §6.14) -----------------------------------
+    property string shareAddress: ""
+    property string shareUser: ""
+
+    /// Ask for the address first. A typo is caught here, before anybody
+    /// types a secret.
+    function askShareAddress() {
+        win.shareAddress = ""
+        win.shareUser = ""
+        prompt.secret = false
+        prompt.mode = "share-address"
+        prompt.openWith(qsTr("Shared folder address"), "",
+                        qsTr("For example  //nas/media  or  \\\\nas\\media"))
+        win.qaDump("share-prompt")
+    }
+
+    function shareAddressEntered(text) {
+        const bad = dirModel.share_check(text)
+        if (bad !== "") {
+            prompt.errorText = bad
+            win.qaDump("share-bad-address")
+            return
+        }
+        win.shareAddress = text
+        prompt.secret = false
+        prompt.mode = "share-user"
+        prompt.openWith(qsTr("Username for that share"), "",
+                        qsTr("Leave empty if the share needs no account"))
+        win.qaDump("share-prompt")
+    }
+
+    function shareUserEntered(text) {
+        win.shareUser = text
+        // The only masked prompt in Gust. The value goes straight to GIO
+        // and is not kept afterwards.
+        prompt.secret = true
+        prompt.mode = "share-password"
+        prompt.openWith(qsTr("Password"), "",
+                        qsTr("Sent to the server, never stored by Gust"))
+        win.qaDump("share-prompt")
+    }
+
+    function sharePasswordEntered(text) {
+        hints.status = qsTr("Connecting…")
+        const err = dirModel.share_mount(win.shareAddress, win.shareUser, "", text)
+        // Whatever happened, the secret does not stay in QML.
+        prompt.secret = false
+        win.shareAddress = ""
+        win.shareUser = ""
+        if (err !== "") win.alertText = err
+        win.qaDump("share-mount")
+    }
+
     /// Eject a device. Refused while a transfer is running, because pulling
     /// a filesystem out from under a copy is how people lose data.
     function ejectDevice(path) {
@@ -1281,6 +1334,22 @@ Window {
         onVisibleChanged: win.qaDump("prompt")
         onClosed: win.focusList()
         onAccepted: (text) => {
+            // The share steps chain: each one opens the next rather than
+            // finishing, so they return early.
+            if (prompt.mode === "share-address") {
+                win.shareAddressEntered(text)
+                return
+            }
+            if (prompt.mode === "share-user") {
+                win.shareUserEntered(text)
+                return
+            }
+            if (prompt.mode === "share-password") {
+                prompt.close()
+                win.sharePasswordEntered(text)
+                return
+            }
+
             let err = ""
             if (prompt.mode === "rename")
                 err = dirModel.rename_row(prompt.targetRow, text)
@@ -1334,6 +1403,9 @@ Window {
                 ? "vim: h/j/k/l move, l open, r rename, y/d/p copy/cut/paste"
                 : "arrows move, Enter open, F2 rename, Ctrl+C/X/V, Ctrl+N new folder"
             else if (a === "noop") { /* nothing to do */ }
+            else if (a === "share-add") {
+                win.askShareAddress()
+            }
             else if (a.startsWith("device-mount:")) {
                 win.openDevice(a.substring(13), false)
             }

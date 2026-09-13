@@ -42,6 +42,11 @@ FocusScope {
         field.selectAll()
     }
 
+    /// Mask what is typed. The caller sets this; the prompt never infers
+    /// it, because inferring "this looks like a password" is how one gets
+    /// shown in clear text.
+    property bool secret: false
+
     function close() {
         root.opacity = 0
         root.errorText = ""
@@ -111,6 +116,14 @@ FocusScope {
                     anchors.leftMargin: Tokens.spaceMd
                     anchors.rightMargin: Tokens.spaceMd
                     verticalAlignment: TextInput.AlignVCenter
+                    // A secret must not be readable over a shoulder or in a
+                    // screenshot. Set by the caller, never guessed from the
+                    // field's contents.
+                    echoMode: root.secret ? TextInput.Password : TextInput.Normal
+                    // Nothing typed into a masked field may be remembered:
+                    // a rename's undo buffer holding a password would be a
+                    // second place it lives.
+                    persistentSelection: !root.secret
                     color: Tokens.foreground
                     selectionColor: Tokens.selectedBackground
                     selectedTextColor: Tokens.selectedText

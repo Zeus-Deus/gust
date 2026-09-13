@@ -584,6 +584,46 @@ common one. The discovery logic is unit-tested against captured `lsblk`
 output from real machines, and the empty-drive case is verified live. Mount
 and eject against a physical stick remain **unproven**.
 
+## 6.14 Network shares (SMB/NFS through GIO)
+
+Plan §3's "NAS/shared folder" row. Gust mounts a share through GVfs and then
+browses it like any other folder, because that is exactly what it becomes:
+GVfs exposes it under `$XDG_RUNTIME_DIR/gvfs` as `fuse.gvfsd-fuse`, which the
+stall guard (§6.12) already treats as a filesystem that can stop answering.
+
+### The address is asked for, never guessed
+
+The plan is explicit that discovery "can be unavailable or incomplete", so
+Gust asks for the server and share rather than pretending to find them. A
+typed address is the primary path; any discovery that exists is a suggestion
+on top of it, never a substitute.
+
+### Credentials are handed to GIO, not parsed out of it
+
+The rule that shapes this code: **do not scrape localized command prompts.**
+`gio mount` prints "Enter user and password for share…" in the system
+language, and a version of Gust that matched on that string would break for
+every user who does not run in English.
+
+GIO reads credentials from stdin in a **fixed order** — user, then domain,
+then password — when it has no interactive terminal. That order is a
+protocol, not a prompt, and it is language-independent. Gust writes the three
+values in that order and reads nothing back except the exit status and the
+resulting mount point.
+
+The password is written to the child's stdin pipe and nowhere else. It never
+appears in argv (where `ps` would show it), never in an environment variable,
+never in a log line, and never in Gust's places file — which stores the
+server and share only. Re-connecting asks again, or the user's keyring
+answers; Gust does not become a second place their password lives.
+
+### What is deliberately not built
+
+Anonymous/guest shares, NFS, and LAN discovery via Avahi. The mount path is
+the same for NFS, but nothing has been tested against a real NFS export, and
+claiming it on the strength of SMB working would be exactly the kind of
+unearned claim §10 warns about.
+
 ## 7. Undo journal
 
 An undo entry records, per affected path: the expected identity

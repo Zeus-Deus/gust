@@ -46,6 +46,7 @@ Rust 1.98.1, cxx-qt 0.10.0, Mesa llvmpipe (software rendering, Virtio GPU),
 | Vim preset | built | implemented, not yet asserted in QA |
 | **Per-location view memory** | **proven** | `views::tests` + `just qa` §10r; survives a restart |
 | Tabs | **proven** | per-tab location, history, selection, filter and view; Ctrl+T/W/Tab/1-9; last tab cannot be closed; a tab with a running job asks before closing |
+| Network shares (SMB via GIO) | **proven** | 11 unit tests + 7 live against a real Samba server: mount, list, write reaching the backend, predicted mount point, rejected login, and no password in any command line. Password masked in the UI and handed to GIO on stdin — never argv, log, config or places file. A GVfs mount is recognised by the stall guard. |
 | Device discovery (USB, discs) | **partial** | 13 unit tests against captured `lsblk` from real hardware; system disk, swap, zram, loop and LVM correctly excluded; empty optical drive verified live in the sidebar. **Mount/eject against a physical stick is unproven — this VM has no USB device.** |
 | Blocked mount does not block Gust | **proven** | measured: a direct listing of a frozen sshfs mount took 280s; the bounded probe returns in 4s. Startup, navigate and the listing worker are all guarded; only stallable filesystems pay for it |
 | Accessibility (AT-SPI) | **proven** | 46 named nodes in the live tree, files exposed as list items, controls named ("Back", "Up one folder", "Rows view"); needs `QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1`, which Gust does not set globally |
@@ -158,11 +159,12 @@ list is worse than none, because it makes working features look broken.
    tests. But this VM's only removable block device is an empty virtual DVD
    drive, so *mounting a stick and ejecting it* has never run. The argv is
    tested; the round trip is not.
-2. **NAS/SMB and Tailscale are not built.** No Samba is installed here and
-   there is no tailnet, so neither could be qualified even if written.
-   Building them blind and calling them done is exactly the claim §10 warns
-   against. Phones over MTP need GVfs and per-device Trust prompts and are
-   also unbuilt.
+2. **Tailscale is not built, and NFS is untested.** There is no tailnet
+   here, so peer discovery could not be qualified even if written. NFS uses
+   the same GIO mount path as SMB and would probably work, but nothing has
+   been tested against a real export and claiming it on SMB's evidence is
+   the kind of unearned claim §10 warns against. Phones over MTP need GVfs
+   and per-device Trust prompts and are also unbuilt.
 3. **Cloud is proven mechanically, not per provider.** The rclone integration
    is tested end to end against a local WebDAV backend. Drive, Dropbox,
    Proton and Filen each have their own auth and capability quirks; a fixture
