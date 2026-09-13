@@ -617,12 +617,22 @@ never in a log line, and never in Gust's places file — which stores the
 server and share only. Re-connecting asks again, or the user's keyring
 answers; Gust does not become a second place their password lives.
 
+### NFS asks for nothing
+
+NFS authorises by **address**, not by account: an export lists the clients
+allowed to mount it. So the flow skips the username and password steps
+entirely rather than collecting credentials it will never send. Only an
+explicit `nfs://` selects it; nothing is inferred from an address that might
+be either.
+
+GVfs names an NFS mount `nfs:host=H,prefix=<percent-encoded export path>` —
+**measured from a live mount, not guessed**. An earlier version of this code
+predicted `export=<share>` and a unit test enshrined that guess; the live
+test is what caught it.
+
 ### What is deliberately not built
 
-Anonymous/guest shares, NFS, and LAN discovery via Avahi. The mount path is
-the same for NFS, but nothing has been tested against a real NFS export, and
-claiming it on the strength of SMB working would be exactly the kind of
-unearned claim §10 warns about.
+Anonymous/guest shares and LAN discovery via Avahi.
 
 ## 7. Undo journal
 

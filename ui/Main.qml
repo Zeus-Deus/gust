@@ -129,7 +129,8 @@ Window {
         prompt.secret = false
         prompt.mode = "share-address"
         prompt.openWith(qsTr("Shared folder address"), "",
-                        qsTr("For example  //nas/media  or  \\\\nas\\media"))
+                        qsTr("//nas/media for Windows sharing, "
+                             + "or nfs://server/export for NFS"))
         win.qaDump("share-prompt")
     }
 
@@ -141,6 +142,18 @@ Window {
             return
         }
         win.shareAddress = text
+        // NFS authorises by address, not by account. Asking for a username
+        // and password it will never send would be theatre.
+        if (text.trim().toLowerCase().startsWith("nfs://")) {
+            prompt.close()
+            win.shareUser = ""
+            hints.status = qsTr("Connecting…")
+            const nerr = dirModel.share_mount(text, "", "", "")
+            if (nerr !== "") win.alertText = nerr
+            win.shareAddress = ""
+            win.qaDump("share-mount")
+            return
+        }
         prompt.secret = false
         prompt.mode = "share-user"
         prompt.openWith(qsTr("Username for that share"), "",
@@ -583,7 +596,13 @@ Window {
         // an overlay: a committed filter keeps narrowing the list while the
         // list itself takes the keys again, so it must not block refocusing
         // or every key after Return goes nowhere.
-        if (palette.visible || confirm.visible || prompt.visible)
+        // `prompt.claimingFocus` as well as `prompt.visible`: the prompt's
+        // visibility is an animated opacity, so for the first frames after
+        // it opens it does not count as visible. The palette closing in that
+        // window used to steal the keyboard, leaving a prompt on screen that
+        // could not be typed into.
+        if (palette.visible || confirm.visible
+            || prompt.visible || prompt.claimingFocus)
             return
         listFocus.forceActiveFocus()
     }

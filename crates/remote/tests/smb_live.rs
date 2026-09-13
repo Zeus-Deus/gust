@@ -181,3 +181,120 @@ fn a_gvfs_mount_is_treated_as_stallable() {
     );
     assert!(gust_core::stall::needs_probe(&mp));
 }
+
+// --- NFS -----------------------------------------------------------------
+//
+// `tests/nfs-fixture.sh` exports a directory over NFSv4 to loopback only.
+// NFS authorises by address rather than by credential, which is exactly why
+// the export is bound to 127.0.0.1 and nothing else.
+
+fn nfs_export_path() -> String {
+    std::env::var("GUST_NFS_FIXTURE").unwrap_or_else(|_| "/tmp/gust-nfs-fixture".into()) + "/export"
+}
+
+fn nfs_share() -> Share {
+    // The address a person types: host, then the exported path.
+    parse_address(&format!("//127.0.0.1{}", nfs_export_path()), ShareKind::Nfs)
+        .expect("the export path should parse")
+}
+
+fn nfs_fixture_up() -> bool {
+    std::path::Path::new(&format!("{}/hello.txt", nfs_export_path())).exists()
+}
+
+macro_rules! need_nfs {
+    () => {
+        if !nfs_fixture_up() {
+            eprintln!("nfs fixture not running — start tests/nfs-fixture.sh");
+            return;
+        }
+    };
+}
+
+#[test]
+fn an_nfs_export_mounts_and_lists() {
+    need_nfs!();
+    let share = nfs_share();
+    // NFS takes no password: authorisation is by address.
+    let mp = mount(
+        &share,
+        String::new(),
+        &runtime_dir(),
+        Duration::from_secs(30),
+    )
+    .expect("the fixture export should mount");
+    assert!(mp.is_dir(), "predicted mount point must exist: {mp:?}");
+
+    let names: Vec<String> = std::fs::read_dir(&mp)
+        .expect("listing the export")
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect();
+    assert!(
+        names.iter().any(|n| n == "hello.txt"),
+        "expected hello.txt, got {names:?}"
+    );
+}
+
+/// The predictor was WRONG for NFS until a live mount corrected it: GVfs
+/// names the directory `prefix=<url-encoded path>`, not `export=<share>`.
+/// This test exists so that guess cannot come back.
+#[test]
+fn the_predicted_nfs_mount_point_is_the_real_one() {
+    need_nfs!();
+    let share = nfs_share();
+    let mp = mount(
+        &share,
+        String::new(),
+        &runtime_dir(),
+        Duration::from_secs(30),
+    )
+    .expect("mount");
+    assert_eq!(mp, share.mount_point(&runtime_dir()));
+    assert!(
+        mp.to_string_lossy().contains("prefix=%2F"),
+        "GVfs uses a percent-encoded prefix: {mp:?}"
+    );
+}
+
+#[test]
+fn a_write_reaches_the_nfs_backend() {
+    need_nfs!();
+    let share = nfs_share();
+    let mp = mount(
+        &share,
+        String::new(),
+        &runtime_dir(),
+        Duration::from_secs(30),
+    )
+    .expect("mount");
+
+    let name = "written-over-nfs.txt";
+    let body = "this went over NFS\n";
+    std::fs::write(mp.join(name), body).expect("writing through the export");
+
+    let backend = format!("{}/{}", nfs_export_path(), name);
+    let got = std::fs::read_to_string(&backend)
+        .unwrap_or_else(|e| panic!("the server should hold {backend}: {e}"));
+    assert_eq!(got, body);
+
+    std::fs::remove_file(mp.join(name)).ok();
+}
+
+#[test]
+fn an_nfs_mount_is_treated_as_stallable() {
+    need_nfs!();
+    let share = nfs_share();
+    let mp = mount(
+        &share,
+        String::new(),
+        &runtime_dir(),
+        Duration::from_secs(30),
+    )
+    .expect("mount");
+    let fs = gust_core::stall::fstype_for(&mp).unwrap_or_else(|| panic!("no fstype for {mp:?}"));
+    assert!(
+        gust_core::stall::can_stall(&fs),
+        "{fs} must be treated as a filesystem that can stop answering"
+    );
+}

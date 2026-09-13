@@ -983,9 +983,22 @@ impl qobject::DirModel {
         if !gvfs_available() {
             return QString::from(ShareError::NoGvfs.message());
         }
-        match parse_address(&address.to_string(), ShareKind::Smb) {
+        let text = address.to_string();
+        match parse_address(&text, Self::share_kind_for(&text)) {
             Ok(_) => QString::default(),
             Err(e) => QString::from(e.message()),
+        }
+    }
+
+    /// Does this address ask for NFS or SMB?
+    ///
+    /// Only an explicit `nfs://` means NFS. Guessing from anything else
+    /// would send a password to a protocol that has no use for one.
+    fn share_kind_for(text: &str) -> gust_remote::shares::ShareKind {
+        if text.trim_start().to_lowercase().starts_with("nfs://") {
+            gust_remote::shares::ShareKind::Nfs
+        } else {
+            gust_remote::shares::ShareKind::Smb
         }
     }
 
@@ -1002,9 +1015,10 @@ impl qobject::DirModel {
         domain: QString,
         password: QString,
     ) -> QString {
-        use gust_remote::shares::{mount, parse_address, ShareKind};
+        use gust_remote::shares::{mount, parse_address};
 
-        let mut share = match parse_address(&address.to_string(), ShareKind::Smb) {
+        let text = address.to_string();
+        let mut share = match parse_address(&text, Self::share_kind_for(&text)) {
             Ok(s) => s,
             Err(e) => return QString::from(e.message()),
         };
