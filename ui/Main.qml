@@ -183,6 +183,132 @@ Window {
         win.qaDump("share-mount")
     }
 
+    // --- dragging a tab (DESIGN §6.20) -----------------------------------
+    //
+    // Where a drag currently is: "" (nowhere), "left", "right" or "outside".
+    // A drop target is shown only for the first two, because "outside" has
+    // no rectangle to highlight.
+    property string tabDropZone: ""
+    property int tabDragIndex: -1
+    /// The last position the window actually saw. Wayland stops delivering
+    /// motion once the pointer leaves the surface, so a release outside is
+    /// reported at the edge — the last seen position is what decides.
+    property point tabDragLast: Qt.point(0, 0)
+    /// True once the drag has been seen leaving the window's own bounds.
+    property bool tabDragLeft: false
+
+    /// Which zone is this window position in?
+    ///
+    /// Left and right thirds of the PANE AREA split; anywhere beyond the
+    /// window's own edges detaches. The middle is deliberately nothing: a
+    /// drag that ends there puts the tab back, because losing a tab to an
+    /// imprecise gesture is how people stop dragging tabs.
+    function tabZoneAt(x, y) {
+        if (x < 0 || y < 0 || x > win.width || y > win.height) return "outside"
+        // Only over the file area — a drop on the header or the strip itself
+        // is not a split.
+        if (y < paneArea.mapToItem(null, 0, 0).y) return ""
+        const left = paneArea.mapToItem(null, 0, 0).x
+        const w = paneArea.width
+        if (w <= 0) return ""
+        const rel = (x - left) / w
+        if (rel < 0 || rel > 1) return ""
+        if (rel < 0.33) return "left"
+        if (rel > 0.67) return "right"
+        return ""
+    }
+
+    function tabDragMoved(index, x, y) {
+        win.tabDragIndex = index
+        win.tabDragLast = Qt.point(x, y)
+        const zone = win.tabZoneAt(x, y)
+        if (zone === "outside") win.tabDragLeft = true
+        if (zone !== win.tabDropZone) {
+            win.tabDropZone = zone
+            hints.status = zone === "outside"
+                ? qsTr("Release to open in a new window")
+                : zone === "" ? ""
+                : qsTr("Release to put this tab on the ") + zone
+            win.qaDump("tab-drag")
+        }
+    }
+
+    function tabDragEnded() {
+        win.tabDropZone = ""
+        win.tabDragIndex = -1
+        win.tabDragLeft = false
+        hints.status = ""
+    }
+
+    function tabDragDropped(index, x, y) {
+        // A release outside the window arrives clamped to the edge, so the
+        // drag having LEFT at any point is what decides — not where the
+        // release happened to be reported.
+        const zone = win.tabDragLeft ? "outside" : win.tabZoneAt(x, y)
+        win.tabDragEnded()
+
+        if (zone === "outside") {
+            // The last tab detaching would close the window it came from,
+            // which is a window-close gesture wearing a tab-drag costume.
+            if (win.tabCount <= 1) {
+                hints.status = qsTr("This is the only tab")
+                win.qaDump("tab-detach-refused")
+                return
+            }
+            const m = win.tabModelAt(index)
+            if (!m) return
+            const err = m.detach_here()
+            if (err !== "") {
+                win.alertText = err
+                win.qaDump("tab-detach-refused")
+                return
+            }
+            win.closeTab(index)
+            hints.status = qsTr("Opened in a new window")
+            win.qaDump("tab-detached")
+            return
+        }
+
+        if (zone === "left" || zone === "right") {
+            const wantPane = zone === "left" ? 0 : 1
+            // Opening the second pane, but NOT through splitPane(): that
+            // moves the ACTIVE tab across, which is right for :split and
+            // wrong here — the drop already knows which tab to move, and
+            // calling it first sent two tabs right and left pane 0 empty.
+            if (win.paneCount < 2) {
+                if (win.tabCount <= 1) {
+                    hints.status = qsTr("Open another tab first")
+                    win.qaDump("tab-split-refused")
+                    return
+                }
+                win.paneCount = 2
+                // The dragged tab goes to the new side; everything else
+                // stays where it is.
+                win.paneTab = [win.paneTab[0], index]
+            }
+            if (tabList.get(index).pane === wantPane) {
+                // Already where it was dropped. Nothing happened, so nothing
+                // is said.
+                return
+            }
+            const cameFrom = tabList.get(index).pane
+            tabList.setProperty(index, "pane", wantPane)
+            // The pane it left must still show one of its OWN tabs, or it
+            // points at a tab that now belongs to the other side.
+            const left = win.paneTabs(cameFrom)
+            const pt = win.paneTab.slice()
+            pt[cameFrom] = left.length > 0 ? left[0] : -1
+            pt[wantPane] = index
+            win.paneTab = pt
+            win.activePane = wantPane
+            win.activateTab(index)
+            win.refreshPaneTabCount()
+            win.refreshPanes()
+            hints.status = qsTr("Moved to the ") + zone + qsTr(" pane")
+            win.qaDump("tab-split-drop")
+        }
+    }
+
     // --- bulk rename (DESIGN §6.16) --------------------------------------
     property string bulkPattern: ""
     property string bulkLines: ""
@@ -857,9 +983,41 @@ Window {
                         }
 
                         MouseArea {
+                            id: tabMouse
                             anchors.fill: parent
                             acceptedButtons: Qt.LeftButton | Qt.MiddleButton
+                            // A few pixels before a click becomes a drag, so
+                            // a slightly imprecise click is still a click —
+                            // the same threshold the file list uses.
+                            property point pressAt: Qt.point(0, 0)
+                            property bool dragging: false
+
+                            onPressed: (mouse) => {
+                                tabMouse.pressAt = Qt.point(mouse.x, mouse.y)
+                                tabMouse.dragging = false
+                            }
+                            onPositionChanged: (mouse) => {
+                                if (!(mouse.buttons & Qt.LeftButton)) return
+                                const dx = mouse.x - tabMouse.pressAt.x
+                                const dy = mouse.y - tabMouse.pressAt.y
+                                if (!tabMouse.dragging
+                                    && Math.abs(dx) + Math.abs(dy) < 8) return
+                                tabMouse.dragging = true
+                                const p = tabMouse.mapToItem(null, mouse.x, mouse.y)
+                                win.tabDragMoved(parent.index, p.x, p.y)
+                            }
+                            onReleased: (mouse) => {
+                                if (!tabMouse.dragging) return
+                                tabMouse.dragging = false
+                                const p = tabMouse.mapToItem(null, mouse.x, mouse.y)
+                                win.tabDragDropped(parent.index, p.x, p.y)
+                            }
+                            onCanceled: {
+                                tabMouse.dragging = false
+                                win.tabDragEnded()
+                            }
                             onClicked: (mouse) => {
+                                if (tabMouse.dragging) return
                                 if (mouse.button === Qt.MiddleButton)
                                     win.closeTab(parent.index)
                                 else
@@ -1087,6 +1245,32 @@ Window {
                         onDropPreview: (t) => { hints.status = t }
                         onDropFailed: (m) => { win.alertText = m; win.qaDump("drop") }
                         onDropDone: { hints.status = ""; jobTimer.start(); win.qaDump("drop") }
+                    }
+                }
+
+                // Where a dragged tab would land. Shown only while dragging
+                // over a real target: a highlight with no drop behind it
+                // would promise something that does not happen.
+                Rectangle {
+                    z: 20
+                    visible: win.tabDropZone === "left"
+                             || win.tabDropZone === "right"
+                    x: win.tabDropZone === "right"
+                       ? Math.round(paneArea.width * 0.67) : 0
+                    y: 0
+                    width: Math.round(paneArea.width * 0.33)
+                    height: paneArea.height
+                    color: Tokens.withAlpha(Tokens.accent, 0.12)
+                    border.width: Math.max(1, Tokens.borderWidth)
+                    border.color: Tokens.accent
+
+                    Text {
+                        anchors.centerIn: parent
+                        text: win.tabDropZone === "left" ? qsTr("Left pane")
+                                                         : qsTr("Right pane")
+                        color: Tokens.foregroundBright
+                        font.family: Tokens.fontFamily
+                        font.pixelSize: Tokens.fontBody
                     }
                 }
 
@@ -1806,6 +1990,7 @@ Window {
             quickLookLines: quickLook.info && quickLook.info.lines
                             ? quickLook.info.lines.length : 0,
             quickLookNoPreview: quickLook.info ? quickLook.info.noPreview : "",
+            tabDropZone: win.tabDropZone,
             paletteOpen: palette.visible,
             paletteResults: palette.visible ? palette.resultLabels() : [],
             promptOpen: prompt.visible,

@@ -873,6 +873,55 @@ If `wl-copy` is missing, the internal clipboard still works within Gust and
 the status line says the system clipboard is unavailable rather than
 pretending the copy went further than it did.
 
+## 6.20 Dragging a tab
+
+The plan asks for two gestures: drag a tab to a left or right drop target to
+split, and drag one outside the window to detach it into a normal window
+Hyprland can tile.
+
+### Splitting
+
+Dragging a tab over the left or right third of the pane area shows a drop
+target and, on release, moves that tab into that pane — opening the second
+pane if there is only one. It is the same operation `:split` performs, so it
+goes through `splitPane()` and `tabList`'s `pane` field rather than a
+parallel path: two ways to reach one outcome, not two outcomes.
+
+Dropping a tab into the pane it already belongs to does nothing, and says
+nothing, because nothing happened.
+
+### Detaching
+
+Dragging a tab outside the window opens **a new Gust process** at that tab's
+location, then closes the tab here.
+
+A new process, not a new `Window` in this one, for a reason the plan states
+directly: the detached window must be "a normal window that Hyprland can
+tile". A second Qt window inside one process shares that process's fate —
+one crash takes both, one stuck mount freezes both — and Gust's whole
+remote design is built on the opposite assumption (§6.12). Two processes
+also means the window manager sees two independent clients, which is what
+tiling expects.
+
+**A tab with a running job does not detach.** The job belongs to the process
+that started it; handing its location to a new process would leave the
+transfer running in the old one with nothing on screen to represent it. The
+drag is refused with the reason, exactly as closing such a tab is (§6.6).
+
+The last tab does not detach either: detaching it would close the window it
+came from, which is a window-close gesture wearing a tab-drag costume.
+
+### What the gesture must not do
+
+A drag that starts on a tab and ends somewhere meaningless — the header, the
+sidebar, off the bottom — puts the tab back. A file manager that loses a tab
+because a drag ended in the wrong place is a file manager people stop
+dragging tabs in.
+
+The threshold is the same as the file-list drag: a few pixels of movement
+before anything is considered a drag at all, so a slightly imprecise click
+is still a click.
+
 ## 7. Undo journal
 
 An undo entry records, per affected path: the expected identity
