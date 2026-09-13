@@ -270,6 +270,12 @@ pub mod qobject {
         /// Duplicate the row beside itself, e.g. `notes (copy).txt`.
         #[qinvokable]
         fn duplicate_row(self: Pin<&mut DirModel>, row: i32) -> QString;
+        /// Open every selected file with its default handler. One launch
+        /// when the handler takes a list, one per file when it does not
+        /// (DESIGN §6.18). Returns "" when there is nothing multi-file to
+        /// do, so the caller falls back to ordinary activation.
+        #[qinvokable]
+        fn activate_selection(self: Pin<&mut DirModel>) -> QString;
         /// Applications that can open the row, as JSON. Read from the
         /// desktop database, never from a localized command's output
         /// (DESIGN §6.17).
@@ -1001,6 +1007,92 @@ impl qobject::DirModel {
             h = (h ^ *b as u32).wrapping_mul(16777619);
         }
         format!("http://127.0.0.1:{}", 45000 + (h % 2000) as u16)
+    }
+
+    // --- opening several files (DESIGN §6.18) ----------------------------
+
+    /// Open the whole selection with its default handler.
+    ///
+    /// Returns "" when this is not a multi-file situation, so the caller
+    /// falls back to ordinary single-row activation rather than this
+    /// silently doing nothing.
+    fn activate_selection(mut self: Pin<&mut Self>) -> QString {
+        let paths = self.as_ref().target_paths();
+        if paths.len() < 2 {
+            return QString::default();
+        }
+        if paths.len() > gust_core::open::with::MAX_OPEN_AT_ONCE {
+            return QString::from(format!(
+                "{} files is more than Gust will open at once — select up to {}.",
+                paths.len(),
+                gust_core::open::with::MAX_OPEN_AT_ONCE
+            ));
+        }
+
+        // A folder in the selection makes this a navigation question rather
+        // than an open, and an executable is refused exactly as it is for a
+        // single file (§4). Either way, fall back to the cursor row.
+        for p in &paths {
+            let Ok(meta) = std::fs::symlink_metadata(p) else {
+                return QString::default();
+            };
+            if meta.is_dir() {
+                return QString::default();
+            }
+            if let Ok(m) = std::fs::metadata(p) {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = m.permissions().mode();
+                if gust_core::mime::needs_trusted_launch(
+                    p.file_name().unwrap_or_default(),
+                    Some(mode),
+                ) {
+                    return QString::default();
+                }
+            }
+        }
+
+        // Every file must be the same kind, or "the default handler" means
+        // nothing: opening a PDF and a video together is two applications.
+        let Some(first) = paths.first() else {
+            return QString::default();
+        };
+        let Some(mime) = Self::mime_of(first) else {
+            return QString::default();
+        };
+        for p in paths.iter().skip(1) {
+            if Self::mime_of(p).as_deref() != Some(mime.as_str()) {
+                // Mixed kinds: open them one at a time with their own
+                // defaults, which is what the user would get by pressing
+                // Enter on each.
+                let mut opened = 0usize;
+                for p in &paths {
+                    let mode = std::fs::metadata(p).ok().map(|m| {
+                        use std::os::unix::fs::PermissionsExt;
+                        m.permissions().mode()
+                    });
+                    if gust_core::open::open_with_desktop(p, mode).is_ok() {
+                        opened += 1;
+                    }
+                }
+                let msg = format!("Opened {opened} files");
+                self.as_mut().set_status(QString::from(&msg));
+                return QString::from(format!("OK:{msg}"));
+            }
+        }
+
+        let handlers = gust_core::open::with::handlers_for(&mime);
+        let Some(handler) = handlers.first() else {
+            return QString::default();
+        };
+        let outcome = gust_core::open::with::launch_many(handler, &paths);
+        let msg = outcome.message();
+        match outcome {
+            gust_core::open::with::MultiOpen::Refused(_) => QString::from(msg),
+            _ => {
+                self.as_mut().set_status(QString::from(&msg));
+                QString::from(format!("OK:{msg}"))
+            }
+        }
     }
 
     // --- open with (DESIGN §6.17) ----------------------------------------

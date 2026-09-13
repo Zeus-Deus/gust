@@ -701,6 +701,22 @@ Window {
     }
 
     function activateRow(row) {
+        // Several files selected: one viewer showing all of them beats five
+        // viewers showing one each (DESIGN §6.18). Returns "" when this is
+        // not a multi-file situation, so ordinary activation still runs.
+        if (dirModel.sel_count() > 1) {
+            const many = dirModel.activate_selection()
+            if (many.startsWith("OK:")) {
+                hints.status = many.substring(3)
+                win.qaDump("activate-many")
+                return
+            }
+            if (many !== "") {
+                win.alertText = many
+                win.qaDump("activate-refused")
+                return
+            }
+        }
         const r = dirModel.activate(row)
         if (r.startsWith("blocked:"))
             hints.status = r.substring(8)
