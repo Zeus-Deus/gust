@@ -789,6 +789,45 @@ wearing a file manager's clothes, and Gust already refuses to execute a file
 to find out what it is (§4). The list is applications the system says can
 open this type, plus nothing.
 
+## 6.18 Opening several files at once
+
+§9's Interop list asks for "multi-file open", and it is not the same thing as
+opening one file several times.
+
+Select five photographs, press Enter, and the right outcome is **one image
+viewer showing five images** — you can move between them. Five separate
+viewers, each holding one photograph, is five windows to close and no way to
+flip through them.
+
+### One launch, many arguments
+
+The handler's `Exec` line says which it can take:
+
+| Field code | Meaning | Gust does |
+|---|---|---|
+| `%F` or `%U` | accepts a list | one launch, every path appended |
+| `%f` or `%u` | one file per invocation | one launch **per file** |
+| neither | unknown | one launch per file, conservatively |
+
+The distinction is in the freedesktop spec and is exactly the information
+needed. `imv %F` takes them all; `xournalpp-wrapper %f` does not, and
+launching it once with five arguments would open the first and silently drop
+the rest — which is worse than five windows, because the files look opened.
+
+### The bounds
+
+At most 50 files in one activation. Past that the question is no longer
+"open these" but "did you mean to", and a hundred viewer windows is a
+denial of service the user performed on themselves. The refusal says the
+number and suggests opening fewer.
+
+Everything in the selection must be openable: a folder among the selected
+files makes the whole action a navigation question rather than an open, so
+Enter on a mixed selection opens only the cursor row, as it always did.
+
+Executables are refused exactly as they are for a single file (§4). Nothing
+about selecting several files makes running one of them safer.
+
 ## 7. Undo journal
 
 An undo entry records, per affected path: the expected identity

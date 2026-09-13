@@ -276,6 +276,47 @@ pub fn exec_argv(exec: &str, path: &Path) -> Vec<String> {
     out
 }
 
+/// Can this handler take several files in one launch?
+///
+/// The freedesktop spec is explicit: `%F` and `%U` accept a list, `%f` and
+/// `%u` are single-file and the launcher must invoke the program once per
+/// file. Guessing wrong the other way is worse than an extra window —
+/// passing five paths to a `%f` program opens the first and silently drops
+/// four, so the files *look* opened.
+pub fn takes_many(exec: &str) -> bool {
+    exec.split_whitespace()
+        .any(|w| w.contains("%F") || w.contains("%U"))
+}
+
+/// Expand an `Exec` line for several files at once.
+///
+/// Only valid when [`takes_many`] is true; the caller launches once per file
+/// otherwise.
+pub fn exec_argv_many(exec: &str, paths: &[PathBuf]) -> Vec<String> {
+    let mut out = Vec::new();
+    for word in exec.split_whitespace() {
+        let w = word.trim_matches('"');
+        match w {
+            "%F" => out.extend(paths.iter().map(|p| p.to_string_lossy().to_string())),
+            "%U" => out.extend(
+                paths
+                    .iter()
+                    .map(|p| format!("file://{}", p.to_string_lossy())),
+            ),
+            "%i" | "%c" | "%k" => {}
+            // A single-file code inside a multi-file launch would only ever
+            // carry the first path; the caller must not be here at all.
+            "%f" | "%u" => {
+                if let Some(first) = paths.first() {
+                    out.push(first.to_string_lossy().to_string());
+                }
+            }
+            other => out.push(other.to_string()),
+        }
+    }
+    out
+}
+
 /// Launch `handler` on `path`.
 ///
 /// Returns the application's name on success. The child is detached: closing
@@ -306,6 +347,96 @@ pub fn launch(handler: &Handler, path: &Path) -> Result<String, super::OpenRefus
         .spawn()
         .map(|_| handler.name.clone())
         .map_err(|e| super::OpenRefusal::Failed(e.to_string()))
+}
+
+/// How many files one activation may open at once.
+///
+/// Past this the question is no longer "open these" but "did you mean to":
+/// a hundred viewer windows is a denial of service the user performed on
+/// themselves.
+pub const MAX_OPEN_AT_ONCE: usize = 50;
+
+/// What a multi-file open did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MultiOpen {
+    /// One launch with every path.
+    Together {
+        app: String,
+        count: usize,
+    },
+    /// One launch per file, because the handler is single-file.
+    Separately {
+        app: String,
+        count: usize,
+    },
+    Refused(String),
+}
+
+impl MultiOpen {
+    pub fn message(&self) -> String {
+        match self {
+            MultiOpen::Together { app, count } => {
+                format!("Opened {count} files with {app}")
+            }
+            MultiOpen::Separately { app, count } => {
+                format!("Opened {count} files with {app}, one window each")
+            }
+            MultiOpen::Refused(why) => why.clone(),
+        }
+    }
+}
+
+/// Open several files with one handler, respecting whether it takes a list.
+pub fn launch_many(handler: &Handler, paths: &[PathBuf]) -> MultiOpen {
+    if paths.is_empty() {
+        return MultiOpen::Refused("nothing selected".into());
+    }
+    if paths.len() > MAX_OPEN_AT_ONCE {
+        return MultiOpen::Refused(format!(
+            "{} files is more than Gust will open at once — select up to {}.",
+            paths.len(),
+            MAX_OPEN_AT_ONCE
+        ));
+    }
+
+    if takes_many(&handler.exec) {
+        let argv = exec_argv_many(&handler.exec, paths);
+        if argv.is_empty() {
+            return MultiOpen::Refused("empty command".into());
+        }
+        let program = argv[0].clone();
+        if super::which(&program).is_none() {
+            return MultiOpen::Refused(format!("{program} is not installed"));
+        }
+        return match std::process::Command::new(&program)
+            .args(&argv[1..])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(_) => MultiOpen::Together {
+                app: handler.name.clone(),
+                count: paths.len(),
+            },
+            Err(e) => MultiOpen::Refused(e.to_string()),
+        };
+    }
+
+    // Single-file handler: once per file, as the spec requires.
+    let mut opened = 0usize;
+    for p in paths {
+        if launch(handler, p).is_ok() {
+            opened += 1;
+        }
+    }
+    if opened == 0 {
+        return MultiOpen::Refused(format!("{} could not be started", handler.name));
+    }
+    MultiOpen::Separately {
+        app: handler.name.clone(),
+        count: opened,
+    }
 }
 
 #[cfg(test)]
@@ -418,6 +549,98 @@ mod tests {
     fn an_embedded_code_is_expanded_in_place() {
         let argv = exec_argv("app --file=%f", Path::new("/tmp/x"));
         assert_eq!(argv, vec!["app", "--file=/tmp/x"]);
+    }
+
+    #[test]
+    fn list_codes_are_distinguished_from_single_file_codes() {
+        // The spec's distinction, and the reason it matters: passing five
+        // paths to a %f program opens the first and drops four silently.
+        assert!(takes_many("imv %F"));
+        assert!(takes_many("browser %U"));
+        assert!(!takes_many("xournalpp-wrapper %f"));
+        assert!(!takes_many("editor %u"));
+        assert!(!takes_many("someapp"), "no code means assume single-file");
+    }
+
+    #[test]
+    fn a_list_code_expands_to_every_path() {
+        let paths = vec![
+            PathBuf::from("/tmp/a.png"),
+            PathBuf::from("/tmp/b.png"),
+            PathBuf::from("/tmp/c.png"),
+        ];
+        let argv = exec_argv_many("imv %F", &paths);
+        assert_eq!(argv.len(), 4, "got {argv:?}");
+        assert_eq!(argv[0], "imv");
+        assert_eq!(argv[3], "/tmp/c.png");
+    }
+
+    #[test]
+    fn a_uri_list_code_expands_to_uris() {
+        let paths = vec![PathBuf::from("/tmp/a.html"), PathBuf::from("/tmp/b.html")];
+        let argv = exec_argv_many("browser %U", &paths);
+        assert_eq!(argv[1], "file:///tmp/a.html");
+        assert_eq!(argv[2], "file:///tmp/b.html");
+    }
+
+    #[test]
+    fn hostile_names_stay_separate_arguments_in_a_list() {
+        let paths = vec![
+            PathBuf::from("/tmp/; rm -rf ~"),
+            PathBuf::from("/tmp/ok.png"),
+        ];
+        let argv = exec_argv_many("imv %F", &paths);
+        assert_eq!(argv.len(), 3);
+        assert_eq!(argv[1], "/tmp/; rm -rf ~");
+    }
+
+    #[test]
+    fn too_many_files_is_refused_with_the_number() {
+        let h = Handler {
+            id: "imv.desktop".into(),
+            name: "imv".into(),
+            exec: "imv %F".into(),
+            terminal: false,
+            is_default: true,
+        };
+        let many: Vec<PathBuf> = (0..MAX_OPEN_AT_ONCE + 1)
+            .map(|i| PathBuf::from(format!("/tmp/{i}.png")))
+            .collect();
+        match launch_many(&h, &many) {
+            MultiOpen::Refused(why) => {
+                assert!(why.contains(&(MAX_OPEN_AT_ONCE + 1).to_string()));
+                assert!(why.contains(&MAX_OPEN_AT_ONCE.to_string()));
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_empty_selection_opens_nothing() {
+        let h = Handler {
+            id: "x.desktop".into(),
+            name: "x".into(),
+            exec: "x %F".into(),
+            terminal: false,
+            is_default: false,
+        };
+        assert!(matches!(launch_many(&h, &[]), MultiOpen::Refused(_)));
+    }
+
+    #[test]
+    fn messages_say_which_way_it_opened() {
+        assert!(MultiOpen::Together {
+            app: "imv".into(),
+            count: 5
+        }
+        .message()
+        .contains("5 files with imv"));
+        assert!(MultiOpen::Separately {
+            app: "ed".into(),
+            count: 3
+        }
+        .message()
+        .contains("one window each"));
     }
 
     #[test]

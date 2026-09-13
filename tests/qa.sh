@@ -2587,6 +2587,85 @@ fi
 
 rm -rf "$OWDIR"
 
+say "12m · opening several files opens ONE application, not five"
+stop_gust
+MODIR="${FIXTURE}-multiopen"
+rm -rf "$MODIR"
+mkdir -p "$MODIR"
+for n in 1 2 3; do printf 'text %s\n' "$n" > "$MODIR/doc-$n.txt"; done
+
+start_gust
+wait_for "d['model']['settled']" "True" 20 >/dev/null
+goto "$MODIR"
+wait_for "d['model']['settled']" "True" 20 >/dev/null
+
+mo_before="$(pgrep -c -f 'nvim ' 2>/dev/null || true)"
+
+# Select all three by name.
+for target in doc-1 doc-2 doc-3; do
+  sleep 1.3
+  typ "$target"
+  sleep 0.5
+  ctrl space
+  sleep 0.4
+done
+mo_sel="$(state "d['selCount']")"
+[[ "$mo_sel" == "3" ]] \
+  && ok "three files selected" \
+  || bad "expected 3 selected, got $mo_sel"
+
+key Return
+sleep 3
+mo_status="$(state "d['hintStatus']")"
+mo_after="$(pgrep -c -f 'nvim ' 2>/dev/null || true)"
+mo_started=$(( mo_after - mo_before ))
+
+# nvim's desktop entry is "nvim %F" — a list handler — so ONE launch.
+if [[ "$mo_started" -le 1 ]]; then
+  ok "opening 3 files started $mo_started application(s), not 3"
+else
+  bad "opening 3 files started $mo_started applications"
+fi
+if [[ "$mo_status" == *"3 files"* ]]; then
+  ok "and it says how many were opened  ($mo_status)"
+else
+  bad "the status does not report the multi-open: '$mo_status'"
+fi
+shot "12m-multi-open"
+
+# Close what this case started, or instances pile up across runs.
+pkill -f "nvim $MODIR" 2>/dev/null || true
+sleep 0.5
+
+# A folder in the selection makes this a navigation question, not an open:
+# Enter must fall back to the cursor row rather than launching anything.
+mkdir -p "$MODIR/afolder"
+ctrl r
+sleep 1.5
+wait_for "d['model']['settled']" "True" 20 >/dev/null
+sleep 1.3
+typ "doc-1"
+sleep 0.5
+ctrl space
+sleep 1.3
+typ "afolder"
+sleep 0.5
+ctrl space
+sleep 0.8
+mo_before2="$(pgrep -c -f 'nvim ' 2>/dev/null || true)"
+key Return
+sleep 2.5
+mo_after2="$(pgrep -c -f 'nvim ' 2>/dev/null || true)"
+if [[ "$(( mo_after2 - mo_before2 ))" -le 1 ]]; then
+  ok "a folder in the selection does not launch an application per file"
+else
+  bad "a mixed selection launched $(( mo_after2 - mo_before2 )) applications"
+fi
+pkill -f "nvim $MODIR" 2>/dev/null || true
+sleep 0.5
+
+rm -rf "$MODIR"
+
 say "13 · nothing executed, nothing crashed, no QML errors"
 [[ -f /tmp/gust-fixture-EXECUTED ]] \
   && bad "SECURITY: a fixture script executed during browsing" \
@@ -2606,13 +2685,13 @@ else
   real_trash_count=0
 fi
 echo "  (real trash entries: $real_trash_count — Gust ran with XDG_DATA_HOME=$FIXTURE/.local/share)"
-for d in "$FIXTURE" "${FIXTURE}-panes" "${FIXTURE}-peek" "${FIXTURE}-perm" "${FIXTURE}-arch" "${FIXTURE}-bulk" "${FIXTURE}-openwith"; do
+for d in "$FIXTURE" "${FIXTURE}-panes" "${FIXTURE}-peek" "${FIXTURE}-perm" "${FIXTURE}-arch" "${FIXTURE}-bulk" "${FIXTURE}-openwith" "${FIXTURE}-multiopen"; do
   case "$d" in
     /home/*|/root/*)
       bad "a QA tree was inside a real home: $d" ;;
   esac
 done
-ok "QA ran entirely against $FIXTURE and its -panes/-peek/-perm/-arch/-bulk/-openwith trees"
+ok "QA ran entirely against $FIXTURE and its -panes/-peek/-perm/-arch/-bulk/-openwith/-multiopen trees"
 
 stop_gust
 
