@@ -335,6 +335,65 @@ across window boundaries, which is a materially larger piece of work than the
 split itself. The split is reachable from the palette and the keyboard; the
 drag gestures are recorded as unbuilt rather than half-built.
 
+## 6.8 Cloud remotes through rclone
+
+rclone is the integration layer (plan §3). Gust does not implement any
+provider: it reads the **installed** rclone's configured remotes and its
+declared capabilities, and offers only what that rclone actually supports.
+A provider Gust has never heard of works if rclone has it; a provider rclone
+lacks does not appear.
+
+### Reading the configuration is not connecting
+
+`rclone listremotes` reads a local file. It opens no network socket, exactly
+as SSH discovery does not (§6.4). Remotes appear as *suggestions*; the first
+network traffic happens when the user connects, deliberately.
+
+### Credentials
+
+Gust never reads, writes, stores, echoes or logs a token, password or
+client secret. It never passes one on a command line. Configuring a remote
+is `rclone config`'s job — Gust launches it in a terminal and re-reads the
+list afterwards. An obscured password in rclone's config is **not**
+encryption (plan §9); if the config is encrypted, Gust asks rclone to unlock
+it through rclone's own prompt and never handles the passphrase.
+
+### "Cached" is not "uploaded"
+
+The rule the plan calls non-negotiable. With `--vfs-cache-mode writes`, a
+save returns as soon as the bytes are in the local cache; the upload happens
+afterwards and can fail. A file manager that shows such a file as saved is
+lying.
+
+Gust therefore distinguishes three states per file and never conflates them:
+
+| State | Meaning | Shown as |
+|---|---|---|
+| `Cached` | written locally, not yet on the backend | "not uploaded yet" |
+| `Uploading` | transfer in flight | "uploading…" |
+| `Uploaded` | the backend confirmed it | nothing (the normal case) |
+| `Failed` | the upload failed | an alert, with the reason |
+
+**An empty transfer queue does not mean uploaded.** rclone reports an empty
+queue both when everything is uploaded and when nothing was ever queued.
+Confirmation must come from the backend: the file is `Uploaded` only when a
+fresh listing of the remote reports it with a matching size, and Gust asks
+for that listing rather than assuming.
+
+### Closing with unfinished uploads
+
+Closing a window, disconnecting a place or unmounting with anything in
+`Cached` or `Uploading` asks first and names the count. Gust never
+lazy-unmounts a dirty mount and never kills a mount it did not create
+(plan §9).
+
+### What is deliberately not built
+
+OAuth flows in Gust's own UI. The plan is explicit that Drive/Dropbox/
+OneDrive OAuth is not a template for Proton or Filen, and a half-built OAuth
+path that works for one provider is worse than sending the user to
+`rclone config`, which handles every provider correctly.
+
 ## 7. Undo journal
 
 An undo entry records, per affected path: the expected identity

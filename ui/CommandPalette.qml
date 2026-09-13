@@ -22,7 +22,7 @@ Rectangle {
         visible = true
         input.text = ""
         input.forceActiveFocus()
-        rebuild("")
+        rebuildAndAnnounce("")
     }
     function close() {
         visible = false
@@ -55,6 +55,27 @@ Rectangle {
 
     ListModel { id: results }
 
+    /// Emitted whenever the offered list changes, so the window can dump QA
+    /// state at the moment the user would be reading it.
+    signal resultsChanged()
+
+    /// What the palette is offering, for tests and for the QA state dump.
+    /// Reading the app's own answer beats reading pixels: the row below is
+    /// low-contrast by design and OCR misses it.
+    function resultLabels() {
+        const out = []
+        for (let i = 0; i < results.count; i++) out.push(results.get(i).label)
+        return out
+    }
+
+    /// Rebuild the offered list, then announce it. `rebuild` has an early
+    /// return per branch, so the signal is emitted here rather than at the
+    /// end of a function that usually does not reach its end.
+    function rebuildAndAnnounce(text) {
+        rebuild(text)
+        root.resultsChanged()
+    }
+
     function rebuild(text) {
         results.clear()
         const t = text.trim()
@@ -78,6 +99,36 @@ Rectangle {
                                         + (h.proxy ? " · via a jump host" : ""),
                                  payload: (h.connected ? "remote-off:" : "remote-on:") + h.alias })
             }
+            return
+        }
+
+        // Cloud remotes the INSTALLED rclone has configured. Reading its
+        // config opens no socket, exactly as SSH discovery does not.
+        if (t.toLowerCase().startsWith("cloud")) {
+            let remotes = []
+            try { remotes = JSON.parse(root.model.cloud_suggestions()) } catch (e) { remotes = [] }
+            // rclone missing or locked: say why, and do not pretend the
+            // user simply has no cloud storage.
+            if (remotes.length === 1 && remotes[0].unavailable) {
+                results.append({ kind: "action", label: remotes[0].why, payload: "noop" })
+                return
+            }
+            if (remotes.length === 0) {
+                results.append({ kind: "action",
+                                 label: "No cloud storage configured — set one up with rclone",
+                                 payload: "cloud-setup" })
+                return
+            }
+            for (let i = 0; i < remotes.length; i++) {
+                const c = remotes[i]
+                results.append({ kind: "action",
+                                 label: (c.connected ? "Disconnect from " : "Connect to ")
+                                        + c.name + "  (" + c.backend + ")",
+                                 payload: (c.connected ? "cloud-off:" : "cloud-on:") + c.name })
+            }
+            results.append({ kind: "action",
+                             label: "Add cloud storage (opens rclone config)",
+                             payload: "cloud-setup" })
             return
         }
 
@@ -160,7 +211,7 @@ Rectangle {
                     selectByMouse: true
                     // A text field owns its keys: file shortcuts must not fire
                     // while typing here (plan §8).
-                    onTextChanged: root.rebuild(text)
+                    onTextChanged: root.rebuildAndAnnounce(text)
                     Keys.onEscapePressed: root.close()
                     Keys.onReturnPressed: root.accept()
                     Keys.onDownPressed: list.currentIndex = Math.min(list.currentIndex + 1, results.count - 1)

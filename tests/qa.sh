@@ -1901,6 +1901,111 @@ sleep 1.2
 expect "the window unsplits" "d['paneCount']" "1"
 expect "closing a pane kept its tabs" "d['tabCount']" "$tabs_before"
 
+say "12c · cloud: discovery lists without connecting, and degrades without rclone"
+stop_gust
+start_gust
+wait_for "d['model']['settled']" "True" 20 >/dev/null
+
+# Reading rclone's config is not connecting. Whatever this machine has
+# configured, opening the list must not create a mount.
+cloud_before="$(mount | grep -c 'gust/cloud' || true)"
+palette_open
+typ "cloud"
+sleep 1.2
+shot "12c-cloud-list"
+cloud_after="$(mount | grep -c 'gust/cloud' || true)"
+[[ "$cloud_before" == "$cloud_after" ]] \
+  && ok "listing cloud remotes opened no connection  ($cloud_after mount(s), unchanged)" \
+  || bad "listing cloud storage mounted something ($cloud_before -> $cloud_after)"
+key Escape
+sleep 0.5
+
+# rclone is an OPTIONAL dependency: without it, cloud storage is simply
+# unavailable, it says so, and everything else keeps working (plan §8).
+NORCLONE="$OUTDIR/norclone"
+mkdir -p "$NORCLONE/bin"
+cat > "$NORCLONE/bin/rclone" <<'SHIM'
+#!/usr/bin/env bash
+echo "rclone: command not found" >&2
+exit 127
+SHIM
+chmod +x "$NORCLONE/bin/rclone"
+cat > "$NORCLONE/run.sh" <<EOF
+#!/usr/bin/env bash
+exec > "$OUTDIR/norclone.log" 2>&1
+export HOME="$FIXTURE"
+export XDG_DATA_HOME="$FIXTURE/.local/share"
+export XDG_CACHE_HOME="$FIXTURE/.cache"
+export GUST_OMARCHY_STATE="$REAL_STATE"
+export GUST_QA_STATE="$OUTDIR/norclone-state.json"
+export PATH="$NORCLONE/bin:\$PATH"
+exec "$BIN"
+EOF
+chmod +x "$NORCLONE/run.sh"
+
+stop_gust
+rm -f "$OUTDIR/norclone-state.json"
+vm "$NORCLONE/run.sh" 9>&- &
+for _ in $(seq 1 30); do
+  [[ -f "$OUTDIR/norclone-state.json" ]] && break
+  sleep 0.4
+done
+sleep 1.5
+if [[ -f "$OUTDIR/norclone-state.json" ]]; then
+  ok "gust starts normally with rclone unavailable"
+  # Retry the open: a freshly mapped window may not have focus yet, and a
+  # ":" typed into nothing produces a screenshot that proves nothing.
+  norc_open=0
+  for _ in 1 2 3 4 5; do
+    vm wtype ":" >/dev/null 2>&1
+    sleep 1.2
+    if python3 -c "
+import json,sys
+try:
+    d=json.load(open('$OUTDIR/norclone-state.json'))
+    sys.exit(0 if d.get('paletteOpen') else 1)
+except Exception:
+    sys.exit(1)
+"; then
+      norc_open=1
+      break
+    fi
+  done
+  if [[ "$norc_open" == "1" ]]; then
+    ok "the palette opens with rclone unavailable"
+  else
+    bad "the palette never opened in the no-rclone run"
+  fi
+  vm wtype "cloud" >/dev/null 2>&1; sleep 1.6
+  shot "12c-no-rclone"
+  # Capture what the palette is offering NOW, while it is still open: the
+  # state file is a live dump and goes empty the moment Escape closes it.
+  norc_said="$(python3 -c "
+import json
+try:
+    d = json.load(open('$OUTDIR/norclone-state.json'))
+    print(' | '.join(d.get('paletteResults') or []))
+except Exception as e:
+    print('NO_STATE:' + str(e))
+")"
+  if [[ "$norc_said" == *"rclone"* && "$norc_said" == *"nstall"* ]]; then
+    ok "it explains that cloud storage needs rclone  ($norc_said)"
+  else
+    bad "with rclone missing, the cloud palette said: $norc_said"
+  fi
+  vm wtype -k Escape >/dev/null 2>&1; sleep 0.4
+  if pgrep -x gust >/dev/null; then
+    ok "and it is still running"
+  else
+    bad "gust died when rclone was missing"
+  fi
+else
+  bad "gust did not start with rclone unavailable"
+fi
+stop_gust
+start_gust
+wait_for "d['model']['settled']" "True" 20 >/dev/null
+
 say "13 · nothing executed, nothing crashed, no QML errors"
 [[ -f /tmp/gust-fixture-EXECUTED ]] \
   && bad "SECURITY: a fixture script executed during browsing" \

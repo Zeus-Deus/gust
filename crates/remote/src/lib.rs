@@ -7,10 +7,15 @@
 //! - no secret in argv, env, logs or config files
 
 pub mod capabilities;
+pub mod cloud;
 pub mod mount;
 pub mod ssh_config;
 pub mod upload;
 
 pub use capabilities::probe_from_fsinfo;
+pub use cloud::{
+    backend_listing, confirmed_on_backend, list_remotes, rclone_available, relative_to_mount,
+    vfs_pending, BackendEntry, CloudError, CloudRemote, VfsPending,
+};
 pub use ssh_config::{parse_ssh_config, SshHost};
 pub use upload::{UploadState, UploadTracker};
