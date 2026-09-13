@@ -146,16 +146,36 @@ symlink following, cancellation). Palette actions, archives, portal, packaging,
 
 ## Known gaps worth stating plainly
 
-1. **Thumbnails are placeholders.** The sandbox contract and output validation
-   are tested, but no thumbnailer runs yet.
-2. **Only Trash is wired.** Trash + undo work end to end on the real desktop.
-   Copy, move, rename and permanent delete have tested engines but no UI path;
-   the permanent-delete branch reports that it is unwired rather than guessing.
-3. **Software rendering only.** Every performance impression from this VM is
-   meaningless for a native GPU.
-4. **No packaging.** No PKGBUILD, no `--default`, no rollback test.
-5. **Memory/latency budgets unmeasured.** The plan's ≤250 ms paint and ≤90 MiB
-   PSS targets remain hypotheses; `bench/` does not exist yet.
+This list is rewritten whenever something ships. Items 1, 2 and 4 of the
+original list (placeholder thumbnails, only-Trash-is-wired, no packaging)
+were all closed and have been removed rather than left to rot: a stale gap
+list is worse than none, because it makes working features look broken.
+
+1. **Three §3 sources are not built.** USB/phones (UDisks, GVfs/MTP),
+   NAS/SMB (GIO/GMountOperation) and Tailscale peer discovery have no
+   implementation. None of them can be honestly qualified in this VM: there
+   is no physical USB device (the only removable block device is an empty
+   virtual DVD drive), no SMB server, and no tailnet. Building them blind
+   and calling them done would be exactly the kind of claim §10 warns about.
+2. **Cloud is proven mechanically, not per provider.** The rclone integration
+   is tested end to end against a local WebDAV backend. Drive, Dropbox,
+   Proton and Filen each have their own auth and capability quirks; a fixture
+   passing is not provider certification.
+3. **Software rendering only, so the memory target is unresolved.** Every
+   performance number here comes from llvmpipe in a 2 GB VM. First paint is
+   206 ms (inside the ≤250 ms target) and 100k entries settle in ~510 ms, but
+   PSS measures 218 MiB against a ≤90 MiB target — and a bare Qt Quick window
+   with no Gust code in it already costs 155 MiB on this machine, 59 MiB of
+   which is llvmpipe. The target can only be judged on real GPU hardware.
+   This is the single genuinely open question in the project.
+4. **Tab drag-to-split and drag-out-to-detach are not built.** The split
+   itself works from the palette and the keyboard; the drag gestures need
+   cross-window Qt drag sessions and are recorded unbuilt rather than
+   half-built (DESIGN §6.7).
+5. **A real `pacman -U` install/uninstall cycle has not been run.** The
+   package builds, the binary inside it has been extracted and run, and the
+   `--default` claim/rollback round trip is tested against a fake HOME — but
+   installing to the live system would touch the user's machine.
 
 
 ## Measured performance (this VM only)

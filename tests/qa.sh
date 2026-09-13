@@ -2163,6 +2163,116 @@ helpers="$(pgrep -x ls 2>/dev/null | wc -l)"
   && ok "no probe helper leaked during local browsing" \
   || bad "$helpers probe helper(s) still running after a local listing"
 
+say "12d · permanent delete acts on everything the dialog named"
+# The worst failure mode in a file manager is a confirmation that promises
+# one thing and does another. If the dialog says "4 selected items" and the
+# action removes one, three files the user expected gone are still there —
+# and they have no reason to look.
+stop_gust
+# A location on a DIFFERENT filesystem from the fixture's XDG_DATA_HOME has
+# no usable Trash, which is what exercises the permanent path. /dev/shm is a
+# separate tmpfs on every Linux system; if it is not usable, the case still
+# runs and reports that it tested the Trash path instead.
+if [[ -d /dev/shm && -w /dev/shm ]]; then
+  DELDIR="/dev/shm/gust-qa-perm-$$"
+else
+  DELDIR="${FIXTURE}-perm"
+fi
+rm -rf "$DELDIR"
+mkdir -p "$DELDIR/keepdir"
+for n in one two three four; do printf '%s\n' "$n" > "$DELDIR/del-$n.txt"; done
+printf 'untouched\n' > "$DELDIR/keep-me.txt"
+printf 'nested\n'   > "$DELDIR/keepdir/inner.txt"
+
+start_gust
+wait_for "d['model']['settled']" "True" 20 >/dev/null
+goto "$DELDIR"
+wait_for "d['model']['settled']" "True" 20 >/dev/null
+
+# Select the four del-* files BY NAME. Walking Down from the first one
+# depends on sort order and ran off the end of the group into keep-me.txt,
+# which made a correct deletion look like a destroyed bystander.
+for target in del-one del-two del-three del-four; do
+  # The type-ahead buffer holds for 1000ms: without a longer gap the next
+  # name appends to the previous one and matches nothing.
+  sleep 1.3
+  typ "$target"
+  sleep 0.5
+  got="$(state "d['model']['cursor_name']")"
+  [[ "$got" == "$target.txt" ]] \
+    || bad "type-ahead landed on $got instead of $target.txt"
+  ctrl space
+  sleep 0.4
+done
+sel_n="$(state "d['selCount']")"
+[[ "$sel_n" == "4" ]] \
+  && ok "four items selected" \
+  || bad "expected 4 selected, got $sel_n"
+
+key Delete
+wait_for "d['confirmOpen']" "True" 10 >/dev/null
+del_title="$(state "d['confirmTitle']")"
+del_body="$(state "d['confirmBody']")"
+
+# Whatever this location supports, the dialog must name the real count.
+if [[ "$del_body" == *"4 selected items"* ]]; then
+  ok "the dialog names the real count  ($del_body)"
+else
+  bad "the dialog does not name 4 items: $del_body"
+fi
+
+# On a location without Trash the wording must be unmistakably different
+# and the irreversibility explicit (plan §3 rule 2).
+if [[ "$del_title" == *"permanently"* ]]; then
+  [[ "$del_body" == *"CANNOT be undone"* ]] \
+    && ok "an irreversible delete says so in the body" \
+    || bad "permanent delete did not warn it cannot be undone"
+  hard_delete=1
+else
+  ok "this location supports Trash, so Trash is what was offered  ($del_title)"
+  hard_delete=0
+fi
+
+# Confirm it. Cancel holds focus only for a DANGEROUS dialog, so Tab is
+# needed exactly then — tabbing on a Trash dialog moves away from the
+# confirm button and cancels instead.
+if [[ "$hard_delete" == "1" ]]; then
+  key Tab
+  sleep 0.4
+fi
+key Return
+sleep 2.5
+wait_for "d['model']['settled']" "True" 20 >/dev/null
+
+left="$(ls -1 "$DELDIR" 2>/dev/null | grep -c '^del-' || true)"
+if [[ "$left" == "0" ]]; then
+  ok "all four selected items were removed, not just the cursor row"
+else
+  bad "$left of 4 selected files survived — the dialog promised more than it did"
+fi
+
+# And nothing else may have been touched.
+[[ -f "$DELDIR/keep-me.txt" ]] \
+  && ok "an unselected file was left alone" \
+  || bad "an unselected file was destroyed"
+[[ -f "$DELDIR/keepdir/inner.txt" ]] \
+  && ok "an unselected folder's contents survived" \
+  || bad "an unselected folder was damaged"
+
+# A permanent delete has no undo, and must not pretend otherwise.
+if [[ "$hard_delete" == "1" ]]; then
+  undo_after="$(state "d.get('undoLabel','')")"
+  if [[ -z "$undo_after" || "$undo_after" == "None" ]]; then
+    ok "no undo is offered for an irreversible delete"
+  else
+    bad "undo was offered after a permanent delete: $undo_after"
+  fi
+fi
+
+shot "12d-permanent"
+rm -rf "$DELDIR"
+DELDIR=""
+
 say "13 · nothing executed, nothing crashed, no QML errors"
 [[ -f /tmp/gust-fixture-EXECUTED ]] \
   && bad "SECURITY: a fixture script executed during browsing" \
@@ -2182,13 +2292,13 @@ else
   real_trash_count=0
 fi
 echo "  (real trash entries: $real_trash_count — Gust ran with XDG_DATA_HOME=$FIXTURE/.local/share)"
-for d in "$FIXTURE" "${FIXTURE}-panes" "${FIXTURE}-peek"; do
+for d in "$FIXTURE" "${FIXTURE}-panes" "${FIXTURE}-peek" "${FIXTURE}-perm"; do
   case "$d" in
     /home/*|/root/*)
       bad "a QA tree was inside a real home: $d" ;;
   esac
 done
-ok "QA ran entirely against $FIXTURE, ${FIXTURE}-panes and ${FIXTURE}-peek"
+ok "QA ran entirely against $FIXTURE and its -panes/-peek/-perm trees"
 
 stop_gust
 
