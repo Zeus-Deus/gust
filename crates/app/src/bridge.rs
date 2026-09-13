@@ -270,6 +270,11 @@ pub mod qobject {
         /// Duplicate the row beside itself, e.g. `notes (copy).txt`.
         #[qinvokable]
         fn duplicate_row(self: Pin<&mut DirModel>, row: i32) -> QString;
+        /// Open this location in a NEW Gust window (a separate process, so
+        /// Hyprland sees an independent client). Returns "" on success or
+        /// the reason it was refused (DESIGN §6.20).
+        #[qinvokable]
+        fn detach_here(self: &DirModel) -> QString;
         /// Open every selected file with its default handler. One launch
         /// when the handler takes a list, one per file when it does not
         /// (DESIGN §6.18). Returns "" when there is nothing multi-file to
@@ -1007,6 +1012,51 @@ impl qobject::DirModel {
             h = (h ^ *b as u32).wrapping_mul(16777619);
         }
         format!("http://127.0.0.1:{}", 45000 + (h % 2000) as u16)
+    }
+
+    // --- detaching a tab (DESIGN §6.20) ----------------------------------
+
+    /// Open this location in a new Gust window.
+    ///
+    /// A separate PROCESS, not another Window in this one. The plan asks for
+    /// "a normal window that Hyprland can tile", and a second window inside
+    /// one process shares that process's fate — one stuck mount would freeze
+    /// both, which is the opposite of what §6.12 guarantees.
+    fn detach_here(&self) -> QString {
+        // A running job belongs to the process that started it. Handing this
+        // location to a new process would leave the transfer running here
+        // with nothing on screen to represent it.
+        if self.job.is_some() {
+            return QString::from(
+                "A transfer is running in this tab. Wait for it, or cancel it first.",
+            );
+        }
+
+        let Some(dir) = self.key.as_path().map(|p| p.to_path_buf()) else {
+            return QString::from("This place cannot be opened in a new window.");
+        };
+        // The location must still be there: detaching into a folder that has
+        // gone away opens a window showing home, which is not what was asked.
+        if !dir.is_dir() {
+            return QString::from("That folder is no longer there.");
+        }
+
+        let Ok(exe) = std::env::current_exe() else {
+            return QString::from("Gust could not find its own program to start.");
+        };
+
+        match std::process::Command::new(&exe)
+            .arg(&dir)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            // Deliberately not waited on: the new window is independent, and
+            // reaping it would tie the two processes back together.
+            Ok(_) => QString::default(),
+            Err(e) => QString::from(format!("Could not open a new window: {e}")),
+        }
     }
 
     // --- opening several files (DESIGN §6.18) ----------------------------
