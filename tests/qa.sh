@@ -734,7 +734,7 @@ typ "$SEL/from"; key Return
 wait_for "d['model']['location']" "$SEL/from" >/dev/null
 vm wtype -M ctrl -k a -m ctrl >/dev/null 2>&1; sleep 0.7
 rm -f "$SEL/from/five.txt"
-key F5
+ctrl r            # reload is Ctrl+R; F5 now sends to the other pane
 sleep 1.5
 AFTER="$(state "d['selCount']")"
 [[ "$AFTER" -eq 4 ]] \
@@ -946,7 +946,7 @@ fi
   || bad "source damaged ($SRC_LEFT of 120)"
 
 # Escape must be handled by the window, not leak out and disturb anything.
-key F5
+ctrl r            # reload is Ctrl+R; F5 now sends to the other pane
 sleep 1.0
 [[ "$(state "d['model']['settled']")" == "True" ]] \
   && ok "the window is still healthy after a cancel" \
@@ -1801,6 +1801,106 @@ ctrl w
 sleep 1.0
 expect "the last tab cannot be closed" "d['tabCount']" "1"
 
+say "12p · two panes: independent, and F5/F6 really move files"
+stop_gust
+PANEDIR="${FIXTURE}-panes"
+rm -rf "$PANEDIR"
+mkdir -p "$PANEDIR/paneL" "$PANEDIR/paneR"
+printf 'one\n'   > "$PANEDIR/paneL/p1.txt"
+printf 'two\n'   > "$PANEDIR/paneL/p2.txt"
+start_gust
+wait_for "d['model']['settled']" "True" 20 >/dev/null
+goto "$PANEDIR/paneL"
+wait_for "d['model']['settled']" "True" 20 >/dev/null
+expect "the pane case starts in its own tree" \
+       "d['model']['location']" "$PANEDIR/paneL"
+
+expect "starts with one pane" "d['paneCount']" "1"
+
+# With one pane there is no other side. Refusing with a reason beats
+# doing nothing at all.
+key F5
+sleep 0.8
+expect_contains "F5 with one pane explains itself" \
+                "d.get('alertText','')" "Only one pane"
+key Escape
+sleep 0.5
+
+palette_run "Split: two"
+sleep 1.2
+expect "the window splits" "d['paneCount']" "2"
+
+# The second pane must be able to show somewhere else entirely.
+goto "$PANEDIR/paneR"
+wait_for "d['model']['settled']" "True" 20 >/dev/null
+expect "the second pane navigates on its own" \
+       "d['model']['location']" "$PANEDIR/paneR"
+
+# Tab crosses the divider; it does not cycle tabs.
+key Tab
+sleep 1.2
+expect "Tab moves to the other pane" "d['activePane']" "0"
+expect "and that pane kept its folder" \
+       "d['model']['location']" "$PANEDIR/paneL"
+
+# The real point of two panes.
+ctrl a
+sleep 0.7
+key F5
+sleep 2.5
+wait_for "d['jobRunning']" "False" 20 >/dev/null
+if [[ -f "$PANEDIR/paneR/p1.txt" && -f "$PANEDIR/paneR/p2.txt" ]]; then
+  ok "F5 copied the selection to the other pane"
+else
+  bad "F5 did not copy: paneR holds [$(ls "$PANEDIR/paneR" 2>/dev/null | tr '\n' ' ')]"
+fi
+if [[ -f "$PANEDIR/paneL/p1.txt" ]]; then
+  ok "a copy left the originals alone"
+else
+  bad "F5 removed the source files — that is a move, not a copy"
+fi
+
+# A job that nobody polls never finishes, and then every LATER operation is
+# refused because one is "still running". This is the assertion that catches
+# it, and it must run after a transfer rather than before one.
+expect "the transfer job finished and cleared" "d['jobRunning']" "False"
+
+# Move, then undo it. A pane transfer is an ordinary operation through the
+# same journal as any other (DESIGN §6.7 rule 4).
+rm -rf "$PANEDIR/paneR"
+mkdir -p "$PANEDIR/paneR"
+ctrl r
+sleep 1.0
+ctrl a
+sleep 0.7
+key F6
+sleep 2.5
+wait_for "d['jobRunning']" "False" 20 >/dev/null
+if [[ -f "$PANEDIR/paneR/p1.txt" && ! -f "$PANEDIR/paneL/p1.txt" ]]; then
+  ok "F6 moved the selection to the other pane"
+else
+  bad "F6 did not move (L=[$(ls "$PANEDIR/paneL" 2>/dev/null | tr '\n' ' ')] R=[$(ls "$PANEDIR/paneR" 2>/dev/null | tr '\n' ' ')])"
+fi
+expect_contains "undo is offered for a pane move" "d.get('undoLabel','')" "back"
+vm wtype -M ctrl -k z -m ctrl >/dev/null 2>&1
+sleep 2.5
+wait_for "d['jobRunning']" "False" 20 >/dev/null
+if [[ -f "$PANEDIR/paneL/p1.txt" ]]; then
+  ok "Ctrl+Z brought the files back"
+else
+  bad "undo did not restore the moved files"
+fi
+
+shot "12p-panes"
+
+# Closing a pane keeps its tabs: a pane is a layout, and closing a layout
+# must not lose a location (DESIGN §6.7 rule 2).
+tabs_before="$(state "d['tabCount']")"
+palette_run "Split: one"
+sleep 1.2
+expect "the window unsplits" "d['paneCount']" "1"
+expect "closing a pane kept its tabs" "d['tabCount']" "$tabs_before"
+
 say "13 · nothing executed, nothing crashed, no QML errors"
 [[ -f /tmp/gust-fixture-EXECUTED ]] \
   && bad "SECURITY: a fixture script executed during browsing" \
@@ -1820,7 +1920,13 @@ else
   real_trash_count=0
 fi
 echo "  (real trash entries: $real_trash_count — Gust ran with XDG_DATA_HOME=$FIXTURE/.local/share)"
-ok "QA ran entirely against $FIXTURE"
+for d in "$FIXTURE" "${FIXTURE}-panes"; do
+  case "$d" in
+    /home/*|/root/*)
+      bad "a QA tree was inside a real home: $d" ;;
+  esac
+done
+ok "QA ran entirely against $FIXTURE and ${FIXTURE}-panes"
 
 stop_gust
 

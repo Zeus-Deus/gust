@@ -7,6 +7,7 @@ fn main() {
     // alias would resolve to a bogus qrc URL that fails to load at runtime.
     let views = [
         "ui/Main.qml",
+        "ui/Pane.qml",
         "ui/RowsView.qml",
         "ui/IconGridView.qml",
         "ui/ColumnsView.qml",

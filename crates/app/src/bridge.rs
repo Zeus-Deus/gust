@@ -179,6 +179,13 @@ pub mod qobject {
         /// on success, or the reason it was refused.
         #[qinvokable]
         fn drop_on_row(self: Pin<&mut DirModel>, row: i32, as_move: bool) -> QString;
+        /// Copy the selection into an absolute destination folder (the other
+        /// pane). Returns "" on success or a reason it was refused.
+        #[qinvokable]
+        fn copy_selection_to(self: Pin<&mut DirModel>, dest: &QString) -> QString;
+        /// Move the selection into an absolute destination folder.
+        #[qinvokable]
+        fn move_selection_to(self: Pin<&mut DirModel>, dest: &QString) -> QString;
         /// Accept a drop of URIs from another application onto `row`.
         #[qinvokable]
         fn drop_uris(self: Pin<&mut DirModel>, row: i32, uris: &QString, as_move: bool) -> QString;
@@ -1990,6 +1997,62 @@ impl qobject::DirModel {
             r.last_trashed_batch.clear();
         }
         QString::default()
+    }
+
+    /// The shared half of "send this selection over there". The destination
+    /// comes from the other pane, so it is a real folder the user is looking
+    /// at — but it is still checked, because a pane can be showing a place
+    /// that has gone away underneath it.
+    fn send_selection_to(mut self: Pin<&mut Self>, dest: &QString, as_move: bool) -> QString {
+        if self.as_ref().job.is_some() {
+            return QString::from("another operation is still running");
+        }
+        let sources = self.as_ref().target_paths();
+        if sources.is_empty() {
+            return QString::from("nothing selected");
+        }
+        let dest_dir = std::path::PathBuf::from(dest.to_string());
+        if !dest_dir.is_dir() {
+            return QString::from("that folder is no longer there");
+        }
+        // Refuse a no-op and refuse copying a folder into itself; the same
+        // questions a drop asks, asked the same way (DESIGN §6.1).
+        for src in &sources {
+            if src == &dest_dir {
+                return QString::from("that is the destination");
+            }
+            if let Some(parent) = src.parent() {
+                if parent == dest_dir.as_path() {
+                    return QString::from("already there");
+                }
+            }
+            if dest_dir.starts_with(src) {
+                return QString::from("a folder cannot be copied into itself");
+            }
+        }
+
+        let req = if as_move {
+            gust_ops::jobs::Request::Move { sources, dest_dir }
+        } else {
+            gust_ops::jobs::Request::Copy { sources, dest_dir }
+        };
+        let id = format!("job-{}", gust_ops::journal::now_unix());
+        let handle = gust_ops::jobs::start(id, req, gust_ops::journal::ConflictPolicy::Ask);
+        {
+            let mut r = self.as_mut().rust_mut();
+            r.job = Some(handle);
+            r.last_job = None;
+            r.last_trashed_batch.clear();
+        }
+        QString::default()
+    }
+
+    fn copy_selection_to(self: Pin<&mut Self>, dest: &QString) -> QString {
+        self.send_selection_to(dest, false)
+    }
+
+    fn move_selection_to(self: Pin<&mut Self>, dest: &QString) -> QString {
+        self.send_selection_to(dest, true)
     }
 
     fn drop_uris(mut self: Pin<&mut Self>, row: i32, uris: &QString, as_move: bool) -> QString {

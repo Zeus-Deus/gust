@@ -32,6 +32,10 @@ Rectangle {
     }
 
     readonly property var allActions: [
+        { id: "split",        label: "Split: two panes",      hint: "" },
+        { id: "unsplit",      label: "Split: one pane",       hint: "" },
+        { id: "send-copy",    label: "Copy to other pane",    hint: "F5" },
+        { id: "send-move",    label: "Move to other pane",    hint: "F6" },
         { id: "view-rows",    label: "View: Rows",            hint: "" },
         { id: "view-grid",    label: "View: Grid",            hint: "" },
         { id: "view-columns", label: "View: Columns",         hint: "" },

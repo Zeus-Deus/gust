@@ -46,7 +46,8 @@ Rust 1.98.1, cxx-qt 0.10.0, Mesa llvmpipe (software rendering, Virtio GPU),
 | Vim preset | built | implemented, not yet asserted in QA |
 | **Per-location view memory** | **proven** | `views::tests` + `just qa` §10r; survives a restart |
 | Tabs | **proven** | per-tab location, history, selection, filter and view; Ctrl+T/W/Tab/1-9; last tab cannot be closed; a tab with a running job asks before closing |
-| Two panes | not started | — |
+| Two panes | **proven** | `:split` / `:unsplit`, Tab crosses the divider, F5 copies and F6 moves to the other pane through the normal journal and undo; a pane with no tabs closes itself; closing a pane keeps its tabs |
+| Tab drag to split / detach | not started | needs cross-window Qt drag sessions; recorded unbuilt rather than half-built (DESIGN §6.7) |
 | 100k benchmark | **proven** | `just bench`: 100k listed+settled in 470 ms (release), first window 155 ms |
 | Listing off the UI thread | **proven** | worker thread + generation-tagged snapshots; names paint before metadata |
 | PSS budget (≤ 90 MiB) | **MISSED — platform floor** | a BARE Qt Quick window costs 155 MiB here; Gust adds ~10 MiB. Needs a GPU machine to judge |

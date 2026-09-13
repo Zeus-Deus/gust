@@ -81,6 +81,59 @@ PY
 done
 [[ "$FAIL" == 0 ]] && echo "  ok: every file's braces balance"
 
+
+# ---------------------------------------------------------------------------
+# A property binding written over a FUNCTION CALL evaluates once and never
+# again — silently, with no warning and no log line. This has cost this
+# project two multi-hour debugging sessions (DESIGN §6.6.1): a pane rendered
+# an empty list, a tab strip never appeared, a label stayed at its first
+# value. QML tracks properties, not function results.
+#
+# Flags `<prop>: <something>(...)` on a declarative binding line. Signal
+# handlers (on*:) and known-safe constructs are excluded.
+# ---------------------------------------------------------------------------
+echo "checking for bindings over function calls..."
+if ! python3 - ui/*.qml <<'PYBIND'
+import re, sys
+
+# A declarative binding over a function call evaluates ONCE and never again.
+# Object keys inside a function body look identical to a line-based grep, so
+# track brace depth relative to the nearest `function` to tell them apart.
+SAFE = re.compile(r':\s*(Qt|Math|JSON|String|Number|Boolean|parseInt|parseFloat|qsTr)\b')
+# Component-scoped helpers that the window refreshes explicitly, and geometry
+# helpers Qt itself re-evaluates on layout.
+ALLOW = re.compile(r'\b(columns|pageStep|currentView|withAlpha|color|metric|scaled)\s*\(')
+BIND = re.compile(r'^\s*(readonly\s+)?(property\s+[\w<>.]+\s+)?(?!on[A-Z])[a-z][\w.]*\s*:\s+[A-Za-z_][\w.]*\s*\(')
+
+bad = []
+for path in sys.argv[1:]:
+    if path.endswith('Tokens.qml'):
+        continue            # reads a QObject that emits change signals
+    in_func = 0
+    depth = 0
+    for n, line in enumerate(open(path), 1):
+        stripped = line.strip()
+        if re.match(r'(function\s+\w+|on[A-Z]\w*\s*:\s*(function)?\s*\{|\w+\s*:\s*function)', stripped):
+            in_func = depth + 1
+        if BIND.match(line) and not SAFE.search(line) and not ALLOW.search(line):
+            if in_func == 0:
+                bad.append((path, n, stripped))
+        depth += line.count('{') - line.count('}')
+        if in_func and depth < in_func:
+            in_func = 0
+
+for path, n, text in bad:
+    print("    %s:%d: %s" % (path, n, text[:100]))
+sys.exit(1 if bad else 0)
+PYBIND
+then
+  echo "    ^ these evaluate ONCE. Use a plain property refreshed explicitly,"
+  echo "      or bind to a notifying property instead (DESIGN §6.6.1)."
+  FAIL=1
+else
+  echo "  ok: no bindings over function calls"
+fi
+
 echo
 if [[ "$FAIL" == 0 ]]; then
   echo "QML lint: PASS"

@@ -36,7 +36,7 @@ FocusScope {
             model: root.model
             clip: true
             focus: true
-            currentIndex: root.model.cursor
+            currentIndex: (root.model ? root.model.cursor : 0)
             highlightMoveDuration: 0
             // Recycle delegates so a huge folder cannot create one
             // QQuickItem per entry (see RowsView).
@@ -61,10 +61,10 @@ FocusScope {
                     anchors.margins: Tokens.spaceXs
                     color: isSelected
                            ? Tokens.withAlpha(Tokens.accent, 0.22)
-                           : (index === root.model.cursor
+                           : (index === (root.model ? root.model.cursor : 0)
                               ? Tokens.withAlpha(Tokens.selectedBackground, Math.max(Tokens.selectedAlpha, 0.14))
                               : (hover.hovered ? Tokens.withAlpha(Tokens.foreground, 0.05) : "transparent"))
-                    border.width: (isSelected || index === root.model.cursor)
+                    border.width: (isSelected || index === (root.model ? root.model.cursor : 0))
                                   ? Math.max(1, Tokens.borderWidth) : 0
                     border.color: Tokens.accent
                     radius: Tokens.radius
@@ -171,13 +171,13 @@ FocusScope {
 
                 Accessible.role: Accessible.ListItem
                 Accessible.name: name + (isDir ? ", folder" : ", file")
-                Accessible.selected: isSelected || index === root.model.cursor
+                Accessible.selected: isSelected || index === (root.model ? root.model.cursor : 0)
             }
 
             Text {
                 anchors.centerIn: parent
                 visible: grid.count === 0
-                text: root.model.filter.length > 0 ? "No match for \"" + root.model.filter + "\""
+                text: (root.model ? root.model.filter : "").length > 0 ? "No match for \"" + (root.model ? root.model.filter : "") + "\""
                                                    : "This folder is empty"
                 color: Tokens.foregroundDim
                 font.family: Tokens.fontFamily

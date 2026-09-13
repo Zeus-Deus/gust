@@ -25,7 +25,9 @@ Rectangle {
     border.width: Tokens.borderWidth
     clip: true
 
-    function stateLabel() {
+    /// The job's state in words, as a BINDING for the same reason as
+    /// stateColour: a function call would freeze at the first state.
+    readonly property string stateText: {
         if (!root.active)
             return ""
         switch (root.job.state) {
@@ -38,7 +40,11 @@ Rectangle {
         }
     }
 
-    function stateColor() {
+
+    /// The colour for the job's current state, as a BINDING. It was a
+    /// function call, which QML evaluates once — so a job that later failed
+    /// or was cancelled kept the colour it had when the drawer appeared.
+    readonly property color stateColour: {
         if (!root.active)
             return Tokens.muted
         switch (root.job.state) {
@@ -49,6 +55,7 @@ Rectangle {
         default:          return Tokens.accent
         }
     }
+
 
     Column {
         anchors.fill: parent
@@ -61,8 +68,8 @@ Rectangle {
 
             Text {
                 id: stateText
-                text: root.stateLabel()
-                color: root.stateColor()
+                text: root.stateText
+                color: root.stateColour
                 font.family: Tokens.fontFamily
                 font.pixelSize: Tokens.fontSmall
                 font.bold: true
@@ -116,7 +123,7 @@ Rectangle {
             Rectangle {
                 height: parent.height
                 radius: parent.radius
-                color: root.stateColor()
+                color: root.stateColour
                 width: {
                     if (!root.active || root.job.total <= 0)
                         return 0

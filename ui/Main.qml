@@ -8,7 +8,7 @@ Window {
 
     ListModel {
         id: tabList
-        ListElement { startPath: ""; label: "…" }
+        ListElement { startPath: ""; label: "…"; pane: 0 }
     }
 
     // Instantiator, not Repeater: a Repeater needs a visual parent and
@@ -136,7 +136,152 @@ Window {
     // selection and filter, so a tab needs no new state type (DESIGN §6.6).
     // `dirModel` resolves to the active one, so all 120-odd existing call
     // sites keep working and there is exactly one definition of "current".
+    // --- panes ----------------------------------------------------------
+    //
+    // At most two, side by side (DESIGN §6.7). A pane owns a set of tabs and
+    // which one of them is showing; a tab already owns everything else, so
+    // there is no third kind of state.
+    property int paneCount: 1
+    property int activePane: 0
+    property real paneRatio: 0.5
+    /// Each pane's active tab, as an INDEX INTO tabList.
+    property var paneTab: [0, -1]
+
+    /// The active tab of the active pane. Every existing call site that says
+    /// `activeTab` keeps meaning "the tab the user is working in".
     property int activeTab: 0
+
+    /// Indices of the tabs belonging to a pane, in list order.
+    function paneTabs(p) {
+        const out = []
+        for (let i = 0; i < tabList.count; i++)
+            if (tabList.get(i).pane === p) out.push(i)
+        return out
+    }
+    /// The model a pane is showing, or null if it has no tabs.
+    function paneModel(p) {
+        const t = win.paneTab[p]
+        return (t >= 0 && t < tabList.count) ? tabs.objectAt(t) : null
+    }
+    /// A pane's view mode is the view of the tab it is showing.
+    function paneViewMode(p) {
+        const t = win.paneTab[p]
+        return (t >= 0 && t < tabViews.length) ? (tabViews[t] || "rows") : "rows"
+    }
+
+    /// Make a pane active. Focus moves only on an explicit action, never
+    /// because a job finished or a listing settled (DESIGN §6.7 rule 1).
+    function focusPane(p) {
+        if (p < 0 || p >= win.paneCount) return
+        if (win.activePane === p) return
+        win.activePane = p
+        win.activeTab = win.paneTab[p]
+        win.refreshActiveModel()
+        win.viewMode = win.paneViewMode(p)
+        win.focusList()
+        win.refreshPaneTabCount()
+        win.qaDump("pane-focus")
+    }
+
+    /// Open the second pane, moving the active tab into it when there is
+    /// more than one to spare, or opening a fresh tab there when there is not.
+    function splitPane() {
+        if (win.paneCount > 1) {
+            hints.status = qsTr("Already two panes")
+            return
+        }
+        win.paneCount = 2
+        const mine = win.paneTabs(0)
+        if (mine.length > 1) {
+            // Move the active tab across: the user asked for this location
+            // beside the others, not for a duplicate of it.
+            const moving = win.activeTab
+            tabList.setProperty(moving, "pane", 1)
+            win.paneTab = [win.firstTabOf(0), moving]
+        } else {
+            // The only tab stays put; the new pane opens where it is, so the
+            // split shows something immediately rather than an empty half.
+            const here = win.dirModel ? win.dirModel.location : ""
+            tabList.append({ startPath: here, label: "…", pane: 1 })
+            tabViews.push("rows")
+            win.paneTab = [win.paneTab[0], tabList.count - 1]
+        }
+        win.activePane = 1
+        win.activeTab = win.paneTab[1]
+        win.activateTab(win.activeTab)
+        win.refreshPaneTabCount()
+        win.qaDump("pane-split")
+    }
+
+    /// Close a pane. Its tabs move to the survivor rather than being
+    /// discarded: a pane is a layout, and closing a layout must not lose a
+    /// location, still less a running job (DESIGN §6.7 rule 2).
+    function closePane(p) {
+        if (win.paneCount < 2) {
+            hints.status = qsTr("This is the only pane")
+            return
+        }
+        const keep = p === 0 ? 1 : 0
+        for (let i = 0; i < tabList.count; i++)
+            if (tabList.get(i).pane === p) tabList.setProperty(i, "pane", keep)
+        win.paneCount = 1
+        // Everything is pane 0 again once there is only one pane.
+        for (let j = 0; j < tabList.count; j++) tabList.setProperty(j, "pane", 0)
+        const showing = win.paneTab[keep]
+        win.paneTab = [showing >= 0 ? showing : 0, -1]
+        win.activePane = 0
+        win.activeTab = win.paneTab[0]
+        win.activateTab(win.activeTab)
+        win.refreshPaneTabCount()
+        win.qaDump("pane-close")
+    }
+
+    /// The last path segment, for naming a destination in a sentence.
+    function lastSegment(p) {
+        if (!p || p === "") return "?"
+        const cut = p.lastIndexOf("/")
+        return (cut >= 0 && cut < p.length - 1) ? p.substring(cut + 1) : p
+    }
+
+    function firstTabOf(p) {
+        const t = win.paneTabs(p)
+        return t.length > 0 ? t[0] : -1
+    }
+
+    /// Copy or move the selection to the other pane's folder. Both go
+    /// through the same engine, journal and undo as any other operation
+    /// (DESIGN §6.7 rule 4); with one pane there is no other side, and
+    /// refusing with a reason beats doing nothing.
+    function sendToOtherPane(asMove) {
+        if (win.paneCount < 2) {
+            win.alertText = qsTr("Only one pane is open — split first (:split)")
+            win.qaDump("pane-send-refused")
+            return
+        }
+        const other = win.activePane === 0 ? 1 : 0
+        const dest = win.paneModel(other)
+        const src = win.dirModel
+        if (!dest || !src) return
+        if (dest.location === src.location) {
+            win.alertText = qsTr("Both panes are showing the same folder")
+            win.qaDump("pane-send-refused")
+            return
+        }
+        const err = asMove ? src.move_selection_to(dest.location)
+                           : src.copy_selection_to(dest.location)
+        if (err !== "") {
+            win.alertText = err
+            win.qaDump("pane-send-refused")
+            return
+        }
+        // A job nobody polls never finishes, and then every later operation
+        // is refused because one is "still running".
+        hints.status = (asMove ? qsTr("Moving to ") : qsTr("Copying to "))
+                     + win.lastSegment(dest.location)
+        jobTimer.start()
+        win.qaDump("pane-send")
+    }
+
     // NOT `tabs.objectAt(activeTab)` as a binding: objectAt is a function
     // call with no change notification, so the binding evaluated once while
     // the Instantiator was still empty and stayed null forever. It is a
@@ -152,6 +297,7 @@ Window {
         const m = tabs.objectAt(win.activeTab)
         if (m) win.dirModel = m
         win.refreshTabLabels()
+        win.refreshPaneTabCount()
     }
 
     /// The visible name of each tab: the last path segment, or "/" at the
@@ -170,6 +316,29 @@ Window {
     // so the strip stayed hidden after a second tab appeared. The ListModel
     // is the source of truth for how many tabs there are.
     readonly property int tabCount: tabList.count
+    /// How many tabs the ACTIVE pane has — what the strip reflects.
+    property int activePaneTabCount: 1
+
+    // Each pane's model and view as PLAIN PROPERTIES. They were bindings
+    // over paneModel()/paneViewMode(), which are function calls: QML cannot
+    // track those, so they evaluated once against an empty Instantiator and
+    // the panes rendered nothing at all (DESIGN §6.6.1).
+    property var paneAModel: null
+    property var paneBModel: null
+    property string paneAView: "rows"
+    property string paneBView: "rows"
+
+    function refreshPanes() {
+        const a = win.paneModel(0)
+        if (a) win.paneAModel = a
+        win.paneBModel = win.paneCount > 1 ? win.paneModel(1) : null
+        win.paneAView = win.paneViewMode(0)
+        win.paneBView = win.paneViewMode(1)
+    }
+    function refreshPaneTabCount() {
+        win.activePaneTabCount = win.paneTabs(win.activePane).length
+        win.refreshPanes()
+    }
 
     // Per-tab view mode. Kept beside the tab rather than in the model,
     // because the view lives in QML (the model does not duplicate it).
@@ -183,9 +352,11 @@ Window {
         // Opens BESIDE the active tab, not at the end: "open in new tab"
         // should land where the eye already is.
         const at = activeTab + 1
-        tabList.insert(at, { startPath: here, label: "…" })
+        tabList.insert(at, { startPath: here, label: "…",
+                             pane: win.activePane })
         tabViews.splice(at, 0, "rows")
         activateTab(at)
+        win.refreshPaneTabCount()
         win.qaDump("tab-new")
     }
 
@@ -208,11 +379,28 @@ Window {
             win.qaDump("tab-close-blocked")
             return
         }
+        const owner = tabList.get(i).pane
         tabList.remove(i)
         tabViews.splice(i, 1)
+        // Every stored index above the removed one shifts down by one.
+        const pt = win.paneTab.map(function (t) {
+            return t > i ? t - 1 : (t === i ? -1 : t)
+        })
+        win.paneTab = pt
         if (activeTab >= tabList.count) activeTab = tabList.count - 1
         else if (i < activeTab) activeTab -= 1
+        // A pane that just lost its last tab closes: an empty half of the
+        // window shows nothing and does nothing.
+        if (win.paneCount > 1 && win.paneTabs(owner).length === 0) {
+            win.closePane(owner)
+            return
+        }
+        if (win.paneTab[win.activePane] < 0) {
+            const left = win.paneTabs(win.activePane)
+            if (left.length > 0) activeTab = left[0]
+        }
         activateTab(activeTab)
+        win.refreshPaneTabCount()
         win.qaDump("tab-close")
     }
 
@@ -221,6 +409,13 @@ Window {
     function activateTab(i) {
         if (i < 0 || i >= tabList.count) return
         activeTab = i
+        // The pane showing this tab is the one the user is now in.
+        const owner = tabList.get(i).pane
+        if (owner !== win.activePane && owner < win.paneCount)
+            win.activePane = owner
+        const pt = win.paneTab.slice()
+        pt[win.activePane] = i
+        win.paneTab = pt
         const it = tabs.objectAt(i)
         if (it && !it.everActivated) {
             it.everActivated = true
@@ -234,23 +429,28 @@ Window {
     }
 
     function nextTab(step) {
-        if (tabList.count <= 1) return
-        let i = (activeTab + step) % tabList.count
-        if (i < 0) i += tabList.count
-        activateTab(i)
+        // Cycling stays inside the active pane: Ctrl+Tab should not throw the
+        // user into the other half of the window.
+        const mine = win.paneTabs(win.activePane)
+        if (mine.length <= 1) return
+        const at = mine.indexOf(win.activeTab)
+        let k = (at + step) % mine.length
+        if (k < 0) k += mine.length
+        activateTab(mine[k])
     }
 
     // --- helpers -----------------------------------------------------------
-    function currentView() {
-        return viewMode === "grid" ? gridView
-             : viewMode === "columns" ? columnsView
-             : rowsView
+    function activePaneItem() {
+        if (win.activePane === 1 && paneBLoader.item) return paneBLoader.item
+        return paneA
     }
+    function currentView() { return win.activePaneItem().currentView() }
     function setView(m) {
         viewMode = m
         // Each tab keeps its own view, so switching tabs restores what that
         // tab was showing rather than what the last one chose.
         if (win.activeTab >= 0) win.tabViews[win.activeTab] = m
+        win.refreshPanes()
         // Transient feedback must not outlive what it describes.
         hints.status = ""
         // An EXPLICIT choice, so it is remembered for this location.
@@ -378,9 +578,9 @@ Window {
             // `height: visible ? X : 0` makes height depend on a sibling
             // binding's evaluation order: visible flipped true while height
             // stayed 0, so the strip was shown and occupied no space at all.
-            height: win.tabCount > 1 ? Tokens.controlHeight : 0
+            height: win.activePaneTabCount > 1 ? Tokens.controlHeight : 0
             color: Tokens.barBackground
-            visible: win.tabCount > 1
+            visible: win.activePaneTabCount > 1
 
             Rectangle {
                 anchors.bottom: parent.bottom
@@ -398,6 +598,10 @@ Window {
                 Repeater {
                     model: tabList
                     delegate: Rectangle {
+                        // Only this pane's tabs. A strip mixing both panes
+                        // makes a click jump the user across the window.
+                        required property int pane
+                        visible: pane === win.activePane
                         // `index` is supplied by the Repeater; `label` comes
                         // from the ListModel role. Both must be declared or
                         // the delegate fails to create — silently, leaving an
@@ -602,99 +806,85 @@ Window {
             }
 
             Item {
+                id: paneArea
                 x: sidebar.visible ? sidebar.width : 0
                 width: parent.width - x
                 height: parent.height
 
-                RowsView {
-                    id: rowsView
-                    anchors.fill: parent
-                    visible: win.viewMode === "rows"
-                    model: dirModel
-                    onActivated: (r) => win.activateRow(r)
-                    onSelectionTouched: {
-                        win.qaDump("select")
-                    }
-                    onDragStarted: (r) => {
-                        rowsView.dragActive = true
-                        dirModel.drag_begin(r)
-                        win.qaDump("drag-begin")
-                    }
-                    // Say what a drop would do BEFORE the button is released,
-                    // so the operation and destination are never a surprise.
-                    onDropMovedOver: (r) => {
-                        hints.status = dirModel.drop_preview(r, win.dropAsMove)
-                    }
-                    onDropReleased: (r) => {
-                        const err = dirModel.drop_on_row(r, win.dropAsMove)
-                        if (err !== "") {
-                            win.alertText = err
-                        } else {
-                            hints.status = ""
-                        }
-                        win.qaDump("drop")
+                // Two panes side by side, or one filling the area. With a
+                // single pane there is no splitter and no pane border:
+                // chrome that earns nothing is not shown (DESIGN §6.7).
+                Pane {
+                    id: paneA
+                    x: 0
+                    y: 0
+                    width: win.paneCount > 1
+                         ? Math.round((paneArea.width - paneSplit.width) * win.paneRatio)
+                         : paneArea.width
+                    height: paneArea.height
+                    model: win.paneAModel
+                    viewMode: win.paneAView
+                    dropAsMove: win.dropAsMove
+                    onActivated: (r) => { win.focusPane(0); win.activateRow(r) }
+                    onSelectionTouched: { win.focusPane(0); win.qaDump("select") }
+                    onDragBegan: { win.focusPane(0); win.qaDump("drag-begin") }
+                    onDropPreview: (t) => { hints.status = t }
+                    onDropFailed: (m) => { win.alertText = m; win.qaDump("drop") }
+                    onDropDone: { hints.status = ""; jobTimer.start(); win.qaDump("drop") }
+                }
+
+                // The divider. It is a visible seam, not a decoration: the
+                // user needs to see where one pane ends.
+                Rectangle {
+                    id: paneSplit
+                    visible: win.paneCount > 1
+                    width: visible ? Math.max(1, Tokens.borderWidth) : 0
+                    height: paneArea.height
+                    x: paneA.width
+                    color: Tokens.withAlpha(Tokens.border, Tokens.borderAlpha)
+                }
+
+                // A Loader, not a hidden Pane: an unopened pane holds a null
+                // model, and every binding inside its three views throws on
+                // the first frame. A pane that is not open does not exist.
+                Loader {
+                    id: paneBLoader
+                    active: win.paneCount > 1
+                    x: paneA.width + paneSplit.width
+                    y: 0
+                    width: active ? paneArea.width - x : 0
+                    height: paneArea.height
+                    sourceComponent: Pane {
+                        model: win.paneBModel
+                        viewMode: win.paneBView
+                        dropAsMove: win.dropAsMove
+                        onActivated: (r) => { win.focusPane(1); win.activateRow(r) }
+                        onSelectionTouched: { win.focusPane(1); win.qaDump("select") }
+                        onDragBegan: { win.focusPane(1); win.qaDump("drag-begin") }
+                        onDropPreview: (t) => { hints.status = t }
+                        onDropFailed: (m) => { win.alertText = m; win.qaDump("drop") }
+                        onDropDone: { hints.status = ""; jobTimer.start(); win.qaDump("drop") }
                     }
                 }
-                IconGridView {
-                    id: gridView
-                    anchors.fill: parent
-                    visible: win.viewMode === "grid"
-                    model: dirModel
-                    onActivated: (r) => win.activateRow(r)
-                    onSelectionTouched: {
-                        win.qaDump("select")
-                    }
-                    onDragStarted: (r) => {
-                        gridView.dragActive = true
-                        win.qaDump("drag-begin")
-                    }
-                    // Say what a drop would do BEFORE the button is released,
-                    // so the operation and destination are never a surprise.
-                    onDropMovedOver: (r) => {
-                        hints.status = dirModel.drop_preview(r, win.dropAsMove)
-                    }
-                    onDropReleased: (r) => {
-                        const err = dirModel.drop_on_row(r, win.dropAsMove)
-                        if (err !== "") {
-                            win.alertText = err
-                        } else {
-                            hints.status = ""
-                        }
-                        win.qaDump("drop")
-                    }
-                }
-                ColumnsView {
-                    id: columnsView
-                    anchors.fill: parent
-                    visible: win.viewMode === "columns"
-                    model: dirModel
-                    onActivated: (r) => win.activateRow(r)
-                    onSelectionTouched: {
-                        win.qaDump("select")
-                    }
-                    onDragStarted: (r) => {
-                        columnsView.dragActive = true
-                        win.qaDump("drag-begin")
-                    }
-                    // Say what a drop would do BEFORE the button is released,
-                    // so the operation and destination are never a surprise.
-                    onDropMovedOver: (r) => {
-                        hints.status = dirModel.drop_preview(r, win.dropAsMove)
-                    }
-                    onDropReleased: (r) => {
-                        const err = dirModel.drop_on_row(r, win.dropAsMove)
-                        if (err !== "") {
-                            win.alertText = err
-                        } else {
-                            hints.status = ""
-                        }
-                        win.qaDump("drop")
-                    }
+
+                // The active pane is marked by a border, not by colour alone:
+                // a theme may make the two backgrounds nearly identical.
+                // z: above the panes, or their own backgrounds cover it.
+                Rectangle {
+                    z: 10
+                    visible: win.paneCount > 1
+                    x: win.activePane === 0 ? paneA.x : paneBLoader.x
+                    y: 0
+                    width: win.activePane === 0 ? paneA.width : paneBLoader.width
+                    height: paneArea.height
+                    color: "transparent"
+                    border.width: Math.max(1, Tokens.borderWidth)
+                    border.color: Tokens.accent
                 }
             }
         }
 
-        // Filter bar, shown only while filtering.
+        // Filter bar, shown only while filtering.        // Filter bar, shown only while filtering.
         Rectangle {
             id: filterBar
             width: parent.width
@@ -798,7 +988,7 @@ Window {
             // Navigation common to both presets.
             // In Grid, Up/Down move a whole row (two-dimensional selection);
             // Left/Right move one tile. Rows/Columns move one entry.
-            const step = win.viewMode === "grid" ? gridView.columns() : 1
+            const step = win.activePaneItem().pageStep()
             const extend = (event.modifiers & Qt.ShiftModifier) !== 0
 
             // Shift+movement extends from the anchor; plain movement drops
@@ -838,8 +1028,16 @@ Window {
                 win.activateRow(dirModel.cursor); event.accepted = true; return
             case Qt.Key_Backspace:
                 dirModel.navigate_up(); event.accepted = true; return
+            case Qt.Key_Tab:
+                if (win.paneCount > 1) {
+                    win.focusPane(win.activePane === 0 ? 1 : 0)
+                    event.accepted = true; return
+                }
+                break
             case Qt.Key_F5:
-                dirModel.reload(); event.accepted = true; return
+                win.sendToOtherPane(false); event.accepted = true; return
+            case Qt.Key_F6:
+                win.sendToOtherPane(true); event.accepted = true; return
             case Qt.Key_Delete:
                 win.askTrash(); event.accepted = true; return
             case Qt.Key_Escape:
@@ -1032,6 +1230,10 @@ Window {
         onNavigateRequested: (p) => { dirModel.navigate(p); win.focusList() }
         onActionRequested: (a) => {
             if (a === "view-rows") win.setView("rows")
+            else if (a === "split") win.splitPane()
+            else if (a === "unsplit") win.closePane(win.activePane)
+            else if (a === "send-copy") win.sendToOtherPane(false)
+            else if (a === "send-move") win.sendToOtherPane(true)
             else if (a === "view-grid") win.setView("grid")
             else if (a === "view-columns") win.setView("columns")
             else if (a === "toggle-hidden") dirModel.toggle_hidden()
@@ -1185,6 +1387,22 @@ Window {
                 }
                 return out
             })(),
+            paneCount: win.paneCount,
+            activePane: win.activePane,
+            paneLocations: (function () {
+                let out = []
+                for (let p = 0; p < win.paneCount; p++) {
+                    const m = win.paneModel(p)
+                    out.push(m ? m.location : "")
+                }
+                return out
+            })(),
+            paneTabs: (function () {
+                let out = []
+                for (let p = 0; p < win.paneCount; p++)
+                    out.push(win.paneTabs(p).length)
+                return out
+            })(),
             paletteOpen: palette.visible,
             promptOpen: prompt.visible,
             promptMode: prompt.mode,
@@ -1232,7 +1450,8 @@ Window {
                     win.activateTab(win.activeTab)
                 }
                 target = -1
-                win.qaDump("tab-close")
+                win.refreshPaneTabCount()
+        win.qaDump("tab-close")
             }
         }
     }
