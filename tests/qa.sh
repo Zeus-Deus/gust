@@ -2410,6 +2410,115 @@ arc_alert="$(state "d.get('alertText','')")"
 
 rm -rf "$ARCDIR"
 
+say "12b · bulk rename shows the plan before it touches anything"
+stop_gust
+BULKDIR="${FIXTURE}-bulk"
+rm -rf "$BULKDIR"
+mkdir -p "$BULKDIR"
+for n in one two three; do printf '%s\n' "$n" > "$BULKDIR/$n.txt"; done
+printf 'bystander\n' > "$BULKDIR/keep.md"
+
+start_gust
+wait_for "d['model']['settled']" "True" 20 >/dev/null
+goto "$BULKDIR"
+wait_for "d['model']['settled']" "True" 20 >/dev/null
+
+# Select the three .txt files by name.
+for target in one two three; do
+  sleep 1.3
+  typ "$target"
+  sleep 0.5
+  ctrl space
+  sleep 0.4
+done
+bulk_sel="$(state "d['selCount']")"
+[[ "$bulk_sel" == "3" ]] \
+  && ok "three files selected for renaming" \
+  || bad "expected 3 selected, got $bulk_sel"
+
+# A pattern that would collide must be refused BEFORE anything happens.
+palette_run "Bulk rename"
+sleep 1.2
+expect "the rename prompt opened" "d['promptMode']" "bulk"
+ctrl a            # the field is pre-filled; replace it, do not append
+typ "same.{ext}"
+sleep 0.5
+key Return
+sleep 1.5
+bulk_err="$(state "d.get('promptError','')")"
+if [[ -n "$bulk_err" && "$bulk_err" != "None" ]]; then
+  ok "a colliding pattern is refused with a reason  ($bulk_err)"
+else
+  bad "a pattern that renames three files to one name was not refused"
+fi
+# And nothing may have been touched.
+still="$(ls -1 "$BULKDIR" | grep -c '^\(one\|two\|three\)\.txt$' || true)"
+[[ "$still" == "3" ]] \
+  && ok "a refused pattern renamed nothing" \
+  || bad "files were renamed by a pattern that was refused"
+key Escape
+sleep 0.8
+
+# A good pattern must show a preview before renaming.
+palette_run "Bulk rename"
+sleep 1.2
+ctrl a            # replace the pre-filled pattern
+typ "file-{n}.{ext}"
+sleep 0.5
+key Return
+sleep 1.5
+expect "a preview is shown before anything happens" "d['confirmOpen']" "True"
+bulk_body="$(state "d['confirmBody']")"
+if [[ "$bulk_body" == *"→"* ]]; then
+  ok "the preview shows old → new"
+else
+  bad "the preview does not show the renames: $bulk_body"
+fi
+shot "12b-bulk-preview"
+
+# Nothing has happened yet.
+still2="$(ls -1 "$BULKDIR" | grep -c '^\(one\|two\|three\)\.txt$' || true)"
+[[ "$still2" == "3" ]] \
+  && ok "showing the preview renamed nothing" \
+  || bad "files were renamed before the user confirmed"
+
+# Confirm, and check the result.
+key Return
+sleep 1
+# Wait for the app to say it finished, rather than racing the filesystem:
+# the rename runs and then reloads, and `settled` can still be true from
+# before the keypress.
+for _ in $(seq 1 40); do
+  [[ "$(ls -1 "$BULKDIR" 2>/dev/null | grep -c '^file-[0-9]*\.txt$' || true)" == "3" ]] && break
+  sleep 0.5
+done
+wait_for "d['model']['settled']" "True" 20 >/dev/null
+renamed="$(ls -1 "$BULKDIR" | grep -c '^file-[0-9]*\.txt$' || true)"
+[[ "$renamed" == "3" ]] \
+  && ok "all three files were renamed  ($(ls -1 "$BULKDIR" | tr '\n' ' '))" \
+  || bad "expected 3 renamed files, found $renamed"
+[[ -f "$BULKDIR/keep.md" ]] \
+  && ok "an unselected file was left alone" \
+  || bad "a bystander was renamed"
+
+# No temporary names may survive.
+debris="$(ls -a "$BULKDIR" | grep -c '^\.gust-rename' || true)"
+[[ "$debris" == "0" ]] \
+  && ok "no temporary names were left behind" \
+  || bad "$debris temporary name(s) survived"
+
+# One Ctrl+Z undoes the whole thing.
+expect_contains "undo is offered for the bulk rename" "d.get('undoLabel','')" "back"
+vm wtype -M ctrl -k z -m ctrl >/dev/null 2>&1
+sleep 2
+wait_for "d['model']['settled']" "True" 20 >/dev/null
+back="$(ls -1 "$BULKDIR" | grep -c '^\(one\|two\|three\)\.txt$' || true)"
+[[ "$back" == "3" ]] \
+  && ok "one Ctrl+Z put every name back" \
+  || bad "undo restored $back of 3 names"
+
+rm -rf "$BULKDIR"
+
 say "13 · nothing executed, nothing crashed, no QML errors"
 [[ -f /tmp/gust-fixture-EXECUTED ]] \
   && bad "SECURITY: a fixture script executed during browsing" \
@@ -2429,13 +2538,13 @@ else
   real_trash_count=0
 fi
 echo "  (real trash entries: $real_trash_count — Gust ran with XDG_DATA_HOME=$FIXTURE/.local/share)"
-for d in "$FIXTURE" "${FIXTURE}-panes" "${FIXTURE}-peek" "${FIXTURE}-perm" "${FIXTURE}-arch"; do
+for d in "$FIXTURE" "${FIXTURE}-panes" "${FIXTURE}-peek" "${FIXTURE}-perm" "${FIXTURE}-arch" "${FIXTURE}-bulk"; do
   case "$d" in
     /home/*|/root/*)
       bad "a QA tree was inside a real home: $d" ;;
   esac
 done
-ok "QA ran entirely against $FIXTURE and its -panes/-peek/-perm/-arch trees"
+ok "QA ran entirely against $FIXTURE and its -panes/-peek/-perm/-arch/-bulk trees"
 
 stop_gust
 

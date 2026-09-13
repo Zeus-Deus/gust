@@ -32,6 +32,7 @@ Rectangle {
     }
 
     readonly property var allActions: [
+        { id: "bulk",         label: "Bulk rename (selection)", hint: "" },
         { id: "compress",     label: "Compress to .tar.zst",  hint: "" },
         { id: "extract",      label: "Extract here",          hint: "" },
         { id: "split",        label: "Split: two panes",      hint: "" },
