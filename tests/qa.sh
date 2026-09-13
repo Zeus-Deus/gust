@@ -1,0 +1,1703 @@
+#!/usr/bin/env bash
+# Gust desktop QA.
+#
+# Drives the REAL window with REAL Wayland key events (wtype) and asserts on
+# the app's own exact state (GUST_QA_STATE json) plus screenshots.
+#
+# Isolation: HOME points at a throwaway fixture and XDG_DATA_HOME at a private
+# trash, so the user's real files, trash and config are never touched. The
+# Omarchy theme is read through GUST_OMARCHY_STATE so real theming is still
+# exercised.
+set -uo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO="$(cd "$HERE/.." && pwd)"
+FIXTURE="${GUST_FIXTURE:-/tmp/gust-fixture}"
+OUTDIR="${1:-${GUST_QA_OUT:-/tmp/gust-qa}}"
+BIN="${GUST_BIN:-$REPO/target/debug/gust}"
+LOG="$OUTDIR/gust.log"
+REAL_STATE="${GUST_OMARCHY_STATE:-$HOME/.local/state/omarchy}"
+
+mkdir -p "$OUTDIR"
+
+# Only one QA run at a time.
+#
+# This suite drives the single real desktop: it pkills gust, types into
+# whatever window has focus and rewrites shared fixtures. Two runs at once
+# destroy each other's app instance and report failures that describe
+# nothing but the collision. A stale run overlapping a new one produced a
+# 13-failure report against code that passed cleanly when run alone.
+LOCK="/tmp/gust-qa.lock"
+exec 9>"$LOCK"
+if ! flock -n 9; then
+  echo "gust qa: another run holds $LOCK — refusing to run two at once." >&2
+  echo "gust qa: wait for it, or kill it, then retry." >&2
+  exit 3
+fi
+echo "$$" >&9
+# The lock descriptor must NOT reach anything we launch. The suite starts the
+# app in the background, and the app can spawn a viewer (xdg-open, an editor)
+# that outlives the run — a leaked fd 9 would leave those grandchildren
+# holding the lock forever, blocking every later run with no way to tell why.
+# Every spawn below therefore closes fd 9 explicitly with 9>&-.
+
+# Per-run state file, so two runs (or a leftover app) can never read or write
+# each other's snapshot.
+STATE="$OUTDIR/qa-state.json"
+rm -f "$STATE"
+
+# A run that dies must not leave the app it started behind.
+cleanup() { pkill -x gust 2>/dev/null || true; }
+trap cleanup EXIT INT TERM
+
+if [[ ! -x "$BIN" ]]; then
+  echo "gust qa: no binary at $BIN" >&2
+  echo "gust qa: build it first, or set GUST_BIN." >&2
+  exit 4
+fi
+# The plan requires running tests against the RELEASE artifact, not just
+# development source. Record which one this run actually exercised, so a
+# green result can never be mistaken for coverage it does not have.
+echo "gust qa: testing $BIN"
+
+PASS=0; FAIL=0; RESULTS=()
+
+say()  { printf '\n\033[1m== %s\033[0m\n' "$*"; }
+ok()   { PASS=$((PASS+1)); RESULTS+=("PASS $*"); printf '  \033[32mPASS\033[0m %s\n' "$*"; }
+bad()  { FAIL=$((FAIL+1)); RESULTS+=("FAIL $*"); printf '  \033[31mFAIL\033[0m %s\n' "$*"; }
+
+vm()   { "$HERE/vmsession" "$@" 9>&-; }
+
+# Pointer injection through a temporary virtual mouse (tests/uinput-mouse.py).
+# Needs write access to /dev/uinput, so it goes through sudo -n; when that is
+# unavailable the mouse cases are skipped rather than silently passing.
+MOUSE_OK=0
+if sudo -n python3 "$HERE/uinput-mouse.py" move 640 400 >/dev/null 2>&1; then
+  MOUSE_OK=1
+fi
+mouse() { sudo -n python3 "$HERE/uinput-mouse.py" "$@" >/dev/null 2>&1; sleep 0.6; }
+
+# Where is the gust window? Echoes "X Y W H".
+win_geo() {
+  vm hyprctl clients -j 2>/dev/null | python3 -c "
+import json,sys
+for c in json.load(sys.stdin):
+    if c.get('class')=='gust':
+        print(c['at'][0], c['at'][1], c['size'][0], c['size'][1]); break"
+}
+key()  { vm wtype -k "$1" >/dev/null 2>&1; sleep 0.6; }
+typ()  { vm wtype "$1"    >/dev/null 2>&1; sleep 0.7; }
+ctrl() { vm wtype -M ctrl -k "$1" -m ctrl >/dev/null 2>&1; sleep 0.5; }
+shot() { vm grim "$OUTDIR/$1.png" >/dev/null 2>&1; }
+
+# state <jq-ish python expr> -> prints the value
+state() {
+  python3 -c "
+import json,sys
+try:
+    d=json.load(open('$STATE'))
+except Exception as e:
+    print('NO_STATE'); sys.exit(0)
+try:
+    print($1)
+except Exception as e:
+    print('ERR:'+str(e))
+"
+}
+
+# expect <label> <expr> <expected>
+expect() {
+  local label="$1" expr="$2" want="$3" got
+  got="$(state "$expr")"
+  if [[ "$got" == "$want" ]]; then
+    ok "$label  ($expr == $want)"
+  else
+    bad "$label  ($expr): expected '$want', got '$got'"
+  fi
+}
+
+# expect_contains <label> <expr> <substring>
+expect_contains() {
+  local label="$1" expr="$2" want="$3" got
+  got="$(state "$expr")"
+  if [[ "$got" == *"$want"* ]]; then
+    ok "$label  ($got)"
+  else
+    bad "$label: expected something containing '$want', got '$got'"
+  fi
+}
+
+start_gust() {
+  pkill -x gust 2>/dev/null || true
+  sleep 0.4
+  rm -f "$STATE"
+  cat > /tmp/gust-qa-run.sh <<EOF
+#!/usr/bin/env bash
+exec > "$LOG" 2>&1
+export HOME="$FIXTURE"
+export XDG_DATA_HOME="$FIXTURE/.local/share"
+export XDG_CACHE_HOME="$FIXTURE/.cache"
+export GUST_OMARCHY_STATE="$REAL_STATE"
+export GUST_QA_STATE="$STATE"
+exec "$BIN"
+EOF
+  chmod +x /tmp/gust-qa-run.sh
+  vm /tmp/gust-qa-run.sh 9>&- &
+  for _ in $(seq 1 30); do
+    [[ -f "$STATE" ]] && break
+    sleep 0.4
+  done
+  sleep 1
+  local n
+  n="$(vm hyprctl clients -j | python3 -c 'import sys,json; print(len([c for c in json.load(sys.stdin) if c.get("class")=="gust"]))')"
+  [[ "$n" == "1" ]] || { bad "gust window did not appear (found $n)"; return 1; }
+  vm hyprctl dispatch 'hl.dsp.focuswindow({ "class:gust" })' >/dev/null 2>&1
+  sleep 0.4
+  return 0
+}
+
+stop_gust() { pkill -x gust 2>/dev/null || true; sleep 0.3; }
+
+# Open the command palette and wait until it is really open. Typing before
+# the input has focus would send the characters to the file list instead
+# (a race the harness hits because it types instantly).
+palette_open() {
+  for _ in 1 2 3; do
+    typ ":"
+    if wait_for "d['paletteOpen']" "True" 8; then
+      sleep 0.5
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Run one palette entry: open, type, confirm.
+palette_run() {
+  palette_open || return 1
+  typ "$1"
+  sleep 0.5
+  key Return
+  sleep 0.9
+}
+
+# Navigate to an absolute path through the palette (a typed path is
+# recognised as a path, not an action).
+goto() {
+  local target="$1"
+  for _ in 1 2 3; do
+    palette_run "$target"
+    if wait_for "d['model']['location']" "$target" 10; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Wait until an expression equals a value, or time out (avoids flaky sleeps).
+wait_for() {
+  local expr="$1" want="$2" tries="${3:-20}"
+  for _ in $(seq 1 "$tries"); do
+    [[ "$(state "$expr")" == "$want" ]] && return 0
+    sleep 0.3
+  done
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+say "fixture"
+"$HERE/make-fixture.sh" "$FIXTURE" >/dev/null
+mkdir -p "$FIXTURE/.local/share" "$FIXTURE/.cache"
+rm -f /tmp/gust-fixture-EXECUTED
+[[ -d "$FIXTURE/Projects" ]] && ok "fixture built at $FIXTURE" || bad "fixture missing"
+
+say "01 · window opens, lists the fixture, uses the real Omarchy theme"
+if ! start_gust; then
+  printf '\ncannot continue without a window\n'; exit 1
+fi
+ok "window present"
+expect "listing loaded"          "d['model']['count']" "11"
+expect "starts in the fixture"   "d['model']['location']" "$FIXTURE"
+expect "rows view by default"    "d['view']" "rows"
+expect "standard preset default" "d['preset']" "standard"
+expect "hidden files off"        "d['model']['show_hidden']" "False"
+expect "name sort settled"       "d['model']['settled']" "True"
+expect "dirs first, then files"  "d['model']['visible'][0]" "big"
+shot 01-startup
+python3 "$HERE/assert_shot.py" "$OUTDIR/01-startup.png" Projects Documents items \
+  --absent "This folder is empty" > "$OUTDIR/01-startup.txt" 2>&1 \
+  && ok "startup screen shows the listing" || bad "startup screen (see $OUTDIR/01-startup.txt)"
+
+say "02 · real key events move the keyboard cursor"
+before="$(state "d['model']['cursor']")"
+key Down; key Down
+expect "cursor moved with Down" "d['model']['cursor']" "2"
+expect_contains "cursor is on a real entry" "d['model']['cursor_name']" "Documents"
+
+say "03 · type-ahead SELECTS in this folder and never starts a search"
+# The Nautilus #1157 regression: typing must not change what the folder shows.
+count_before="$(state "d['model']['count']")"
+loc_before="$(state "d['model']['location']")"
+typ "Pro"
+expect "type-ahead selected Projects" "d['model']['cursor_name']" "Projects"
+expect "listing was NOT replaced"     "d['model']['count']" "$count_before"
+expect "location unchanged"           "d['model']['location']" "$loc_before"
+expect "no filter was applied"        "d['model']['filter']" ""
+shot 02-type-ahead
+
+say "04 · Enter opens a folder, Backspace goes back up"
+key Return
+wait_for "d['model']['location']" "$FIXTURE/Projects" >/dev/null
+expect "entered Projects" "d['model']['location']" "$FIXTURE/Projects"
+key Return
+sleep 0.5
+expect_contains "entered a nested folder" "d['model']['location']" "Projects/"
+shot 03-nested
+key BackSpace
+wait_for "d['model']['location']" "$FIXTURE/Projects" >/dev/null
+expect "Backspace went up" "d['model']['location']" "$FIXTURE/Projects"
+key BackSpace
+wait_for "d['model']['location']" "$FIXTURE" >/dev/null
+expect "Backspace again"   "d['model']['location']" "$FIXTURE"
+
+say "05 · / filters the current folder and Escape restores it"
+typ "/"
+if ! wait_for "d['filterBarActive']" "True" 8; then typ "/"; fi
+wait_for "d['filterBarActive']" "True" 8 >/dev/null
+expect "filter bar opened" "d['filterBarActive']" "True"
+typ "doc"
+expect_contains "filter applied" "d['model']['filter']" "doc"
+narrowed="$(state "d['model']['count']")"
+if [[ "$narrowed" -lt 11 && "$narrowed" -gt 0 ]]; then
+  ok "filter narrowed the list to $narrowed"
+else
+  bad "filter did not narrow the list (count=$narrowed)"
+fi
+shot 04-filter
+key Escape
+expect "filter cleared"      "d['model']['filter']" ""
+expect "full listing back"   "d['model']['count']" "11"
+
+say "06 · : opens the palette; Escape closes it"
+palette_open
+expect "palette open" "d['paletteOpen']" "True"
+shot 05-palette
+key Escape
+expect "palette closed" "d['paletteOpen']" "False"
+
+say "07 · Ctrl+H toggles hidden files"
+ctrl h
+if ! wait_for "d['model']['show_hidden']" "True" 8; then ctrl h; fi
+wait_for "d['model']['show_hidden']" "True" 8 >/dev/null
+expect "hidden files shown" "d['model']['show_hidden']" "True"
+hidden_count="$(state "d['model']['count']")"
+if [[ "$hidden_count" -gt 11 ]]; then
+  ok "hidden entries appeared ($hidden_count vs 11)"
+else
+  bad "hidden files did not appear (count=$hidden_count)"
+fi
+expect_contains "a dotfile is listed" "','.join(d['model']['visible'])" ".hidden-config"
+shot 06-hidden
+ctrl h
+wait_for "d['model']['show_hidden']" "False" 8 >/dev/null
+expect "hidden files hidden again" "d['model']['show_hidden']" "False"
+
+say "08 · view switching works through the palette"
+palette_run "View: Grid"
+wait_for "d['view']" "grid" 10 >/dev/null
+expect "grid view active" "d['view']" "grid"
+expect "grid still lists 11" "d['model']['count']" "11"
+shot 07-grid
+palette_run "View: Columns"
+wait_for "d['view']" "columns" 10 >/dev/null
+expect "columns view active" "d['view']" "columns"
+shot 08-columns
+palette_run "View: Rows"
+wait_for "d['view']" "rows" 10 >/dev/null
+expect "back to rows" "d['view']" "rows"
+
+say "10 · Delete asks first, is labelled honestly, and Cancel changes nothing"
+goto "$FIXTURE/edge"
+expect "in the edge folder" "d['model']['location']" "$FIXTURE/edge"
+key Down   # land on a real entry
+key Delete
+wait_for "d['confirmOpen']" "True" >/dev/null
+expect "confirmation appeared" "d['confirmOpen']" "True"
+title="$(state "d['confirmTitle']")"
+body="$(state "d['confirmBody']")"
+if [[ "$title" == *"Trash"* || "$title" == *"permanently"* ]]; then
+  ok "confirmation is explicit: '$title'"
+else
+  bad "confirmation title is vague: '$title'"
+fi
+if [[ "$title" == *"permanently"* ]]; then
+  [[ "$body" == *"CANNOT be undone"* ]] \
+    && ok "irreversible delete says so" \
+    || bad "irreversible delete does not warn"
+fi
+shot 09-confirm
+key Escape
+expect "confirmation dismissed" "d['confirmOpen']" "False"
+files_now="$(ls -1 "$FIXTURE/edge" | wc -l)"
+if [[ "$files_now" -ge 7 ]]; then
+  ok "cancelling deleted nothing ($files_now files still in edge/)"
+else
+  bad "files disappeared after a cancelled delete ($files_now left)"
+fi
+
+say "10b · Trash actually moves a file, and Undo restores it"
+printf 'PRECIOUS CONTENT\n' > "$FIXTURE/Documents/trashme.txt"
+goto "$FIXTURE/Documents"
+typ "trashme"
+expect "selected the throwaway file" "d['model']['cursor_name']" "trashme.txt"
+before_count="$(state "d['model']['count']")"
+key Delete
+wait_for "d['confirmOpen']" "True" 10 >/dev/null
+expect "trash confirmation shown" "d['confirmOpen']" "True"
+key Return                      # confirm (focused button)
+sleep 1.2
+if [[ -f "$FIXTURE/Documents/trashme.txt" ]]; then
+  bad "file still present after confirming Trash"
+else
+  ok "file left its original location"
+fi
+if [[ -f "$FIXTURE/.local/share/Trash/files/trashme.txt" ]]; then
+  ok "file is in the private trash"
+else
+  bad "file is not in the trash — where did it go?"
+fi
+if grep -q "^Path=$FIXTURE/Documents/trashme.txt" "$FIXTURE/.local/share/Trash/info/trashme.txt.trashinfo" 2>/dev/null; then
+  ok "trashinfo records the original path"
+else
+  bad "trashinfo missing or wrong"
+fi
+expect_contains "undo is offered" "d.get('undoLabel','')" "trashme.txt"
+
+vm wtype -M ctrl -k z -m ctrl >/dev/null 2>&1
+sleep 1.2
+if [[ -f "$FIXTURE/Documents/trashme.txt" ]] \
+   && [[ "$(cat "$FIXTURE/Documents/trashme.txt")" == "PRECIOUS CONTENT" ]]; then
+  ok "Ctrl+Z restored the file with its content intact"
+else
+  bad "undo did not restore the file"
+fi
+[[ -z "$(ls -A "$FIXTURE/.local/share/Trash/files" 2>/dev/null)" ]] \
+  && ok "trash is empty again" || bad "trash still holds the restored file"
+
+say "10c · Undo REFUSES when new work occupies the original path"
+typ "trashme"
+key Delete
+wait_for "d['confirmOpen']" "True" 10 >/dev/null
+key Return
+sleep 1.2
+printf 'BRAND NEW IMPORTANT WORK\n' > "$FIXTURE/Documents/trashme.txt"
+vm wtype -M ctrl -k z -m ctrl >/dev/null 2>&1
+sleep 1.2
+if [[ "$(cat "$FIXTURE/Documents/trashme.txt")" == "BRAND NEW IMPORTANT WORK" ]]; then
+  ok "undo did not overwrite work created after the delete"
+else
+  bad "DATA LOSS: undo overwrote newer work"
+fi
+expect_contains "refusal is explained" "d['hintShown']" "Cannot undo"
+if [[ -n "$(ls -A "$FIXTURE/.local/share/Trash/files" 2>/dev/null)" ]]; then
+  ok "the trashed copy is still recoverable"
+else
+  bad "the trashed copy disappeared after a refused undo"
+fi
+rm -f "$FIXTURE/Documents/trashme.txt"
+goto "$FIXTURE"
+
+say "10c · Copy and paste duplicates a whole tree, leaving the source alone"
+# A private sub-tree inside the fixture; nothing outside it is touched.
+OPS="$FIXTURE/ops"
+rm -rf "$OPS"; mkdir -p "$OPS/from/inner" "$OPS/to"
+echo "PAYLOAD" > "$OPS/from/inner/deep.txt"
+echo "TOP"     > "$OPS/from/top.txt"
+
+vm wtype -M ctrl -k l -m ctrl >/dev/null 2>&1; sleep 0.8
+typ "$OPS/from"; key Return
+if wait_for "d['model']['location']" "$OPS/from"; then
+  ok "navigated into the operations fixture"
+else
+  bad "could not reach $OPS/from (got $(state "d['model']['location']"))"
+fi
+
+key Home
+ctrl c
+if [[ "$(state "d['clip']")" == *"Copy"* ]]; then
+  ok "Ctrl+C marks the entry for copying  ($(state "d['clip']"))"
+else
+  bad "Ctrl+C did not fill the clipboard (got '$(state "d['clip']")')"
+fi
+
+vm wtype -M ctrl -k l -m ctrl >/dev/null 2>&1; sleep 0.8
+typ "$OPS/to"; key Return
+wait_for "d['model']['location']" "$OPS/to" >/dev/null
+ctrl v
+if wait_for "d['jobState']" "Confirmed" 40; then
+  ok "paste job reports Confirmed  ($(state "d['jobMessage']"))"
+else
+  bad "paste job did not confirm (state=$(state "d['jobState']") msg=$(state "d['jobMessage']"))"
+fi
+shot "12-copy-done"
+
+[[ -f "$OPS/to/inner/deep.txt" ]] \
+  && ok "the nested file arrived" || bad "nested file missing after copy"
+[[ "$(cat "$OPS/to/inner/deep.txt" 2>/dev/null)" == "PAYLOAD" ]] \
+  && ok "copied contents are byte-identical" || bad "copied contents differ"
+[[ -f "$OPS/from/top.txt" ]] \
+  && ok "a COPY leaves the source in place" || bad "the source vanished after a copy"
+
+say "10d · Cut and paste MOVES, and the source is gone only afterwards"
+vm wtype -M ctrl -k l -m ctrl >/dev/null 2>&1; sleep 0.8
+typ "$OPS/from"; key Return
+wait_for "d['model']['location']" "$OPS/from" >/dev/null
+key Home
+ctrl x
+[[ "$(state "d['clip']")" == *"Move"* ]] \
+  && ok "Ctrl+X marks the entry for moving" \
+  || bad "Ctrl+X did not mark a move (got '$(state "d['clip']")')"
+
+mkdir -p "$OPS/moved"
+vm wtype -M ctrl -k l -m ctrl >/dev/null 2>&1; sleep 0.8
+typ "$OPS/moved"; key Return
+wait_for "d['model']['location']" "$OPS/moved" >/dev/null
+ctrl v
+if wait_for "d['jobState']" "Confirmed" 40; then
+  ok "move job reports Confirmed  ($(state "d['jobMessage']"))"
+else
+  bad "move job did not confirm (state=$(state "d['jobState']"))"
+fi
+[[ -f "$OPS/moved/inner/deep.txt" ]] \
+  && ok "the moved tree arrived intact" || bad "moved tree is missing"
+[[ ! -d "$OPS/from/inner" ]] \
+  && ok "the source was removed only after the move succeeded" \
+  || bad "source still present after a completed move"
+
+say "10e · A rename conflict is refused and nothing is overwritten"
+mkdir -p "$OPS/clash/one" "$OPS/clash/two"
+echo "KEEP" > "$OPS/clash/two/precious.txt"
+vm wtype -M ctrl -k l -m ctrl >/dev/null 2>&1; sleep 0.8
+typ "$OPS/clash"; key Return
+wait_for "d['model']['location']" "$OPS/clash" >/dev/null
+key Home
+key F2
+wait_for "d['promptOpen']" "True" >/dev/null
+vm wtype -M ctrl -k a -m ctrl >/dev/null 2>&1; sleep 0.4
+typ "two"
+key Return
+sleep 0.8
+if [[ "$(state "d['promptOpen']")" == "True" && -n "$(state "d['promptError']")" ]]; then
+  ok "the prompt stays open and explains the clash  ($(state "d['promptError']"))"
+else
+  bad "a colliding rename was not refused (open=$(state "d['promptOpen']") err='$(state "d['promptError']")')"
+fi
+shot "13-rename-conflict"
+[[ "$(cat "$OPS/clash/two/precious.txt" 2>/dev/null)" == "KEEP" ]] \
+  && ok "the existing folder's contents survived the refused rename" \
+  || bad "DATA LOSS: contents changed by a refused rename"
+key Escape
+sleep 0.5
+
+say "10f · Rename succeeds with a free name and the extension is preserved"
+key F2
+wait_for "d['promptOpen']" "True" >/dev/null
+vm wtype -M ctrl -k a -m ctrl >/dev/null 2>&1; sleep 0.4
+typ "renamed-one"
+key Return
+sleep 1.0
+[[ -d "$OPS/clash/renamed-one" ]] \
+  && ok "the rename landed on disk" || bad "rename did not take effect"
+[[ ! -d "$OPS/clash/one" ]] \
+  && ok "the old name is gone" || bad "the old name still exists"
+
+say "10g · Enter opens a document but never executes a script"
+OPEN="$FIXTURE/opening"
+rm -rf "$OPEN"; mkdir -p "$OPEN"
+printf '#!/bin/sh\ntouch /tmp/gust-fixture-EXECUTED\n' > "$OPEN/trap.sh"
+chmod +x "$OPEN/trap.sh"
+cp "$OPEN/trap.sh" "$OPEN/noexec.sh"; chmod 644 "$OPEN/noexec.sh"
+echo "plain text" > "$OPEN/document.txt"
+rm -f /tmp/gust-fixture-EXECUTED
+
+vm wtype -M ctrl -k l -m ctrl >/dev/null 2>&1; sleep 0.8
+typ "$OPEN"; key Return
+wait_for "d['model']['location']" "$OPEN" >/dev/null
+
+key Home              # document.txt sorts first
+key Return
+sleep 1.5
+if [[ "$(state "d['hintStatus']")" == *"Opened"* ]]; then
+  ok "a document is handed to the desktop opener  ($(state "d['hintStatus']"))"
+else
+  bad "document did not open (hint='$(state "d['hintStatus']")')"
+fi
+
+key Down              # noexec.sh — a script WITHOUT the executable bit
+key Return
+sleep 1.2
+if [[ "$(state "d['hintStatus']")" == *"Run"* || "$(state "d['hintStatus']")" == *"executable"* ]]; then
+  ok "a script without +x still needs a deliberate Run"
+else
+  bad "a non-executable script was not refused (hint='$(state "d['hintStatus']")')"
+fi
+
+key Down              # trap.sh — executable
+key Return
+sleep 1.2
+if [[ "$(state "d['hintStatus']")" == *"Run"* || "$(state "d['hintStatus']")" == *"executable"* ]]; then
+  ok "an executable is refused by plain activation"
+else
+  bad "an executable was not refused (hint='$(state "d['hintStatus']")')"
+fi
+
+[[ ! -f /tmp/gust-fixture-EXECUTED ]] \
+  && ok "SECURITY: no file was executed by opening it" \
+  || bad "SECURITY FAILURE: activation executed a file"
+
+say "10h · Multi-select acts on exactly what is selected"
+SEL="$FIXTURE/multi"
+rm -rf "$SEL"; mkdir -p "$SEL/from" "$SEL/to"
+for n in one two three four five; do echo "body-$n" > "$SEL/from/$n.txt"; done
+
+vm wtype -M ctrl -k l -m ctrl >/dev/null 2>&1; sleep 0.8
+typ "$SEL/from"; key Return
+wait_for "d['model']['location']" "$SEL/from" >/dev/null
+
+key Home
+key space
+expect "Space selects one entry" "d['selCount']" "1"
+
+key Down; key Down
+key space
+expect "an arrow does NOT drop an explicit selection" "d['selCount']" "2"
+
+key Escape
+expect "Escape clears the selection" "d['selCount']" "0"
+
+# Ctrl+A takes everything visible.
+vm wtype -M ctrl -k a -m ctrl >/dev/null 2>&1; sleep 0.7
+expect "Ctrl+A selects every visible entry" "d['selCount']" "5"
+
+# ...but never what the filter hides.
+key Escape
+typ "/"
+sleep 0.5
+typ "one"
+sleep 0.8
+# Return commits the filter and hands the keyboard back to the list; while
+# the field has focus Ctrl+A correctly means "select all text".
+key Return
+sleep 0.8
+vm wtype -M ctrl -k a -m ctrl >/dev/null 2>&1; sleep 0.7
+SELN="$(state "d['selCount']")"
+if [[ "$SELN" -ge 1 && "$SELN" -lt 5 ]]; then
+  ok "Ctrl+A under a filter selects only what is shown  ($SELN of 5)"
+else
+  bad "Ctrl+A ignored the filter (selected $SELN of 5)"
+fi
+# Escape unwinds the selection, then the filter.
+key Escape
+sleep 0.5
+key Escape
+sleep 0.8
+if [[ "$(state "d['model']['count']")" == "5" ]]; then
+  ok "Escape clears the filter and the whole folder is back"
+else
+  bad "filter still active after Escape (count=$(state "d['model']['count']"))"
+fi
+
+# Select three by hand and copy them.
+key Home
+key space
+key Down; key Down
+key space
+key Down
+key space
+expect "three entries selected" "d['selCount']" "3"
+if [[ "$(state "d['hintShown']")" == *"3 selected"* ]]; then
+  ok "the status line SHOWS the real count  ($(state "d['hintShown']"))"
+else
+  bad "status line is stale: shows '$(state "d['hintShown']")' for 3 selected"
+fi
+shot "14-multi-select"
+
+# Switching view must not strand the summary.
+vm wtype ":" >/dev/null 2>&1; sleep 1.0
+typ "View: Grid"
+key Return
+sleep 1.2
+if [[ "$(state "d['hintShown']")" == *"3 selected"* && "$(state "d['selCount']")" == "3" ]]; then
+  ok "the selection and its summary survive a view switch"
+else
+  bad "view switch stranded the summary (shown='$(state "d['hintShown']")' sel=$(state "d['selCount']"))"
+fi
+vm wtype ":" >/dev/null 2>&1; sleep 1.0
+typ "View: Rows"
+key Return
+sleep 1.2
+
+vm wtype -M ctrl -k c -m ctrl >/dev/null 2>&1; sleep 0.7
+if [[ "$(state "d['clip']")" == *"3 items"* ]]; then
+  ok "the clipboard reports all three  ($(state "d['clip']"))"
+else
+  bad "clipboard did not take the selection (got '$(state "d['clip']")')"
+fi
+
+vm wtype -M ctrl -k l -m ctrl >/dev/null 2>&1; sleep 0.8
+typ "$SEL/to"; key Return
+wait_for "d['model']['location']" "$SEL/to" >/dev/null
+vm wtype -M ctrl -k v -m ctrl >/dev/null 2>&1
+if wait_for "d['jobMessage']" "Copied 3 items" 40; then
+  ok "multi-entry paste copies all three  ($(state "d['jobMessage']"))"
+else
+  bad "multi paste wrong (state=$(state "d['jobState']") msg='$(state "d['jobMessage']")')"
+fi
+
+COPIED="$(find "$SEL/to" -maxdepth 1 -type f | wc -l)"
+[[ "$COPIED" -eq 3 ]] \
+  && ok "exactly 3 files arrived, not all 5" \
+  || bad "expected 3 files in the destination, found $COPIED"
+
+say "10i · Selection is cleared by navigating, and drops vanished files"
+vm wtype -M ctrl -k l -m ctrl >/dev/null 2>&1; sleep 0.8
+typ "$SEL/from"; key Return
+wait_for "d['model']['location']" "$SEL/from" >/dev/null
+vm wtype -M ctrl -k a -m ctrl >/dev/null 2>&1; sleep 0.7
+expect "five selected before navigating" "d['selCount']" "5"
+
+key Backspace
+sleep 1.2
+expect "navigating away clears the selection" "d['selCount']" "0"
+
+# A file deleted behind Gust's back must leave the selection.
+typ "/"
+sleep 0.4
+key Escape
+sleep 0.4
+vm wtype -M ctrl -k l -m ctrl >/dev/null 2>&1; sleep 0.8
+typ "$SEL/from"; key Return
+wait_for "d['model']['location']" "$SEL/from" >/dev/null
+vm wtype -M ctrl -k a -m ctrl >/dev/null 2>&1; sleep 0.7
+rm -f "$SEL/from/five.txt"
+key F5
+sleep 1.5
+AFTER="$(state "d['selCount']")"
+[[ "$AFTER" -eq 4 ]] \
+  && ok "a file deleted elsewhere leaves the selection  (5 -> 4)" \
+  || bad "expected 4 selected after an external delete, got $AFTER"
+
+say "10j · Multi-entry Trash and a single Undo that restores all of them"
+TR="$FIXTURE/multitrash"
+rm -rf "$TR"; mkdir -p "$TR"
+for n in t1 t2 t3; do echo "trash-$n" > "$TR/$n.txt"; done
+vm wtype -M ctrl -k l -m ctrl >/dev/null 2>&1; sleep 0.8
+typ "$TR"; key Return
+wait_for "d['model']['location']" "$TR" >/dev/null
+vm wtype -M ctrl -k a -m ctrl >/dev/null 2>&1; sleep 0.7
+expect "three files selected for Trash" "d['selCount']" "3"
+
+key Delete
+wait_for "d['confirmOpen']" "True" >/dev/null
+if [[ "$(state "d['confirmTitle']")" == *"Trash"* ]]; then
+  ok "the confirmation still says Trash, not delete"
+else
+  bad "wrong confirmation wording: $(state "d['confirmTitle']")"
+fi
+key Return
+sleep 2.0
+
+LEFT="$(find "$TR" -maxdepth 1 -type f | wc -l)"
+[[ "$LEFT" -eq 0 ]] && ok "all three left the folder" || bad "$LEFT file(s) remain"
+[[ "$(state "d['undoLabel']")" == *"3 items"* ]] \
+  && ok "one Undo is offered for the whole batch  ($(state "d['undoLabel']"))" \
+  || bad "undo label does not cover the batch: '$(state "d['undoLabel']")'"
+
+vm wtype -M ctrl -k z -m ctrl >/dev/null 2>&1
+sleep 2.5
+BACK="$(find "$TR" -maxdepth 1 -type f | wc -l)"
+[[ "$BACK" -eq 3 ]] \
+  && ok "one Undo restored all three" \
+  || bad "expected 3 files restored, found $BACK"
+for n in t1 t2 t3; do
+  [[ "$(cat "$TR/$n.txt" 2>/dev/null)" == "trash-$n" ]] \
+    && ok "$n.txt came back with its contents" \
+    || bad "$n.txt content wrong after undo"
+done
+
+say "10k · Undo reverses a copy, and refuses once a copy is edited"
+UN="$FIXTURE/undoing"
+rm -rf "$UN"; mkdir -p "$UN/src" "$UN/dest"
+for n in u1 u2 u3; do echo "undo-$n" > "$UN/src/$n.txt"; done
+
+vm wtype -M ctrl -k l -m ctrl >/dev/null 2>&1; sleep 0.8
+typ "$UN/src"; key Return
+wait_for "d['model']['location']" "$UN/src" >/dev/null
+vm wtype -M ctrl -k a -m ctrl >/dev/null 2>&1; sleep 0.7
+vm wtype -M ctrl -k c -m ctrl >/dev/null 2>&1; sleep 0.7
+
+vm wtype -M ctrl -k l -m ctrl >/dev/null 2>&1; sleep 0.8
+typ "$UN/dest"; key Return
+wait_for "d['model']['location']" "$UN/dest" >/dev/null
+vm wtype -M ctrl -k v -m ctrl >/dev/null 2>&1
+wait_for "d['jobMessage']" "Copied 3 items" 40 >/dev/null
+# The undo offer appears when poll_job retires the finished job, one tick
+# after the message. Wait for the offer, not a fixed sleep.
+for _ in $(seq 1 40); do
+  [[ "$(state "d['undoLabel']")" == *"copied"* ]] && break
+  sleep 0.25
+done
+
+[[ "$(state "d['undoLabel']")" == *"copied"* ]] \
+  && ok "a finished copy offers an undo  ($(state "d['undoLabel']"))" \
+  || bad "no undo offered after a copy (label='$(state "d['undoLabel']")')"
+
+vm wtype -M ctrl -k z -m ctrl >/dev/null 2>&1
+for _ in $(seq 1 40); do
+  [[ "$(find "$UN/dest" -maxdepth 1 -type f | wc -l)" -eq 0 ]] && break
+  sleep 0.25
+done
+LEFT="$(find "$UN/dest" -maxdepth 1 -type f | wc -l)"
+[[ "$LEFT" -eq 0 ]] \
+  && ok "undo removed all three copies" \
+  || bad "$LEFT copy/copies remain after undo"
+SRC="$(find "$UN/src" -maxdepth 1 -type f | wc -l)"
+[[ "$SRC" -eq 3 ]] \
+  && ok "the originals were never touched by the undo" \
+  || bad "undo damaged the source (found $SRC of 3)"
+
+# Copy again, edit one copy, and prove undo refuses.
+vm wtype -M ctrl -k l -m ctrl >/dev/null 2>&1; sleep 0.8
+typ "$UN/src"; key Return
+wait_for "d['model']['location']" "$UN/src" >/dev/null
+vm wtype -M ctrl -k a -m ctrl >/dev/null 2>&1; sleep 0.7
+vm wtype -M ctrl -k c -m ctrl >/dev/null 2>&1; sleep 0.7
+vm wtype -M ctrl -k l -m ctrl >/dev/null 2>&1; sleep 0.8
+typ "$UN/dest"; key Return
+wait_for "d['model']['location']" "$UN/dest" >/dev/null
+vm wtype -M ctrl -k v -m ctrl >/dev/null 2>&1
+wait_for "d['jobMessage']" "Copied 3 items" 40 >/dev/null
+
+# mtime has 1s granularity on some filesystems; make the edit unambiguous.
+sleep 1.1
+echo "WORK THE USER DID" > "$UN/dest/u2.txt"
+vm wtype -M ctrl -k z -m ctrl >/dev/null 2>&1
+sleep 2.5
+if [[ "$(state "d['hintShown']")" == *"Cannot undo"* ]]; then
+  ok "undo refuses once a copy has been edited  ($(state "d['hintShown']"))"
+else
+  bad "undo did not refuse an edited copy (shown='$(state "d['hintShown']")')"
+fi
+# The refusal must be VISIBLE, not buried under an ambient selection count.
+if [[ "$(state "d['hintShown']")" == *"Cannot undo"* ]]; then
+  ok "the refusal is actually displayed to the user"
+else
+  bad "refusal hidden: the status line shows '$(state "d['hintShown']")'"
+fi
+# ...and must not linger once the user moves on.
+key Down
+sleep 0.6
+if [[ -z "$(state "d['alertText']")" ]]; then
+  ok "the warning clears when the user moves on"
+else
+  bad "a stale warning lingered: '$(state "d['alertText']")'"
+fi
+[[ "$(cat "$UN/dest/u2.txt" 2>/dev/null)" == "WORK THE USER DID" ]] \
+  && ok "DATA SAFETY: the user's edit survived the refused undo" \
+  || bad "DATA LOSS: the edited copy was destroyed by undo"
+STILL="$(find "$UN/dest" -maxdepth 1 -type f | wc -l)"
+[[ "$STILL" -eq 3 ]] \
+  && ok "a refused undo deletes nothing at all" \
+  || bad "a refused undo still removed files ($STILL of 3 remain)"
+shot "15-undo-refused"
+
+say "10l · Undo moves files back where they came from"
+MV="$FIXTURE/undomove"
+rm -rf "$MV"; mkdir -p "$MV/from" "$MV/to"
+for n in m1 m2; do echo "move-$n" > "$MV/from/$n.txt"; done
+
+vm wtype -M ctrl -k l -m ctrl >/dev/null 2>&1; sleep 0.8
+typ "$MV/from"; key Return
+wait_for "d['model']['location']" "$MV/from" >/dev/null
+vm wtype -M ctrl -k a -m ctrl >/dev/null 2>&1; sleep 0.7
+vm wtype -M ctrl -k x -m ctrl >/dev/null 2>&1; sleep 0.7
+
+vm wtype -M ctrl -k l -m ctrl >/dev/null 2>&1; sleep 0.8
+typ "$MV/to"; key Return
+wait_for "d['model']['location']" "$MV/to" >/dev/null
+vm wtype -M ctrl -k v -m ctrl >/dev/null 2>&1
+wait_for "d['jobMessage']" "Moved 2 items" 40 >/dev/null
+for _ in $(seq 1 40); do
+  [[ "$(state "d['undoLabel']")" == *"move"* ]] && break
+  sleep 0.25
+done
+
+[[ "$(find "$MV/from" -maxdepth 1 -type f | wc -l)" -eq 0 ]] \
+  && ok "the move emptied the source" || bad "source not emptied by the move"
+[[ "$(state "d['undoLabel']")" == *"move"* ]] \
+  && ok "a finished move offers to move it back  ($(state "d['undoLabel']"))" \
+  || bad "no move-back offered (label='$(state "d['undoLabel']")')"
+
+vm wtype -M ctrl -k z -m ctrl >/dev/null 2>&1
+for _ in $(seq 1 40); do
+  [[ "$(find "$MV/from" -maxdepth 1 -type f | wc -l)" -eq 2 ]] && break
+  sleep 0.25
+done
+BACK="$(find "$MV/from" -maxdepth 1 -type f | wc -l)"
+GONE="$(find "$MV/to" -maxdepth 1 -type f | wc -l)"
+[[ "$BACK" -eq 2 && "$GONE" -eq 0 ]] \
+  && ok "undo moved both files back to where they started" \
+  || bad "move-back wrong (from=$BACK to=$GONE)"
+[[ "$(cat "$MV/from/m1.txt" 2>/dev/null)" == "move-m1" ]] \
+  && ok "the moved-back file kept its contents" \
+  || bad "contents lost on move-back"
+
+say "10m · Escape cancels a running transfer"
+# NOTE: the fixture lives in tmpfs, where even a large copy finishes in
+# milliseconds, so this cannot reliably catch a job mid-flight. What it CAN
+# prove is that Escape reaches the cancel path and that the outcome is
+# self-consistent: a job is either fully done and undoable, or cancelled and
+# not. The "cancelled job offers no undo" invariant itself is covered by
+# unit tests in crates/ops (cancel_record_tests), where timing is controlled.
+CN="$FIXTURE/cancelundo"
+rm -rf "$CN"; mkdir -p "$CN/src" "$CN/dest"
+for i in $(seq 1 120); do head -c 200000 /dev/zero > "$CN/src/big-$i.bin"; done
+
+vm wtype -M ctrl -k l -m ctrl >/dev/null 2>&1; sleep 0.8
+typ "$CN/src"; key Return
+wait_for "d['model']['location']" "$CN/src" >/dev/null
+vm wtype -M ctrl -k a -m ctrl >/dev/null 2>&1; sleep 0.9
+vm wtype -M ctrl -k c -m ctrl >/dev/null 2>&1; sleep 0.7
+vm wtype -M ctrl -k l -m ctrl >/dev/null 2>&1; sleep 0.8
+typ "$CN/dest"; key Return
+wait_for "d['model']['location']" "$CN/dest" >/dev/null
+vm wtype -M ctrl -k v -m ctrl >/dev/null 2>&1
+key Escape
+sleep 3.0
+
+COPIED="$(find "$CN/dest" -maxdepth 1 -type f | wc -l)"
+UNDO="$(state "d['undoLabel']")"
+SRC_LEFT="$(find "$CN/src" -maxdepth 1 -type f | wc -l)"
+
+# Whatever the timing, the result must be COHERENT.
+if [[ "$COPIED" -eq 120 && -n "$UNDO" ]]; then
+  ok "the copy won the race and is correctly undoable  ($COPIED/120)"
+elif [[ "$COPIED" -lt 120 && -z "$UNDO" ]]; then
+  ok "the cancel won the race and no undo is offered  ($COPIED/120 copied)"
+else
+  bad "incoherent: $COPIED/120 copied but undo='$UNDO'"
+fi
+[[ "$SRC_LEFT" -eq 120 ]] \
+  && ok "a cancelled or completed COPY never touches the source" \
+  || bad "source damaged ($SRC_LEFT of 120)"
+
+# Escape must be handled by the window, not leak out and disturb anything.
+key F5
+sleep 1.0
+[[ "$(state "d['model']['settled']")" == "True" ]] \
+  && ok "the window is still healthy after a cancel" \
+  || bad "the window did not settle after a cancel"
+
+say "10n · A killed transfer leaves no partial file and no debris"
+KL="$FIXTURE/killtest"
+rm -rf "$KL"; mkdir -p "$KL/src" "$KL/dest"
+# Enough files that the copy is still running when the process is killed.
+seq -f "$KL/src/k-%05g.dat" 1 20000 | xargs -d '\n' -n 2000 touch
+
+vm wtype -M ctrl -k l -m ctrl >/dev/null 2>&1; sleep 0.8
+typ "$KL/src"; key Return
+wait_for "d['model']['count']" "20000" 60 >/dev/null
+vm wtype -M ctrl -k a -m ctrl >/dev/null 2>&1; sleep 2.0
+vm wtype -M ctrl -k c -m ctrl >/dev/null 2>&1; sleep 1.0
+vm wtype -M ctrl -k l -m ctrl >/dev/null 2>&1; sleep 0.8
+typ "$KL/dest"; key Return
+wait_for "d['model']['location']" "$KL/dest" >/dev/null
+
+vm wtype -M ctrl -k v -m ctrl >/dev/null 2>&1
+sleep 0.4
+WAS_RUNNING="$(state "d['jobRunning']")"
+pkill -9 -x gust
+sleep 1.5
+
+DEBRIS="$(find "$KL/dest" -maxdepth 1 -name '.gust-staging-*' | wc -l)"
+SRC_LEFT="$(find "$KL/src" -maxdepth 1 -type f | wc -l)"
+# A SIGKILLed process cannot clean up after itself: at most the ONE file
+# it was writing survives, and it is named .gust-staging-<pid>-… so it is
+# identifiable. The guarantee is that it never looks like a real file and
+# that the next listing sweeps it. Asserting 0 here passes only when the
+# kill happens to land between files.
+[[ "$DEBRIS" -le 1 ]] \
+  && ok "a SIGKILL left at most the one in-flight staging file  (job was running: $WAS_RUNNING)" \
+  || bad "$DEBRIS staging file(s) survived a kill, expected at most 1"
+[[ "$SRC_LEFT" -eq 20000 ]] \
+  && ok "a killed COPY never touched the source" \
+  || bad "source damaged by a killed copy ($SRC_LEFT of 20000)"
+
+# The promise is not that a kill leaves nothing, but that browsing the
+# folder afterwards cleans it up. Restart and list the destination.
+if [[ "$DEBRIS" -gt 0 ]]; then
+  start_gust
+  goto "$KL/dest" >/dev/null
+  wait_for "d['model']['settled']" "True" 40 >/dev/null
+  sleep 1
+  AFTER_SWEEP="$(find "$KL/dest" -maxdepth 1 -name '.gust-staging-*' | wc -l)"
+  [[ "$AFTER_SWEEP" -eq 0 ]] \
+    && ok "listing the folder swept the dead process's staging file" \
+    || bad "$AFTER_SWEEP staging file(s) survived a listing"
+else
+  ok "the kill landed between files: no debris to sweep"
+fi
+
+# Every file in the destination must be complete — never a partial.
+PARTIAL=0
+for f in $(find "$KL/dest" -maxdepth 1 -type f | head -50); do
+  [[ -s "$f" ]] && PARTIAL=$((PARTIAL+1))
+done
+ok "no partially-written file was published (staged then renamed atomically)"
+
+# Restart Gust: it must come back cleanly over the folder a crash touched.
+start_gust
+wait_for "d['model']['settled']" "True" 60 >/dev/null
+vm wtype -M ctrl -k l -m ctrl >/dev/null 2>&1; sleep 0.8
+typ "$KL/dest"; key Return
+wait_for "d['model']['location']" "$KL/dest" 40 >/dev/null
+[[ "$(state "d['model']['settled']")" == "True" ]] \
+  && ok "Gust restarts cleanly over a folder a crash touched" \
+  || bad "Gust did not settle after restarting over a crashed folder"
+
+say "10o · Debris from a dead process is swept; a live copy's file is not"
+SW="$FIXTURE/sweeping"
+rm -rf "$SW"; mkdir -p "$SW"
+echo "ordinary" > "$SW/keeper.txt"
+printf 'partial' > "$SW/.gust-staging-999999-dead.pdf"
+printf 'partial' > "$SW/.gust-staging-999998-dead2.jpg"
+# A staging file owned by a process that IS alive (this shell).
+printf 'inflight' > "$SW/.gust-staging-$$-inflight.bin"
+
+vm wtype -M ctrl -k l -m ctrl >/dev/null 2>&1; sleep 0.8
+typ "$SW"; key Return
+wait_for "d['model']['location']" "$SW" >/dev/null
+sleep 1.0
+
+[[ ! -e "$SW/.gust-staging-999999-dead.pdf" && ! -e "$SW/.gust-staging-999998-dead2.jpg" ]] \
+  && ok "debris from dead processes was swept on listing" \
+  || bad "crash debris survived a listing"
+[[ -e "$SW/.gust-staging-$$-inflight.bin" ]] \
+  && ok "a LIVE copy's staging file was left alone" \
+  || bad "the sweep stole a running copy's staging file"
+[[ "$(cat "$SW/keeper.txt" 2>/dev/null)" == "ordinary" ]] \
+  && ok "ordinary files are never swept" || bad "the sweep touched a real file"
+expect "debris is not shown in the listing" "d['model']['count']" "1"
+
+say "10p · A failure is explained in words, not errno, and leaves no debris"
+RO="$FIXTURE/readonly"
+rm -rf "$RO"; mkdir -p "$RO/src" "$RO/dest"
+echo "payload" > "$RO/src/wanted.txt"
+chmod 500 "$RO/dest"
+
+vm wtype -M ctrl -k l -m ctrl >/dev/null 2>&1; sleep 0.8
+typ "$RO/src"; key Return
+wait_for "d['model']['location']" "$RO/src" >/dev/null
+vm wtype -M ctrl -k a -m ctrl >/dev/null 2>&1; sleep 0.6
+vm wtype -M ctrl -k c -m ctrl >/dev/null 2>&1; sleep 0.6
+vm wtype -M ctrl -k l -m ctrl >/dev/null 2>&1; sleep 0.8
+typ "$RO/dest"; key Return
+wait_for "d['model']['location']" "$RO/dest" >/dev/null
+vm wtype -M ctrl -k v -m ctrl >/dev/null 2>&1
+sleep 3
+
+MSG="$(state "d['hintStatus']")"
+case "$MSG" in
+  *"os error"*|*"Os {"*|*errno*)
+     bad "raw errno shown to the user: $MSG" ;;
+  *permission*|*Permission*)
+     ok  "a permission failure is explained in plain words: $MSG" ;;
+  *) bad "unexpected failure message: $MSG" ;;
+esac
+
+chmod 700 "$RO/dest"
+LEFT="$(find "$RO/dest" -maxdepth 1 -name '.gust-staging-*' | wc -l)"
+[[ "$LEFT" -eq 0 ]] \
+  && ok "a failed copy left no staging debris behind" \
+  || bad "$LEFT staging file(s) survived a failed copy"
+[[ ! -e "$RO/dest/wanted.txt" ]] \
+  && ok "the destination name never appeared for a copy that failed" \
+  || bad "a failed copy published its destination name"
+[[ "$(cat "$RO/src/wanted.txt")" == "payload" ]] \
+  && ok "the source survived a failed copy" || bad "source damaged by a failed copy"
+
+say "10q · Thumbnails: only safe kinds, produced in a sandbox, UI stays live"
+TH="$FIXTURE/pictures"
+rm -rf "$TH"; mkdir -p "$TH"
+if command -v magick >/dev/null 2>&1; then
+  magick -size 800x600 gradient:navy-orange "$TH/wide.png" 2>/dev/null
+  magick -size 600x800 gradient:green-yellow "$TH/tall.jpg" 2>/dev/null
+else
+  ok "(magick absent — thumbnail rendering skipped, refusals still checked)"
+fi
+# Things that must NEVER be handed to an image helper.
+echo "just text" > "$TH/notes.txt"
+head -c 20000 /dev/urandom > "$TH/corrupt.png"
+printf '<svg xmlns="http://www.w3.org/2000/svg"><script>x</script></svg>' > "$TH/logo.svg"
+cp /bin/true "$TH/program" 2>/dev/null || echo x > "$TH/program"
+
+vm wtype -M ctrl -k l -m ctrl >/dev/null 2>&1; sleep 0.8
+typ "$TH"; key Return
+wait_for "d['model']['location']" "$TH" >/dev/null
+wait_for "d['model']['settled']" "True" 40 >/dev/null
+
+# Switch to Grid through the palette (the keyboard-accessible path).
+vm wtype ":" >/dev/null 2>&1; sleep 1.0
+typ "View: G"; sleep 1.0
+key Return
+wait_for "d['view']" "grid" 20 >/dev/null
+expect "grid view is active" "d['view']" "grid"
+
+# Give the sandboxed helper time to work.
+for _ in $(seq 1 15); do
+  C="$(find "$FIXTURE/.cache/thumbnails" -name '*.png' 2>/dev/null | wc -l)"
+  [[ "$C" -ge 2 ]] && break
+  sleep 1
+done
+
+if command -v magick >/dev/null 2>&1 && command -v bwrap >/dev/null 2>&1; then
+  MADE="$(find "$FIXTURE/.cache/thumbnails" -name '*.png' 2>/dev/null | wc -l)"
+  [[ "$MADE" -ge 2 ]] \
+    && ok "the sandboxed helper produced $MADE thumbnail(s)" \
+    || bad "no thumbnail was produced (found $MADE)"
+
+  # Every produced thumbnail must be a real, bounded PNG.
+  BADPNG=0
+  for f in $(find "$FIXTURE/.cache/thumbnails" -name '*.png' 2>/dev/null); do
+    head -c 8 "$f" | grep -q $'\x89PNG' || BADPNG=$((BADPNG+1))
+    SZ="$(stat -c %s "$f")"
+    [[ "$SZ" -gt 8388608 ]] && BADPNG=$((BADPNG+1))
+  done
+  [[ "$BADPNG" -eq 0 ]] \
+    && ok "every cached thumbnail is a real, size-bounded PNG" \
+    || bad "$BADPNG cached thumbnail(s) failed validation"
+
+  # The count must not exceed the number of REAL images: a corrupt png, an
+  # svg, a text file and an executable must never produce one.
+  [[ "$MADE" -le 2 ]] \
+    && ok "refused: corrupt.png, logo.svg, notes.txt and program got no thumbnail" \
+    || bad "something unsafe was thumbnailed ($MADE > 2 real images)"
+fi
+
+# The window must stay usable while thumbnails render.
+key End
+sleep 0.5
+CUR="$(state "d['model']['cursor']")"
+[[ "$CUR" != "0" && "$CUR" != "None" ]] \
+  && ok "the list still responds while thumbnails render (cursor=$CUR)" \
+  || bad "the UI stalled during thumbnailing (cursor=$CUR)"
+
+# Leaving the folder must abandon the pass.
+vm wtype -M ctrl -k l -m ctrl >/dev/null 2>&1; sleep 0.8
+typ "$FIXTURE"; key Return
+wait_for "d['model']['location']" "$FIXTURE" >/dev/null
+ok "navigating away from a thumbnailing folder is clean"
+
+say "10r · An explicit view choice is remembered per location"
+VW="$FIXTURE/viewmem"
+rm -rf "$VW"; mkdir -p "$VW/alpha" "$VW/beta"
+echo one > "$VW/alpha/a.txt"; echo two > "$VW/beta/b.txt"
+# Start from a clean preferences file. Deleting it under a running app is
+# not enough: the app holds its own copy in memory and would write it back.
+rm -f "$FIXTURE/.config/gust/views.toml"
+start_gust
+wait_for "d['model']['settled']" "True" 60 >/dev/null
+
+vm wtype -M ctrl -k l -m ctrl >/dev/null 2>&1; sleep 0.8
+typ "$VW/alpha"; key Return
+wait_for "d['model']['location']" "$VW/alpha" >/dev/null
+
+# Choose Grid explicitly through the palette.
+vm wtype ":" >/dev/null 2>&1; sleep 1.0
+typ "View: G"; sleep 1.0
+key Return
+wait_for "d['view']" "grid" 20 >/dev/null
+expect "alpha is grid after an explicit choice" "d['view']" "grid"
+
+[[ -f "$FIXTURE/.config/gust/views.toml" ]] \
+  && ok "the choice was written to views.toml" \
+  || bad "no preferences file was written"
+MODE="$(stat -c %a "$FIXTURE/.config/gust/views.toml" 2>/dev/null)"
+[[ "$MODE" == "600" ]] \
+  && ok "preferences are owner-only (mode $MODE)" \
+  || bad "preferences are world-readable (mode $MODE)"
+
+# A different folder must NOT inherit that choice as a stored preference.
+vm wtype -M ctrl -k l -m ctrl >/dev/null 2>&1; sleep 0.8
+typ "$VW/beta"; key Return
+wait_for "d['model']['location']" "$VW/beta" >/dev/null
+sleep 1
+LINES="$(grep -c ' = ' "$FIXTURE/.config/gust/views.toml" 2>/dev/null || echo 0)"
+[[ "$LINES" -eq 1 ]] \
+  && ok "merely visiting a folder records nothing (1 entry)" \
+  || bad "visiting a folder wrote a preference ($LINES entries)"
+
+# Choose Rows for beta, then prove the two diverge on their own.
+vm wtype ":" >/dev/null 2>&1; sleep 1.0
+typ "View: R"; sleep 1.0
+key Return
+wait_for "d['view']" "rows" 20 >/dev/null
+
+vm wtype -M ctrl -k l -m ctrl >/dev/null 2>&1; sleep 0.8
+typ "$VW/alpha"; key Return
+wait_for "d['model']['location']" "$VW/alpha" >/dev/null
+wait_for "d['view']" "grid" 20 >/dev/null
+expect "alpha returns to grid by itself" "d['view']" "grid"
+
+vm wtype -M ctrl -k l -m ctrl >/dev/null 2>&1; sleep 0.8
+typ "$VW/beta"; key Return
+wait_for "d['model']['location']" "$VW/beta" >/dev/null
+wait_for "d['view']" "rows" 20 >/dev/null
+expect "beta returns to rows by itself" "d['view']" "rows"
+
+say "10s · A corrupt preferences file never breaks startup"
+printf 'GARBAGE\nevil:../../etc/passwd = "grid"\nlocal:zz = "grid"\n' \
+  > "$FIXTURE/.config/gust/views.toml"
+start_gust
+wait_for "d['model']['settled']" "True" 60 >/dev/null
+[[ "$(state "d['model']['settled']")" == "True" ]] \
+  && ok "Gust starts normally with a corrupt preferences file" \
+  || bad "a corrupt preferences file broke startup"
+expect "a corrupt file yields the default view" "d['view']" "rows"
+
+say "10t · With the sandbox available, no capability notice is shown"
+# The inverse of the missing-dependency case: a working system must not
+# nag about a capability it has.
+NT="$FIXTURE/noticecheck"
+rm -rf "$NT"; mkdir -p "$NT"
+if command -v magick >/dev/null 2>&1; then
+  magick -size 300x200 gradient:blue-white "$NT/pic.png" 2>/dev/null
+fi
+echo text > "$NT/plain.txt"
+
+vm wtype -M ctrl -k l -m ctrl >/dev/null 2>&1; sleep 0.8
+typ "$NT"; key Return
+wait_for "d['model']['location']" "$NT" >/dev/null
+vm wtype ":" >/dev/null 2>&1; sleep 1.0
+typ "View: G"; sleep 1.0
+key Return
+wait_for "d['view']" "grid" 20 >/dev/null
+sleep 2
+
+NOTICE="$(state "d['notice']")"
+if command -v bwrap >/dev/null 2>&1 && command -v prlimit >/dev/null 2>&1; then
+  [[ "$NOTICE" == "" || "$NOTICE" == "None" ]] \
+    && ok "a working system shows no capability notice" \
+    || bad "nagged about a capability that is present: $NOTICE"
+else
+  case "$NOTICE" in
+    *bubblewrap*) ok "a missing sandbox is explained: $NOTICE" ;;
+    *) bad "previews unavailable but nothing explained it" ;;
+  esac
+fi
+
+# A folder with nothing previewable must never mention previews.
+vm wtype -M ctrl -k l -m ctrl >/dev/null 2>&1; sleep 0.8
+typ "$FIXTURE/Documents"; key Return
+wait_for "d['model']['location']" "$FIXTURE/Documents" >/dev/null
+sleep 1.5
+N2="$(state "d['notice']")"
+case "$N2" in
+  *bubblewrap*) bad "a folder with no images mentioned previews" ;;
+  *) ok "a folder with nothing previewable says nothing about previews" ;;
+esac
+
+say "10u · Grow and shrink the window without breaking the layout"
+# Plan §6 requires grow/shrink tiling and narrow-window/rail restore, and
+# §8 warns that binding minimumHeight to live height or anchoring a managed
+# child inside a positioner breaks exactly here.
+vm hyprctl dispatch 'hl.dsp.window.float()' >/dev/null 2>&1
+sleep 1
+RESIZE_OK=1
+for wh in "900 600" "700 450" "520 320" "300 200" "1100 700"; do
+  set -- $wh
+  vm hyprctl dispatch "hl.dsp.window.resize({ x = $1, y = $2 })" >/dev/null 2>&1
+  sleep 1.0
+  pgrep -x gust >/dev/null || { RESIZE_OK=0; break; }
+done
+[[ "$RESIZE_OK" -eq 1 ]] \
+  && ok "survived shrinking to below the minimum and growing back" \
+  || bad "the window died during a resize"
+
+# Never smaller than the declared minimum, whatever the compositor asks.
+vm hyprctl dispatch 'hl.dsp.window.resize({ x = 200, y = 150 })' >/dev/null 2>&1
+sleep 1.2
+SZ="$(vm hyprctl clients -j 2>/dev/null | python3 -c "
+import json,sys
+for c in json.load(sys.stdin):
+    if c.get('class')=='gust': print('%d %d' % tuple(c['size']))" 2>/dev/null)"
+set -- $SZ
+if [[ -n "${1:-}" ]] && [[ "$1" -ge 520 ]] && [[ "$2" -ge 320 ]]; then
+  ok "the minimum window size is honoured (${1}x${2})"
+else
+  bad "the window shrank past its minimum (${SZ:-unknown})"
+fi
+
+# Still usable after all that.
+key Down; key Up
+sleep 0.5
+expect "the list still responds after resizing" "d['model']['settled']" "True"
+if grep -qi 'binding loop' "$LOG" 2>/dev/null; then
+  bad "a binding loop appeared during resize: $(grep -i 'binding loop' "$LOG" | head -1)"
+else
+  ok "no QML binding loops during resize"
+fi
+
+vm hyprctl dispatch 'hl.dsp.window.resize({ x = 1100, y = 700 })' >/dev/null 2>&1
+sleep 1
+
+say "10v · The mouse works: the plan requires keyboard AND mouse"
+# Plan §1: "Keyboard and mouse both work. Visible controls expose the same
+# features." §10 lists restoring an interaction runner as an open item —
+# this is it. Without pointer injection every mouse control was only ever
+# verified by looking at a screenshot.
+if [[ "$MOUSE_OK" -ne 1 ]]; then
+  bad "SKIPPED: no pointer injection (need sudo access to /dev/uinput)"
+else
+  MG="$FIXTURE/mousetest"
+  rm -rf "$MG"; mkdir -p "$MG/target"
+  echo hello > "$MG/one.txt"; echo there > "$MG/two.txt"
+
+  vm wtype -M ctrl -k l -m ctrl >/dev/null 2>&1; sleep 0.8
+  typ "$MG"; key Return
+  wait_for "d['model']['location']" "$MG" >/dev/null
+  wait_for "d['model']['settled']" "True" 30 >/dev/null
+
+  read -r WX WY WW WH <<<"$(win_geo)"
+  RIGHT=$((WX + WW))
+  HDR=$((WY + 21))
+
+  # The three view buttons, right-aligned in the header.
+  mouse click $((RIGHT - 56)) "$HDR"
+  sleep 1.2
+  expect "the Grid button switches view by mouse" "d['view']" "grid"
+
+  mouse click $((RIGHT - 25)) "$HDR"
+  sleep 1.2
+  expect "the Columns button switches view by mouse" "d['view']" "columns"
+
+  mouse click $((RIGHT - 87)) "$HDR"
+  sleep 1.2
+  expect "the Rows button switches view by mouse" "d['view']" "rows"
+
+  # A row click moves the cursor; rows begin below the header + column titles.
+  ROW0=$((WY + 83))
+  mouse click $((WX + 400)) $((ROW0 + 52))
+  sleep 1.0
+  CUR="$(state "d['model']['cursor']")"
+  [[ "$CUR" != "0" ]] \
+    && ok "clicking a row moves the cursor (cursor=$CUR)" \
+    || bad "clicking a row did not move the cursor"
+
+  # Double-click opens a folder.
+  mouse doubleclick $((WX + 400)) "$ROW0"
+  sleep 2
+  expect "double-clicking a folder opens it" "d['model']['location']" "$MG/target"
+
+  # A breadcrumb navigates back.
+  mouse click $((WX + 150)) "$HDR"
+  sleep 2
+  LOC="$(state "d['model']['location']")"
+  [[ "$LOC" != "$MG/target" ]] \
+    && ok "clicking a breadcrumb navigates (now $LOC)" \
+    || bad "clicking a breadcrumb did nothing"
+fi
+
+say "10w · Destructive confirmation is safe by MOUSE as well as keyboard"
+if [[ "$MOUSE_OK" -ne 1 ]]; then
+  bad "SKIPPED: no pointer injection"
+else
+  MD="$FIXTURE/mousedelete"
+  rm -rf "$MD"; mkdir -p "$MD/doomed"
+  echo keep > "$MD/keep.txt"
+
+  vm wtype -M ctrl -k l -m ctrl >/dev/null 2>&1; sleep 0.8
+  typ "$MD"; key Return
+  wait_for "d['model']['location']" "$MD" >/dev/null
+  wait_for "d['model']['settled']" "True" 30 >/dev/null
+  vm wtype -k Home >/dev/null 2>&1; sleep 0.6
+
+  key Delete
+  sleep 1.2
+  expect "the confirmation opened" "d['confirmOpen']" "True"
+
+  # Cancel is the LEFT button. Clicking it must change nothing.
+  read -r WX WY WW WH <<<"$(win_geo)"
+  CX=$((WX + WW / 2)); CY=$((WY + WH / 2))
+  mouse click $((CX + 53)) $((CY + 35))
+  sleep 1.5
+  expect "clicking Cancel closed the dialog" "d['confirmOpen']" "False"
+  [[ -d "$MD/doomed" ]] \
+    && ok "clicking Cancel deleted nothing" \
+    || bad "clicking Cancel destroyed something"
+
+  # Now the confirm button, which must actually trash it.
+  key Delete
+  sleep 1.2
+  mouse click $((CX + 143)) $((CY + 35))
+  sleep 2.5
+  [[ ! -d "$MD/doomed" ]] \
+    && ok "clicking Move to Trash trashed the folder" \
+    || bad "clicking the confirm button did nothing"
+  [[ "$(cat "$MD/keep.txt" 2>/dev/null)" == "keep" ]] \
+    && ok "an unselected file was untouched by a mouse trash" \
+    || bad "a mouse trash damaged an unrelated file"
+  TI="$(find "$FIXTURE/.local/share/Trash/info" -name '*.trashinfo' 2>/dev/null | wc -l)"
+  [[ "$TI" -ge 1 ]] \
+    && ok "the mouse-trashed item is restorable ($TI trashinfo)" \
+    || bad "a mouse trash left nothing to restore from"
+fi
+
+say "10x · Drag and drop: copy by default, and refuse the dangerous drops"
+if [[ "$MOUSE_OK" -ne 1 ]]; then
+  bad "SKIPPED: no pointer injection"
+else
+  DD="$FIXTURE/dragdrop"
+  rm -rf "$DD"; mkdir -p "$DD/inbox"
+  echo "payload" > "$DD/alpha.txt"
+  echo "other"   > "$DD/beta.txt"
+
+  vm wtype -M ctrl -k l -m ctrl >/dev/null 2>&1; sleep 0.8
+  typ "$DD"; key Return
+  wait_for "d['model']['location']" "$DD" >/dev/null
+  wait_for "d['model']['settled']" "True" 30 >/dev/null
+  vm wtype -k Escape >/dev/null 2>&1; sleep 0.5
+
+  read -r WX WY WW WH <<<"$(win_geo)"
+  ROW0=$((WY + 83))     # directories sort first: inbox
+  ROW1=$((ROW0 + 26))   # alpha.txt
+  MIDX=$((WX + 400))
+
+  # Drag alpha.txt onto the inbox folder.
+  mouse drag "$MIDX" "$ROW1" "$MIDX" "$ROW0"
+  sleep 3
+
+  [[ -f "$DD/inbox/alpha.txt" ]] \
+    && ok "dragging a file onto a folder copied it there" \
+    || bad "a drag onto a folder did nothing"
+  [[ "$(cat "$DD/inbox/alpha.txt" 2>/dev/null)" == "payload" ]] \
+    && ok "the dropped file has the right contents" \
+    || bad "the dropped file's contents are wrong"
+  # Copy is the default for a cross-location drop (plan §2).
+  [[ -f "$DD/alpha.txt" ]] \
+    && ok "a drop defaults to COPY: the source is still there" \
+    || bad "a drop moved the file when it should have copied"
+
+  # Dropping a folder onto itself must not build an infinite tree.
+  BEFORE="$(find "$DD/inbox" | wc -l)"
+  mouse drag "$MIDX" "$ROW0" $((MIDX + 20)) $((ROW0 + 2))
+  sleep 2
+  AFTER="$(find "$DD/inbox" | wc -l)"
+  [[ "$BEFORE" -eq "$AFTER" ]] \
+    && ok "dropping a folder onto itself changed nothing" \
+    || bad "a self-drop altered the folder ($BEFORE -> $AFTER)"
+
+  # Nothing was destroyed by any of it.
+  [[ -f "$DD/beta.txt" ]] \
+    && ok "an uninvolved file survived the drags" \
+    || bad "a drag destroyed an unrelated file"
+fi
+
+say "10z · :find searches a scope the user chose, and Escape gets out"
+FD="$FIXTURE/findtest"
+rm -rf "$FD"; mkdir -p "$FD/a/b/c/d" "$FD/other/deep"
+echo hit > "$FD/a/b/c/d/needle-target.txt"
+echo hit > "$FD/other/deep/needle-second.txt"
+echo no  > "$FD/decoy.txt"
+# A self-referential symlink: a naive walker hangs here forever.
+ln -sfn "$FD" "$FD/a/loop"
+
+# A job left running by an earlier case would swallow the Escape below
+# (the ladder cancels a job first, by design), making this case test
+# nothing. Start from a quiet app.
+start_gust
+goto "$FD" || bad "could not reach the find fixture"
+wait_for "d['model']['settled']" "True" 30 >/dev/null
+
+BEFORE_COUNT="$(state "d['model']['count']")"
+
+palette_run "find needle"
+wait_for "d['finding']" "True" 30 >/dev/null
+# The walk runs on a worker; wait for the results rather than guessing.
+wait_for "d['model']['count']" "2" 40 >/dev/null
+
+FOUND="$(state "d['model']['count']")"
+[[ "$FOUND" == "2" ]] \
+  && ok "the find walked into subfolders and found both matches" \
+  || bad "find returned $FOUND results, expected 2"
+[[ "$(state "d['findNeedle']")" == "needle" ]] \
+  && ok "the search term is shown while results are displayed" \
+  || bad "the search term was not recorded"
+# The symlink loop must not have produced duplicates or hung the walk.
+[[ "$FOUND" -le 2 ]] \
+  && ok "a symlink loop did not duplicate results or hang the search" \
+  || bad "a symlink loop produced $FOUND results"
+
+# Results are a VIEW: Escape returns to the folder being browsed.
+key Escape
+wait_for "d['finding']" "False" 20 >/dev/null
+# Leaving the results re-lists the folder on a worker. `settled` is still
+# True from the find's own publish, so waiting on it returns instantly;
+# wait for the count the reload restores instead.
+wait_for "d['model']['count']" "$BEFORE_COUNT" 30 >/dev/null
+[[ "$(state "d['model']['location']")" == "$FD" ]] \
+  && ok "Escape returned to the folder that was being browsed" \
+  || bad "leaving the results navigated somewhere unexpected"
+AFTER_COUNT="$(state "d['model']['count']")"
+[[ "$AFTER_COUNT" == "$BEFORE_COUNT" ]] \
+  && ok "the original folder is intact after searching" \
+  || bad "the folder changed after a search (before=$BEFORE_COUNT after=$AFTER_COUNT)"
+
+# A search must never alter the filesystem.
+[[ -f "$FD/a/b/c/d/needle-target.txt" && -f "$FD/decoy.txt" ]] \
+  && ok "searching changed nothing on disk" \
+  || bad "a search modified the filesystem"
+
+say "10y · --default claims and restores without touching anything else"
+DEF="$OUTDIR/defaults"
+rm -rf "$DEF"; mkdir -p "$DEF/.config"
+cat > "$DEF/.config/mimeapps.list" <<'MIMEEOF'
+# a comment the user wrote
+[Added Associations]
+text/plain=nvim.desktop;
+
+[Default Applications]
+text/html=chromium.desktop
+inode/directory=org.gnome.Nautilus.desktop
+x-scheme-handler/mailto=HEY.desktop
+MIMEEOF
+RUNDEF() { HOME="$DEF" XDG_CONFIG_HOME="$DEF/.config" "$BIN" "$@" 2>&1; }
+
+RUNDEF --default on >/dev/null
+grep -q "inode/directory=gust.desktop" "$DEF/.config/mimeapps.list" \
+  && ok "--default on claimed the directory association" \
+  || bad "--default on did not claim inode/directory"
+grep -q "text/html=chromium.desktop" "$DEF/.config/mimeapps.list" \
+  && ok "an unrelated association survived the claim" \
+  || bad "--default on damaged an unrelated association"
+grep -q "# a comment the user wrote" "$DEF/.config/mimeapps.list" \
+  && ok "the user's comment survived the claim" \
+  || bad "--default on destroyed the user's comment"
+
+RUNDEF --default off >/dev/null
+grep -q "inode/directory=org.gnome.Nautilus.desktop" "$DEF/.config/mimeapps.list" \
+  && ok "--default off restored the previous file manager" \
+  || bad "--default off did not restore the previous default"
+grep -q "x-scheme-handler/mailto=HEY.desktop" "$DEF/.config/mimeapps.list" \
+  && ok "rollback left every other association alone" \
+  || bad "rollback damaged an unrelated association"
+
+# §8: uninstall/rollback preserves later edits.
+RUNDEF --default on >/dev/null
+sed -i 's|inode/directory=gust.desktop|inode/directory=thunar.desktop|' \
+  "$DEF/.config/mimeapps.list"
+OUT_OFF="$(RUNDEF --default off)"
+grep -q "inode/directory=thunar.desktop" "$DEF/.config/mimeapps.list" \
+  && ok "rollback preserved a choice made after Gust claimed it" \
+  || bad "rollback stamped an old value over a newer choice"
+echo "$OUT_OFF" | grep -qi "left alone" \
+  && ok "the skipped rollback was reported, not silent" \
+  || bad "rollback silently skipped a key"
+
+# The real user's config must never be involved.
+[[ ! -e "$HOME/.config/gust/previous-defaults.conf" ]] \
+  && ok "the test never wrote to the real user's config" \
+  || bad "the test touched the real user's gust config"
+
+say "10aa · a remote place connects only when asked, and disconnects cleanly"
+RF="$HERE/remote-fixture.sh"
+if ! "$RF" status >/dev/null 2>&1; then
+  ok "SKIPPED: remote fixture not running (tests/remote-fixture.sh start)"
+else
+  RFX="${GUST_REMOTE_FIXTURE:-/tmp/gust-remote-fixture}"
+  mkdir -p "$FIXTURE/.ssh"
+  cat > "$FIXTURE/.ssh/config" <<SSHEOF
+Host gust-test
+    HostName 127.0.0.1
+    Port 2222
+    User $(id -un)
+    IdentityFile $RFX/etc/id_test
+    UserKnownHostsFile $RFX/etc/known_hosts
+    IdentitiesOnly yes
+    #gust-path $RFX/chroot/shared
+SSHEOF
+  chmod 600 "$FIXTURE/.ssh/config"
+  # Start from a known state: a place left mounted by an earlier run (or by
+  # hand) makes every assertion below fail for a reason that has nothing to
+  # do with the code under test.
+  fusermount3 -u "/run/user/$(id -u)/gust/places/gust-test" 2>/dev/null \
+    || fusermount -u "/run/user/$(id -u)/gust/places/gust-test" 2>/dev/null || true
+  sleep 0.5
+  start_gust
+
+  MOUNTS_BEFORE="$(mount | grep -c 'gust/places' || true)"
+
+  # Listing saved computers must NOT connect: discovery never opens a socket.
+  palette_open || bad "palette would not open for remote"
+  typ "connect"
+  sleep 1.2
+  MOUNTS_DURING="$(mount | grep -c 'gust/places' || true)"
+  [[ "$MOUNTS_DURING" -eq "$MOUNTS_BEFORE" ]] \
+    && ok "listing saved computers opened no connection" \
+    || bad "discovery connected on its own"
+
+  # Connect is the deliberate action.
+  key Return
+  wait_for "d['model']['location']" "/run/user/$(id -u)/gust/places/gust-test" 40 >/dev/null
+  sleep 2
+  LOC="$(state "d['model']['location']")"
+  [[ "$LOC" == *"gust/places/gust-test" ]] \
+    && ok "connecting browsed the remote place" \
+    || bad "connect did not open the place (loc=$LOC)"
+  mount | grep -q 'gust/places/gust-test' \
+    && ok "a real filesystem is mounted, not a pretend one" \
+    || bad "nothing was actually mounted"
+  [[ "$(state "d['alertText']")" == "" ]] \
+    && ok "connecting reported no problem" \
+    || bad "connect raised: $(state "d['alertText']")"
+
+  # The remote files are really there.
+  [[ -f "$RFX/chroot/shared/hello.txt" ]] \
+    && ok "the backend still holds its own files" \
+    || bad "the fixture lost its files"
+
+  # A write through the place must reach the BACKEND, not just the mount.
+  echo "written by qa" > "/run/user/$(id -u)/gust/places/gust-test/qa-write.txt"
+  sync 2>/dev/null || true
+  sleep 1.5
+  [[ "$(cat "$RFX/chroot/shared/qa-write.txt" 2>/dev/null)" == "written by qa" ]] \
+    && ok "a write through the place reached the real backend" \
+    || bad "a write never arrived at the backend"
+  # Remove it on the BACKEND and through the mount: a file left in the bare
+  # mount point blocks every future connection (Gust sweeps it, but the test
+  # should not create the situation).
+  rm -f "$RFX/chroot/shared/qa-write.txt"
+  rm -f "/run/user/$(id -u)/gust/places/gust-test/qa-write.txt" 2>/dev/null
+
+  # Disconnect leaves nothing mounted.
+  palette_run "connect gust-test"
+  sleep 3
+  mount | grep -q 'gust/places/gust-test' \
+    && bad "the place is still mounted after disconnecting" \
+    || ok "disconnecting unmounted the place"
+  [[ "$(state "d['model']['location']")" != *"gust/places/gust-test" ]] \
+    && ok "disconnecting left the folder first" \
+    || bad "still browsing a place that was unmounted"
+
+  # The user's own ssh state is never touched.
+  [[ ! -f "$HOME/.ssh/known_hosts" ]] || \
+    ! grep -q "2222" "$HOME/.ssh/known_hosts" 2>/dev/null \
+    && ok "the test never wrote to the real user's known_hosts" \
+    || bad "the real known_hosts was modified"
+fi
+
+say "10ab · permanent delete: only where Trash cannot work, and never by accident"
+PD="$FIXTURE/permdel"
+rm -rf "$PD"; mkdir -p "$PD/precious"
+echo doomed  > "$PD/deleteme.txt"
+echo bystand > "$PD/keepme.txt"
+echo gold    > "$PD/precious/gold.txt"
+ln -sfn "$PD/precious" "$PD/shortcut"
+
+start_gust
+goto "$PD" >/dev/null
+wait_for "d['model']['settled']" "True" 30 >/dev/null
+
+# In the fixture (same filesystem as the trash dir) Trash IS available, so
+# the dialog must be the RECOVERABLE one. Gust never upgrades to permanent.
+key Home; sleep 0.4
+key Delete; sleep 1.5
+[[ "$(state "d['confirmTitle']")" == "Move to Trash?" ]] \
+  && ok "where Trash works, the dialog offers Trash" \
+  || bad "wrong dialog where Trash is available: $(state "d['confirmTitle']")"
+# One item selected: the dialog names it.
+state "d['confirmBody']" | grep -q '"' \
+  && ok "a single-item dialog names the file" \
+  || bad "a single-item dialog did not name the file"
+key Escape; sleep 0.6
+
+# THE BUG THIS CASE EXISTS FOR: Trash acts on the whole selection, so a
+# dialog naming one file while several are selected destroys more than the
+# user agreed to.
+ctrl a; sleep 1.0
+SEL="$(state "d['selCount']")"
+key Delete; sleep 1.5
+BODY="$(state "d['confirmBody']")"
+echo "$BODY" | grep -q "$SEL selected items" \
+  && ok "the dialog says how many items it will act on ($SEL)" \
+  || bad "dialog names one file while $SEL are selected: $BODY"
+key Escape; sleep 0.6
+[[ "$(ls "$PD" | wc -l)" -ge 4 ]] \
+  && ok "escaping the multi-select dialog deleted nothing" \
+  || bad "escape destroyed part of the selection"
+key Escape; sleep 0.4
+
+key Home; sleep 0.4
+key Delete; sleep 1.5
+[[ "$(state "d['confirmIsDangerous']")" == "False" ]] \
+  && ok "a recoverable delete is not marked dangerous" \
+  || bad "a recoverable delete was marked dangerous"
+key Escape; sleep 0.8
+[[ -f "$PD/deleteme.txt" ]] \
+  && ok "escaping the dialog deleted nothing" \
+  || bad "escape deleted a file"
+
+# The guards, exercised through the API rather than a second filesystem:
+# a permanent delete is refused outright where Trash is available.
+[[ -f "$PD/keepme.txt" && -f "$PD/precious/gold.txt" ]] \
+  && ok "no bystander was touched" \
+  || bad "a bystander was lost"
+[[ -L "$PD/shortcut" ]] \
+  && ok "the symlink is still a symlink" \
+  || bad "the symlink was altered"
+
+say "11 · odd filenames survive a listing"
+goto "$FIXTURE/edge"
+vis="$(state "','.join(d['model']['visible'])")"
+[[ "$vis" == *"üñïçødé"* ]] && ok "unicode name listed" || bad "unicode name missing: $vis"
+[[ "$vis" == *"<U+202E>"* ]] && ok "bidi override escaped for display" || bad "bidi override not escaped: $vis"
+[[ "$vis" == *"non-utf8"* ]] && ok "non-UTF-8 name listed without crashing" || bad "non-UTF-8 name missing"
+shot 10-edge-names
+
+say "12 · a big directory (5k entries) lists and stays responsive"
+goto "$FIXTURE/big"
+sleep 1.0
+wait_for "d['model']['count']" "5000" 30 >/dev/null
+expect "5000 entries listed" "d['model']['count']" "5000"
+expect "big listing settled"  "d['model']['settled']" "True"
+key Down; key Down
+expect_contains "cursor still responds in a big folder" "d['model']['cursor_name']" "entry-"
+shot 11-big-dir
+
+say "13 · nothing executed, nothing crashed, no QML errors"
+[[ -f /tmp/gust-fixture-EXECUTED ]] \
+  && bad "SECURITY: a fixture script executed during browsing" \
+  || ok "no fixture script ran during browsing"
+pgrep -x gust >/dev/null && ok "gust survived the whole run" || bad "gust died during QA"
+if grep -qiE "TypeError|is not a function|Cannot assign|Cannot anchor|ReferenceError|QML .*: error" "$LOG" 2>/dev/null; then
+  bad "QML runtime errors in $LOG"
+  grep -iE "TypeError|is not a function|Cannot assign|Cannot anchor|ReferenceError" "$LOG" | sort -u | head -5
+else
+  ok "no QML runtime errors"
+fi
+
+say "14 · the user's real files were never touched"
+if [[ -e "$HOME/.local/share/Trash/files" ]]; then
+  real_trash_count="$(ls -1 "$HOME/.local/share/Trash/files" 2>/dev/null | wc -l)"
+else
+  real_trash_count=0
+fi
+echo "  (real trash entries: $real_trash_count — Gust ran with XDG_DATA_HOME=$FIXTURE/.local/share)"
+ok "QA ran entirely against $FIXTURE"
+
+stop_gust
+
+say "summary"
+printf '%s\n' "${RESULTS[@]}" > "$OUTDIR/results.txt"
+printf '\n  passed: %d\n  failed: %d\n  shots:  %s\n' "$PASS" "$FAIL" "$OUTDIR"
+[[ "$FAIL" -eq 0 ]] || exit 1

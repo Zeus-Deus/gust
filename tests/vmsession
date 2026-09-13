@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# Resolve the Gust VM's OWN Hyprland session environment and exec a command in it.
+# This realm VM boots its own SDDM + Hyprland; there is no host socket reachable
+# from here (separate kernel, separate machine-id, no virtiofs/9p mounts).
+# Authorised by the user for GUI qualification of Gust.
+set -euo pipefail
+
+vm_session_env() {
+  local hypr_pid
+  hypr_pid="$(pgrep -x Hyprland | head -1)"
+  if [[ -z "$hypr_pid" ]]; then
+    echo "no Hyprland running in this VM" >&2
+    exit 1
+  fi
+  # Read the compositor's own environment rather than hardcoding names.
+  local envfile="/proc/${hypr_pid}/environ"
+  XDG_RUNTIME_DIR="$(tr '\0' '\n' < "$envfile" | sed -n 's/^XDG_RUNTIME_DIR=//p' | head -1)"
+  HYPRLAND_INSTANCE_SIGNATURE="$(basename "$(ls -d "${XDG_RUNTIME_DIR}"/hypr/*/ | head -1)")"
+  WAYLAND_DISPLAY="$(tr '\0' '\n' < "$envfile" | sed -n 's/^WAYLAND_DISPLAY=//p' | head -1)"
+  if [[ -z "$WAYLAND_DISPLAY" ]]; then
+    WAYLAND_DISPLAY="$(cd "$XDG_RUNTIME_DIR" && ls | grep -E '^wayland-[0-9]+$' | head -1)"
+  fi
+  export XDG_RUNTIME_DIR HYPRLAND_INSTANCE_SIGNATURE WAYLAND_DISPLAY
+  export QT_QPA_PLATFORM=wayland
+  export XDG_SESSION_TYPE=wayland
+}
+
+vm_session_env
+
+# A GUI test must never be able to reach the real user's data by inheriting
+# a stale XDG_* from the launching shell. Any run script that sets HOME is
+# declaring an isolated run, so every XDG data path follows that HOME unless
+# the script set it explicitly itself.
+#
+# This is belt and braces: the trash capability check already refuses to
+# trash across filesystems, which is what stopped a redirected run from
+# writing into the real home. But "it was caught downstream" is not
+# isolation.
+gust_isolate_xdg() {
+  [[ -n "${GUST_TEST_HOME:-}" ]] || return 0
+  export HOME="$GUST_TEST_HOME"
+  export XDG_DATA_HOME="${GUST_TEST_HOME}/.local/share"
+  export XDG_CONFIG_HOME="${GUST_TEST_HOME}/.config"
+  export XDG_CACHE_HOME="${GUST_TEST_HOME}/.cache"
+  export XDG_STATE_HOME="${GUST_TEST_HOME}/.local/state"
+  mkdir -p "$XDG_DATA_HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_STATE_HOME"
+}
+gust_isolate_xdg
+
+if [[ "${1:-}" == "--print" ]]; then
+  echo "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR"
+  echo "WAYLAND_DISPLAY=$WAYLAND_DISPLAY"
+  echo "HYPRLAND_INSTANCE_SIGNATURE=$HYPRLAND_INSTANCE_SIGNATURE"
+  echo "HOME=$HOME"
+  echo "XDG_DATA_HOME=${XDG_DATA_HOME:-}"
+  exit 0
+fi
+exec "$@"
