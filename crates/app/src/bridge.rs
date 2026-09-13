@@ -270,6 +270,14 @@ pub mod qobject {
         /// Duplicate the row beside itself, e.g. `notes (copy).txt`.
         #[qinvokable]
         fn duplicate_row(self: Pin<&mut DirModel>, row: i32) -> QString;
+        /// Preview a bulk rename over the selection, as JSON. Touches
+        /// nothing: the user sees every old → new before anything happens
+        /// (DESIGN §6.16).
+        #[qinvokable]
+        fn bulk_preview(self: &DirModel, row: i32, pattern: &QString) -> QString;
+        /// Run a bulk rename the user has already seen. All or nothing.
+        #[qinvokable]
+        fn bulk_apply(self: Pin<&mut DirModel>, row: i32, pattern: &QString) -> QString;
 
         /// Poll the running job; refreshes the listing when it finishes.
         /// Returns a JSON snapshot, or "" when no job is running.
@@ -442,6 +450,9 @@ pub struct DirModelRust {
     type_ahead: gust_core::search::TypeAhead,
     /// The last trashed item plus its display label, for a one-step undo.
     last_trashed_batch: Vec<(gust_ops::trash::TrashedItem, String)>,
+    /// Every (from, to) of the last bulk rename, so one Ctrl+Z puts them
+    /// all back — one user action, one undo entry (DESIGN §6.16).
+    last_bulk_rename: Vec<(std::path::PathBuf, std::path::PathBuf)>,
     /// What Ctrl+C / Ctrl+X marked, waiting for a paste.
     clipboard: Option<(Vec<std::path::PathBuf>, ClipMode)>,
     /// The job currently running, if any. Only one at a time in M2.
@@ -557,6 +568,7 @@ impl Default for DirModelRust {
             forward: Vec::new(),
             type_ahead: gust_core::search::TypeAhead::default(),
             last_trashed_batch: Vec::new(),
+            last_bulk_rename: Vec::new(),
             clipboard: None,
             job: None,
             load_cancel: CancelToken::new(),
@@ -2642,6 +2654,55 @@ impl qobject::DirModel {
     }
 
     fn undo_last(mut self: Pin<&mut Self>) -> QString {
+        // A bulk rename is one user action, so one Ctrl+Z puts every name
+        // back — not forty separate undos (DESIGN §6.16).
+        let renames = self.as_ref().last_bulk_rename.clone();
+        if !renames.is_empty() {
+            let mut back = 0usize;
+            let mut refusals: Vec<String> = Vec::new();
+            // Reverse order, and through the same two-phase trick, so a
+            // swap undoes as cleanly as it was done.
+            let dir = self
+                .as_ref()
+                .key
+                .as_path()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_default();
+            let plan = gust_ops::bulk::RenamePlan {
+                renames: renames
+                    .iter()
+                    .rev()
+                    .map(|(from, to)| gust_ops::bulk::PlannedRename {
+                        from: to.clone(),
+                        to: from.clone(),
+                        old_name: to
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_default(),
+                        new_name: from
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_default(),
+                        unchanged: false,
+                    })
+                    .collect(),
+                problems: Vec::new(),
+            };
+            let outcome = gust_ops::bulk::execute(&dir, &plan);
+            back += outcome.done.len();
+            refusals.extend(outcome.failed);
+
+            self.as_mut().rust_mut().last_bulk_rename.clear();
+            self.as_mut().reload();
+            let msg = if refusals.is_empty() {
+                format!("Put {back} name{} back", if back == 1 { "" } else { "s" })
+            } else {
+                format!("Put {back} back; {} could not be undone", refusals.len())
+            };
+            self.as_mut().set_status(QString::from(&msg));
+            return QString::default();
+        }
+
         // A completed copy/move is more recent than any trash batch it
         // followed, so it is undone first.
         if let Some(job) = self.as_ref().last_job.clone() {
@@ -2726,6 +2787,13 @@ impl qobject::DirModel {
     }
 
     fn undo_label(&self) -> QString {
+        let n = self.last_bulk_rename.len();
+        if n > 0 {
+            return QString::from(&format!(
+                "Undo: put {n} name{} back",
+                if n == 1 { "" } else { "s" }
+            ));
+        }
         if let Some(job) = &self.last_job {
             let n = job.entries.iter().filter(|e| e.done).count();
             let noun = if n == 1 { "item" } else { "items" };
@@ -3065,6 +3133,91 @@ impl qobject::DirModel {
                 QString::from("a file with that name already exists")
             }
             Err(e) => QString::from(&format!("{e}")),
+        }
+    }
+
+    /// The files a bulk rename would act on, in the order shown on screen.
+    ///
+    /// `target_paths` already resolves the selection against the VISIBLE
+    /// entries, so the order is the user's current sort — numbering that
+    /// matches nothing on screen would be useless. Selection stores names,
+    /// not indices, which is why this cannot be done by index arithmetic.
+    fn bulk_targets(&self, row: i32) -> Vec<std::path::PathBuf> {
+        if self.selection.is_empty() {
+            return self.path_of_row(row).into_iter().collect();
+        }
+        self.target_paths()
+    }
+
+    fn bulk_preview(&self, row: i32, pattern: &QString) -> QString {
+        let Some(dir) = self.key.as_path().map(|p| p.to_path_buf()) else {
+            return QString::from(r#"{"ok":false,"summary":"Not a folder"}"#);
+        };
+        let files = self.bulk_targets(row);
+        let plan = gust_ops::bulk::plan(&dir, &files, &pattern.to_string());
+
+        let mut rows = String::from("[");
+        for (i, r) in plan.renames.iter().take(200).enumerate() {
+            if i > 0 {
+                rows.push(',');
+            }
+            rows.push_str(&format!(
+                r#"{{"from":{},"to":{},"unchanged":{}}}"#,
+                Self::json_str(&r.old_name),
+                Self::json_str(&r.new_name),
+                r.unchanged
+            ));
+        }
+        rows.push(']');
+
+        let mut problems = String::from("[");
+        for (i, p) in plan.problems.iter().take(50).enumerate() {
+            if i > 0 {
+                problems.push(',');
+            }
+            problems.push_str(&Self::json_str(&p.message()).to_string());
+        }
+        problems.push(']');
+
+        QString::from(format!(
+            r#"{{"ok":{},"summary":{},"changing":{},"rows":{},"problems":{}}}"#,
+            plan.is_safe(),
+            Self::json_str(&plan.summary()),
+            plan.changing(),
+            rows,
+            problems
+        ))
+    }
+
+    fn bulk_apply(mut self: Pin<&mut Self>, row: i32, pattern: &QString) -> QString {
+        let Some(dir) = self.as_ref().key.as_path().map(|p| p.to_path_buf()) else {
+            return QString::from("This place cannot be renamed in.");
+        };
+        let files = self.as_ref().bulk_targets(row);
+        let plan = gust_ops::bulk::plan(&dir, &files, &pattern.to_string());
+
+        // The plan is rebuilt here rather than carried from the preview: the
+        // folder may have changed while the dialog was open, and renaming
+        // against a stale plan is how a bystander file gets overwritten.
+        if !plan.is_safe() {
+            return QString::from(plan.summary());
+        }
+
+        let outcome = gust_ops::bulk::execute(&dir, &plan);
+
+        // One journal entry, not forty: one Ctrl+Z undoes one user action.
+        if !outcome.done.is_empty() {
+            self.as_mut().rust_mut().last_bulk_rename = outcome.done.clone();
+        }
+        self.as_mut().rust_mut().selection.clear();
+        self.as_mut().reload();
+
+        let msg = outcome.summary();
+        self.as_mut().set_status(QString::from(&msg));
+        if outcome.failed.is_empty() {
+            QString::default()
+        } else {
+            QString::from(outcome.failed.join(", "))
         }
     }
 

@@ -183,6 +183,85 @@ Window {
         win.qaDump("share-mount")
     }
 
+    // --- bulk rename (DESIGN §6.16) --------------------------------------
+    property string bulkPattern: ""
+    property string bulkLines: ""
+    property string bulkSummary: ""
+
+    /// Opens the preview once the rename prompt has finished fading, so the
+    /// prompt's own refocus cannot steal the keyboard from the dialog.
+    Timer {
+        id: bulkConfirmAfterPrompt
+        interval: Tokens.animFast + 60
+        repeat: false
+        onTriggered: {
+            confirm.purpose = "bulk"
+            confirm.open(win.bulkSummary, win.bulkLines, qsTr("Rename"), false)
+            win.qaDump("bulk-confirm-open")
+        }
+    }
+
+    function askBulkRename() {
+        if (!dirModel || dirModel.count === 0) return
+        prompt.secret = false
+        prompt.mode = "bulk"
+        prompt.openWith(qsTr("Rename these files"), "{name}.{ext}",
+                        qsTr("{n} numbers them · {name} is the name · {ext} the extension"))
+        win.qaDump("bulk-prompt")
+    }
+
+    /// Show the plan before anything happens. A bulk rename the user has
+    /// not seen is the most dangerous ordinary operation there is.
+    function bulkPreview(pattern) {
+        win.bulkPattern = pattern
+        let plan = null
+        try {
+            plan = JSON.parse(dirModel.bulk_preview(dirModel.cursor, pattern))
+        } catch (e) {
+            plan = null
+        }
+        if (!plan) {
+            prompt.errorText = qsTr("That pattern could not be read")
+            win.qaDump("bulk-bad")
+            return
+        }
+        if (!plan.ok) {
+            // Stay in the prompt with the reason, so the pattern can be
+            // corrected without retyping it.
+            prompt.errorText = plan.summary
+                + (plan.problems.length > 0 ? "  ·  " + plan.problems[0] : "")
+            win.qaDump("bulk-refused")
+            return
+        }
+
+        // Build the old → new list the user confirms against.
+        let lines = []
+        for (let i = 0; i < plan.rows.length && i < 12; i++) {
+            const r = plan.rows[i]
+            if (r.unchanged) continue
+            lines.push(r.from + "  →  " + r.to)
+        }
+        if (plan.changing > lines.length)
+            lines.push("… and " + (plan.changing - lines.length) + " more")
+
+        // NOT confirm.open() straight after prompt.close(): closing the
+        // prompt schedules a focusList() for when its fade finishes, and
+        // that would land after the dialog took focus and hand the keyboard
+        // back to the file list. Open the dialog once the prompt is gone.
+        win.bulkLines = lines.join("\n")
+        win.bulkSummary = plan.summary
+        prompt.close()
+        bulkConfirmAfterPrompt.start()
+        win.qaDump("bulk-confirm")
+    }
+
+    function bulkApply() {
+        const err = dirModel.bulk_apply(dirModel.cursor, win.bulkPattern)
+        if (err !== "") win.alertText = err
+        win.bulkPattern = ""
+        win.qaDump("bulk-done")
+    }
+
     /// Eject a device. Refused while a transfer is running, because pulling
     /// a filesystem out from under a copy is how people lose data.
     function ejectDevice(path) {
@@ -1355,6 +1434,10 @@ Window {
         onAccepted: (text) => {
             // The share steps chain: each one opens the next rather than
             // finishing, so they return early.
+            if (prompt.mode === "bulk") {
+                win.bulkPreview(text)
+                return
+            }
             if (prompt.mode === "share-address") {
                 win.shareAddressEntered(text)
                 return
@@ -1422,6 +1505,9 @@ Window {
                 ? "vim: h/j/k/l move, l open, r rename, y/d/p copy/cut/paste"
                 : "arrows move, Enter open, F2 rename, Ctrl+C/X/V, Ctrl+N new folder"
             else if (a === "noop") { /* nothing to do */ }
+            else if (a === "bulk") {
+                win.askBulkRename()
+            }
             else if (a === "compress") {
                 const cerr = dirModel.compress_selection(dirModel.cursor)
                 if (cerr !== "") win.alertText = cerr
@@ -1535,6 +1621,10 @@ Window {
         onVisibleChanged: win.qaDump("confirm")
         onClosed: win.focusList()
         onAccepted: {
+            if (confirm.purpose === "bulk") {
+                win.bulkApply()
+                return
+            }
             if (confirm.purpose === "clouddirty") {
                 // The user was told exactly how many files are unfinished
                 // and chose to go anyway. Only now is force allowed.
@@ -1592,30 +1682,25 @@ Window {
             win.qaDump("trashed")
         }
         onRejected: {
+            // Cancel means CANCEL. This handler used to carry a copy of the
+            // accept branches, so cancelling "disconnect anyway?" force-
+            // disconnected and cancelling "close this tab?" closed it —
+            // exactly the opposite of what the button says.
             if (confirm.purpose === "clouddirty") {
-                // The user was told exactly how many files are unfinished
-                // and chose to go anyway. Only now is force allowed.
-                const cn = win.pendingCloudOff
                 win.pendingCloudOff = ""
-                if (cn === "") return
-                const e = dirModel.cloud_disconnect(cn, true)
-                if (e !== "") win.alertText = e
-                win.refreshPlaces()
-                win.qaDump("cloud-disconnect-forced")
+                win.qaDump("cloud-disconnect-cancelled")
+                return
+            }
+            if (confirm.purpose === "bulk") {
+                win.bulkPattern = ""
+                win.qaDump("bulk-cancelled")
                 return
             }
             if (confirm.purpose === "closetab") {
-                const i = win.pendingCloseTab
+                // Keep the tab AND its transfer: that is what Cancel means.
                 win.pendingCloseTab = -1
-                if (i < 0) return
-                const m = win.tabModelAt(i)
-                if (m) m.cancel_job()
-                // Give the worker a moment to notice, then close the tab —
-                // the same courtesy the window close already extends.
-                closeTabAfterCancel.target = i
-                closeTabAfterCancel.ticks = 0
-                closeTabAfterCancel.start()
-                win.qaDump("tab-close-confirmed")
+                hints.status = qsTr("Transfer continues")
+                win.qaDump("tab-close-cancelled")
                 return
             }
             if (confirm.purpose === "close") {

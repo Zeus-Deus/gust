@@ -688,6 +688,66 @@ Encrypted archives, multi-part archives, and writing formats other than
 `.tar.zst`. Reading covers whatever the installed bsdtar reads; a format it
 does not know fails with the reason rather than a guess.
 
+## 6.16 Bulk rename
+
+Mockup C gives it a key of its own (`R`). It is the most dangerous ordinary
+operation in a file manager: one mistake renames forty files at once, and
+unlike a copy there is nothing left to compare against.
+
+So the whole design is: **decide everything, show it, then do it.**
+
+### A pattern, not a script
+
+The user types a pattern with placeholders:
+
+| Token | Becomes |
+|---|---|
+| `{n}` | a counter, from 1, zero-padded to the width of the largest number |
+| `{name}` | the original name without its extension |
+| `{ext}` | the original extension, without the dot |
+
+`holiday-{n}.{ext}` over three JPEGs gives `holiday-1.jpg`, `holiday-2.jpg`,
+`holiday-3.jpg`. Anything that is not a token is a literal, including braces
+that do not form one — a file genuinely called `{n}` is possible and is left
+alone.
+
+There is no regular expression and no shell. A pattern language small enough
+to explain in one table is a pattern language nobody can be surprised by.
+
+### The preview is the feature
+
+Nothing is renamed until the user has seen the full list of
+`old name → new name`, **including the failures**. The plan is built before
+a single file is touched, and the plan reports:
+
+- every rename that would collide with an existing file
+- every rename that would collide with *another rename in the same batch*
+- every name the filesystem would reject (empty, `/`, NUL, `.`, `..`)
+- every file whose name would not change at all
+
+If any entry is refused, **nothing is renamed**. A partial bulk rename is
+the worst outcome: the user cannot tell which half happened, and running it
+again does something different. All or nothing.
+
+### Ordering is the user's, not the disk's
+
+Files are numbered in the order the user is looking at them — the current
+sort — not in whatever order the filesystem returned. Numbering by inode
+order would produce a sequence that matches nothing on screen.
+
+### Undo
+
+Bulk rename goes through the same journal as everything else, so Ctrl+Z puts
+every name back. The undo entry records each old and new path; it is one
+entry, not forty, because one Ctrl+Z should undo one user action.
+
+### Two-phase execution
+
+`a.txt → b.txt` and `b.txt → a.txt` in one batch is a legitimate swap, and
+renaming them in sequence destroys one of them. Every rename therefore goes
+to a unique temporary name first, then to its final name. A crash between
+phases leaves recoverable temporary names rather than a lost file.
+
 ## 7. Undo journal
 
 An undo entry records, per affected path: the expected identity

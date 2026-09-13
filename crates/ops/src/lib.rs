@@ -5,6 +5,7 @@
 
 pub mod anchor;
 pub mod archive;
+pub mod bulk;
 pub mod engine;
 pub mod jobs;
 pub mod journal;
