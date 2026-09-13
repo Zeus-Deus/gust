@@ -62,7 +62,19 @@ pub enum UndoStep {
     /// Move something back where it came from.
     MoveBack { from: PathBuf, to: PathBuf },
     /// Remove a file the operation created — only after identity verification.
-    RemoveCreated { path: PathBuf },
+    ///
+    /// `expected` is the identity recorded when the operation created it.
+    /// `apply_undo` re-checks it immediately before removing, because time
+    /// passes between planning and applying and a file edited in that window
+    /// must survive.
+    RemoveCreated {
+        path: PathBuf,
+        expected: Option<RecordedIdentity>,
+        /// Identities of everything inside, when `path` is a directory. An
+        /// empty map means "nothing recorded", which is refused rather than
+        /// assumed safe.
+        subtree: BTreeMap<PathBuf, RecordedIdentity>,
+    },
     /// Restore preserved overwritten bytes.
     RestorePreserved { preserved: PathBuf, to: PathBuf },
 }
@@ -135,6 +147,45 @@ pub fn verify_subtree_unchanged(
     None
 }
 
+/// Verify a subtree contains exactly what the operation created.
+///
+/// Unlike `verify_subtree_unchanged`, a path listed in `preexisting` is
+/// EXPECTED to be there and is not treated as new work: a merging copy lands
+/// beside the user's own files, and those files are not evidence of tampering.
+/// They are, however, never removed — `plan_undo` filters them out of the
+/// removal set.
+pub fn verify_created_subtree(
+    root: &Path,
+    recorded: &BTreeMap<PathBuf, RecordedIdentity>,
+    preexisting: &std::collections::BTreeSet<&PathBuf>,
+) -> Option<UndoRefusal> {
+    let current = snapshot_subtree(root);
+
+    // Anything present now that was neither recorded nor known to predate the
+    // operation is new work created since.
+    for path in current.keys() {
+        if !recorded.contains_key(path) && !preexisting.contains(path) {
+            return Some(UndoRefusal::NewWorkPresent(path.clone()));
+        }
+    }
+    // Everything we created must still be byte-identical. A pre-existing path
+    // may legitimately have changed; it is not ours and will not be removed.
+    for (path, rec) in recorded {
+        if preexisting.contains(path) {
+            continue;
+        }
+        match FileIdentity::of_path(path) {
+            Ok(now) => {
+                if !rec.matches(&now) {
+                    return Some(UndoRefusal::DescendantChanged(path.clone()));
+                }
+            }
+            Err(_) => return Some(UndoRefusal::DescendantChanged(path.clone())),
+        }
+    }
+    None
+}
+
 /// Decide whether a job can be undone right now.
 pub fn plan_undo(job: &Job) -> UndoPlan {
     if !job.kind.is_undoable() {
@@ -153,7 +204,15 @@ pub fn plan_undo(job: &Job) -> UndoPlan {
 
         match job.kind {
             // Undoing a copy removes the created copy — but only after
-            // proving it is still exactly the file we created.
+            // proving it is still exactly the file we created, and only for
+            // paths the copy actually CREATED.
+            //
+            // A copy into an existing directory merges: the destination
+            // folder and any file already in it belong to the user, not to
+            // this operation. Removing the whole destination tree destroys
+            // data the copy never wrote, which is the merged-copy data-loss
+            // case. So the recorded set is filtered to what the operation
+            // created, and anything pre-existing is deliberately left.
             JobKind::Copy | JobKind::Extract => {
                 if dest.is_dir() {
                     let recorded: BTreeMap<PathBuf, RecordedIdentity> = job
@@ -162,10 +221,37 @@ pub fn plan_undo(job: &Job) -> UndoPlan {
                         .filter(|(p, _)| p.starts_with(dest))
                         .cloned()
                         .collect();
-                    if let Some(reason) = verify_subtree_unchanged(dest, &recorded) {
+                    if recorded.is_empty() {
+                        return UndoPlan::Refused(UndoRefusal::IdentityUnknown(dest.clone()));
+                    }
+                    // Paths that existed at the destination BEFORE this
+                    // operation are not ours to delete.
+                    let preexisting: std::collections::BTreeSet<&PathBuf> =
+                        job.preexisting_at_dest.iter().collect();
+                    if let Some(reason) = verify_created_subtree(dest, &recorded, &preexisting) {
                         return UndoPlan::Refused(reason);
                     }
+                    let owned: BTreeMap<PathBuf, RecordedIdentity> = recorded
+                        .into_iter()
+                        .filter(|(p, _)| !preexisting.contains(p))
+                        .collect();
+                    if owned.is_empty() {
+                        // Everything under the destination predates the copy:
+                        // there is nothing this operation created to remove.
+                        continue;
+                    }
+                    steps.push(UndoStep::RemoveCreated {
+                        path: dest.clone(),
+                        expected: None,
+                        subtree: owned,
+                    });
+                    continue;
                 } else {
+                    // A single file that already existed and was replaced is
+                    // restored from its preserved copy, never deleted.
+                    if job.preexisting_at_dest.contains(dest) && e.preserved.is_none() {
+                        return UndoPlan::Refused(UndoRefusal::NewWorkPresent(dest.clone()));
+                    }
                     let Some(expected) = job
                         .subtree_identities
                         .iter()
@@ -183,8 +269,12 @@ pub fn plan_undo(job: &Job) -> UndoPlan {
                             return UndoPlan::Refused(UndoRefusal::IdentityUnknown(dest.clone()))
                         }
                     }
+                    steps.push(UndoStep::RemoveCreated {
+                        path: dest.clone(),
+                        expected: Some(expected),
+                        subtree: BTreeMap::new(),
+                    });
                 }
-                steps.push(UndoStep::RemoveCreated { path: dest.clone() });
             }
             // Undoing a move/rename puts it back.
             JobKind::Move | JobKind::Rename | JobKind::Trash => {
@@ -194,7 +284,25 @@ pub fn plan_undo(job: &Job) -> UndoPlan {
                 });
             }
             JobKind::NewFolder => {
-                steps.push(UndoStep::RemoveCreated { path: dest.clone() });
+                // A folder we created: removable only while still empty, and
+                // only when its identity is the one recorded. Anything the
+                // user has since put inside keeps it.
+                let expected = job
+                    .subtree_identities
+                    .iter()
+                    .find(|(p, _)| p == dest)
+                    .map(|(_, id)| *id);
+                let mut subtree = BTreeMap::new();
+                if let Some(id) = expected {
+                    subtree.insert(dest.clone(), id);
+                } else {
+                    return UndoPlan::Refused(UndoRefusal::IdentityUnknown(dest.clone()));
+                }
+                steps.push(UndoStep::RemoveCreated {
+                    path: dest.clone(),
+                    expected: None,
+                    subtree,
+                });
             }
             JobKind::DeletePermanent => {
                 return UndoPlan::Refused(UndoRefusal::NotUndoable(job.kind));
@@ -267,12 +375,22 @@ mod tests {
         ));
         match plan_undo(&job) {
             UndoPlan::Safe { steps } => {
-                assert_eq!(
-                    steps,
-                    vec![UndoStep::RemoveCreated {
-                        path: d.join("dst.txt")
-                    }]
-                );
+                assert_eq!(steps.len(), 1);
+                match &steps[0] {
+                    UndoStep::RemoveCreated {
+                        path,
+                        expected,
+                        subtree,
+                    } => {
+                        assert_eq!(path, &d.join("dst.txt"));
+                        assert!(
+                            expected.is_some(),
+                            "a file removal must carry the identity it will re-verify"
+                        );
+                        assert!(subtree.is_empty(), "a single file has no subtree");
+                    }
+                    other => panic!("expected RemoveCreated, got {other:?}"),
+                }
             }
             other => panic!("expected Safe, got {other:?}"),
         }
@@ -468,10 +586,15 @@ pub fn apply_undo(plan: &UndoPlan) -> UndoOutcome {
                 }
             }
 
-            UndoStep::RemoveCreated { path } => {
-                // Re-verify: the plan proved this was our copy, but that was
-                // then. Anything edited since must not be deleted.
-                match remove_verified(path) {
+            UndoStep::RemoveCreated {
+                path,
+                expected,
+                subtree,
+            } => {
+                // Re-verify NOW. The plan proved this was our copy, but that
+                // was then: a dialog may have been on screen for a minute and
+                // anything edited in that window must survive.
+                match remove_verified(path, expected.as_ref(), subtree) {
                     Ok(()) => out.steps_done += 1,
                     Err(why) => out.problems.push(why),
                 }
@@ -487,23 +610,128 @@ pub fn apply_undo(plan: &UndoPlan) -> UndoOutcome {
 }
 
 /// Remove something this operation created, refusing anything surprising.
-fn remove_verified(path: &Path) -> Result<(), String> {
+///
+/// `expected` must match the object on disk RIGHT NOW, not at plan time. For a
+/// directory, only the exact paths in `owned` are removed, deepest first, and
+/// each is re-verified as it goes. Anything not in `owned` — a file the user
+/// created since, or one that predates the operation — stops the removal of
+/// its parent and is reported.
+fn remove_verified(
+    path: &Path,
+    expected: Option<&RecordedIdentity>,
+    owned: &BTreeMap<PathBuf, RecordedIdentity>,
+) -> Result<(), String> {
     let Ok(md) = path.symlink_metadata() else {
         // Already gone: the desired state, not a failure.
         return Ok(());
     };
 
+    // A symlink is unlinked, never followed — but only after proving it is
+    // still the link the operation created. Copying a link onto itself and
+    // undoing that must not remove the user's original.
     if md.file_type().is_symlink() {
+        if let Some(exp) = expected {
+            match FileIdentity::of_path(path) {
+                Ok(now) if exp.matches(&now) => {}
+                Ok(_) => {
+                    return Err(format!(
+                        "{} changed since the operation — left in place",
+                        path.display()
+                    ))
+                }
+                Err(_) => return Err(format!("cannot verify {} — left in place", path.display())),
+            }
+        } else {
+            return Err(format!(
+                "{} has no recorded identity — left in place",
+                path.display()
+            ));
+        }
         return std::fs::remove_file(path).map_err(|e| format!("{}: {e}", path.display()));
     }
+
     if md.is_file() {
+        let Some(exp) = expected else {
+            return Err(format!(
+                "{} has no recorded identity — left in place",
+                path.display()
+            ));
+        };
+        match FileIdentity::of_path(path) {
+            Ok(now) if exp.matches(&now) => {}
+            Ok(_) => {
+                return Err(format!(
+                    "{} changed since the operation — left in place",
+                    path.display()
+                ))
+            }
+            Err(_) => return Err(format!("cannot verify {} — left in place", path.display())),
+        }
         return std::fs::remove_file(path).map_err(|e| format!("{}: {e}", path.display()));
     }
+
     if md.is_dir() {
-        // Only remove a directory we can empty by removing exactly what the
-        // operation put there. `remove_dir_all` would take new work with it,
-        // which DESIGN.md §7 forbids.
-        return crate::recursive::remove_tree(path).map_err(|e| format!("{}: {e}", path.display()));
+        // Remove exactly what the operation created, deepest first, each
+        // re-verified immediately before it goes. `remove_dir_all` would take
+        // new work with it, which DESIGN.md §7 forbids.
+        if owned.is_empty() {
+            return Err(format!(
+                "{} has no recorded contents — left in place",
+                path.display()
+            ));
+        }
+        let mut problems: Vec<String> = Vec::new();
+        // Deepest paths first so directories are empty when reached.
+        let mut paths: Vec<&PathBuf> = owned.keys().collect();
+        paths.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
+
+        for p in paths {
+            let Ok(pmd) = p.symlink_metadata() else {
+                continue; // already gone
+            };
+            let exp = owned.get(p);
+            if pmd.file_type().is_symlink() || pmd.is_file() {
+                match (exp, FileIdentity::of_path(p)) {
+                    (Some(e), Ok(now)) if e.matches(&now) => {
+                        if let Err(err) = std::fs::remove_file(p) {
+                            problems.push(format!("{}: {err}", p.display()));
+                        }
+                    }
+                    (Some(_), Ok(_)) => problems.push(format!(
+                        "{} changed since the operation — left in place",
+                        p.display()
+                    )),
+                    _ => problems.push(format!("cannot verify {} — left in place", p.display())),
+                }
+            } else if pmd.is_dir() {
+                // Only removable once empty; if the user put something new in
+                // it, removal fails and that is the correct outcome.
+                if p.as_path() == path {
+                    continue; // the root is handled last, below
+                }
+                if let Err(err) = std::fs::remove_dir(p) {
+                    problems.push(format!(
+                        "{} was not empty — left in place ({err})",
+                        p.display()
+                    ));
+                }
+            }
+        }
+        // Finally the root, only if the operation created it and it is now
+        // empty. A merged copy's destination folder predates the operation and
+        // will still hold the user's files, so this legitimately fails.
+        if owned.contains_key(&path.to_path_buf()) {
+            if let Err(err) = std::fs::remove_dir(path) {
+                problems.push(format!(
+                    "{} was not empty — left in place ({err})",
+                    path.display()
+                ));
+            }
+        }
+        if !problems.is_empty() {
+            return Err(problems.join("; "));
+        }
+        return Ok(());
     }
     Err(format!("{} is a special file — left alone", path.display()))
 }
@@ -512,6 +740,27 @@ fn remove_verified(path: &Path) -> Result<(), String> {
 mod apply_tests {
     use super::*;
     use std::fs;
+
+    /// A removal step carrying the identity the file has right now, which is
+    /// what a real plan records. Using this in a test means the step goes
+    /// through the same re-verification a real undo does.
+    fn remove_now(path: &Path) -> UndoStep {
+        let expected = FileIdentity::of_path(path).ok().map(RecordedIdentity::from);
+        let mut subtree = BTreeMap::new();
+        if path.is_dir()
+            && !path
+                .symlink_metadata()
+                .map(|m| m.file_type().is_symlink())
+                .unwrap_or(false)
+        {
+            subtree = snapshot_subtree(path);
+        }
+        UndoStep::RemoveCreated {
+            path: path.to_path_buf(),
+            expected,
+            subtree,
+        }
+    }
 
     fn tmp(tag: &str) -> PathBuf {
         let p = std::env::temp_dir().join(format!(
@@ -568,9 +817,7 @@ mod apply_tests {
         let d = tmp("removecopy");
         fs::write(d.join("copy.txt"), b"a copy").unwrap();
         let plan = UndoPlan::Safe {
-            steps: vec![UndoStep::RemoveCreated {
-                path: d.join("copy.txt"),
-            }],
+            steps: vec![remove_now(&d.join("copy.txt"))],
         };
         assert!(apply_undo(&plan).is_complete());
         assert!(!d.join("copy.txt").exists());
@@ -583,6 +830,8 @@ mod apply_tests {
         let plan = UndoPlan::Safe {
             steps: vec![UndoStep::RemoveCreated {
                 path: d.join("never-existed"),
+                expected: None,
+                subtree: BTreeMap::new(),
             }],
         };
         let out = apply_undo(&plan);
@@ -599,9 +848,7 @@ mod apply_tests {
         fs::create_dir_all(d.join("copied/inner")).unwrap();
         fs::write(d.join("copied/inner/f.txt"), b"x").unwrap();
         let plan = UndoPlan::Safe {
-            steps: vec![UndoStep::RemoveCreated {
-                path: d.join("copied"),
-            }],
+            steps: vec![remove_now(&d.join("copied"))],
         };
         assert!(apply_undo(&plan).is_complete());
         assert!(!d.join("copied").exists());
@@ -614,9 +861,7 @@ mod apply_tests {
         fs::write(d.join("target.txt"), b"important").unwrap();
         std::os::unix::fs::symlink(d.join("target.txt"), d.join("link")).unwrap();
         let plan = UndoPlan::Safe {
-            steps: vec![UndoStep::RemoveCreated {
-                path: d.join("link"),
-            }],
+            steps: vec![remove_now(&d.join("link"))],
         };
         assert!(apply_undo(&plan).is_complete());
         assert!(!d.join("link").exists());
@@ -646,16 +891,12 @@ mod apply_tests {
 
         let plan = UndoPlan::Safe {
             steps: vec![
-                UndoStep::RemoveCreated {
-                    path: d.join("a.txt"),
-                },
+                remove_now(&d.join("a.txt")),
                 UndoStep::MoveBack {
                     from: d.join("blocked.txt"),
                     to: d.join("in-the-way.txt"),
                 },
-                UndoStep::RemoveCreated {
-                    path: d.join("c.txt"),
-                },
+                remove_now(&d.join("c.txt")),
             ],
         };
         let out = apply_undo(&plan);

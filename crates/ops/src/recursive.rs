@@ -269,9 +269,15 @@ pub fn move_tree(
         Err(e) => return Err(e.into()),
     }
 
-    // Cross-device: record identity, copy, verify the source is untouched,
-    // and only then remove it.
+    // Cross-device: record identity of the WHOLE subtree, copy, verify nothing
+    // inside changed, and only then remove the source.
+    //
+    // The root's own identity is not a subtree fingerprint: editing a child
+    // does not change the parent directory's mtime or inode, so a root-only
+    // check happily deletes a source tree containing an edit made after that
+    // child was copied. Every descendant must be proven unchanged.
     let before = FileIdentity::from_stat(&sd.stat_child(&sn)?);
+    let before_tree = crate::undo::snapshot_subtree(src_root);
     let plan = copy_tree(src_root, dst_root, policy, cancel, progress)?;
 
     let after = FileIdentity::from_stat(&sd.stat_child(&sn)?);
@@ -279,6 +285,14 @@ pub fn move_tree(
         return Err(OpError::Refused(
             "source changed during move; the copy was kept and the source was NOT removed".into(),
         ));
+    }
+    if let Some(reason) = crate::undo::verify_subtree_unchanged(src_root, &before_tree) {
+        // The copy stays; the source is kept. Losing the newer bytes is never
+        // the fallback.
+        return Err(OpError::Refused(format!(
+            "something inside changed during the move ({reason}); \
+             the copy was kept and the source was NOT removed"
+        )));
     }
     if !plan.refused.is_empty() {
         return Err(OpError::Refused(format!(

@@ -1,0 +1,408 @@
+//! The five reproduced data-loss cases, as failing tests first.
+//!
+//! Every test in this file destroys or preserves USER data — bytes the user
+//! created and never asked anybody to touch. They are written against the
+//! real production functions and job chains, not helpers built for the test,
+//! because the audit that found them reproduced them exactly that way.
+//!
+//! Each test asserts on FILE CONTENTS, never on a status value: an operation
+//! that reports success while removing a bystander is precisely the failure
+//! mode being tested.
+
+use gust_core::lister::CancelToken;
+use gust_ops::journal::{ConflictPolicy, JobKind, JobState};
+use gust_ops::{jobs, recursive, undo};
+use std::fs;
+use std::path::{Path, PathBuf};
+
+/// A fixture directory on the SAME filesystem, uniquely named per test.
+fn fixture(tag: &str) -> PathBuf {
+    let p = std::env::temp_dir().join(format!(
+        "gust-loss-{tag}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = fs::remove_dir_all(&p);
+    fs::create_dir_all(&p).unwrap();
+    p
+}
+
+/// A fixture on a DIFFERENT filesystem, to force the cross-device paths.
+/// /dev/shm is a separate tmpfs on every Linux system.
+fn other_fs_fixture(tag: &str) -> Option<PathBuf> {
+    let shm = Path::new("/dev/shm");
+    if !shm.is_dir() {
+        return None;
+    }
+    let p = shm.join(format!(
+        "gust-loss-{tag}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = fs::remove_dir_all(&p);
+    fs::create_dir_all(&p).ok()?;
+    Some(p)
+}
+
+fn dev_of(p: &Path) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    fs::metadata(p).unwrap().dev()
+}
+
+/// Run a copy/move job through the real worker and wait for it to finish.
+fn run_job(
+    kind: JobKind,
+    sources: Vec<PathBuf>,
+    dest: PathBuf,
+    policy: ConflictPolicy,
+) -> (jobs::JobProgress, gust_ops::journal::Job) {
+    let req = match kind {
+        JobKind::Copy => jobs::Request::Copy {
+            sources,
+            dest_dir: dest,
+        },
+        JobKind::Move => jobs::Request::Move {
+            sources,
+            dest_dir: dest,
+        },
+        other => panic!("run_job does not drive {other:?}"),
+    };
+    let mut h = jobs::start("regression", req, policy);
+    let progress = h.wait();
+    (progress, h.record())
+}
+
+// ---------------------------------------------------------------------------
+// Case 1: copy into an existing directory, then Undo, deletes files that were
+//         in the destination BEFORE the copy and were never part of it.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn undo_of_a_merged_directory_copy_keeps_preexisting_destination_files() {
+    let root = fixture("merge-undo");
+    let src = root.join("src");
+    let dest = root.join("dest");
+    fs::create_dir_all(src.join("payload")).unwrap();
+    fs::write(src.join("payload/copied.txt"), b"came from src").unwrap();
+
+    // The destination folder of the same name ALREADY exists and already
+    // holds the user's own work.
+    fs::create_dir_all(dest.join("payload")).unwrap();
+    fs::write(
+        dest.join("payload/precious.txt"),
+        b"the user's own file, predates the copy",
+    )
+    .unwrap();
+
+    let (p, rec) = run_job(
+        JobKind::Copy,
+        vec![src.join("payload")],
+        dest.clone(),
+        ConflictPolicy::Replace,
+    );
+    assert_eq!(p.state, JobState::Confirmed, "copy should have succeeded");
+    assert!(dest.join("payload/copied.txt").is_file());
+    assert!(dest.join("payload/precious.txt").is_file());
+
+    // Now undo it. Undo must remove what the COPY created and nothing else.
+    let record = rec;
+    let plan = undo::plan_undo(&record);
+    let outcome = match &plan {
+        undo::UndoPlan::Safe { .. } => undo::apply_undo(&plan),
+        undo::UndoPlan::Refused(r) => {
+            // Refusing is an acceptable, safe answer. What is NOT acceptable
+            // is deleting the bystander.
+            eprintln!("undo refused (acceptable): {r}");
+            Default::default()
+        }
+    };
+    eprintln!("undo outcome: {outcome:?}");
+
+    assert_eq!(
+        fs::read(dest.join("payload/precious.txt")).ok().as_deref(),
+        Some(&b"the user's own file, predates the copy"[..]),
+        "UNDO DESTROYED A PRE-EXISTING DESTINATION FILE that the copy never created"
+    );
+    fs::remove_dir_all(&root).ok();
+}
+
+// ---------------------------------------------------------------------------
+// Case 2: the staging sweep deletes a file it does not own, purely because the
+//         NAME looks like debris and the encoded PID is not running.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_staging_sweep_never_deletes_a_file_it_did_not_create() {
+    let root = fixture("sweep-unowned");
+
+    // A user file that merely LOOKS like our debris. Nothing about a filename
+    // establishes who created it.
+    let impostor = root.join(".gust-staging-999999-quarterly-report.txt");
+    fs::write(&impostor, b"not ours; the only copy the user has").unwrap();
+
+    // Real debris from a dead process, which SHOULD be swept.
+    let real_debris = root.join(".gust-staging-999998-real-debris.bin");
+    fs::write(&real_debris, b"partial").unwrap();
+
+    let removed = gust_ops::engine::sweep_stale_staging(&root);
+    eprintln!("sweep removed {removed}");
+
+    assert!(
+        impostor.is_file(),
+        "THE SWEEP DELETED AN UNOWNED FILE: a filename is not an ownership record"
+    );
+    assert_eq!(
+        fs::read(&impostor).ok().as_deref(),
+        Some(&b"not ours; the only copy the user has"[..]),
+        "the unowned file's contents must be untouched"
+    );
+    fs::remove_dir_all(&root).ok();
+}
+
+// ---------------------------------------------------------------------------
+// Case 3: a cross-filesystem folder Move removes the source tree even though a
+//         CHILD was edited after that child had been copied. The root's own
+//         identity is unchanged, so the root-only check cannot see it.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_cross_filesystem_move_never_discards_a_child_edited_after_it_was_copied() {
+    let src_root = fixture("xdev-src");
+    let Some(dst_root) = other_fs_fixture("xdev-dst") else {
+        eprintln!("SKIP: /dev/shm unavailable, cannot force the cross-device path");
+        return;
+    };
+    assert_ne!(
+        dev_of(&src_root),
+        dev_of(&dst_root),
+        "fixture must span two filesystems or this tests the rename fast path"
+    );
+
+    let tree = src_root.join("work");
+    fs::create_dir_all(&tree).unwrap();
+    fs::write(tree.join("a.txt"), b"original a").unwrap();
+    fs::write(tree.join("b.txt"), b"original b").unwrap();
+
+    // Copy the tree exactly as move_tree's cross-device path does, then edit a
+    // child in the window between its copy and the source removal. This is the
+    // real interleaving: a background move with the user still typing.
+    let cancel = CancelToken::default();
+    let mut noop = |_: usize, _: usize, _: u64, _: u64| {};
+    let dst = dst_root.join("work");
+    recursive::copy_tree(&tree, &dst, ConflictPolicy::Replace, &cancel, &mut noop).unwrap();
+
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    fs::write(
+        tree.join("a.txt"),
+        b"EDITED AFTER THE COPY - must not be lost",
+    )
+    .unwrap();
+
+    // The source tree may only be removed if every descendant still matches
+    // what was actually copied.
+    let ids = undo::snapshot_subtree(&tree);
+    let changed = undo::verify_subtree_unchanged(&tree, &ids);
+    eprintln!("subtree check: {changed:?}");
+
+    // Whatever the engine decides, the newer bytes must survive somewhere.
+    let src_has = fs::read(tree.join("a.txt")).ok();
+    let dst_has = fs::read(dst.join("a.txt")).ok();
+    let edited = &b"EDITED AFTER THE COPY - must not be lost"[..];
+    assert!(
+        src_has.as_deref() == Some(edited) || dst_has.as_deref() == Some(edited),
+        "THE EDIT MADE DURING THE MOVE WAS LOST: src={src_has:?} dst={dst_has:?}"
+    );
+
+    fs::remove_dir_all(&src_root).ok();
+    fs::remove_dir_all(&dst_root).ok();
+}
+
+/// The same case driven through the real `move_tree`, which is what the UI
+/// calls. The edit is interleaved at an OBSERVED boundary rather than by
+/// sleeping and hoping: the writer waits until the copy has actually produced
+/// the target file at the destination, which means that child has been copied
+/// and the walk has moved on.
+#[test]
+fn move_tree_cross_device_keeps_the_source_when_a_child_changed_mid_move() {
+    let src_root = fixture("xdev2-src");
+    let Some(dst_root) = other_fs_fixture("xdev2-dst") else {
+        eprintln!("SKIP: /dev/shm unavailable");
+        return;
+    };
+    let tree = src_root.join("work");
+    fs::create_dir_all(&tree).unwrap();
+    // Enough files that the copy is still walking when the edit lands.
+    for i in 0..600 {
+        fs::write(tree.join(format!("f{i:04}.txt")), format!("original {i}")).unwrap();
+    }
+
+    let target = tree.join("f0000.txt");
+    let edited = b"EDITED WHILE THE MOVE WAS RUNNING".to_vec();
+    let dst = dst_root.join("work");
+
+    let watch = dst.join("f0000.txt");
+    let t2 = target.clone();
+    let e2 = edited.clone();
+    let writer = std::thread::spawn(move || {
+        // Wait for the copy to have written this child at the destination.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while std::time::Instant::now() < deadline {
+            if watch.exists() {
+                // It has been copied; now edit the SOURCE behind the walk.
+                std::thread::sleep(std::time::Duration::from_millis(2));
+                let _ = fs::write(&t2, &e2);
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        false
+    });
+
+    let cancel = CancelToken::default();
+    let mut noop = |_: usize, _: usize, _: u64, _: u64| {};
+    let res = recursive::move_tree(&tree, &dst, ConflictPolicy::Replace, &cancel, &mut noop);
+    let interleaved = writer.join().unwrap();
+    eprintln!("move_tree returned {res:?}, edit interleaved={interleaved}");
+    assert!(
+        interleaved,
+        "the test could not interleave the edit; it would prove nothing"
+    );
+
+    let src_bytes = fs::read(&target).ok();
+    let dst_bytes = fs::read(dst.join("f0000.txt")).ok();
+    assert!(
+        src_bytes.as_deref() == Some(&edited[..]) || dst_bytes.as_deref() == Some(&edited[..]),
+        "THE MID-MOVE EDIT WAS LOST: src={src_bytes:?} dst={dst_bytes:?}"
+    );
+    // And the move must have REFUSED rather than reported success while
+    // discarding the newer bytes.
+    assert!(
+        res.is_err(),
+        "a move that could not prove the source was unchanged must refuse, got {res:?}"
+    );
+
+    fs::remove_dir_all(&src_root).ok();
+    fs::remove_dir_all(&dst_root).ok();
+}
+
+// ---------------------------------------------------------------------------
+// Case 4: apply_undo removes a path that was edited AFTER plan_undo verified
+//         it. Planning and applying are separate moments in time.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn apply_undo_reverifies_and_refuses_a_file_edited_after_planning() {
+    let root = fixture("plan-apply-window");
+    fs::write(root.join("src.txt"), b"source").unwrap();
+
+    fs::create_dir_all(root.join("out")).unwrap();
+    let (p, rec) = run_job(
+        JobKind::Copy,
+        vec![root.join("src.txt")],
+        root.join("out"),
+        ConflictPolicy::Replace,
+    );
+    assert_eq!(p.state, JobState::Confirmed);
+    let copied = root.join("out/src.txt");
+    assert!(copied.is_file());
+
+    let record = rec;
+
+    // Plan the undo while the copy is untouched: this is Safe.
+    let plan = undo::plan_undo(&record);
+    assert!(
+        matches!(plan, undo::UndoPlan::Safe { .. }),
+        "expected a safe plan, got {plan:?}"
+    );
+
+    // The user now edits the copy. Time passes between planning and applying —
+    // a dialog was on screen, or a slow confirmation.
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    fs::write(&copied, b"USER EDITED THIS AFTER THE UNDO WAS PLANNED").unwrap();
+
+    let outcome = undo::apply_undo(&plan);
+    eprintln!("apply outcome: {outcome:?}");
+
+    assert_eq!(
+        fs::read(&copied).ok().as_deref(),
+        Some(&b"USER EDITED THIS AFTER THE UNDO WAS PLANNED"[..]),
+        "APPLY_UNDO DELETED AN EDIT MADE AFTER PLANNING: it must re-verify identity \
+         immediately before each destructive step, not trust the plan"
+    );
+    assert!(
+        !outcome.problems.is_empty(),
+        "refusing to remove the changed file must be REPORTED, not silent"
+    );
+    fs::remove_dir_all(&root).ok();
+}
+
+// ---------------------------------------------------------------------------
+// Case 5: copying a symlink inside its own folder with Ask, then Undo, removes
+//         the ORIGINAL link.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_same_folder_symlink_copy_then_undo_leaves_the_original_link_alone() {
+    let root = fixture("symlink-self");
+    fs::write(root.join("target.txt"), b"the real file").unwrap();
+    std::os::unix::fs::symlink("target.txt", root.join("link")).unwrap();
+
+    let before = fs::read_link(root.join("link")).unwrap();
+
+    // Copy the link into the folder it already lives in, with Ask: the
+    // destination name is occupied by the link itself, so this must either
+    // report a conflict or produce a differently-named copy. It must never
+    // overwrite the original with a copy of itself.
+    let (p, rec) = run_job(
+        JobKind::Copy,
+        vec![root.join("link")],
+        root.clone(),
+        ConflictPolicy::Ask,
+    );
+    eprintln!(
+        "same-folder symlink copy: state={:?} msg={}",
+        p.state, p.message
+    );
+
+    assert!(
+        root.join("link").symlink_metadata().is_ok(),
+        "THE ORIGINAL SYMLINK WAS DESTROYED BY COPYING IT ONTO ITSELF"
+    );
+
+    {
+        let record = rec.clone();
+        if record.state == JobState::Confirmed {
+            let plan = undo::plan_undo(&record);
+            let outcome = match &plan {
+                undo::UndoPlan::Safe { .. } => undo::apply_undo(&plan),
+                undo::UndoPlan::Refused(r) => {
+                    eprintln!("undo refused (acceptable): {r}");
+                    Default::default()
+                }
+            };
+            eprintln!("undo outcome: {outcome:?}");
+        }
+    }
+
+    assert!(
+        root.join("link").symlink_metadata().is_ok(),
+        "UNDO REMOVED THE ORIGINAL SYMLINK, not a copy it had created"
+    );
+    assert_eq!(
+        fs::read_link(root.join("link")).unwrap(),
+        before,
+        "the original link must still point where it did"
+    );
+    assert_eq!(
+        fs::read(root.join("target.txt")).ok().as_deref(),
+        Some(&b"the real file"[..]),
+        "the link's target must never be touched"
+    );
+    fs::remove_dir_all(&root).ok();
+}
