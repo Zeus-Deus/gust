@@ -153,6 +153,23 @@ EOF
   [[ "$n" == "1" ]] || { bad "gust window did not appear (found $n)"; return 1; }
   vm hyprctl dispatch 'hl.dsp.focuswindow({ "class:gust" })' >/dev/null 2>&1
   sleep 0.4
+  # Wait for the window GEOMETRY to stop changing before anything computes a
+  # click coordinate from it. A window that is mapped but still being placed
+  # (or still floating at a size an earlier case left behind) reports a size
+  # that is stale a moment later, and every mouse assertion then clicks empty
+  # space — which looks exactly like a broken handler.
+  local geo prev="" stable=0
+  for _ in $(seq 1 25); do
+    geo="$(win_geo)"
+    if [[ -n "$geo" && "$geo" == "$prev" ]]; then
+      stable=$((stable + 1))
+      [[ "$stable" -ge 2 ]] && break
+    else
+      stable=0
+    fi
+    prev="$geo"
+    sleep 0.2
+  done
   return 0
 }
 
@@ -205,6 +222,43 @@ wait_for() {
 }
 
 # ---------------------------------------------------------------------------
+# A fresh Omarchy install greets you with onboarding cards and can raise an
+# update prompt mid-run. They take focus and swallow keystrokes and clicks,
+# which surfaces as "clicking a row did not move the cursor" — a failure that
+# has nothing to do with Gust. Clear the screen before trusting anything.
+say "desktop is clear"
+dismiss_desktop_overlays() {
+  local i
+  for i in 1 2 3 4 5; do
+    vm wtype -k Escape >/dev/null 2>&1
+    sleep 0.3
+  done
+  # Omarchy's onboarding cards are dismissed by SUMMARY, one at a time.
+  # These are the ones a fresh install shows; an unknown card is harmless
+  # here because the foreign-window check below still reports it.
+  local card
+  for card in "Set your default agent" "Install Dictation with Voxtype" \
+              "Update available" "Omarchy"; do
+    vm omarchy-notification-dismiss "$card" >/dev/null 2>&1 || true
+  done
+  sleep 0.5
+}
+dismiss_desktop_overlays
+FOREIGN="$(vm hyprctl clients -j 2>/dev/null | python3 -c '
+import json,sys
+try: cs = json.load(sys.stdin)
+except Exception: sys.exit(0)
+bad = [c for c in cs if c.get("class") not in ("gust", "", None)]
+print(len(bad))
+for c in bad[:3]:
+    print("   ", c.get("class"), repr(c.get("title"))[:50], file=sys.stderr)
+' 2>/dev/null)"
+if [[ "${FOREIGN:-0}" -gt 0 ]]; then
+  bad "$FOREIGN foreign window(s) on screen — they will swallow clicks"
+else
+  ok "no other windows are competing for input"
+fi
+
 say "fixture"
 "$HERE/make-fixture.sh" "$FIXTURE" >/dev/null
 mkdir -p "$FIXTURE/.local/share" "$FIXTURE/.cache"
@@ -1259,6 +1313,20 @@ say "10v · The mouse works: the plan requires keyboard AND mouse"
 if [[ "$MOUSE_OK" -ne 1 ]]; then
   bad "SKIPPED: no pointer injection (need sudo access to /dev/uinput)"
 else
+  # The resize case leaves the window FLOATING at a size it chose. Mouse
+  # coordinates are computed from live geometry so that still works, but a
+  # tiled window is the state a user actually has — put it back, and let the
+  # compositor settle before any coordinate is read.
+  # `float()` TOGGLES; there is no `tile()` in this Lua API, so only call it
+  # when the window is actually floating or it floats a tiled window instead.
+  if vm hyprctl clients -j 2>/dev/null | python3 -c '
+import json,sys
+w=[c for c in json.load(sys.stdin) if c.get("class")=="gust"]
+sys.exit(0 if (w and w[0].get("floating")) else 1)'; then
+    vm hyprctl dispatch 'hl.dsp.window.float()' >/dev/null 2>&1
+    sleep 1.5
+  fi
+
   MG="$FIXTURE/mousetest"
   rm -rf "$MG"; mkdir -p "$MG/target"
   echo hello > "$MG/one.txt"; echo there > "$MG/two.txt"
