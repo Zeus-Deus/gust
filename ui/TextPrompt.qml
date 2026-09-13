@@ -21,6 +21,7 @@ FocusScope {
     signal closed()
 
     function openWith(titleText, initial, hintText, row) {
+        root.claimingFocus = true
         root.title = titleText
         root.hint = hintText === undefined ? "" : hintText
         root.errorText = ""
@@ -42,12 +43,19 @@ FocusScope {
         field.selectAll()
     }
 
+    /// True from the instant openWith() is called until close() finishes.
+    /// `visible` cannot be used for this: it is `opacity > 0` and opacity is
+    /// animated, so for the first frames after opening the prompt does not
+    /// count as visible and anything calling focusList() steals the keyboard.
+    property bool claimingFocus: false
+
     /// Mask what is typed. The caller sets this; the prompt never infers
     /// it, because inferring "this looks like a password" is how one gets
     /// shown in clear text.
     property bool secret: false
 
     function close() {
+        root.claimingFocus = false
         root.opacity = 0
         root.errorText = ""
         // NOT closed() here: `visible` is `opacity > 0` and opacity is

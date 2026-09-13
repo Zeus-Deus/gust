@@ -148,10 +148,37 @@ impl Share {
             ShareKind::Smb => {
                 format!("smb-share:server={},share={}", self.server, self.share)
             }
-            ShareKind::Nfs => format!("nfs:host={},export={}", self.server, self.share),
+            // Measured against a real GVfs NFS mount, not guessed: the
+            // directory is `prefix=<url-encoded absolute export path>`.
+            // An earlier version said `export=<share>` and was simply wrong.
+            ShareKind::Nfs => {
+                let path = if self.share.starts_with('/') {
+                    self.share.clone()
+                } else {
+                    format!("/{}", self.share)
+                };
+                format!("nfs:host={},prefix={}", self.server, percent_encode(&path))
+            }
         };
         PathBuf::from(runtime_dir).join("gvfs").join(name)
     }
+}
+
+/// Percent-encode a path the way GVfs names its mount directories.
+///
+/// Only the characters GVfs escapes: everything outside the unreserved set
+/// becomes %XX, uppercase.
+fn percent_encode(path: &str) -> String {
+    let mut out = String::with_capacity(path.len() * 2);
+    for b in path.bytes() {
+        let unreserved = b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~');
+        if unreserved {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
 }
 
 /// Is GVfs available to mount shares with?
@@ -329,10 +356,32 @@ mod tests {
     fn nfs_has_its_own_scheme_and_mount_name() {
         let s = parse_address("//nas/export", ShareKind::Nfs).unwrap();
         assert_eq!(s.uri(), "nfs://nas/export");
-        assert!(s
+        let mp = s
             .mount_point("/run/user/1000")
             .to_string_lossy()
-            .contains("nfs:host=nas"));
+            .to_string();
+        assert!(mp.contains("nfs:host=nas"), "got {mp}");
+        // Measured from a real GVfs mount: `prefix=` with the export path
+        // percent-encoded, NOT `export=<share>`.
+        assert!(mp.contains("prefix=%2Fexport"), "got {mp}");
+    }
+
+    #[test]
+    fn the_nfs_mount_point_matches_a_real_gvfs_directory() {
+        // Captured from a live mount of 127.0.0.1:/tmp/gust-nfs-fixture/export.
+        let s = parse_address("//127.0.0.1/tmp/gust-nfs-fixture/export", ShareKind::Nfs).unwrap();
+        assert_eq!(
+            s.mount_point("/run/user/1000").to_string_lossy(),
+            "/run/user/1000/gvfs/nfs:host=127.0.0.1,\
+prefix=%2Ftmp%2Fgust-nfs-fixture%2Fexport"
+                .replace("\\\n", "")
+        );
+    }
+
+    #[test]
+    fn percent_encoding_matches_gvfs() {
+        assert_eq!(percent_encode("/tmp/x"), "%2Ftmp%2Fx");
+        assert_eq!(percent_encode("abc-1_2.3~"), "abc-1_2.3~");
     }
 
     #[test]
