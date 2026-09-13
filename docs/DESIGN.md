@@ -484,6 +484,56 @@ with no keyboard focus at all: after cancelling a rename, every subsequent
 key went nowhere. A closing overlay announces itself only once it is really
 gone.
 
+## 6.12 A stalled mount must not stall Gust
+
+Plan §3 rule 3, and the only one of the four that cannot be satisfied by
+being careful in Rust.
+
+**A cancellation token cannot interrupt a stuck syscall.** A `readdir` or a
+`stat` on a FUSE mount whose server has stopped answering blocks in
+uninterruptible sleep: the thread cannot be woken, `SIGTERM` is ignored, and
+`timeout(1)` cannot end it either. This was measured rather than assumed — a
+listing of an sshfs mount with a SIGSTOPped sshd took **280 seconds** to
+return, and only returned when the server was resumed.
+
+So Gust does not perform the call that might hang. A short-lived child does,
+and Gust kills it if it does not answer within four seconds. Killing a
+process is the only thing that reliably ends a stuck FUSE wait, and even that
+only takes effect when the wait finally ends — what matters is that *Gust* is
+not the one waiting.
+
+### Where the probe sits
+
+Three places touch a path before any worker does, and all three are bounded:
+
+| Place | Why it must be bounded |
+|---|---|
+| `startup_location()` | Runs before the window exists. Unbounded, Gust never paints at all. |
+| `navigate()` | Runs on the UI thread. Unbounded, the whole window freezes. |
+| the listing worker | Unbounded, the folder never settles and the worker never returns. |
+
+**Only paths that can actually stall are probed.** The filesystem type comes
+from `/proc/self/mounts`, which the kernel answers from its own tables and
+which therefore cannot itself hang. A path on ext4/btrfs/xfs/tmpfs spawns no
+child and pays nothing.
+
+### What the user sees
+
+The window stays on the folder it could reach. Moving somebody somewhere else
+because a remote hung would lose their place for them. The status says
+`Not responding`, and the notice says which place stopped answering, how long
+Gust waited, and that the rest of the application still works:
+
+> `studio stopped responding after 4 seconds. Browsing is still available
+> everywhere else; reconnect to try again.`
+
+At startup the fallback is home rather than a window that never appears.
+
+The child is `ls -A --` with the path as a separate argument: no shell, so a
+directory named `; rm -rf ~` is a directory name and nothing else. A killed
+child is deliberately **not** reaped — waiting on it would block for exactly
+as long as the stall being escaped.
+
 ## 7. Undo journal
 
 An undo entry records, per affected path: the expected identity
