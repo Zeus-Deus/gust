@@ -1837,23 +1837,34 @@ impl qobject::DirModel {
 
         // Never lazy-unmount a dirty mount (plan §9). Ask first, and say how
         // much work is outstanding.
+        //
+        // A query that did not answer is NOT an empty queue: reading this as
+        // `if let Ok(p) = ...` failed OPEN, so a timed-out or refused RC call
+        // silently proceeded to unmount and could destroy work that was only
+        // ever in the local cache. Unknown state is refused, not assumed safe
+        // (gust_remote::disconnect).
         if !force {
             let rc = Self::cloud_rc_addr(&name);
-            if let Ok(p) = gust_remote::cloud::vfs_pending(&rc, std::time::Duration::from_secs(3)) {
-                if p.has_pending() {
-                    let n = p.queued + p.in_progress;
-                    // "1 file is" / "3 files are": the verb agrees with the
-                    // count, and the whole clause is built rather than
-                    // stitched from fragments that can disagree.
-                    let subject = if n == 1 {
-                        "1 file is".to_string()
-                    } else {
-                        format!("{n} files are")
-                    };
-                    return QString::from(format!(
-                        "ASK:{subject} still waiting to upload. \
-                         Disconnecting now would lose that work."
-                    ));
+            let report =
+                match gust_remote::cloud::vfs_pending(&rc, std::time::Duration::from_secs(3)) {
+                    Ok(p) => gust_remote::disconnect::PendingReport::Known {
+                        queued: p.queued,
+                        in_progress: p.in_progress,
+                        errored: p.errored,
+                    },
+                    Err(e) => gust_remote::disconnect::PendingReport::Unknown(e.message()),
+                };
+            match gust_remote::disconnect::verdict_for(&name, &report, None, Some(&mp), false) {
+                gust_remote::disconnect::DisconnectVerdict::Safe => {}
+                // Answerable: the user may choose to go ahead.
+                gust_remote::disconnect::DisconnectVerdict::Ask(msg) => {
+                    return QString::from(format!("ASK:{msg}"));
+                }
+                // Not a yes/no question. Routed to the alert channel, because
+                // offering a button that can only lose data is worse than
+                // refusing (DESIGN §6.8).
+                gust_remote::disconnect::DisconnectVerdict::Refuse(msg) => {
+                    return QString::from(msg);
                 }
             }
         }
