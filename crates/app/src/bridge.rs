@@ -1016,6 +1016,25 @@ impl qobject::DirModel {
 
     // --- detaching a tab (DESIGN §6.20) ----------------------------------
 
+    /// Park a detached child and reap any that have already exited.
+    ///
+    /// A detached window is a separate process on purpose (§6.20), so it is
+    /// never waited on — but an exited child still needs reaping or it stays
+    /// a zombie for the life of the parent. `try_wait` never blocks, so this
+    /// is safe to call from the GUI thread.
+    fn reap_detached(new_child: Option<std::process::Child>) {
+        use std::sync::{Mutex, OnceLock};
+        static DETACHED: OnceLock<Mutex<Vec<std::process::Child>>> = OnceLock::new();
+        let list = DETACHED.get_or_init(|| Mutex::new(Vec::new()));
+        let Ok(mut g) = list.lock() else {
+            return;
+        };
+        if let Some(c) = new_child {
+            g.push(c);
+        }
+        g.retain_mut(|c| !matches!(c.try_wait(), Ok(Some(_))));
+    }
+
     /// Open this location in a new Gust window.
     ///
     /// A separate PROCESS, not another Window in this one. The plan asks for
@@ -1037,7 +1056,21 @@ impl qobject::DirModel {
         };
         // The location must still be there: detaching into a folder that has
         // gone away opens a window showing home, which is not what was asked.
-        if !dir.is_dir() {
+        //
+        // This runs on the GUI thread, so it must never be an unbounded
+        // `is_dir()`: on a stalled remote mount that call sits in
+        // uninterruptible sleep and the whole window freezes instead of
+        // refusing the drag (DESIGN §6.12). Anything that can stall is
+        // checked in a supervised child with a deadline.
+        if gust_core::stall::needs_probe(&dir) {
+            match gust_core::stall::probe_if_risky(&dir, std::time::Duration::from_secs(4)) {
+                r if !r.is_responsive() => {
+                    return QString::from(r.message(&gust_core::stall::place_name_for(&dir)));
+                }
+                _ => {}
+            }
+        } else if !dir.is_dir() {
+            // Local filesystems cannot stall, so this is safe here.
             return QString::from("That folder is no longer there.");
         }
 
@@ -1045,16 +1078,41 @@ impl qobject::DirModel {
             return QString::from("Gust could not find its own program to start.");
         };
 
-        match std::process::Command::new(&exe)
-            .arg(&dir)
+        // The child must NOT inherit this process's QA state path: two
+        // processes writing one state file makes every later assertion read
+        // whichever wrote last, which silently invalidates a QA run.
+        let mut cmd = std::process::Command::new(&exe);
+        cmd.arg(&dir)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-        {
+            .stderr(std::process::Stdio::null());
+        match std::env::var_os("GUST_QA_STATE") {
+            Some(path) => {
+                // Give the detached window its own sibling file so a test can
+                // still observe it, without overwriting ours.
+                let mut p = std::path::PathBuf::from(path);
+                let stem = p
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "state".to_string());
+                p.set_file_name(format!("{stem}-detached-{}.json", std::process::id()));
+                cmd.env("GUST_QA_STATE", p);
+            }
+            None => {
+                cmd.env_remove("GUST_QA_STATE");
+            }
+        }
+
+        match cmd.spawn() {
             // Deliberately not waited on: the new window is independent, and
-            // reaping it would tie the two processes back together.
-            Ok(_) => QString::default(),
+            // blocking on it would tie the two processes back together. The
+            // handle is parked in a process-wide list and reaped
+            // opportunistically with try_wait, so a detached window that is
+            // closed does not linger as a zombie.
+            Ok(child) => {
+                Self::reap_detached(Some(child));
+                QString::default()
+            }
             Err(e) => QString::from(format!("Could not open a new window: {e}")),
         }
     }

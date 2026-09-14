@@ -222,7 +222,10 @@ Window {
         win.tabDragIndex = index
         win.tabDragLast = Qt.point(x, y)
         const zone = win.tabZoneAt(x, y)
-        if (zone === "outside") win.tabDragLeft = true
+        // Whether the drag is outside RIGHT NOW, not whether it ever was.
+        // Latching on any excursion meant dragging out and back still
+        // detached, which loses a tab to a gesture the user reversed.
+        win.tabDragLeft = (zone === "outside")
         if (zone !== win.tabDropZone) {
             win.tabDropZone = zone
             hints.status = zone === "outside"
