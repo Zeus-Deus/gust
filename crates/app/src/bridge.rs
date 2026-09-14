@@ -1016,6 +1016,57 @@ impl qobject::DirModel {
 
     // --- detaching a tab (DESIGN §6.20) ----------------------------------
 
+    /// The durable journal every real operation records into.
+    ///
+    /// Without this the record is an in-memory `Arc<Mutex<Job>>` that dies
+    /// with the process, so a crash mid-copy leaves staging debris that can
+    /// never be attributed to an operation and nothing for a restart to
+    /// recover (DESIGN.md §5, §7). Tests pass `None` to stay off disk.
+    fn production_journal() -> Option<gust_ops::journal::Journal> {
+        // A QA run points HOME/XDG_STATE_HOME at a fixture, so this follows
+        // the same isolation as every other piece of state.
+        Some(gust_ops::journal::Journal::new(
+            gust_ops::journal::Journal::default_path(),
+        ))
+    }
+
+    /// Operations that were in flight when this process last died.
+    ///
+    /// Read once at startup. Returns one plain sentence per interrupted job,
+    /// so the UI can tell the user what was happening rather than silently
+    /// leaving half-finished work behind.
+    fn unfinished_operations() -> Vec<String> {
+        let Some(j) = Self::production_journal() else {
+            return Vec::new();
+        };
+        j.unfinished()
+            .into_iter()
+            .map(|job| {
+                let what = match job.kind {
+                    gust_ops::journal::JobKind::Copy => "Copying",
+                    gust_ops::journal::JobKind::Move => "Moving",
+                    gust_ops::journal::JobKind::Trash => "Moving to Trash",
+                    gust_ops::journal::JobKind::Extract => "Extracting",
+                    gust_ops::journal::JobKind::Rename => "Renaming",
+                    gust_ops::journal::JobKind::NewFolder => "Creating a folder",
+                    gust_ops::journal::JobKind::DeletePermanent => "Deleting",
+                };
+                let name = job
+                    .entries
+                    .first()
+                    .and_then(|e| e.source.file_name())
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "an item".to_string());
+                let more = job.entries.len().saturating_sub(1);
+                if more > 0 {
+                    format!("{what} {name} and {more} more did not finish")
+                } else {
+                    format!("{what} {name} did not finish")
+                }
+            })
+            .collect()
+    }
+
     /// Park a detached child and reap any that have already exited.
     ///
     /// A detached window is a separate process on purpose (§6.20), so it is
@@ -3212,7 +3263,12 @@ impl qobject::DirModel {
         // Ask policy: an existing name surfaces a conflict instead of a
         // silent overwrite.
         let id = format!("job-{}", gust_ops::journal::now_unix());
-        let handle = gust_ops::jobs::start(id, req, gust_ops::journal::ConflictPolicy::Ask);
+        let handle = gust_ops::jobs::start_journalled(
+            id,
+            req,
+            gust_ops::journal::ConflictPolicy::Ask,
+            Self::production_journal(),
+        );
         {
             let mut r = self.as_mut().rust_mut();
             r.job = Some(handle);
@@ -3321,7 +3377,12 @@ impl qobject::DirModel {
             },
         };
         let id = format!("job-{}", gust_ops::journal::now_unix());
-        let handle = gust_ops::jobs::start(id, req, gust_ops::journal::ConflictPolicy::Ask);
+        let handle = gust_ops::jobs::start_journalled(
+            id,
+            req,
+            gust_ops::journal::ConflictPolicy::Ask,
+            Self::production_journal(),
+        );
         {
             let mut r = self.as_mut().rust_mut();
             r.job = Some(handle);
@@ -3369,7 +3430,12 @@ impl qobject::DirModel {
             gust_ops::jobs::Request::Copy { sources, dest_dir }
         };
         let id = format!("job-{}", gust_ops::journal::now_unix());
-        let handle = gust_ops::jobs::start(id, req, gust_ops::journal::ConflictPolicy::Ask);
+        let handle = gust_ops::jobs::start_journalled(
+            id,
+            req,
+            gust_ops::journal::ConflictPolicy::Ask,
+            Self::production_journal(),
+        );
         {
             let mut r = self.as_mut().rust_mut();
             r.job = Some(handle);
@@ -3424,7 +3490,12 @@ impl qobject::DirModel {
                     },
                 };
                 let id = format!("job-{}", gust_ops::journal::now_unix());
-                let handle = gust_ops::jobs::start(id, req, gust_ops::journal::ConflictPolicy::Ask);
+                let handle = gust_ops::jobs::start_journalled(
+                    id,
+                    req,
+                    gust_ops::journal::ConflictPolicy::Ask,
+                    Self::production_journal(),
+                );
                 let mut r = self.as_mut().rust_mut();
                 r.job = Some(handle);
                 r.last_job = None;
@@ -3586,13 +3657,14 @@ impl qobject::DirModel {
         // CopyAs lands the copy directly under its "(copy)" name — no
         // temporary name, so a crash cannot leave a half-named duplicate.
         let id = format!("dup-{}", gust_ops::journal::now_unix());
-        let handle = gust_ops::jobs::start(
+        let handle = gust_ops::jobs::start_journalled(
             id,
             gust_ops::jobs::Request::CopyAs {
                 source: src,
                 dest_path,
             },
             gust_ops::journal::ConflictPolicy::Ask,
+            Self::production_journal(),
         );
         self.as_mut().rust_mut().job = Some(handle);
         QString::default()

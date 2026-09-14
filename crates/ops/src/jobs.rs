@@ -144,6 +144,23 @@ impl JobHandle {
 /// `policy` decides what happens on a name clash; `Ask` surfaces a conflict
 /// rather than guessing.
 pub fn start(id: impl Into<String>, req: Request, policy: ConflictPolicy) -> JobHandle {
+    start_journalled(id, req, policy, None)
+}
+
+/// Start a job, persisting every state change to a durable journal.
+///
+/// The in-memory record dies with the process, so a crash mid-operation would
+/// otherwise leave staging debris with nothing to attribute it to and no way
+/// to offer recovery on restart (DESIGN.md §5, §7). With a journal, every
+/// transition is appended and fsynced before the work it describes is judged,
+/// so a restarted process can read `Journal::unfinished()` and see exactly
+/// what was in flight.
+pub fn start_journalled(
+    id: impl Into<String>,
+    req: Request,
+    policy: ConflictPolicy,
+    journal: Option<crate::journal::Journal>,
+) -> JobHandle {
     let id = id.into();
     let kind = req.kind();
     let progress = Arc::new(Mutex::new(JobProgress::new(id.clone(), kind)));
@@ -159,7 +176,16 @@ pub fn start(id: impl Into<String>, req: Request, policy: ConflictPolicy) -> Job
 
     let join = std::thread::Builder::new()
         .name(format!("gust-job-{id}"))
-        .spawn(move || run(req, policy, worker_progress, worker_cancel, worker_record))
+        .spawn(move || {
+            run(
+                req,
+                policy,
+                worker_progress,
+                worker_cancel,
+                worker_record,
+                journal,
+            )
+        })
         .ok();
 
     JobHandle {
@@ -182,10 +208,23 @@ fn run(
     progress: Arc<Mutex<JobProgress>>,
     cancel: CancelToken,
     record: Arc<Mutex<crate::journal::Job>>,
+    journal: Option<crate::journal::Journal>,
 ) {
+    // Mutate the in-memory record and immediately persist it. Both must move
+    // together: a snapshot and a journal that disagree about success is the
+    // bug class this exists to prevent.
     let set_rec = |f: &dyn Fn(&mut crate::journal::Job)| {
-        if let Ok(mut g) = record.lock() {
+        let snapshot = if let Ok(mut g) = record.lock() {
             f(&mut g);
+            Some(g.clone())
+        } else {
+            None
+        };
+        if let (Some(j), Some(snap)) = (journal.as_ref(), snapshot) {
+            // A journal write failure must not abort the operation, but it
+            // must not be silent either: the error is recorded on the entry
+            // so the UI can say durability is unavailable.
+            let _ = j.record(&snap);
         }
     };
     set_rec(&|r| r.state = crate::journal::JobState::Running);
