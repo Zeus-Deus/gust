@@ -1014,6 +1014,49 @@ impl qobject::DirModel {
         format!("http://127.0.0.1:{}", 45000 + (h % 2000) as u16)
     }
 
+    /// Per-object upload state for every cloud mount in THIS process.
+    ///
+    /// Process-wide, not per-model: one mount is shared by every tab and
+    /// pane, so a file written in one tab must still block a disconnect
+    /// triggered from another. rclone's VFS queue describes rclone's own
+    /// work; this records what Gust promised the user about each object, and
+    /// only a confirmed revision clears it (DESIGN §6.8, remote rule 1).
+    fn cloud_tracker() -> &'static std::sync::Mutex<gust_remote::upload::UploadTracker> {
+        use std::sync::{Mutex, OnceLock};
+        static T: OnceLock<Mutex<gust_remote::upload::UploadTracker>> = OnceLock::new();
+        T.get_or_init(|| Mutex::new(gust_remote::upload::UploadTracker::new()))
+    }
+
+    /// Record every file a finished job wrote INSIDE a cloud mount as dirty.
+    ///
+    /// Landing in the VFS cache is not an upload. Until the backend confirms
+    /// the revision these files are work that exists only on this computer,
+    /// and a disconnect that discards them is data loss.
+    fn track_cloud_writes(record: &gust_ops::journal::Job) {
+        let mounts: Vec<std::path::PathBuf> = match gust_remote::cloud::list_remotes(None) {
+            Ok(rs) => rs
+                .into_iter()
+                .filter_map(|r| Self::cloud_mount_point(&r.name))
+                .collect(),
+            Err(_) => return,
+        };
+        if mounts.is_empty() {
+            return;
+        }
+        let Ok(mut t) = Self::cloud_tracker().lock() else {
+            return;
+        };
+        for e in &record.entries {
+            if !e.done {
+                continue;
+            }
+            let Some(dest) = &e.destination else { continue };
+            if mounts.iter().any(|mp| dest.starts_with(mp)) {
+                t.set(dest, gust_remote::upload::UploadState::Cached, None);
+            }
+        }
+    }
+
     // --- detaching a tab (DESIGN §6.20) ----------------------------------
 
     /// The durable journal every real operation records into.
@@ -1854,7 +1897,9 @@ impl qobject::DirModel {
                     },
                     Err(e) => gust_remote::disconnect::PendingReport::Unknown(e.message()),
                 };
-            match gust_remote::disconnect::verdict_for(&name, &report, None, Some(&mp), false) {
+            let guard = Self::cloud_tracker().lock();
+            let tracker = guard.as_ref().ok().map(|g| &**g);
+            match gust_remote::disconnect::verdict_for(&name, &report, tracker, Some(&mp), false) {
                 gust_remote::disconnect::DisconnectVerdict::Safe => {}
                 // Answerable: the user may choose to go ahead.
                 gust_remote::disconnect::DisconnectVerdict::Ask(msg) => {
@@ -1955,7 +2000,18 @@ impl qobject::DirModel {
         };
         let subdir = rel.to_string_lossy().to_string();
         match gust_remote::cloud::backend_listing(&remote, &subdir, None) {
-            Ok(entries) => gust_remote::cloud::confirmed_on_backend(&entries, &file, size),
+            Ok(entries) => {
+                let ok = gust_remote::cloud::confirmed_on_backend(&entries, &file, size);
+                if ok {
+                    // The backend has this object at this size: the file is
+                    // no longer work that exists only on this computer, so it
+                    // must stop blocking a disconnect.
+                    if let Ok(mut t) = Self::cloud_tracker().lock() {
+                        t.set(&local, gust_remote::upload::UploadState::Confirmed, None);
+                    }
+                }
+                ok
+            }
             Err(_) => false,
         }
     }
@@ -3844,6 +3900,12 @@ impl qobject::DirModel {
             // its inverse. A cancelled or failed job is not offered an undo:
             // half an operation has no well-defined opposite.
             let record = self.as_ref().job.as_ref().map(|j| j.record());
+            // Anything this job wrote inside a cloud mount is in the local
+            // VFS cache, NOT uploaded. Record it before the handle is
+            // dropped, so a later disconnect cannot discard it silently.
+            if let Some(rec) = record.as_ref() {
+                Self::track_cloud_writes(rec);
+            }
             {
                 let mut r = self.as_mut().rust_mut();
                 r.job = None;
