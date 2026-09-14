@@ -44,6 +44,23 @@ start() {
       return 1
     fi
     echo started > "$ROOT/we-started-nfsd"
+  fi
+
+  # rpc.mountd, which rpc.nfsd does NOT start. Without it the kernel
+  # registers the nfs program on 2049 and `exportfs -v` looks perfectly
+  # healthy, but no mountd is registered with rpcbind: `showmount -e` says
+  # "RPC: Program not registered" and even an NFSv4 mount fails, because the
+  # client still consults mountd for the export list. The symptom points at
+  # the export, so this costs an hour if it is not started explicitly.
+  if ! pgrep -x rpc.mountd >/dev/null 2>&1; then
+    sudo -n rpc.mountd 2>/dev/null || echo "rpc.mountd failed to start" >&2
+    for _ in $(seq 1 20); do
+      rpcinfo -p 127.0.0.1 2>/dev/null | grep -q mountd && break
+      sleep 0.25
+    done
+    rpcinfo -p 127.0.0.1 2>/dev/null | grep -q mountd \
+      || echo "rpc.mountd did not register with rpcbind" >&2
+    echo started > "$ROOT/we-started-mountd"
     sleep 1
   fi
 
