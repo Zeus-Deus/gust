@@ -29,10 +29,29 @@ fn fixture_up() -> bool {
     fixture_password().is_some()
 }
 
+/// A missing fixture must be an explicit, visible SKIP — never a quiet
+/// early return that cargo reports as `ok`.
+///
+/// `cargo test` prints `test <name> ... ok` for a test that returns early,
+/// so counting named SMB tests proved nothing about whether any backend or
+/// auth path actually ran. Opting in with GUST_SMB_REQUIRED=1 turns a
+/// missing fixture into a FAILURE, which is what a release gate must use.
 macro_rules! need_fixture {
     () => {
         if !fixture_up() {
-            eprintln!("smb fixture not running — start tests/smb-fixture.sh");
+            let required = std::env::var("GUST_SMB_REQUIRED")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
+            if required {
+                panic!(
+                    "SMB FIXTURE REQUIRED BUT NOT RUNNING: start tests/smb-fixture.sh. \
+                     GUST_SMB_REQUIRED=1 forbids skipping this case."
+                );
+            }
+            eprintln!(
+                "SKIP: smb fixture not running (tests/smb-fixture.sh start) — \
+                 this case did NOT run; set GUST_SMB_REQUIRED=1 to make it fail instead"
+            );
             return;
         }
     };
@@ -43,6 +62,59 @@ fn test_share() -> Share {
     s.user = Some(std::env::var("USER").unwrap_or_else(|_| "user".into()));
     s.domain = Some("GUSTTEST".into());
     s
+}
+
+/// Wait for a GVfs mount point to become usable.
+///
+/// `gio mount` returns once the backend accepted the request, but the fuse
+/// directory under $XDG_RUNTIME_DIR/gvfs appears a moment later. Asserting
+/// on it immediately is a race that fails intermittently and looks like a
+/// broken mount.
+fn wait_mounted(mp: &std::path::Path) -> bool {
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    while std::time::Instant::now() < deadline {
+        if mp.is_dir() && std::fs::read_dir(mp).is_ok() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    false
+}
+
+/// Clear any pre-existing GVfs mount for this share before a test that needs
+/// to observe the mount operation itself.
+///
+/// GVfs keeps a mount alive process-wide once it exists and returns
+/// "Location is already mounted" to the next caller, so a test that asserts
+/// on `mount()` succeeding fails for a reason that has nothing to do with the
+/// code under test. Each case that cares must therefore START from unmounted
+/// rather than inheriting whatever an earlier case left behind.
+fn ensure_unmounted(share: &Share) {
+    let _ = unmount(share);
+    let mp = share.mount_point(&runtime_dir());
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        if !mp.exists() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// Mount for a test, tolerating GVfs's already-mounted answer.
+///
+/// Returns the mount point either way, so a case that only needs a MOUNTED
+/// share does not fail because a sibling case mounted it first.
+fn mount_for_test(share: &Share, pw: String) -> std::path::PathBuf {
+    let mp = match mount(share, pw, &runtime_dir(), Duration::from_secs(30)) {
+        Ok(mp) => mp,
+        Err(ShareError::Refused(m)) if m.contains("already mounted") => {
+            share.mount_point(&runtime_dir())
+        }
+        Err(e) => panic!("the fixture share should mount: {e:?}"),
+    };
+    assert!(wait_mounted(&mp), "mount point never became usable: {mp:?}");
+    mp
 }
 
 #[test]
@@ -56,9 +128,13 @@ fn a_share_mounts_and_lists() {
     let share = test_share();
     let pw = fixture_password().unwrap();
 
+    ensure_unmounted(&share);
     let mp = mount(&share, pw, &runtime_dir(), Duration::from_secs(30))
         .expect("the fixture share should mount");
-    assert!(mp.is_dir(), "the predicted mount point must exist: {mp:?}");
+    assert!(
+        wait_mounted(&mp),
+        "the predicted mount point never became usable: {mp:?}"
+    );
 
     // The seeded contents must be visible through the mount.
     let names: Vec<String> = std::fs::read_dir(&mp)
@@ -79,9 +155,9 @@ fn the_predicted_mount_point_is_the_real_one() {
     need_fixture!();
     let share = test_share();
     let pw = fixture_password().unwrap();
-    let mp = mount(&share, pw, &runtime_dir(), Duration::from_secs(30)).unwrap();
+    let mp = mount_for_test(&share, pw);
     assert_eq!(mp, share.mount_point(&runtime_dir()));
-    assert!(mp.is_dir());
+    assert!(wait_mounted(&mp), "mount point not usable: {mp:?}");
 }
 
 /// A write through the share must reach the SERVER's own directory, not just
@@ -91,7 +167,7 @@ fn a_write_reaches_the_backend() {
     need_fixture!();
     let share = test_share();
     let pw = fixture_password().unwrap();
-    let mp = mount(&share, pw, &runtime_dir(), Duration::from_secs(30)).unwrap();
+    let mp = mount_for_test(&share, pw);
 
     let name = "written-through-gust.txt";
     let body = "this went over SMB\n";
@@ -116,6 +192,25 @@ fn a_bad_password_is_refused_clearly() {
     share.share = "shared".into();
     share.user = Some("nosuchuser".into());
 
+    // GVfs returns an EXISTING mount instead of authenticating again, so an
+    // already-mounted share makes this test prove nothing. Unmount first and
+    // assert the mount is really gone, otherwise the auth path is untested
+    // and the case must say so rather than passing.
+    let _ = unmount(&share);
+    let mp_guess = share.mount_point(&runtime_dir());
+    let cleared = {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut gone = false;
+        while std::time::Instant::now() < deadline {
+            if !mp_guess.exists() {
+                gone = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        gone
+    };
+
     let err = mount(
         &share,
         "definitely-not-the-password".into(),
@@ -124,16 +219,25 @@ fn a_bad_password_is_refused_clearly() {
     );
     match err {
         Err(ShareError::AuthFailed) => {}
-        // If the share is already mounted from an earlier test, GVfs returns
-        // the existing mount rather than authenticating again. That is GVfs
-        // behaviour, not a Gust bug, and the message check below still holds.
-        Ok(_) => eprintln!("share was already mounted; auth path not exercised"),
+        Ok(_) => {
+            // Only tolerable if we could not clear the pre-existing mount.
+            assert!(
+                !cleared,
+                "A WRONG PASSWORD WAS ACCEPTED: the share was unmounted first, \
+                 so GVfs really did authenticate and let it through"
+            );
+            eprintln!(
+                "SKIP DETAIL: a pre-existing GVfs mount could not be cleared, \
+                 so the auth path was not exercised by this run"
+            );
+        }
         Err(other) => {
             let m = other.message();
             assert!(
                 !m.contains("Enter user"),
                 "a translated prompt leaked into the message: {m}"
             );
+            assert!(!m.contains("os error"), "an errno reached the user: {m}");
         }
     }
 }
@@ -172,7 +276,7 @@ fn a_gvfs_mount_is_treated_as_stallable() {
     need_fixture!();
     let share = test_share();
     let pw = fixture_password().unwrap();
-    let mp = mount(&share, pw, &runtime_dir(), Duration::from_secs(30)).unwrap();
+    let mp = mount_for_test(&share, pw);
 
     let fs = gust_core::stall::fstype_for(&mp).unwrap_or_else(|| panic!("no fstype for {mp:?}"));
     assert!(
@@ -202,10 +306,24 @@ fn nfs_fixture_up() -> bool {
     std::path::Path::new(&format!("{}/hello.txt", nfs_export_path())).exists()
 }
 
+/// Same contract as `need_fixture!`: a missing NFS export is a visible SKIP,
+/// and GUST_NFS_REQUIRED=1 makes it a failure for a release gate.
 macro_rules! need_nfs {
     () => {
         if !nfs_fixture_up() {
-            eprintln!("nfs fixture not running — start tests/nfs-fixture.sh");
+            let required = std::env::var("GUST_NFS_REQUIRED")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
+            if required {
+                panic!(
+                    "NFS FIXTURE REQUIRED BUT NOT RUNNING: start tests/nfs-fixture.sh. \
+                     GUST_NFS_REQUIRED=1 forbids skipping this case."
+                );
+            }
+            eprintln!(
+                "SKIP: nfs fixture not running (tests/nfs-fixture.sh start) — \
+                 this case did NOT run; set GUST_NFS_REQUIRED=1 to make it fail instead"
+            );
             return;
         }
     };
