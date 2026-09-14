@@ -694,13 +694,10 @@ pub fn prune_dead_claims() -> usize {
     pruned
 }
 
-/// Is this PID still running? Conservative: unknown means "yes, leave it".
-fn pid_is_alive(pid: u32) -> bool {
-    if pid == 0 {
-        return true;
-    }
-    Path::new(&format!("/proc/{pid}")).exists()
-}
+// `pid_is_alive` was removed with the filename-shape sweep: a live PID never
+// established ownership of a staging file (PIDs are recycled, and a remote
+// filesystem's PIDs are meaningless locally). Ownership now comes from a
+// recorded claim bound to dev+inode+boot_id; see crate::staging.
 
 #[cfg(test)]
 mod sweep_tests {
