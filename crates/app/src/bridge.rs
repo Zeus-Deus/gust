@@ -160,10 +160,21 @@ pub mod qobject {
         /// Mark the row for moving (cut).
         #[qinvokable]
         fn clip_cut(self: Pin<&mut DirModel>, row: i32) -> QString;
+        /// Is there something Paste could use — Gust's own clipboard or files
+        /// another application offered?
+        #[qinvokable]
+        fn can_paste(self: &DirModel) -> bool;
+        /// Put the absolute path(s) of the selection — or of the folder when
+        /// `row` is negative — on the desktop clipboard as text.
+        #[qinvokable]
+        fn copy_path(self: Pin<&mut DirModel>, row: i32) -> QString;
         /// Paste into the current folder. Starts a background job and returns
         /// "" on success, or a reason why it could not start.
         #[qinvokable]
         fn clip_paste(self: Pin<&mut DirModel>) -> QString;
+        /// Paste into the folder at `row` ("Paste into folder").
+        #[qinvokable]
+        fn clip_paste_into(self: Pin<&mut DirModel>, row: i32) -> QString;
         /// What would a drop of the current selection onto `row` do?
         /// Returns the sentence to show the user, or "" for a no-op.
         /// Remember what a drag is carrying, at the moment it starts.
@@ -3316,6 +3327,28 @@ impl qobject::DirModel {
         }
     }
 
+    fn can_paste(&self) -> bool {
+        self.clipboard.is_some() || gust_core::clipboard::offers_files()
+    }
+
+    fn copy_path(mut self: Pin<&mut Self>, row: i32) -> QString {
+        let paths = if row < 0 {
+            self.key.as_path().map(|p| vec![p.to_path_buf()]).unwrap_or_default()
+        } else {
+            self.as_mut().set_cursor_if_no_selection(row);
+            self.as_ref().target_paths()
+        };
+        if paths.is_empty() {
+            return QString::from("Nothing to copy the path of");
+        }
+        let text = gust_core::clipboard::paths_as_text(&paths);
+        match gust_core::clipboard::offer_text(&text) {
+            Ok(()) if paths.len() == 1 => QString::from(&format!("Copied path {text}")),
+            Ok(()) => QString::from(&format!("Copied {} paths", paths.len())),
+            Err(e) => QString::from(&format!("Could not copy the path: {e}")),
+        }
+    }
+
     fn clip_cut(mut self: Pin<&mut Self>, row: i32) -> QString {
         self.as_mut().set_cursor_if_no_selection(row);
         let paths = self.as_ref().target_paths();
@@ -3361,7 +3394,25 @@ impl qobject::DirModel {
         self.as_mut().rust_mut().clipboard = None;
     }
 
-    fn clip_paste(mut self: Pin<&mut Self>) -> QString {
+    fn clip_paste(self: Pin<&mut Self>) -> QString {
+        self.paste_into(None)
+    }
+
+    fn clip_paste_into(self: Pin<&mut Self>, row: i32) -> QString {
+        let dir = match self.entry_at(row) {
+            Some(e) if e.kind == EntryKind::Dir => {
+                self.key.join(&e.name).as_path().map(|p| p.to_path_buf())
+            }
+            _ => None,
+        };
+        match dir {
+            Some(d) => self.paste_into(Some(d)),
+            None => QString::from("that is not a folder"),
+        }
+    }
+
+    /// Paste into `into`, or into the folder on screen when `None`.
+    fn paste_into(mut self: Pin<&mut Self>, into: Option<PathBuf>) -> QString {
         if self.as_ref().job.is_some() {
             return QString::from("another operation is still running");
         }
@@ -3379,7 +3430,7 @@ impl qobject::DirModel {
         }) else {
             return QString::from("nothing to paste");
         };
-        let Some(dest) = self.as_ref().key.as_path().map(|p| p.to_path_buf()) else {
+        let Some(dest) = into.or_else(|| self.as_ref().key.as_path().map(|p| p.to_path_buf())) else {
             return QString::from("cannot paste here");
         };
         // Drop anything that vanished since it was copied.

@@ -18,9 +18,24 @@ FocusScope {
     property int dropRow: -1
     signal contextRequested(int row, real x, real y)
 
+    function cursorAnchor() {
+        const it = list.itemAtIndex(root.model ? root.model.cursor : -1)
+        if (it) return it.mapToItem(null, Tokens.rowPaddingX * 3, it.height)
+        return list.mapToItem(null, Tokens.rowPaddingX, 0)
+    }
+
     Rectangle {
         anchors.fill: parent
         color: Tokens.background
+
+        MouseArea {
+            anchors.fill: parent
+            acceptedButtons: Qt.RightButton
+            onClicked: (mouse) => {
+                const g = mapToItem(null, mouse.x, mouse.y)
+                root.contextRequested(-1, g.x, g.y)
+            }
+        }
 
         Row {
             anchors.fill: parent
@@ -118,9 +133,15 @@ FocusScope {
                             anchors.fill: parent
                             acceptedButtons: Qt.LeftButton | Qt.RightButton
                             onClicked: (mouse) => {
+                                if (mouse.button === Qt.RightButton) {
+                                    if (!root.model.sel_contains(index))
+                                        root.model.sel_only(index)
+                                    root.model.focus_row(index)
+                                    const g = mapToItem(null, mouse.x, mouse.y)
+                                    root.contextRequested(index, g.x, g.y)
+                                    return
+                                }
                                 root.model.focus_row(index)
-                                if (mouse.button === Qt.RightButton)
-                                    root.contextRequested(index, mouse.x, mouse.y)
                             }
                             onDoubleClicked: root.activated(index)
                         }

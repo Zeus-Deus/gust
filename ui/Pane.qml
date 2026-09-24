@@ -25,6 +25,9 @@ Item {
     signal dropPreview(string text)
     signal dropFailed(string message)
     signal dropDone()
+    /// Right-click or Menu key: row -1 means the folder itself. x/y are in
+    /// window coordinates.
+    signal contextRequested(int row, real x, real y)
 
     /// The view the user is looking at, for focus and page-step maths.
     function currentView() {
@@ -37,6 +40,7 @@ Item {
         return viewMode === "grid" ? gridView.columns() : 1
     }
     function focusList() { currentView().forceActiveFocus() }
+    function cursorAnchor() { return currentView().cursorAnchor() }
 
     RowsView {
         id: rowsView
@@ -57,6 +61,7 @@ Item {
                 pane.dropPreview(pane.model.drop_preview(r, pane.dropAsMove))
         }
         onDropReleased: (r) => pane.finishDrop(r)
+        onContextRequested: (r, x, y) => pane.contextRequested(r, x, y)
     }
 
     IconGridView {
@@ -76,6 +81,7 @@ Item {
                 pane.dropPreview(pane.model.drop_preview(r, pane.dropAsMove))
         }
         onDropReleased: (r) => pane.finishDrop(r)
+        onContextRequested: (r, x, y) => pane.contextRequested(r, x, y)
     }
 
     ColumnsView {
@@ -95,6 +101,7 @@ Item {
                 pane.dropPreview(pane.model.drop_preview(r, pane.dropAsMove))
         }
         onDropReleased: (r) => pane.finishDrop(r)
+        onContextRequested: (r, x, y) => pane.contextRequested(r, x, y)
     }
 
     /// A drop is an ordinary copy or move through the same engine as any

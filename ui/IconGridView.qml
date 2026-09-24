@@ -19,6 +19,12 @@ FocusScope {
     property int dropRow: -1
     signal contextRequested(int row, real x, real y)
 
+    function cursorAnchor() {
+        const it = grid.itemAtIndex(root.model ? root.model.cursor : -1)
+        if (it) return it.mapToItem(null, it.width / 2, it.height)
+        return grid.mapToItem(null, 0, 0)
+    }
+
     function zoomIn() { tileSize = Math.min(tileSize + 16, 240) }
     function zoomOut() { tileSize = Math.max(tileSize - 16, 48) }
     // Columns per row, so Up/Down move a full row rather than one tile.
@@ -27,6 +33,15 @@ FocusScope {
     Rectangle {
         anchors.fill: parent
         color: Tokens.background
+
+        MouseArea {
+            anchors.fill: parent
+            acceptedButtons: Qt.RightButton
+            onClicked: (mouse) => {
+                const g = mapToItem(null, mouse.x, mouse.y)
+                root.contextRequested(-1, g.x, g.y)
+            }
+        }
 
         GridView {
             id: grid
@@ -152,7 +167,8 @@ FocusScope {
                                 if (!root.model.sel_contains(index))
                                     root.model.sel_only(index)
                                 root.model.focus_row(index)
-                                root.contextRequested(index, mouse.x, mouse.y)
+                                const g = mapToItem(null, mouse.x, mouse.y)
+                                root.contextRequested(index, g.x, g.y)
                                 return
                             }
                             if (mouse.modifiers & Qt.ControlModifier)

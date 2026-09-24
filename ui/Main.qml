@@ -819,7 +819,7 @@ Window {
         // it opens it does not count as visible. The palette closing in that
         // window used to steal the keyboard, leaving a prompt on screen that
         // could not be typed into.
-        if (palette.visible || confirm.visible
+        if (palette.visible || confirm.visible || contextMenu.open
             || prompt.visible || prompt.claimingFocus)
             return
         listFocus.forceActiveFocus()
@@ -862,6 +862,191 @@ Window {
         else if (r === "file")
             hints.status = qsTr("Opened ") + dirModel.entry_name(row)
         win.qaDump("activate")
+    }
+
+    /// Every command the palette and the right-click menu can run. One
+    /// dispatcher, so a menu entry and its palette twin can never drift.
+    function runAction(a) {
+        if (a === "open") win.activateRow(dirModel.cursor)
+        else if (a === "quicklook") win.toggleQuickLook()
+        else if (a === "open-with") { palette.openWith("open with "); return }
+        else if (a === "open-tab") win.newTab(dirModel.entry_path(dirModel.cursor))
+        else if (a === "copy-path") hints.status = dirModel.copy_path(dirModel.cursor)
+        else if (a === "copy-path-folder") hints.status = dirModel.copy_path(-1)
+        else if (a === "paste-into") {
+            const perr = dirModel.clip_paste_into(dirModel.cursor)
+            if (perr !== "") win.alertText = perr
+            else { hints.status = qsTr("Started"); jobTimer.start() }
+        }
+        else if (a === "view-rows") win.setView("rows")
+        else if (a === "split") win.splitPane()
+        else if (a === "unsplit") win.closePane(win.activePane)
+        else if (a === "send-copy") win.sendToOtherPane(false)
+        else if (a === "send-move") win.sendToOtherPane(true)
+        else if (a === "view-grid") win.setView("grid")
+        else if (a === "view-columns") win.setView("columns")
+        else if (a === "toggle-hidden") dirModel.toggle_hidden()
+        else if (a === "reload") dirModel.reload()
+        else if (a === "up") dirModel.navigate_up()
+        else if (a === "trash") win.askTrash()
+        else if (a === "new-folder") win.askNewFolder()
+        else if (a === "rename") win.askRename()
+        else if (a === "duplicate") win.doDuplicate()
+        else if (a === "copy") hints.status = dirModel.clip_copy(dirModel.cursor)
+        else if (a === "cut") hints.status = dirModel.clip_cut(dirModel.cursor)
+        else if (a === "paste") win.doPaste()
+        else if (a === "terminal") hints.status = dirModel.open_terminal()
+        else if (a === "keys") hints.status = win.keyPreset === "vim"
+            ? "vim: h/j/k/l move, l open, r rename, y/d/p copy/cut/paste"
+            : "arrows move, Enter open, F2 rename, Ctrl+C/X/V, Ctrl+N new folder"
+        else if (a === "noop") { /* nothing to do */ }
+        else if (a.startsWith("openwith:")) {
+            const msg = dirModel.open_with_id(dirModel.cursor, a.substring(9))
+            // "OK:" marks success: the window does not change, so
+            // without a line here nothing appears to have happened.
+            if (msg.startsWith("OK:")) hints.status = msg.substring(3)
+            else if (msg !== "") win.alertText = msg
+            win.qaDump("open-with")
+        }
+        else if (a === "bulk") {
+            win.askBulkRename()
+        }
+        else if (a === "compress") {
+            const cerr = dirModel.compress_selection(dirModel.cursor)
+            if (cerr !== "") win.alertText = cerr
+            win.qaDump("compress")
+        }
+        else if (a === "extract") {
+            // Only offer to extract something that looks like an archive:
+            // "Extract here" on a text file would be a button that can
+            // only fail.
+            if (!dirModel.row_is_archive(dirModel.cursor)) {
+                win.alertText = qsTr("That is not an archive Gust can open.")
+                win.qaDump("extract-refused")
+            } else {
+                const xerr = dirModel.extract_row(dirModel.cursor)
+                if (xerr !== "") win.alertText = xerr
+                win.qaDump("extract")
+            }
+        }
+        else if (a === "share-add") {
+            win.askShareAddress()
+        }
+        else if (a.startsWith("device-mount:")) {
+            win.openDevice(a.substring(13), false)
+        }
+        else if (a.startsWith("device-eject:")) {
+            win.ejectDevice(a.substring(13))
+        }
+        else if (a.startsWith("grep:")) {
+            dirModel.grep_start(a.substring(5))
+            win.qaDump("grep")
+        }
+        else if (a.startsWith("cloud-on:")) {
+            const cname = a.substring(9)
+            const cerr = dirModel.cloud_connect(cname)
+            if (cerr !== "") win.alertText = cerr
+        }
+        else if (a.startsWith("cloud-off:")) {
+            const cname2 = a.substring(10)
+            // Never force on the first try: unfinished uploads must be
+            // reported, not silently discarded (DESIGN §6.8).
+            // The answer ("ASK:" or a failure) arrives in placeDone.
+            const cerr2 = dirModel.cloud_disconnect(cname2, false)
+            if (cerr2 !== "") win.alertText = cerr2
+        }
+        else if (a === "cloud-setup") {
+            // rclone's own config tool, in a terminal. Gust never asks
+            // for a cloud password and never sees one.
+            const serr = dirModel.cloud_setup()
+            if (serr !== "") win.alertText = serr
+            else hints.status = qsTr("Set up your storage in the terminal, "
+                                     + "then run :cloud again")
+            win.qaDump("cloud-setup")
+        }
+        else if (a.startsWith("remote-on:")) {
+            const alias = a.substring(10)
+            // Runs on a worker; the window stays usable meanwhile.
+            const err = dirModel.remote_connect(alias)
+            if (err !== "") win.alertText = err
+        }
+        else if (a.startsWith("remote-off:")) {
+            const alias2 = a.substring(11)
+            const err2 = dirModel.remote_disconnect(alias2)
+            if (err2 !== "") win.alertText = err2
+        }
+        else if (a.startsWith("find:")) {
+            dirModel.find_start(a.substring(5))
+            win.qaDump("find-start")
+        }
+        else if (a.startsWith("filter:")) {
+            filterBar.filterActive = true
+            filterInput.text = a.substring(7)
+        }
+        else hints.status = a + " is not wired up yet"
+        win.qaDump("action")
+        win.focusList()
+    }
+
+    /// What a right-click offers. `row` -1 is the folder itself.
+    function contextItems(row) {
+        const sep = { separator: true }
+        const canPaste = dirModel.can_paste()
+        if (row < 0) {
+            return [
+                { label: qsTr("New folder"), hint: "Ctrl+N", action: "new-folder" },
+                { label: qsTr("Paste"), hint: "Ctrl+V", action: "paste", enabled: canPaste },
+                sep,
+                { label: qsTr("Open terminal here"), hint: "", action: "terminal" },
+                { label: qsTr("Copy folder path"), hint: "", action: "copy-path-folder" },
+                sep,
+                { label: dirModel.show_hidden ? qsTr("Hide hidden files") : qsTr("Show hidden files"),
+                  hint: "Ctrl+H", action: "toggle-hidden" },
+                { label: qsTr("Reload"), hint: "Ctrl+R", action: "reload" }
+            ]
+        }
+        const many = dirModel.sel_count() > 1
+        const dir = dirModel.is_dir(row)
+        let list = []
+        if (many) list.push({ label: qsTr("Open ") + dirModel.sel_count() + qsTr(" items"), hint: "Enter", action: "open" })
+        else list.push({ label: qsTr("Open"), hint: "Enter", action: "open" })
+        if (!many && dir) list.push({ label: qsTr("Open in new tab"), hint: "", action: "open-tab" })
+        if (!many && !dir) list.push({ label: qsTr("Open with…"), hint: win.keyPreset === "vim" ? "o" : "", action: "open-with" })
+        list.push({ label: qsTr("Quick Look"), hint: "Space", action: "quicklook" })
+        list.push(sep)
+        list.push({ label: qsTr("Cut"), hint: "Ctrl+X", action: "cut" })
+        list.push({ label: qsTr("Copy"), hint: "Ctrl+C", action: "copy" })
+        // On a folder, Paste goes INTO that folder — the one that was
+        // clicked — never silently into the folder around it.
+        if (!many && dir) list.push({ label: qsTr("Paste into folder"), hint: "", action: "paste-into", enabled: canPaste })
+        else list.push({ label: qsTr("Paste"), hint: "Ctrl+V", action: "paste", enabled: canPaste })
+        list.push({ label: many ? qsTr("Copy paths") : qsTr("Copy path"), hint: "Ctrl+Shift+C", action: "copy-path" })
+        list.push(sep)
+        if (many) list.push({ label: qsTr("Rename ") + dirModel.sel_count() + qsTr(" items…"), hint: "", action: "bulk" })
+        else list.push({ label: qsTr("Rename…"), hint: "F2", action: "rename" })
+        list.push({ label: qsTr("Duplicate"), hint: "Ctrl+D", action: "duplicate" })
+        list.push({ label: qsTr("Compress"), hint: "", action: "compress" })
+        if (!many && dirModel.row_is_archive(row)) list.push({ label: qsTr("Extract here"), hint: "", action: "extract" })
+        list.push(sep)
+        list.push({ label: dirModel.delete_action_label(), hint: "Delete", action: "trash", danger: true })
+        return list
+    }
+
+    function openContextMenu(row, x, y) {
+        if (!dirModel) return
+        if (quickLook.open) quickLook.hide()
+        win.alertText = ""
+        contextMenu.popup(x, y, win.contextItems(row))
+        win.qaDump("context-menu")
+    }
+
+    /// Menu key / Shift+F10: the same menu, anchored under the cursor row.
+    function openContextMenuFromKeyboard() {
+        const row = dirModel.count > 0 ? dirModel.cursor : -1
+        if (row >= 0 && !dirModel.sel_contains(row) && dirModel.sel_count() > 0)
+            dirModel.sel_only(row)
+        const p = row >= 0 ? win.activePaneItem().cursorAnchor() : Qt.point(win.width / 3, win.height / 3)
+        win.openContextMenu(row, p.x, p.y)
     }
 
     property int pendingTrashRow: -1
@@ -1225,6 +1410,7 @@ Window {
                     onDropPreview: (t) => { hints.status = t }
                     onDropFailed: (m) => { win.alertText = m; win.qaDump("drop") }
                     onDropDone: { hints.status = ""; jobTimer.start(); win.qaDump("drop") }
+                    onContextRequested: (r, x, y) => { win.focusPane(0); win.openContextMenu(r, x, y) }
                 }
 
                 // The divider. It is a visible seam, not a decoration: the
@@ -1258,6 +1444,7 @@ Window {
                         onDropPreview: (t) => { hints.status = t }
                         onDropFailed: (m) => { win.alertText = m; win.qaDump("drop") }
                         onDropDone: { hints.status = ""; jobTimer.start(); win.qaDump("drop") }
+                        onContextRequested: (r, x, y) => { win.focusPane(1); win.openContextMenu(r, x, y) }
                     }
                 }
 
@@ -1402,6 +1589,11 @@ Window {
             }
             if (event.text === ":") {
                 palette.open()
+                event.accepted = true; return
+            }
+            if (event.key === Qt.Key_Menu
+                || (event.key === Qt.Key_F10 && (event.modifiers & Qt.ShiftModifier))) {
+                win.openContextMenuFromKeyboard()
                 event.accepted = true; return
             }
 
@@ -1568,6 +1760,10 @@ Window {
                     win.qaDump("undo")
                     event.accepted = true; return
                 }
+                if (event.key === Qt.Key_C && (event.modifiers & Qt.ShiftModifier)) {
+                    hints.status = dirModel.copy_path(dirModel.cursor)
+                    win.qaDump("copy-path"); event.accepted = true; return
+                }
                 if (event.key === Qt.Key_C) {
                     hints.status = dirModel.clip_copy(dirModel.cursor)
                     win.qaDump("clip"); event.accepted = true; return
@@ -1714,120 +1910,19 @@ Window {
         onResultsChanged: win.qaDump("palette-results")
         onClosed: win.focusList()
         onNavigateRequested: (p) => { dirModel.navigate(p); win.focusList() }
-        onActionRequested: (a) => {
-            if (a === "view-rows") win.setView("rows")
-            else if (a === "split") win.splitPane()
-            else if (a === "unsplit") win.closePane(win.activePane)
-            else if (a === "send-copy") win.sendToOtherPane(false)
-            else if (a === "send-move") win.sendToOtherPane(true)
-            else if (a === "view-grid") win.setView("grid")
-            else if (a === "view-columns") win.setView("columns")
-            else if (a === "toggle-hidden") dirModel.toggle_hidden()
-            else if (a === "reload") dirModel.reload()
-            else if (a === "up") dirModel.navigate_up()
-            else if (a === "trash") win.askTrash()
-            else if (a === "new-folder") win.askNewFolder()
-            else if (a === "rename") win.askRename()
-            else if (a === "duplicate") win.doDuplicate()
-            else if (a === "copy") hints.status = dirModel.clip_copy(dirModel.cursor)
-            else if (a === "cut") hints.status = dirModel.clip_cut(dirModel.cursor)
-            else if (a === "paste") win.doPaste()
-            else if (a === "terminal") hints.status = dirModel.open_terminal()
-            else if (a === "keys") hints.status = win.keyPreset === "vim"
-                ? "vim: h/j/k/l move, l open, r rename, y/d/p copy/cut/paste"
-                : "arrows move, Enter open, F2 rename, Ctrl+C/X/V, Ctrl+N new folder"
-            else if (a === "noop") { /* nothing to do */ }
-            else if (a.startsWith("openwith:")) {
-                const msg = dirModel.open_with_id(dirModel.cursor, a.substring(9))
-                // "OK:" marks success: the window does not change, so
-                // without a line here nothing appears to have happened.
-                if (msg.startsWith("OK:")) hints.status = msg.substring(3)
-                else if (msg !== "") win.alertText = msg
-                win.qaDump("open-with")
-            }
-            else if (a === "bulk") {
-                win.askBulkRename()
-            }
-            else if (a === "compress") {
-                const cerr = dirModel.compress_selection(dirModel.cursor)
-                if (cerr !== "") win.alertText = cerr
-                win.qaDump("compress")
-            }
-            else if (a === "extract") {
-                // Only offer to extract something that looks like an archive:
-                // "Extract here" on a text file would be a button that can
-                // only fail.
-                if (!dirModel.row_is_archive(dirModel.cursor)) {
-                    win.alertText = qsTr("That is not an archive Gust can open.")
-                    win.qaDump("extract-refused")
-                } else {
-                    const xerr = dirModel.extract_row(dirModel.cursor)
-                    if (xerr !== "") win.alertText = xerr
-                    win.qaDump("extract")
-                }
-            }
-            else if (a === "share-add") {
-                win.askShareAddress()
-            }
-            else if (a.startsWith("device-mount:")) {
-                win.openDevice(a.substring(13), false)
-            }
-            else if (a.startsWith("device-eject:")) {
-                win.ejectDevice(a.substring(13))
-            }
-            else if (a.startsWith("grep:")) {
-                dirModel.grep_start(a.substring(5))
-                win.qaDump("grep")
-            }
-            else if (a.startsWith("cloud-on:")) {
-                const cname = a.substring(9)
-                const cerr = dirModel.cloud_connect(cname)
-                if (cerr !== "") win.alertText = cerr
-            }
-            else if (a.startsWith("cloud-off:")) {
-                const cname2 = a.substring(10)
-                // Never force on the first try: unfinished uploads must be
-                // reported, not silently discarded (DESIGN §6.8).
-                // The answer ("ASK:" or a failure) arrives in placeDone.
-                const cerr2 = dirModel.cloud_disconnect(cname2, false)
-                if (cerr2 !== "") win.alertText = cerr2
-            }
-            else if (a === "cloud-setup") {
-                // rclone's own config tool, in a terminal. Gust never asks
-                // for a cloud password and never sees one.
-                const serr = dirModel.cloud_setup()
-                if (serr !== "") win.alertText = serr
-                else hints.status = qsTr("Set up your storage in the terminal, "
-                                         + "then run :cloud again")
-                win.qaDump("cloud-setup")
-            }
-            else if (a.startsWith("remote-on:")) {
-                const alias = a.substring(10)
-                // Runs on a worker; the window stays usable meanwhile.
-                const err = dirModel.remote_connect(alias)
-                if (err !== "") win.alertText = err
-            }
-            else if (a.startsWith("remote-off:")) {
-                const alias2 = a.substring(11)
-                const err2 = dirModel.remote_disconnect(alias2)
-                if (err2 !== "") win.alertText = err2
-            }
-            else if (a.startsWith("find:")) {
-                dirModel.find_start(a.substring(5))
-                win.qaDump("find-start")
-            }
-            else if (a.startsWith("filter:")) {
-                filterBar.filterActive = true
-                filterInput.text = a.substring(7)
-            }
-            else hints.status = a + " is not wired up yet"
-            win.focusList()
-        }
+        onActionRequested: (a) => win.runAction(a)
     }
 
     QuickLook {
         id: quickLook
         onClosed: win.focusList()
+    }
+
+    ContextMenu {
+        id: contextMenu
+        onChosen: (a) => win.runAction(a)
+        onHighlightMoved: win.qaDump("context-menu")
+        onClosed: { win.focusList(); win.qaDump("context-menu") }
     }
 
     ConfirmDialog {
@@ -1994,6 +2089,12 @@ Window {
             jobState: win.job ? win.job.state : "",
             jobMessage: win.job ? win.job.message : "",
             jobRefused: win.job ? win.job.refused : 0,
+            menuOpen: contextMenu.open,
+            menuCurrent: contextMenu.current >= 0 && contextMenu.items[contextMenu.current]
+                         ? contextMenu.items[contextMenu.current].label : "",
+            menuItems: contextMenu.open
+                       ? contextMenu.items.map(it => it.separator ? "-" : (it.enabled === false ? "(" + it.label + ")" : it.label))
+                       : [],
             confirmOpen: confirm.visible,
             confirmTitle: confirm.title,
             confirmBody: confirm.body,
