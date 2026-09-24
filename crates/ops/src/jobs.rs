@@ -164,6 +164,54 @@ pub fn start_journalled(
     start_with(id, req, policy, journal, None)
 }
 
+/// A name that is already taken where a source would land.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Clash {
+    pub source: PathBuf,
+    pub existing: PathBuf,
+}
+
+/// Every source whose destination name is already taken, in source order.
+///
+/// Asked BEFORE a job starts, so the user answers before a byte is written.
+/// A source that IS its destination (copying a file onto itself) is not a
+/// clash: the job already knows to keep both.
+pub fn conflicts(req: &Request) -> Vec<Clash> {
+    let Some(dir) = req.dest_dir() else {
+        return Vec::new();
+    };
+    req.sources()
+        .into_iter()
+        .filter_map(|src| {
+            let dst = dir.join(src.file_name()?);
+            dst.symlink_metadata().ok()?;
+            let same = match (
+                crate::anchor::FileIdentity::of_path(&src),
+                crate::anchor::FileIdentity::of_path(&dst),
+            ) {
+                (Ok(a), Ok(b)) => a.dev == b.dev && a.ino == b.ino,
+                _ => false,
+            };
+            (!same).then_some(Clash { source: src, existing: dst })
+        })
+        .collect()
+}
+
+/// Start a job with the user's answer for each clashing source.
+///
+/// A source missing from `answers` falls back to `Ask`: if its name turns
+/// out to be taken after all (something appeared since the pre-flight), the
+/// job stops with a conflict instead of overwriting it.
+pub fn start_resolved(
+    id: impl Into<String>,
+    req: Request,
+    answers: std::collections::HashMap<PathBuf, ConflictPolicy>,
+    journal: Option<crate::journal::Journal>,
+    trash: Option<crate::trash::TrashDir>,
+) -> JobHandle {
+    start_full(id, req, ConflictPolicy::Ask, answers, journal, trash)
+}
+
 /// Start a job with every option.
 ///
 /// `trash` is where `Replace` puts the item being replaced, so the user can
@@ -175,6 +223,17 @@ pub fn start_with(
     id: impl Into<String>,
     req: Request,
     policy: ConflictPolicy,
+    journal: Option<crate::journal::Journal>,
+    trash: Option<crate::trash::TrashDir>,
+) -> JobHandle {
+    start_full(id, req, policy, std::collections::HashMap::new(), journal, trash)
+}
+
+fn start_full(
+    id: impl Into<String>,
+    req: Request,
+    policy: ConflictPolicy,
+    answers: std::collections::HashMap<PathBuf, ConflictPolicy>,
     journal: Option<crate::journal::Journal>,
     trash: Option<crate::trash::TrashDir>,
 ) -> JobHandle {
@@ -197,6 +256,7 @@ pub fn start_with(
             run(
                 req,
                 policy,
+                answers,
                 worker_progress,
                 worker_cancel,
                 worker_record,
@@ -223,6 +283,7 @@ fn set<F: FnOnce(&mut JobProgress)>(p: &Arc<Mutex<JobProgress>>, f: F) {
 fn run(
     req: Request,
     policy: ConflictPolicy,
+    answers: std::collections::HashMap<PathBuf, ConflictPolicy>,
     progress: Arc<Mutex<JobProgress>>,
     cancel: CancelToken,
     record: Arc<Mutex<crate::journal::Job>>,
@@ -329,6 +390,8 @@ fn run(
             _ => false,
         };
         let occupied = !matches!(req, Request::CopyAs { .. }) && dst.symlink_metadata().is_ok();
+        // The user's answer for THIS source, if the dialog asked about it.
+        let policy = answers.get(&src).copied().unwrap_or(policy);
         if occupied {
             let effective = match (&req, same_object) {
                 // Moving a thing onto itself is already done.

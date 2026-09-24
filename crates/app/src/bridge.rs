@@ -318,6 +318,19 @@ pub mod qobject {
         #[qinvokable]
         fn bulk_apply(self: Pin<&mut DirModel>, row: i32, pattern: &QString) -> QString;
 
+        /// The clash the conflict dialog should show now, as JSON, or "".
+        #[qinvokable]
+        fn conflict_json(self: &DirModel) -> QString;
+        /// Answer the current clash: "replace", "keep-both" or "skip", for
+        /// this item or (`all`) every clash still unanswered. Returns
+        /// "?conflict" while more questions remain, "" once the job has
+        /// started, or a reason it could not.
+        #[qinvokable]
+        fn conflict_answer(self: Pin<&mut DirModel>, choice: &QString, all: bool) -> QString;
+        /// Drop the held transfer. Nothing was written.
+        #[qinvokable]
+        fn conflict_cancel(self: Pin<&mut DirModel>);
+
         /// Poll the running job; refreshes the listing when it finishes.
         /// Returns a JSON snapshot, or "" when no job is running.
         #[qinvokable]
@@ -496,6 +509,8 @@ pub struct DirModelRust {
     clipboard: Option<(Vec<std::path::PathBuf>, ClipMode)>,
     /// The job currently running, if any. Only one at a time in M2.
     job: Option<gust_ops::jobs::JobHandle>,
+    /// A copy/move waiting for the user to answer its name clashes.
+    pending: Option<PendingTransfer>,
     /// Cancels the listing worker when the user navigates away.
     load_cancel: CancelToken,
     /// name -> cached thumbnail path, for the rows currently listed.
@@ -524,6 +539,20 @@ pub struct DirModelRust {
     /// Cleared once undone, or superseded by the next job.
     last_job: Option<gust_ops::journal::Job>,
 }
+
+/// A copy or move held back until every name clash has an answer.
+struct PendingTransfer {
+    req: gust_ops::jobs::Request,
+    clashes: Vec<gust_ops::jobs::Clash>,
+    answers: std::collections::HashMap<PathBuf, gust_ops::journal::ConflictPolicy>,
+    /// The paste came from a cut: the clipboard is consumed only when the
+    /// job really starts, so a cancelled dialog leaves it pasteable.
+    consumes_cut: bool,
+}
+
+/// What a transfer funnel returns when it must ask first. QML opens the
+/// conflict dialog on it; anything else non-empty is a refusal to show.
+const NEEDS_ANSWERS: &str = "?conflict";
 
 /// What a place operation's worker found.
 enum PlaceOutcome {
@@ -622,6 +651,7 @@ impl Default for DirModelRust {
             last_trashed_batch: Vec::new(),
             last_bulk_rename: Vec::new(),
             clipboard: None,
+            pending: None,
             job: None,
             load_cancel: CancelToken::new(),
             thumbs: std::collections::HashMap::new(),
@@ -2546,6 +2576,10 @@ impl qobject::DirModel {
         }
         let n = self.as_ref().visible.len() as i32;
         unsafe { self.as_mut().end_reset_model() };
+        // The selection may have just shrunk (navigation, a hidden or
+        // filtered-out entry, a file that vanished). Republish it, or the
+        // status bar keeps announcing a selection that no longer exists.
+        self.as_mut().refresh_selection_flags();
 
         let status = match &snap.complete {
             gust_core::entry::Completeness::Failed { error } => format!("cannot open: {error}"),
@@ -2744,6 +2778,10 @@ impl qobject::DirModel {
         }
         let n = self.as_ref().visible.len() as i32;
         unsafe { self.as_mut().end_reset_model() };
+        // The selection may have just shrunk (navigation, a hidden or
+        // filtered-out entry, a file that vanished). Republish it, or the
+        // status bar keeps announcing a selection that no longer exists.
+        self.as_mut().refresh_selection_flags();
         self.as_mut().set_count(n);
         self.as_mut()
             .set_status(QString::from(&format!("{n} items")));
@@ -2787,6 +2825,10 @@ impl qobject::DirModel {
         }
         let n = self.as_ref().visible.len() as i32;
         unsafe { self.as_mut().end_reset_model() };
+        // The selection may have just shrunk (navigation, a hidden or
+        // filtered-out entry, a file that vanished). Republish it, or the
+        // status bar keeps announcing a selection that no longer exists.
+        self.as_mut().refresh_selection_flags();
         self.as_mut().set_count(n);
         self.as_mut().set_cursor(0);
         let t = text.to_string();
@@ -3454,27 +3496,125 @@ impl qobject::DirModel {
                 dest_dir: dest,
             },
         };
-        // Ask policy: an existing name surfaces a conflict instead of a
-        // silent overwrite.
-        let id = format!("job-{}", gust_ops::journal::now_unix());
-        let handle = gust_ops::jobs::start_journalled(
-            id,
+        // A cut is consumed by its paste; a copy stays available.
+        self.begin_transfer(req, mode == ClipMode::Cut)
+    }
+
+    /// The one door every copy and move goes through (paste, drop, send to
+    /// the other pane). Name clashes are found BEFORE anything is written;
+    /// if there are any, the transfer waits for the user's answers.
+    fn begin_transfer(mut self: Pin<&mut Self>, req: gust_ops::jobs::Request, consumes_cut: bool) -> QString {
+        if self.as_ref().job.is_some() {
+            return QString::from("another operation is still running");
+        }
+        let clashes = gust_ops::jobs::conflicts(&req);
+        let pending = PendingTransfer {
             req,
-            gust_ops::journal::ConflictPolicy::Ask,
+            clashes,
+            answers: std::collections::HashMap::new(),
+            consumes_cut,
+        };
+        if pending.clashes.is_empty() {
+            return self.launch(pending);
+        }
+        self.as_mut().rust_mut().pending = Some(pending);
+        QString::from(NEEDS_ANSWERS)
+    }
+
+    fn launch(mut self: Pin<&mut Self>, p: PendingTransfer) -> QString {
+        let id = format!("job-{}", gust_ops::journal::now_unix());
+        // An item with no answer runs under Ask: if its name was taken after
+        // the check, the job stops instead of overwriting.
+        let handle = gust_ops::jobs::start_resolved(
+            id,
+            p.req,
+            p.answers,
             Self::production_journal(),
+            gust_ops::trash::TrashDir::home(),
         );
-        {
-            let mut r = self.as_mut().rust_mut();
-            r.job = Some(handle);
-            // A new operation supersedes the previous undo.
-            r.last_job = None;
-            r.last_trashed_batch.clear();
-            if mode == ClipMode::Cut {
-                // A cut is consumed by its paste; a copy stays available.
-                r.clipboard = None;
-            }
+        let mut r = self.as_mut().rust_mut();
+        r.job = Some(handle);
+        // A new operation supersedes the previous undo.
+        r.last_job = None;
+        r.last_trashed_batch.clear();
+        if p.consumes_cut {
+            r.clipboard = None;
         }
         QString::default()
+    }
+
+    fn conflict_json(&self) -> QString {
+        let Some(p) = self.pending.as_ref() else {
+            return QString::default();
+        };
+        let Some(i) = p.clashes.iter().position(|c| !p.answers.contains_key(&c.source)) else {
+            return QString::default();
+        };
+        use std::os::unix::fs::MetadataExt;
+        let c = &p.clashes[i];
+        let facts = |path: &std::path::Path| match path.symlink_metadata() {
+            Ok(m) if m.is_dir() => (true, "folder".to_string(), human_time(m.mtime())),
+            Ok(m) => (false, human_size(m.len()), human_time(m.mtime())),
+            Err(_) => (false, "gone".to_string(), String::new()),
+        };
+        let (old_dir, old_size, old_time) = facts(&c.existing);
+        let (_, new_size, new_time) = facts(&c.source);
+        let can_replace = gust_ops::trash::TrashDir::home()
+            .map(|t| gust_ops::trash::trash_capability(&c.existing, &t) == gust_core::location::Cap::Yes)
+            .unwrap_or(false);
+        let verb = match p.req {
+            gust_ops::jobs::Request::Move { .. } => "move",
+            _ => "copy",
+        };
+        QString::from(&format!(
+            concat!(
+                "{{\"index\":{},\"count\":{},\"name\":{},\"isDir\":{},",
+                "\"existingSize\":{},\"existingTime\":{},\"incomingSize\":{},\"incomingTime\":{},",
+                "\"canReplace\":{},\"verb\":\"{}\",\"into\":{}}}"
+            ),
+            i,
+            p.clashes.len(),
+            Self::json_str(&c.existing.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()),
+            old_dir,
+            Self::json_str(&old_size),
+            Self::json_str(&old_time),
+            Self::json_str(&new_size),
+            Self::json_str(&new_time),
+            can_replace,
+            verb,
+            Self::json_str(&c.existing.parent().map(|d| d.display().to_string()).unwrap_or_default()),
+        ))
+    }
+
+    fn conflict_answer(mut self: Pin<&mut Self>, choice: &QString, all: bool) -> QString {
+        use gust_ops::journal::ConflictPolicy;
+        let policy = match choice.to_string().as_str() {
+            "replace" => ConflictPolicy::Replace,
+            "keep-both" => ConflictPolicy::KeepBoth,
+            "skip" => ConflictPolicy::Skip,
+            other => return QString::from(&format!("unknown answer {other:?}")),
+        };
+        let Some(mut p) = self.as_mut().rust_mut().pending.take() else {
+            return QString::from("nothing is waiting for an answer");
+        };
+        let open: Vec<PathBuf> = p
+            .clashes
+            .iter()
+            .filter(|c| !p.answers.contains_key(&c.source))
+            .map(|c| c.source.clone())
+            .collect();
+        for src in open.into_iter().take(if all { usize::MAX } else { 1 }) {
+            p.answers.insert(src, policy);
+        }
+        if p.clashes.iter().all(|c| p.answers.contains_key(&c.source)) {
+            return self.launch(p);
+        }
+        self.as_mut().rust_mut().pending = Some(p);
+        QString::from(NEEDS_ANSWERS)
+    }
+
+    fn conflict_cancel(mut self: Pin<&mut Self>) {
+        self.as_mut().rust_mut().pending = None;
     }
 
     // --- drag and drop ---------------------------------------------------
@@ -3570,20 +3710,7 @@ impl qobject::DirModel {
                 dest_dir: destination,
             },
         };
-        let id = format!("job-{}", gust_ops::journal::now_unix());
-        let handle = gust_ops::jobs::start_journalled(
-            id,
-            req,
-            gust_ops::journal::ConflictPolicy::Ask,
-            Self::production_journal(),
-        );
-        {
-            let mut r = self.as_mut().rust_mut();
-            r.job = Some(handle);
-            r.last_job = None;
-            r.last_trashed_batch.clear();
-        }
-        QString::default()
+        self.begin_transfer(req, false)
     }
 
     /// The shared half of "send this selection over there". The destination
@@ -3623,20 +3750,7 @@ impl qobject::DirModel {
         } else {
             gust_ops::jobs::Request::Copy { sources, dest_dir }
         };
-        let id = format!("job-{}", gust_ops::journal::now_unix());
-        let handle = gust_ops::jobs::start_journalled(
-            id,
-            req,
-            gust_ops::journal::ConflictPolicy::Ask,
-            Self::production_journal(),
-        );
-        {
-            let mut r = self.as_mut().rust_mut();
-            r.job = Some(handle);
-            r.last_job = None;
-            r.last_trashed_batch.clear();
-        }
-        QString::default()
+        self.begin_transfer(req, false)
     }
 
     fn copy_selection_to(self: Pin<&mut Self>, dest: &QString) -> QString {
@@ -3683,18 +3797,7 @@ impl qobject::DirModel {
                         dest_dir: destination,
                     },
                 };
-                let id = format!("job-{}", gust_ops::journal::now_unix());
-                let handle = gust_ops::jobs::start_journalled(
-                    id,
-                    req,
-                    gust_ops::journal::ConflictPolicy::Ask,
-                    Self::production_journal(),
-                );
-                let mut r = self.as_mut().rust_mut();
-                r.job = Some(handle);
-                r.last_job = None;
-                r.last_trashed_batch.clear();
-                QString::default()
+                self.begin_transfer(req, false)
             }
             DropPlan::Refused(why) => QString::from(&why),
             DropPlan::Nothing => QString::default(),

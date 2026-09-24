@@ -21,6 +21,7 @@ fn main() {
         "ui/TextPrompt.qml",
         "ui/JobDrawer.qml",
         "ui/ContextMenu.qml",
+        "ui/ConflictDialog.qml",
     ];
 
     let mut module = QmlModule::new("com.gust.app").qml_files(views);

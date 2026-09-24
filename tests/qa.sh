@@ -729,6 +729,13 @@ expect "five selected before navigating" "d['selCount']" "5"
 key Backspace
 sleep 1.2
 expect "navigating away clears the selection" "d['selCount']" "0"
+# What the user SEES, not just the count: the summary used to keep saying
+# "5 selected · …" in the new folder until the next selection change.
+if [[ "$(state "d['hintShown']")" != *"selected"* ]]; then
+  ok "the status bar no longer claims a selection after navigating"
+else
+  bad "stale selection summary after navigating: '$(state "d['hintShown']")'"
+fi
 
 # A file deleted behind Gust's back must leave the selection.
 typ "/"
