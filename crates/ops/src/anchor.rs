@@ -76,6 +76,56 @@ impl DirHandle {
     }
 }
 
+/// Rename that can never replace what is already at the destination.
+///
+/// `renameat2(RENAME_NOREPLACE)` makes "is the name free?" and "take it" one
+/// atomic step, so a file that appears between a check and the rename is
+/// refused with `AlreadyExists` instead of silently destroyed. Filesystems
+/// that do not implement the flag (some FUSE and NFS) fall back to
+/// `link`+`unlink` for non-directories, which is equally atomic; only a
+/// directory on such a filesystem uses check-then-rename, the best the
+/// kernel offers there.
+pub fn rename_noreplace(
+    from_dir: &DirHandle,
+    from: &OsStr,
+    to_dir: &DirHandle,
+    to: &OsStr,
+) -> io::Result<()> {
+    use rustix::fs::{AtFlags, RenameFlags};
+    use rustix::io::Errno;
+    match rustix::fs::renameat_with(
+        from_dir.as_fd(),
+        from,
+        to_dir.as_fd(),
+        to,
+        RenameFlags::NOREPLACE,
+    ) {
+        Ok(()) => Ok(()),
+        Err(Errno::INVAL) | Err(Errno::NOSYS) | Err(Errno::OPNOTSUPP) => {
+            let st = from_dir.stat_child(from)?;
+            let is_dir = (st.st_mode & 0o170000) == 0o040000;
+            if !is_dir {
+                rustix::fs::linkat(from_dir.as_fd(), from, to_dir.as_fd(), to, AtFlags::empty())?;
+                rustix::fs::unlinkat(from_dir.as_fd(), from, AtFlags::empty())?;
+                return Ok(());
+            }
+            if to_dir.stat_child(to).is_ok() {
+                return Err(io::Error::from(io::ErrorKind::AlreadyExists));
+            }
+            Ok(rustix::fs::renameat(from_dir.as_fd(), from, to_dir.as_fd(), to)?)
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// [`rename_noreplace`] for two absolute paths, each resolved without
+/// following a symlink at any level.
+pub fn rename_noreplace_paths(from: &Path, to: &Path) -> io::Result<()> {
+    let (fd, fname) = resolve_parent(from)?;
+    let (td, tname) = resolve_parent(to)?;
+    rename_noreplace(&fd, &fname, &td, &tname)
+}
+
 /// Walk an absolute path component-by-component, holding a descriptor at each
 /// step and refusing to cross any symlink.
 ///

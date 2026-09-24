@@ -600,10 +600,30 @@ pub fn apply_undo(plan: &UndoPlan) -> UndoOutcome {
                 }
             }
 
-            UndoStep::RestorePreserved { preserved, to } => match std::fs::rename(preserved, to) {
-                Ok(()) => out.steps_done += 1,
-                Err(e) => out.problems.push(format!("{}: {e}", preserved.display())),
-            },
+            UndoStep::RestorePreserved { preserved, to } => {
+                // Never onto something the user put there since.
+                match crate::anchor::rename_noreplace_paths(preserved, to) {
+                    Ok(()) => {
+                        out.steps_done += 1;
+                        // The replaced item was kept in the Trash; once it is
+                        // back, its trash record describes nothing.
+                        if let (Some(files), Some(name)) = (preserved.parent(), preserved.file_name()) {
+                            if files.file_name().is_some_and(|n| n == "files") {
+                                if let Some(base) = files.parent() {
+                                    let mut info = name.to_os_string();
+                                    info.push(".trashinfo");
+                                    let _ = std::fs::remove_file(base.join("info").join(info));
+                                }
+                            }
+                        }
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => out.problems.push(format!(
+                        "{} is occupied again — the replaced item stays in the Trash",
+                        to.display()
+                    )),
+                    Err(e) => out.problems.push(format!("{}: {e}", preserved.display())),
+                }
+            }
         }
     }
     out

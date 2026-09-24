@@ -144,7 +144,7 @@ impl JobHandle {
 /// `policy` decides what happens on a name clash; `Ask` surfaces a conflict
 /// rather than guessing.
 pub fn start(id: impl Into<String>, req: Request, policy: ConflictPolicy) -> JobHandle {
-    start_journalled(id, req, policy, None)
+    start_with(id, req, policy, None, None)
 }
 
 /// Start a job, persisting every state change to a durable journal.
@@ -160,6 +160,23 @@ pub fn start_journalled(
     req: Request,
     policy: ConflictPolicy,
     journal: Option<crate::journal::Journal>,
+) -> JobHandle {
+    start_with(id, req, policy, journal, None)
+}
+
+/// Start a job with every option.
+///
+/// `trash` is where `Replace` puts the item being replaced, so the user can
+/// get it back (Undo restores it). Without a trash, `Replace` keeps its old
+/// engine meaning; production always passes one, and where the trash cannot
+/// take the old item (another filesystem) the replace is refused rather
+/// than turned into a silent permanent delete.
+pub fn start_with(
+    id: impl Into<String>,
+    req: Request,
+    policy: ConflictPolicy,
+    journal: Option<crate::journal::Journal>,
+    trash: Option<crate::trash::TrashDir>,
 ) -> JobHandle {
     let id = id.into();
     let kind = req.kind();
@@ -184,6 +201,7 @@ pub fn start_journalled(
                 worker_cancel,
                 worker_record,
                 journal,
+                trash,
             )
         })
         .ok();
@@ -209,6 +227,7 @@ fn run(
     cancel: CancelToken,
     record: Arc<Mutex<crate::journal::Job>>,
     journal: Option<crate::journal::Journal>,
+    trash: Option<crate::trash::TrashDir>,
 ) {
     // Mutate the in-memory record and immediately persist it. Both must move
     // together: a snapshot and a journal that disagree about success is the
@@ -272,6 +291,8 @@ fn run(
     let mut base_entries = 0usize;
     let mut base_bytes = 0u64;
     let mut refused_all: Vec<String> = Vec::new();
+    let mut skipped = 0usize;
+    let mut kept_both = 0usize;
 
     for src in req.sources() {
         if cancel.is_cancelled() {
@@ -295,6 +316,77 @@ fn run(
                 }
             }
         };
+
+        // A name clash at the top level is resolved HERE, per the policy
+        // the user chose, before a byte is written.
+        let mut dst = dst;
+        let mut preserved: Option<PathBuf> = None;
+        let same_object = match (
+            crate::anchor::FileIdentity::of_path(&src),
+            crate::anchor::FileIdentity::of_path(&dst),
+        ) {
+            (Ok(a), Ok(b)) => a.dev == b.dev && a.ino == b.ino,
+            _ => false,
+        };
+        let occupied = !matches!(req, Request::CopyAs { .. }) && dst.symlink_metadata().is_ok();
+        if occupied {
+            let effective = match (&req, same_object) {
+                // Moving a thing onto itself is already done.
+                (Request::Move { .. }, true) => ConflictPolicy::Skip,
+                // Copying a thing onto itself can only mean "a copy beside
+                // it"; Replace would trash the original.
+                (_, true) => ConflictPolicy::KeepBoth,
+                _ => policy,
+            };
+            match effective {
+                ConflictPolicy::Ask => {}
+                ConflictPolicy::Skip => {
+                    if !same_object {
+                        skipped += 1;
+                    }
+                    base_entries += 1;
+                    set(&progress, |p| p.entries_done = base_entries);
+                    continue;
+                }
+                ConflictPolicy::KeepBoth => {
+                    let free = crate::anchor::resolve_parent(&dst)
+                        .map_err(crate::engine::OpError::from)
+                        .and_then(|(parent, name)| recursive::unique_copy_name(&parent, &name));
+                    match free {
+                        Ok(name) => {
+                            dst = dst.with_file_name(name);
+                            kept_both += 1;
+                        }
+                        Err(e) => {
+                            set_rec(&|r| r.state = crate::journal::JobState::Failed);
+                            set(&progress, |p| {
+                                p.state = JobState::Failed;
+                                p.message = format!("No free name beside {}: {e}", dst.display());
+                            });
+                            return;
+                        }
+                    }
+                }
+                ConflictPolicy::Replace => {
+                    if let Some(t) = trash.as_ref() {
+                        match crate::trash::trash_path(&dst, t) {
+                            Ok(item) => preserved = Some(t.files.join(&item.trashed_name)),
+                            Err(e) => {
+                                set_rec(&|r| r.state = crate::journal::JobState::Failed);
+                                let shown = dst.display().to_string();
+                                set(&progress, |p| {
+                                    p.state = JobState::Failed;
+                                    p.message = format!(
+                                        "{shown} was not replaced: it could not be moved to the Trash first ({e}). Use Keep both instead."
+                                    );
+                                });
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         let p_for_cb = Arc::clone(&progress);
         let mut on_progress = |done: usize, _total: usize, bytes: u64, _bt: u64| {
@@ -348,7 +440,7 @@ fn run(
                     source: src.clone(),
                     destination: Some(dst_for_rec.clone()),
                     source_identity: src_id,
-                    preserved: None,
+                    preserved: preserved.clone(),
                     done: entry_ok,
                     error: None,
                 });
@@ -421,12 +513,19 @@ fn run(
         if refused_all.is_empty() {
             p.state = JobState::Confirmed;
             p.message = {
-                let n = p.entries_done;
+                let n = p.entries_done.saturating_sub(skipped);
                 let noun = if n == 1 { "item" } else { "items" };
-                match p.kind {
+                let mut m = match p.kind {
                     JobKind::Move => format!("Moved {n} {noun}"),
                     _ => format!("Copied {n} {noun}"),
+                };
+                if kept_both > 0 {
+                    m.push_str(&format!(" · kept both for {kept_both}"));
                 }
+                if skipped > 0 {
+                    m.push_str(&format!(" · skipped {skipped}"));
+                }
+                m
             };
         } else {
             p.state = JobState::Failed;

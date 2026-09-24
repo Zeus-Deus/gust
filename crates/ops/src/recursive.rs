@@ -155,6 +155,15 @@ pub fn copy_tree(
         classify(&p.stat_child(&n)?) == FileClass::Directory
     };
 
+    // KeepBoth means "never onto an existing name". The job picks a free
+    // name before calling; an occupied root here is somebody else's.
+    if policy == ConflictPolicy::KeepBoth {
+        let (p, n) = resolve_parent(dst_root)?;
+        if p.stat_child(&n).is_ok() {
+            return Err(OpError::Conflict(dst_root.to_path_buf()));
+        }
+    }
+
     let total = plan.entry_count();
     let mut done = 0usize;
     let mut bytes_done = 0u64;
@@ -254,8 +263,10 @@ pub fn move_tree(
     if dd.stat_child(&dn).is_ok() {
         match policy {
             ConflictPolicy::Skip => return Ok(()),
-            ConflictPolicy::Ask => return Err(OpError::Conflict(dst_root.to_path_buf())),
-            ConflictPolicy::Replace | ConflictPolicy::KeepBoth => {}
+            ConflictPolicy::Ask | ConflictPolicy::KeepBoth => {
+                return Err(OpError::Conflict(dst_root.to_path_buf()))
+            }
+            ConflictPolicy::Replace => {}
         }
     }
 

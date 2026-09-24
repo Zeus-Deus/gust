@@ -406,3 +406,166 @@ fn a_same_folder_symlink_copy_then_undo_leaves_the_original_link_alone() {
     );
     fs::remove_dir_all(&root).ok();
 }
+
+
+// ---------------------------------------------------------------------------
+// Phase A: overwrite paths the m41 audit found outside the copy engine.
+// ---------------------------------------------------------------------------
+
+/// A bulk rename is planned, shown, and only then executed. A file that
+/// appears under a target name in between must never be replaced.
+#[test]
+fn bulk_rename_never_replaces_a_file_that_appeared_after_planning() {
+    use gust_ops::bulk;
+    let d = fixture("bulk-race");
+    fs::write(d.join("a.txt"), b"source").unwrap();
+    let plan = bulk::plan(&d, &[d.join("a.txt")], "b.{ext}");
+    assert!(plan.is_safe(), "{plan:?}");
+    // Somebody else creates the target while the preview is on screen.
+    fs::write(d.join("b.txt"), b"BYSTANDER").unwrap();
+
+    let out = bulk::execute(&d, &plan);
+
+    assert_eq!(fs::read(d.join("b.txt")).unwrap(), b"BYSTANDER");
+    assert_eq!(fs::read(d.join("a.txt")).unwrap(), b"source", "source must be put back");
+    assert!(!out.failed.is_empty(), "the refusal must be reported: {out:?}");
+    let debris: Vec<_> = fs::read_dir(&d)
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with(".gust-rename"))
+        .collect();
+    assert!(debris.is_empty(), "temporary names survived");
+    fs::remove_dir_all(&d).ok();
+}
+
+/// Extracting next to a file of the same name keeps the user's file and
+/// lands the archive's copy under a free name.
+#[test]
+fn extraction_never_replaces_an_existing_file() {
+    use gust_ops::archive::io::{extract, tool_available};
+    use gust_ops::archive::ExtractPolicy;
+    if !tool_available() {
+        return;
+    }
+    let d = fixture("extract-clobber");
+    let src = d.join("src");
+    fs::create_dir_all(&src).unwrap();
+    fs::write(src.join("notes.txt"), b"from the archive").unwrap();
+    let archive = d.join("a.tar");
+    let ok = std::process::Command::new("bsdtar")
+        .arg("-cf").arg(&archive).arg("-C").arg(&src).arg("--").arg("notes.txt")
+        .status().unwrap().success();
+    assert!(ok);
+    let dest = d.join("dest");
+    fs::create_dir_all(&dest).unwrap();
+    fs::write(dest.join("notes.txt"), b"MINE").unwrap();
+
+    let done = extract(&archive, &dest, &ExtractPolicy::default()).unwrap();
+
+    assert_eq!(fs::read(dest.join("notes.txt")).unwrap(), b"MINE");
+    assert_eq!(done.files, 1, "{done:?}");
+    let landed: Vec<String> = fs::read_dir(&dest)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n != "notes.txt")
+        .collect();
+    assert_eq!(landed.len(), 1, "the archive copy must land beside: {landed:?}");
+    assert_eq!(fs::read(dest.join(&landed[0])).unwrap(), b"from the archive");
+    assert!(done.summary().contains("renamed"), "{}", done.summary());
+    fs::remove_dir_all(&d).ok();
+}
+
+/// "Keep both" must keep both. m41 treated it exactly like Replace.
+#[test]
+fn keep_both_keeps_both() {
+    let d = fixture("keepboth");
+    fs::create_dir_all(d.join("src")).unwrap();
+    fs::create_dir_all(d.join("dest")).unwrap();
+    fs::write(d.join("src/notes.txt"), b"incoming").unwrap();
+    fs::write(d.join("dest/notes.txt"), b"ORIGINAL").unwrap();
+
+    let mut job = jobs::start(
+        "kb",
+        jobs::Request::Copy { sources: vec![d.join("src/notes.txt")], dest_dir: d.join("dest") },
+        ConflictPolicy::KeepBoth,
+    );
+    let s = job.wait();
+    assert_eq!(s.state, JobState::Confirmed, "{s:?}");
+    assert_eq!(fs::read(d.join("dest/notes.txt")).unwrap(), b"ORIGINAL");
+    assert_eq!(fs::read(d.join("dest/notes (copy).txt")).unwrap(), b"incoming");
+    fs::remove_dir_all(&d).ok();
+}
+
+/// The engine itself must refuse to overwrite under KeepBoth, so no caller
+/// can reintroduce the bug by forgetting to pick a free name.
+#[test]
+fn the_engine_never_overwrites_under_keep_both() {
+    let d = fixture("keepboth-engine");
+    fs::create_dir_all(d.join("dest")).unwrap();
+    fs::write(d.join("f"), b"incoming").unwrap();
+    fs::write(d.join("dest/f"), b"ORIGINAL").unwrap();
+    let cancel = CancelToken::new();
+    let mut noop = |_: usize, _: usize, _: u64, _: u64| {};
+    let r = recursive::copy_tree(&d.join("f"), &d.join("dest/f"), ConflictPolicy::KeepBoth, &cancel, &mut noop);
+    assert!(r.is_err(), "KeepBoth at the engine must refuse, got {r:?}");
+    assert_eq!(fs::read(d.join("dest/f")).unwrap(), b"ORIGINAL");
+    fs::remove_dir_all(&d).ok();
+}
+
+/// Skip leaves the existing item and the source exactly as they were, and
+/// the rest of the batch still runs.
+#[test]
+fn skip_leaves_the_existing_item_and_finishes_the_rest() {
+    let d = fixture("skip");
+    fs::create_dir_all(d.join("src")).unwrap();
+    fs::create_dir_all(d.join("dest")).unwrap();
+    fs::write(d.join("src/a"), b"new a").unwrap();
+    fs::write(d.join("src/b"), b"new b").unwrap();
+    fs::write(d.join("dest/a"), b"OLD A").unwrap();
+
+    let mut job = jobs::start(
+        "sk",
+        jobs::Request::Move { sources: vec![d.join("src/a"), d.join("src/b")], dest_dir: d.join("dest") },
+        ConflictPolicy::Skip,
+    );
+    let s = job.wait();
+    assert_eq!(s.state, JobState::Confirmed, "{s:?}");
+    assert_eq!(fs::read(d.join("dest/a")).unwrap(), b"OLD A");
+    assert_eq!(fs::read(d.join("src/a")).unwrap(), b"new a", "a skipped source stays put");
+    assert_eq!(fs::read(d.join("dest/b")).unwrap(), b"new b");
+    assert!(s.message.contains("skipped"), "{}", s.message);
+    fs::remove_dir_all(&d).ok();
+}
+
+/// Replace puts the old item in the Trash first, and Undo brings it back.
+#[test]
+fn replace_trashes_the_old_item_and_undo_restores_it() {
+    use gust_ops::trash::TrashDir;
+    let d = fixture("replace");
+    fs::create_dir_all(d.join("src")).unwrap();
+    fs::create_dir_all(d.join("dest")).unwrap();
+    fs::write(d.join("src/notes.txt"), b"incoming").unwrap();
+    fs::write(d.join("dest/notes.txt"), b"ORIGINAL").unwrap();
+    let trash = TrashDir::at(d.join("Trash"));
+
+    let mut job = jobs::start_with(
+        "rp",
+        jobs::Request::Copy { sources: vec![d.join("src/notes.txt")], dest_dir: d.join("dest") },
+        ConflictPolicy::Replace,
+        None,
+        Some(trash.clone()),
+    );
+    let s = job.wait();
+    assert_eq!(s.state, JobState::Confirmed, "{s:?}");
+    assert_eq!(fs::read(d.join("dest/notes.txt")).unwrap(), b"incoming");
+    assert_eq!(fs::read(trash.files.join("notes.txt")).unwrap(), b"ORIGINAL");
+
+    let plan = undo::plan_undo(&job.record());
+    assert!(matches!(plan, undo::UndoPlan::Safe { .. }), "replace must be undoable: {plan:?}");
+    let out = undo::apply_undo(&plan);
+    assert!(out.problems.is_empty(), "{out:?}");
+    assert_eq!(fs::read(d.join("dest/notes.txt")).unwrap(), b"ORIGINAL");
+    assert!(!trash.info.join("notes.txt.trashinfo").exists(), "stale trash record left");
+    fs::remove_dir_all(&d).ok();
+}
