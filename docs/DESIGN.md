@@ -883,9 +883,11 @@ Hyprland can tile.
 
 Dragging a tab over the left or right third of the pane area shows a drop
 target and, on release, moves that tab into that pane — opening the second
-pane if there is only one. It is the same operation `:split` performs, so it
-goes through `splitPane()` and `tabList`'s `pane` field rather than a
-parallel path: two ways to reach one outcome, not two outcomes.
+pane if there is only one. It sets `tabList`'s `pane` field for the DRAGGED
+tab directly. It deliberately does not call `splitPane()`: that moves the
+*active* tab, which is right for `:split` and wrong here — the drop already
+names the tab to move, and going through `splitPane()` first sent two tabs to
+the right and left the left pane empty.
 
 Dropping a tab into the pane it already belongs to does nothing, and says
 nothing, because nothing happened.
@@ -893,7 +895,11 @@ nothing, because nothing happened.
 ### Detaching
 
 Dragging a tab outside the window opens **a new Gust process** at that tab's
-location, then closes the tab here.
+location with everything the tab had — back history, selection, cursor,
+hidden-files state and view — passed in a private one-use handoff file. The
+tab here closes only when the new window reports it is on screen; if the new
+process dies or does not appear within 20 s, the tab stays and the reason is
+shown.
 
 A new process, not a new `Window` in this one, for a reason the plan states
 directly: the detached window must be "a normal window that Hyprland can

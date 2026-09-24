@@ -19,6 +19,7 @@ Item {
     signal changed(string key, string value)
     signal defaultRequested(bool on)
     signal keysRequested(bool on)
+    signal dialogsRequested(bool on)
     signal closed()
 
     readonly property var rows: [
@@ -40,6 +41,9 @@ Item {
         { key: "default", title: qsTr("Default app"),
           options: [["true", qsTr("Use Gust")], ["false", qsTr("Previous app")]],
           note: qsTr("Opening folders and \"Show in folder\" from other apps") },
+        { key: "file_dialogs", title: qsTr("Open/Save"),
+          options: [["true", qsTr("Gust")], ["false", qsTr("Previous")]],
+          note: qsTr("Other apps' file dialogs") },
         { key: "omarchy_keys", title: qsTr("Super+Shift+F"),
           options: [["true", qsTr("Gust")], ["false", qsTr("Omarchy default")]],
           note: root.s.is_omarchy ? qsTr("Edits ~/.config/hypr/bindings.lua, reversibly")
@@ -59,6 +63,7 @@ Item {
     function valueOf(key) {
         if (key === "default") return root.s.is_default ? "true" : "false"
         if (key === "omarchy_keys") return root.s.omarchy_keys ? "true" : "false"
+        if (key === "file_dialogs") return root.s.file_dialogs ? "true" : "false"
         const v = root.s[key]
         return v === undefined ? "" : String(v)
     }
@@ -66,6 +71,7 @@ Item {
         const r = root.rows[rowIndex]
         if (r.key === "default") root.defaultRequested(value === "true")
         else if (r.key === "omarchy_keys") root.keysRequested(value === "true")
+        else if (r.key === "file_dialogs") root.dialogsRequested(value === "true")
         else root.changed(r.key, value)
     }
     function step(dir) {
