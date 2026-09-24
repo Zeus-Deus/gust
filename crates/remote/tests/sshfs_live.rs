@@ -222,3 +222,34 @@ fn a_failed_connection_leaves_no_debris() {
     );
     assert!(!is_mounted(&mp));
 }
+
+
+/// A place whose server went away must still count as mounted — and must be
+/// disconnectable and reconnectable. m41 asked `stat`, which fails on a dead
+/// FUSE mount, so the place read as "not mounted", unmount did nothing, and
+/// every reconnect failed with "File exists" until a reboot.
+#[test]
+fn a_mount_whose_server_died_is_still_seen_and_can_be_cleared() {
+    if !fixture_running() {
+        eprintln!("SKIP: remote fixture not running (tests/remote-fixture.sh start)");
+        return;
+    }
+    let mp = mount_dir("dead-server");
+    let _ = unmount(&mp);
+    let r = mount(&spec(&format!("{FIXTURE}/chroot/shared")), &mp, Duration::from_secs(15));
+    assert!(r.is_ok(), "mount failed: {:?}", r.err());
+
+    // Kill the sshfs process: the FUSE mount stays in the table, dead.
+    let _ = std::process::Command::new("pkill")
+        .args(["-KILL", "-f", &format!("sshfs .*{}", mp.display())])
+        .status();
+    std::thread::sleep(Duration::from_millis(400));
+    assert!(std::fs::metadata(&mp).is_err(), "precondition: the mount is dead");
+
+    assert!(is_mounted(&mp), "a dead mount is still a mount");
+    assert!(unmount(&mp).is_ok(), "a dead mount must be clearable");
+    assert!(!is_mounted(&mp));
+    let again = mount(&spec(&format!("{FIXTURE}/chroot/shared")), &mp, Duration::from_secs(15));
+    assert!(again.is_ok(), "reconnect after a dead mount failed: {:?}", again.err());
+    let _ = unmount(&mp);
+}

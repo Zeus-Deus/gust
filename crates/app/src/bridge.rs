@@ -55,7 +55,16 @@ pub mod qobject {
         /// True while a scoped find is running or its results are shown.
         #[qproperty(bool, finding)]
         #[qproperty(QString, find_needle, cxx_name = "findNeedle")]
+        /// True while a mount, connect, eject or disconnect is running on a
+        /// worker. The window stays responsive; this only drives a spinner.
+        #[qproperty(bool, place_busy)]
         type DirModel = super::DirModelRust;
+
+        /// A place operation finished on its worker. `message` is "" on
+        /// success, "ASK:<question>" when the user must decide, or a
+        /// sentence saying what went wrong.
+        #[qsignal]
+        fn place_done(self: Pin<&mut DirModel>, op: QString, name: QString, message: QString);
 
         #[qinvokable]
         fn navigate(self: Pin<&mut DirModel>, path: &QString);
@@ -487,6 +496,7 @@ pub struct DirModelRust {
     /// True while a find is running or its results are shown.
     finding: bool,
     find_needle: QString,
+    place_busy: bool,
     /// Cancels a running find. Escape, a new find, or navigating away.
     find_cancel: CancelToken,
     /// The folder the user was browsing before the find. Results are a
@@ -502,6 +512,18 @@ pub struct DirModelRust {
     /// The last completed copy/move, kept so Ctrl+Z can ask for its inverse.
     /// Cleared once undone, or superseded by the next job.
     last_job: Option<gust_ops::journal::Job>,
+}
+
+/// What a place operation's worker found.
+enum PlaceOutcome {
+    /// Browse this folder (unless the user moved on), then report success.
+    Open { path: std::path::PathBuf, status: String },
+    /// Report success with a status line.
+    Done(String),
+    /// Report a failure the user must read.
+    Failed(String),
+    /// Continue on the GUI thread (e.g. leave a mount, then unmount it).
+    Then(Box<dyn FnOnce(Pin<&mut qobject::DirModel>) + Send>),
 }
 
 /// Whether a clipboard entry will be copied or moved.
@@ -596,6 +618,7 @@ impl Default for DirModelRust {
             drag_payload: Vec::new(),
             finding: false,
             find_needle: QString::from(""),
+            place_busy: false,
             find_cancel: CancelToken::new(),
             find_origin: None,
             thumbs_wanted: false,
@@ -735,6 +758,83 @@ impl qobject::DirModel {
     /// The Qt thread handle, or None before the object is fully constructed.
     fn qt_thread_handle(&self) -> Option<cxx_qt::CxxQtThread<qobject::DirModel>> {
         Some(<qobject::DirModel as cxx_qt::Threading>::qt_thread(self))
+    }
+
+    /// Run a place operation (mount, connect, eject, disconnect) on a worker.
+    ///
+    /// These call sshfs, gio, udisksctl, rclone and fusermount3, each of
+    /// which can take many seconds against a slow or dead server. Blocking
+    /// the GUI thread for that long froze the whole window (the m41 audit);
+    /// here the call returns at once and `place_done` reports the outcome.
+    /// A result that navigates is dropped if the user has already gone
+    /// somewhere else in the meantime.
+    fn place_op<F>(mut self: Pin<&mut Self>, op: &'static str, name: String, busy: String, work: F)
+    where
+        F: FnOnce() -> PlaceOutcome + Send + 'static,
+    {
+        let Some(thread) = self.as_ref().qt_thread_handle() else {
+            return;
+        };
+        if self.as_ref().place_busy {
+            self.as_mut().place_done(
+                QString::from(op),
+                QString::from(&name),
+                QString::from("Another connection is still in progress."),
+            );
+            return;
+        }
+        self.as_mut().set_place_busy(true);
+        self.as_mut().set_status(QString::from(&busy));
+        let gen = self.as_ref().generation;
+        let spawned = std::thread::Builder::new()
+            .name(format!("gust-{op}"))
+            .spawn(move || {
+                let outcome = work();
+                let _ = thread.queue(move |mut model| {
+                    model.as_mut().set_place_busy(false);
+                    let (opq, nameq) = (QString::from(op), QString::from(&name));
+                    match outcome {
+                        PlaceOutcome::Open { path, status } => {
+                            if model.as_ref().generation == gen {
+                                model.as_mut().navigate(&QString::from(path.to_string_lossy().as_ref()));
+                            }
+                            if !status.is_empty() {
+                                model.as_mut().set_status(QString::from(&status));
+                            }
+                            model.as_mut().place_done(opq, nameq, QString::default());
+                        }
+                        PlaceOutcome::Done(status) => {
+                            model.as_mut().set_status(QString::from(&status));
+                            model.as_mut().place_done(opq, nameq, QString::default());
+                        }
+                        PlaceOutcome::Failed(msg) => {
+                            model.as_mut().set_status(QString::from(""));
+                            model.as_mut().place_done(opq, nameq, QString::from(&msg));
+                        }
+                        PlaceOutcome::Then(next) => next(model),
+                    }
+                });
+            });
+        if spawned.is_err() {
+            self.as_mut().set_place_busy(false);
+            self.as_mut().place_done(
+                QString::from(op),
+                QString::from(""),
+                QString::from("Could not start a worker thread."),
+            );
+        }
+    }
+
+    /// Leave `mount` for the home folder if this pane is inside it, so an
+    /// unmount never pulls a filesystem out from under the open listing.
+    fn leave_if_inside(mut self: Pin<&mut Self>, mount: &std::path::Path) {
+        let here = std::path::PathBuf::from(self.as_ref().location.to_string());
+        if here.starts_with(mount) {
+            if let Some(home) = std::env::var_os("HOME") {
+                let q = QString::from(std::path::PathBuf::from(home).to_string_lossy().as_ref());
+                self.as_mut().navigate(&q);
+            }
+        }
     }
 
     /// Start loading the current location on a WORKER thread.
@@ -1005,13 +1105,20 @@ impl qobject::DirModel {
     /// The RC address of the mount Gust started for this remote. Loopback
     /// only: the RC is a privileged control surface (plan §9).
     fn cloud_rc_addr(name: &str) -> String {
-        // A stable per-remote port derived from the name, in the dynamic
-        // range, so two remotes do not fight over one endpoint.
-        let mut h: u32 = 2166136261;
-        for b in name.as_bytes() {
-            h = (h ^ *b as u32).wrapping_mul(16777619);
+        // A Unix socket in the user's runtime dir: only this user can open
+        // it, so the RC needs no password and no port is exposed to other
+        // users or to web pages that can reach loopback.
+        match Self::cloud_rc_socket(name) {
+            Some(p) => gust_remote::cloud::rc_bind_arg(&p),
+            None => String::from("unix:///nonexistent"),
         }
-        format!("http://127.0.0.1:{}", 45000 + (h % 2000) as u16)
+    }
+
+    fn cloud_rc_socket(name: &str) -> Option<std::path::PathBuf> {
+        let mp = Self::cloud_mount_point(name)?;
+        let leaf = mp.file_name()?.to_string_lossy().into_owned();
+        let runtime = mp.parent()?.parent()?.parent()?.to_path_buf();
+        Some(gust_remote::cloud::rc_socket_path(&runtime, &leaf))
     }
 
     /// Per-object upload state for every cloud mount in THIS process.
@@ -1573,7 +1680,7 @@ impl qobject::DirModel {
     /// never written to Gust's places file — which records the server and
     /// share only.
     fn share_mount(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         address: QString,
         user: QString,
         domain: QString,
@@ -1597,25 +1704,17 @@ impl qobject::DirModel {
 
         let runtime =
             std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/run/user/1000".to_string());
-
-        // Bounded: a server that never answers must not hang the window.
-        // This runs on the UI thread only because gio is given a deadline;
-        // the listing that follows goes through the normal worker.
-        let result = mount(
-            &share,
-            password.to_string(),
-            &runtime,
-            std::time::Duration::from_secs(25),
-        );
-
-        match result {
-            Ok(mp) => {
-                let q = QString::from(mp.to_string_lossy().as_ref());
-                self.as_mut().navigate(&q);
-                QString::default()
+        // Moved into the worker and dropped there; never stored.
+        let secret = password.to_string();
+        let label = format!("{}/{}", share.server, share.share);
+        self.place_op("share", label.clone(), format!("Connecting to {label}…"), move || {
+            // Bounded: a server that never answers fails after the deadline.
+            match mount(&share, secret, &runtime, std::time::Duration::from_secs(25)) {
+                Ok(mp) => PlaceOutcome::Open { path: mp, status: format!("Connected to {label}") },
+                Err(e) => PlaceOutcome::Failed(e.message()),
             }
-            Err(e) => QString::from(e.message()),
-        }
+        });
+        QString::default()
     }
 
     // --- removable devices (DESIGN §6.13) --------------------------------
@@ -1649,55 +1748,49 @@ impl qobject::DirModel {
         QString::from(out)
     }
 
-    fn device_mount(mut self: Pin<&mut Self>, path: QString) -> QString {
+    fn device_mount(self: Pin<&mut Self>, path: QString) -> QString {
         use gust_core::devices::{mount_args, udisks_available, DeviceError};
         if !udisks_available() {
             return QString::from(DeviceError::NoUdisks.message());
         }
         let dev = path.to_string();
-        // The device must be one the kernel actually reports, so a crafted
-        // path cannot be handed to udisks.
-        if !gust_core::devices::list_devices()
-            .iter()
-            .any(|d| d.path == dev)
-        {
-            return QString::from("That device is no longer there.");
-        }
-
-        let out = std::process::Command::new("udisksctl")
-            .args(mount_args(&dev))
-            .stdin(std::process::Stdio::null())
-            .output();
-        let out = match out {
-            Ok(o) => o,
-            Err(e) => return QString::from(format!("Could not mount: {e}")),
-        };
-        if !out.status.success() {
-            let err = String::from_utf8_lossy(&out.stderr);
-            return QString::from(format!(
-                "Could not mount that device: {}",
-                err.lines()
-                    .last()
-                    .unwrap_or("udisks did not say why")
-                    .trim()
-            ));
-        }
-        // udisksctl prints "Mounted /dev/sdb1 at /run/media/...".
-        let said = String::from_utf8_lossy(&out.stdout);
-        if let Some(at) = said.rsplit_once(" at ") {
-            let mount = at.1.trim().trim_end_matches('.').to_string();
-            if std::path::Path::new(&mount).is_dir() {
-                let q = QString::from(mount.as_str());
-                self.as_mut().navigate(&q);
-                return QString::default();
+        self.place_op("device-mount", dev.clone(), "Mounting…".into(), move || {
+            // The device must be one the kernel actually reports, so a
+            // crafted path cannot be handed to udisks.
+            if !gust_core::devices::list_devices().iter().any(|d| d.path == dev) {
+                return PlaceOutcome::Failed("That device is no longer there.".into());
             }
-        }
-        // Mounted, but the path could not be read back: say so rather than
-        // claiming to have gone somewhere.
-        QString::from("Mounted, but Gust could not tell where. Check the sidebar.")
+            let out = std::process::Command::new("udisksctl")
+                .args(mount_args(&dev))
+                .stdin(std::process::Stdio::null())
+                .output();
+            let out = match out {
+                Ok(o) => o,
+                Err(e) => return PlaceOutcome::Failed(format!("Could not mount: {e}")),
+            };
+            if !out.status.success() {
+                let err = String::from_utf8_lossy(&out.stderr);
+                return PlaceOutcome::Failed(format!(
+                    "Could not mount that device: {}",
+                    err.lines().last().unwrap_or("udisks did not say why").trim()
+                ));
+            }
+            // udisksctl prints "Mounted /dev/sdb1 at /run/media/...".
+            let said = String::from_utf8_lossy(&out.stdout);
+            if let Some(at) = said.rsplit_once(" at ") {
+                let mount = at.1.trim().trim_end_matches('.').to_string();
+                if std::path::Path::new(&mount).is_dir() {
+                    return PlaceOutcome::Open { path: mount.into(), status: String::new() };
+                }
+            }
+            // Mounted, but the path could not be read back: say so rather
+            // than claiming to have gone somewhere.
+            PlaceOutcome::Failed("Mounted, but Gust could not tell where. Check the sidebar.".into())
+        });
+        QString::default()
     }
 
-    fn device_unmount(mut self: Pin<&mut Self>, path: QString) -> QString {
+    fn device_unmount(self: Pin<&mut Self>, path: QString) -> QString {
         use gust_core::devices::{udisks_available, unmount_args, DeviceError};
         if !udisks_available() {
             return QString::from(DeviceError::NoUdisks.message());
@@ -1708,41 +1801,37 @@ impl qobject::DirModel {
         if self.as_ref().job.is_some() {
             return QString::from(DeviceError::Busy("A transfer".into()).message());
         }
-
-        // If the user is standing on the device, leave before ejecting it.
-        let here = std::path::PathBuf::from(self.as_ref().location.to_string());
-        let mount = gust_core::devices::list_devices()
-            .into_iter()
-            .find(|d| d.path == dev)
-            .and_then(|d| d.mount_point);
-        if let Some(mp) = &mount {
-            if here.starts_with(mp) {
-                if let Some(home) = std::env::var_os("HOME") {
-                    let q =
-                        QString::from(std::path::PathBuf::from(home).to_string_lossy().as_ref());
-                    self.as_mut().navigate(&q);
+        self.place_op("device-eject", dev.clone(), "Ejecting…".into(), move || {
+            let mount = gust_core::devices::list_devices()
+                .into_iter()
+                .find(|d| d.path == dev)
+                .and_then(|d| d.mount_point);
+            // Back on the GUI thread: leave the device if the pane is on it,
+            // then eject on a worker again.
+            PlaceOutcome::Then(Box::new(move |mut model| {
+                if let Some(mp) = &mount {
+                    model.as_mut().leave_if_inside(mp);
                 }
-            }
-        }
-
-        let out = std::process::Command::new("udisksctl")
-            .args(unmount_args(&dev))
-            .stdin(std::process::Stdio::null())
-            .output();
-        match out {
-            Ok(o) if o.status.success() => QString::default(),
-            Ok(o) => {
-                let err = String::from_utf8_lossy(&o.stderr);
-                QString::from(format!(
-                    "Could not eject: {}",
-                    err.lines()
-                        .last()
-                        .unwrap_or("udisks did not say why")
-                        .trim()
-                ))
-            }
-            Err(e) => QString::from(format!("Could not eject: {e}")),
-        }
+                model.place_op("device-eject", dev.clone(), "Ejecting…".into(), move || {
+                    let out = std::process::Command::new("udisksctl")
+                        .args(unmount_args(&dev))
+                        .stdin(std::process::Stdio::null())
+                        .output();
+                    match out {
+                        Ok(o) if o.status.success() => PlaceOutcome::Done("Safe to remove".into()),
+                        Ok(o) => {
+                            let err = String::from_utf8_lossy(&o.stderr);
+                            PlaceOutcome::Failed(format!(
+                                "Could not eject: {}",
+                                err.lines().last().unwrap_or("udisks did not say why").trim()
+                            ))
+                        }
+                        Err(e) => PlaceOutcome::Failed(format!("Could not eject: {e}")),
+                    }
+                });
+            }))
+        });
+        QString::default()
     }
 
     fn cloud_suggestions(&self) -> QString {
@@ -1784,173 +1873,175 @@ impl qobject::DirModel {
         if !gust_remote::cloud::rclone_available() {
             return QString::from(gust_remote::cloud::CloudError::NotInstalled.message());
         }
-        // The remote must be one the installed rclone actually has.
-        match gust_remote::cloud::list_remotes(None) {
-            Ok(remotes) => {
-                if !remotes.iter().any(|r| r.name == name) {
-                    return QString::from(
-                        gust_remote::cloud::CloudError::NoSuchRemote(name).message(),
-                    );
-                }
-            }
-            Err(e) => return QString::from(e.message()),
-        }
-
         let Some(mp) = Self::cloud_mount_point(&name) else {
             return QString::from("That name cannot be used for a place.");
         };
-        if gust_remote::mount::is_mounted(&mp) {
-            let q = QString::from(mp.to_string_lossy().as_ref());
-            self.as_mut().navigate(&q);
-            return QString::from("");
-        }
-        if std::fs::create_dir_all(&mp).is_err() {
-            return QString::from("Could not prepare a place for that remote.");
-        }
-
-        // --vfs-cache-mode writes is what makes "cached" and "uploaded"
-        // different moments; Gust reports the difference rather than hiding
-        // it. No credential is passed here — rclone reads its own config.
-        let rc = Self::cloud_rc_addr(&name);
-        let rc_bind = rc.trim_start_matches("http://").to_string();
-        let cache = mp.parent().map(|p| p.join(".cache")).unwrap_or_default();
-        let _ = std::fs::create_dir_all(&cache);
-
-        let spawned = std::process::Command::new("rclone")
-            .arg("mount")
-            .arg(format!("{name}:"))
-            .arg(&mp)
-            .arg("--vfs-cache-mode")
-            .arg("writes")
-            .arg("--cache-dir")
-            .arg(&cache)
-            .arg("--rc")
-            .arg("--rc-addr")
-            .arg(&rc_bind)
-            .arg("--rc-no-auth")
-            // NOT --daemon: its readiness handshake reports "daemon exited
-            // with error code 1" over a mount that came up perfectly, and
-            // would report success over one that did not. The mount point
-            // itself is the only trustworthy signal.
-            .env("RCLONE_ASK_PASSWORD", "false")
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn();
-
-        let mut child = match spawned {
-            Ok(c) => c,
-            Err(e) => {
-                let _ = std::fs::remove_dir(&mp);
-                return QString::from(format!("Could not start rclone: {e}"));
+        let rc_bind = Self::cloud_rc_addr(&name);
+        let sock = Self::cloud_rc_socket(&name);
+        let label = name.clone();
+        self.as_mut().place_op("cloud-connect", name.clone(), format!("Connecting to {name}…"), move || {
+            // The remote must be one the installed rclone actually has.
+            match gust_remote::cloud::list_remotes(None) {
+                Ok(remotes) if remotes.iter().any(|r| r.name == name) => {}
+                Ok(_) => {
+                    return PlaceOutcome::Failed(
+                        gust_remote::cloud::CloudError::NoSuchRemote(name).message(),
+                    )
+                }
+                Err(e) => return PlaceOutcome::Failed(e.message()),
             }
-        };
-
-        // A mount appears asynchronously. Wait a bounded moment, watching
-        // both the mount point and the child: if rclone gives up first, say
-        // so rather than waiting out the whole timeout.
-        for _ in 0..60 {
             if gust_remote::mount::is_mounted(&mp) {
-                let q = QString::from(mp.to_string_lossy().as_ref());
-                self.as_mut().navigate(&q);
-                return QString::from("");
+                return PlaceOutcome::Open { path: mp, status: String::new() };
             }
-            if let Ok(Some(status)) = child.try_wait() {
-                let _ = std::fs::remove_dir(&mp);
-                return QString::from(format!(
-                    "Could not connect to {name}: rclone stopped ({status}). Check it with: rclone lsd {name}:"
-                ));
+            if std::fs::create_dir_all(&mp).is_err() {
+                return PlaceOutcome::Failed("Could not prepare a place for that remote.".into());
             }
-            std::thread::sleep(std::time::Duration::from_millis(250));
-        }
-        // Still nothing: leave nothing running behind.
-        let _ = child.kill();
-        let _ = std::fs::remove_dir(&mp);
-        QString::from(format!("{name} did not finish connecting."))
+            if let Some(sock) = &sock {
+                if let Some(dir) = sock.parent() {
+                    use std::os::unix::fs::DirBuilderExt;
+                    let _ = std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir);
+                }
+                // A socket left by a crashed mount would make rclone refuse
+                // to bind. It is ours by path and never user data.
+                let _ = std::fs::remove_file(sock);
+            }
+            let cache = mp.parent().map(|p| p.join(".cache")).unwrap_or_default();
+            let _ = std::fs::create_dir_all(&cache);
+
+            // --vfs-cache-mode writes is what makes "cached" and "uploaded"
+            // different moments; Gust reports the difference rather than
+            // hiding it. No credential is passed here — rclone reads its
+            // own config.
+            let spawned = std::process::Command::new("rclone")
+                .arg("mount")
+                .arg(format!("{name}:"))
+                .arg(&mp)
+                .arg("--vfs-cache-mode")
+                .arg("writes")
+                .arg("--cache-dir")
+                .arg(&cache)
+                .arg("--rc")
+                .arg("--rc-addr")
+                .arg(&rc_bind)
+                // Safe ONLY because the address is a socket in a 0700
+                // runtime directory; never with a TCP address.
+                .arg("--rc-no-auth")
+                // NOT --daemon: its readiness handshake reports "daemon
+                // exited with error code 1" over a mount that came up
+                // perfectly. The mount point itself is the only trustworthy
+                // signal.
+                .env("RCLONE_ASK_PASSWORD", "false")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+            let mut child = match spawned {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = std::fs::remove_dir(&mp);
+                    return PlaceOutcome::Failed(format!("Could not start rclone: {e}"));
+                }
+            };
+            // A mount appears asynchronously. Watch both the mount point and
+            // the child: if rclone gives up first, say so.
+            for _ in 0..60 {
+                if gust_remote::mount::is_mounted(&mp) {
+                    // Reap the child from a detached thread so it never
+                    // becomes a zombie when it eventually exits.
+                    std::thread::spawn(move || {
+                        let _ = child.wait();
+                    });
+                    return PlaceOutcome::Open { path: mp, status: format!("Connected to {label}") };
+                }
+                if let Ok(Some(status)) = child.try_wait() {
+                    let _ = std::fs::remove_dir(&mp);
+                    return PlaceOutcome::Failed(format!(
+                        "Could not connect to {name}: rclone stopped ({status}). Check it with: rclone lsd {name}:"
+                    ));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+            // Still nothing: leave nothing running behind.
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = std::fs::remove_dir(&mp);
+            PlaceOutcome::Failed(format!("{name} did not finish connecting."))
+        });
+        QString::default()
     }
 
-    fn cloud_disconnect(mut self: Pin<&mut Self>, name: QString, force: bool) -> QString {
+    fn cloud_disconnect(self: Pin<&mut Self>, name: QString, force: bool) -> QString {
         let name = name.to_string();
         let Some(mp) = Self::cloud_mount_point(&name) else {
             return QString::from("That name cannot be used for a place.");
         };
-        if !gust_remote::mount::is_mounted(&mp) {
-            return QString::from(format!("{name} is not connected."));
-        }
-
-        // Never lazy-unmount a dirty mount (plan §9). Ask first, and say how
-        // much work is outstanding.
-        //
-        // A query that did not answer is NOT an empty queue: reading this as
-        // `if let Ok(p) = ...` failed OPEN, so a timed-out or refused RC call
-        // silently proceeded to unmount and could destroy work that was only
-        // ever in the local cache. Unknown state is refused, not assumed safe
-        // (gust_remote::disconnect).
-        if !force {
-            let rc = Self::cloud_rc_addr(&name);
-            let report =
-                match gust_remote::cloud::vfs_pending(&rc, std::time::Duration::from_secs(3)) {
-                    Ok(p) => gust_remote::disconnect::PendingReport::Known {
-                        queued: p.queued,
-                        in_progress: p.in_progress,
-                        errored: p.errored,
-                    },
-                    Err(e) => gust_remote::disconnect::PendingReport::Unknown(e.message()),
-                };
-            let guard = Self::cloud_tracker().lock();
-            let tracker = guard.as_ref().ok().map(|g| &**g);
-            match gust_remote::disconnect::verdict_for(&name, &report, tracker, Some(&mp), false) {
-                gust_remote::disconnect::DisconnectVerdict::Safe => {}
-                // Answerable: the user may choose to go ahead.
-                gust_remote::disconnect::DisconnectVerdict::Ask(msg) => {
-                    return QString::from(format!("ASK:{msg}"));
-                }
-                // Not a yes/no question. Routed to the alert channel, because
-                // offering a button that can only lose data is worse than
-                // refusing (DESIGN §6.8).
-                gust_remote::disconnect::DisconnectVerdict::Refuse(msg) => {
-                    return QString::from(msg);
+        let rc = Self::cloud_rc_addr(&name);
+        let label = name.clone();
+        self.place_op("cloud-disconnect", name.clone(), format!("Disconnecting {name}…"), move || {
+            if !gust_remote::mount::is_mounted(&mp) {
+                return PlaceOutcome::Failed(format!("{name} is not connected."));
+            }
+            // Never lazy-unmount a dirty mount (plan §9). Ask first, and say
+            // how much work is outstanding.
+            //
+            // A query that did not answer is NOT an empty queue: unknown
+            // state is refused, not assumed safe (gust_remote::disconnect).
+            if !force {
+                let report =
+                    match gust_remote::cloud::vfs_pending(&rc, std::time::Duration::from_secs(3)) {
+                        Ok(p) => gust_remote::disconnect::PendingReport::Known {
+                            queued: p.queued,
+                            in_progress: p.in_progress,
+                            errored: p.errored,
+                        },
+                        Err(e) => gust_remote::disconnect::PendingReport::Unknown(e.message()),
+                    };
+                let guard = Self::cloud_tracker().lock();
+                let tracker = guard.as_ref().ok().map(|g| &**g);
+                match gust_remote::disconnect::verdict_for(&name, &report, tracker, Some(&mp), false) {
+                    gust_remote::disconnect::DisconnectVerdict::Safe => {}
+                    // Answerable: the user may choose to go ahead.
+                    gust_remote::disconnect::DisconnectVerdict::Ask(msg) => {
+                        return PlaceOutcome::Failed(format!("ASK:{msg}"));
+                    }
+                    // Not a yes/no question: offering a button that can only
+                    // lose data is worse than refusing (DESIGN §6.8).
+                    gust_remote::disconnect::DisconnectVerdict::Refuse(msg) => {
+                        return PlaceOutcome::Failed(msg);
+                    }
                 }
             }
-        }
-
-        // If the user is inside the mount, leave before pulling it away.
-        let here = std::path::PathBuf::from(self.as_ref().location.to_string());
-        if here.starts_with(&mp) {
-            if let Some(home) = std::env::var_os("HOME") {
-                let q = QString::from(std::path::PathBuf::from(home).to_string_lossy().as_ref());
-                self.as_mut().navigate(&q);
-            }
-        }
-
-        // Navigating away is not instant: the listing worker can still hold
-        // the directory open for a moment, and fusermount3 then reports
-        // "Device or resource busy" for a mount nobody is really using.
-        let mut last = String::new();
-        for attempt in 0..8 {
-            if attempt > 0 {
-                std::thread::sleep(std::time::Duration::from_millis(400));
-            }
-            match std::process::Command::new("fusermount3")
-                .arg("-u")
-                .arg(&mp)
-                .output()
-            {
-                Ok(o) if o.status.success() => {
-                    // Only a directory Gust created, under the runtime dir.
-                    let _ = std::fs::remove_dir(&mp);
-                    return QString::from("");
-                }
-                Ok(o) => last = String::from_utf8_lossy(&o.stderr).trim().to_string(),
-                Err(e) => last = e.to_string(),
-            }
-        }
-        // Still busy after several tries. Never lazy-unmount to paper over
-        // this (plan §9): something is genuinely using those files, and
-        // pulling the mount away underneath it would lose data.
-        QString::from(format!(
-            "Could not disconnect {name}: {last}. Close anything using those files and try again."
-        ))
+            PlaceOutcome::Then(Box::new(move |mut model| {
+                // If the user is inside the mount, leave before pulling it.
+                model.as_mut().leave_if_inside(&mp);
+                model.place_op("cloud-disconnect", label.clone(), format!("Disconnecting {label}…"), move || {
+                    // Navigating away is not instant: the listing worker can
+                    // still hold the directory open for a moment, and
+                    // fusermount3 then reports "busy" for a mount nobody is
+                    // really using.
+                    let mut last = String::new();
+                    for attempt in 0..8 {
+                        if attempt > 0 {
+                            std::thread::sleep(std::time::Duration::from_millis(400));
+                        }
+                        match std::process::Command::new("fusermount3").arg("-u").arg(&mp).output() {
+                            Ok(o) if o.status.success() => {
+                                // Only a directory Gust created, under the runtime dir.
+                                let _ = std::fs::remove_dir(&mp);
+                                return PlaceOutcome::Done(format!("Disconnected {label}"));
+                            }
+                            Ok(o) => last = String::from_utf8_lossy(&o.stderr).trim().to_string(),
+                            Err(e) => last = e.to_string(),
+                        }
+                    }
+                    // Never lazy-unmount to paper over this (plan §9).
+                    PlaceOutcome::Failed(format!(
+                        "Could not disconnect {label}: {last}. Close anything using those files and try again."
+                    ))
+                });
+            }))
+        });
+        QString::default()
     }
 
     fn cloud_pending_notice(&self) -> QString {
@@ -2034,51 +2125,42 @@ impl qobject::DirModel {
     /// Connect a remote place, then browse it.
     ///
     /// Returns "" on success or a sentence explaining what went wrong.
-    fn remote_connect(mut self: Pin<&mut Self>, alias: QString) -> QString {
+    fn remote_connect(self: Pin<&mut Self>, alias: QString) -> QString {
         let alias = alias.to_string();
         let Some(cfg) = gust_remote::ssh_config::user_config_path() else {
             return QString::from("No SSH configuration found.");
         };
-        let hosts = gust_remote::ssh_config::parse_ssh_config(&cfg);
-        let Some(h) = hosts.iter().find(|h| h.alias == alias) else {
-            return QString::from(format!("No saved computer called \"{alias}\"."));
-        };
         let Some(mp) = gust_remote::mount::mount_point_for(&alias) else {
             return QString::from("That name cannot be used for a place.");
         };
-
-        if gust_remote::mount::is_mounted(&mp) {
-            let q = QString::from(mp.to_string_lossy().as_ref());
-            self.as_mut().navigate(&q);
-            return QString::from("");
-        }
-
-        let mut spec = gust_remote::mount::RemoteSpec::new(
-            &alias,
-            h.hostname.clone().unwrap_or_else(|| alias.clone()),
-        );
-        spec.user = h.user.clone();
-        spec.port = h.port;
-        spec.config_file = Some(cfg);
-        // The alias names a whole Host block: identity, known_hosts, port,
-        // proxy. Use it verbatim, or all of that is silently dropped.
-        spec.use_alias_as_target = true;
-        // Where the place opens. Without an explicit folder a connection
-        // lands in the login directory, which is that account'"'"'s whole home.
-        spec.remote_path = h.remote_path.clone();
-
-        // Blocking, but bounded: sshfs is given a connect timeout and the
-        // call cannot outlive it. A stuck server fails instead of freezing.
-        match gust_remote::mount::mount(&spec, &mp, std::time::Duration::from_secs(20)) {
-            Ok(()) => {
-                let q = QString::from(mp.to_string_lossy().as_ref());
-                self.as_mut().navigate(&q);
-                self.as_mut()
-                    .set_status(QString::from(format!("Connected to {alias}")));
-                QString::from("")
+        self.place_op("remote-connect", alias.clone(), format!("Connecting to {alias}…"), move || {
+            let hosts = gust_remote::ssh_config::parse_ssh_config(&cfg);
+            let Some(h) = hosts.iter().find(|h| h.alias == alias) else {
+                return PlaceOutcome::Failed(format!("No saved computer called \"{alias}\"."));
+            };
+            if gust_remote::mount::is_mounted(&mp) {
+                return PlaceOutcome::Open { path: mp, status: String::new() };
             }
-            Err(e) => QString::from(e.message()),
-        }
+            let mut spec = gust_remote::mount::RemoteSpec::new(
+                &alias,
+                h.hostname.clone().unwrap_or_else(|| alias.clone()),
+            );
+            spec.user = h.user.clone();
+            spec.port = h.port;
+            spec.config_file = Some(cfg);
+            // The alias names a whole Host block: identity, known_hosts,
+            // port, proxy. Use it verbatim, or all of that is dropped.
+            spec.use_alias_as_target = true;
+            // Where the place opens. Without an explicit folder a connection
+            // lands in the login directory, which is that account's home.
+            spec.remote_path = h.remote_path.clone();
+            // Bounded: sshfs is given a connect timeout.
+            match gust_remote::mount::mount(&spec, &mp, std::time::Duration::from_secs(20)) {
+                Ok(()) => PlaceOutcome::Open { path: mp, status: format!("Connected to {alias}") },
+                Err(e) => PlaceOutcome::Failed(e.message()),
+            }
+        });
+        QString::default()
     }
 
     fn remote_disconnect(mut self: Pin<&mut Self>, alias: QString) -> QString {
@@ -2088,20 +2170,14 @@ impl qobject::DirModel {
         };
         // Leaving the folder first: unmounting what is on screen is how a
         // listing worker ends up reading a filesystem that just vanished.
-        if self.as_ref().key.as_path() == Some(mp.as_path()) {
-            if let Some(home) = std::env::var_os("HOME") {
-                let q = QString::from(std::path::Path::new(&home).to_string_lossy().as_ref());
-                self.as_mut().navigate(&q);
+        self.as_mut().leave_if_inside(&mp);
+        self.place_op("remote-disconnect", alias.clone(), format!("Disconnecting {alias}…"), move || {
+            match gust_remote::mount::unmount(&mp) {
+                Ok(()) => PlaceOutcome::Done(format!("Disconnected from {alias}")),
+                Err(e) => PlaceOutcome::Failed(e.message()),
             }
-        }
-        match gust_remote::mount::unmount(&mp) {
-            Ok(()) => {
-                self.as_mut()
-                    .set_status(QString::from(format!("Disconnected from {alias}")));
-                QString::from("")
-            }
-            Err(e) => QString::from(e.message()),
-        }
+        });
+        QString::default()
     }
 
     /// Start a scoped, cancellable find over the current folder and below.

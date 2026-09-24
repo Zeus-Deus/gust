@@ -163,9 +163,11 @@ pub fn probe(path: &Path, timeout: Duration) -> Reachability {
                     // takes effect when the wait finally ends. What matters
                     // is that GUST is not the one waiting.
                     let _ = child.kill();
-                    // Deliberately NOT wait()ed: reaping would block here
-                    // for exactly as long as the stall we are escaping.
-                    // The child is left to the init process.
+                    // Not wait()ed HERE: reaping would block for exactly as
+                    // long as the stall we are escaping. A detached thread
+                    // reaps it whenever the kernel lets it die, so it never
+                    // lingers as a zombie of the Gust process.
+                    reap_in_background(child);
                     return Reachability::Stalled {
                         waited_ms: started.elapsed().as_millis() as u64,
                     };
@@ -208,6 +210,19 @@ pub fn place_name_for(path: &Path) -> String {
     path.file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "That folder".into())
+}
+
+/// Reap a child that has been killed, without blocking the caller.
+///
+/// A killed child stays a zombie until its parent waits on it. Waiting
+/// inline can block (a process in uninterruptible sleep dies only when its
+/// I/O returns), so the wait happens on a small detached thread instead.
+pub fn reap_in_background(mut child: std::process::Child) {
+    let _ = std::thread::Builder::new()
+        .name("gust-reap".into())
+        .spawn(move || {
+            let _ = child.wait();
+        });
 }
 
 #[cfg(test)]
