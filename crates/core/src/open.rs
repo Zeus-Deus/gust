@@ -145,9 +145,32 @@ pub fn which(program: &str) -> Option<PathBuf> {
 ///
 /// Honours `$TERMINAL` first, then the terminals an Omarchy install is
 /// likely to have. Never falls back to a shell string.
+/// The command that opens the user's own terminal in `dir`.
+///
+/// Omarchy (and any desktop following the xdg-terminal-exec spec) records
+/// the chosen terminal there — its Super+Return uses it — so it comes
+/// first. `--dir` is a separate argument: the path is never parsed by a
+/// shell.
+pub fn terminal_command(dir: &Path, have: impl Fn(&str) -> bool) -> Option<Command> {
+    if have("xdg-terminal-exec") {
+        let mut c = Command::new("xdg-terminal-exec");
+        c.arg(format!("--dir={}", dir.display()));
+        return Some(c);
+    }
+    None
+}
+
 pub fn open_terminal_here(dir: &Path) -> Result<String, OpenRefusal> {
     if !dir.is_dir() {
         return Err(OpenRefusal::Failed("not a folder".into()));
+    }
+    if let Some(mut cmd) = terminal_command(dir, |p| which(p).is_some()) {
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        if cmd.spawn().is_ok() {
+            return Ok("xdg-terminal-exec".into());
+        }
     }
     let mut candidates: Vec<String> = Vec::new();
     if let Some(t) = std::env::var_os("TERMINAL") {
@@ -240,6 +263,16 @@ pub fn is_single_argument(path: &OsStr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_desktops_own_terminal_is_used_first() {
+        let d = std::path::Path::new("/home/u/My Projects");
+        let c = terminal_command(d, |p| p == "xdg-terminal-exec").expect("uses xdg-terminal-exec");
+        assert_eq!(c.get_program(), "xdg-terminal-exec");
+        let args: Vec<_> = c.get_args().collect();
+        assert_eq!(args, vec![std::ffi::OsStr::new("--dir=/home/u/My Projects")]);
+        assert!(terminal_command(d, |_| false).is_none(), "falls back when absent");
+    }
 
     #[test]
     fn a_terminal_command_never_goes_through_a_shell() {
