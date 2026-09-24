@@ -94,11 +94,14 @@ fn percent_encode(bytes: &[u8]) -> String {
     s
 }
 
+/// Now, in LOCAL time: the freedesktop Trash spec's DeletionDate is local,
+/// and GIO/Nautilus write it that way, so records must agree.
 fn iso_now() -> String {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
+        .unwrap_or(0)
+        + gust_core::properties::local_offset_seconds();
     let days = secs / 86400;
     let rem = secs % 86400;
     let (h, mi, s) = (rem / 3600, (rem % 3600) / 60, rem % 60);
@@ -210,6 +213,93 @@ pub fn restore(item: &TrashedItem, trash: &TrashDir) -> io::Result<()> {
     rustix::fs::renameat(fd_from.as_fd(), &n_from, fd_to.as_fd(), &n_to)?;
     let _ = std::fs::remove_file(&item.info_file);
     Ok(())
+}
+
+/// One item in the Trash, as the Trash view lists it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TrashEntry {
+    /// Name inside `files/` (unique within the Trash).
+    pub trashed_name: std::ffi::OsString,
+    /// Where it was deleted from.
+    pub original: PathBuf,
+    /// `YYYY-MM-DDThh:mm:ss`, as the record says.
+    pub deleted: String,
+}
+
+fn percent_decode(s: &str) -> Vec<u8> {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                out.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    out
+}
+
+/// Read one `.trashinfo` record. None for anything malformed or relative:
+/// a record must name an absolute path, or restoring it could write
+/// somewhere relative to wherever Gust happens to run.
+fn read_info(path: &Path) -> Option<(PathBuf, String)> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut orig = None;
+    let mut date = String::new();
+    for line in text.lines() {
+        if let Some(v) = line.strip_prefix("Path=") {
+            orig = Some(PathBuf::from(<std::ffi::OsString as std::os::unix::ffi::OsStringExt>::from_vec(
+                percent_decode(v.trim()),
+            )));
+        } else if let Some(v) = line.strip_prefix("DeletionDate=") {
+            date = v.trim().to_string();
+        }
+    }
+    let orig = orig.filter(|p| p.is_absolute())?;
+    Some((orig, date))
+}
+
+/// Everything in the Trash that can be restored: a record with its data.
+/// Newest first. Entries other file managers wrote are included.
+pub fn list(trash: &TrashDir) -> Vec<TrashEntry> {
+    let Ok(rd) = std::fs::read_dir(&trash.info) else {
+        return Vec::new();
+    };
+    let mut out: Vec<TrashEntry> = rd
+        .flatten()
+        .filter_map(|e| {
+            let fname = e.file_name();
+            let stem = fname.as_bytes().strip_suffix(b".trashinfo")?;
+            let name = std::ffi::OsStr::from_bytes(stem).to_os_string();
+            // The data must be there (lstat: a trashed symlink counts).
+            std::fs::symlink_metadata(trash.files.join(&name)).ok()?;
+            let (original, deleted) = read_info(&e.path())?;
+            Some(TrashEntry { trashed_name: name, original, deleted })
+        })
+        .collect();
+    out.sort_by(|a, b| b.deleted.cmp(&a.deleted).then_with(|| a.trashed_name.cmp(&b.trashed_name)));
+    out
+}
+
+/// Restore one Trash item by its name in the Trash. Refuses to overwrite
+/// anything now at the original path; recreates missing parent folders.
+pub fn restore_named(trash: &TrashDir, trashed_name: &std::ffi::OsStr) -> io::Result<()> {
+    // A name, never a path: nothing outside files/ can be addressed.
+    if Path::new(trashed_name).components().count() != 1 || trashed_name.as_bytes().contains(&b'/') {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "not a Trash item name"));
+    }
+    let mut info_name = trashed_name.to_os_string();
+    info_name.push(".trashinfo");
+    let info_file = trash.info.join(&info_name);
+    let (original, _) = read_info(&info_file)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "the Trash record is missing or damaged"))?;
+    let item = TrashedItem { original, trashed_name: trashed_name.to_os_string(), info_file };
+    restore(&item, trash)
 }
 
 /// Permanently delete. Deliberately separate from `trash_path`, and callers

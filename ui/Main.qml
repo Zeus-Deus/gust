@@ -700,7 +700,7 @@ Window {
     // context menu, a confirm or conflict dialog), a file created or deleted
     // by another program must not shift the rows under it: the rename would
     // hit the wrong file. Live updates wait, and land when it closes.
-    readonly property bool liveHold: palette.visible || confirm.visible || settingsPanel.open
+    readonly property bool liveHold: palette.visible || confirm.visible || settingsPanel.open || trashPanel.open
                                      || contextMenu.open || conflictDialog.visible
                                      || prompt.visible || prompt.claimingFocus
     onLiveHoldChanged: {
@@ -927,7 +927,7 @@ Window {
         // window used to steal the keyboard, leaving a prompt on screen that
         // could not be typed into.
         if (palette.visible || confirm.visible || contextMenu.open
-            || conflictDialog.visible || settingsPanel.open
+            || conflictDialog.visible || settingsPanel.open || trashPanel.open
             || prompt.visible || prompt.claimingFocus)
             return
         listFocus.forceActiveFocus()
@@ -1004,6 +1004,7 @@ Window {
         if (a === "open") win.activateRow(dirModel.cursor)
         else if (a === "quicklook") win.toggleQuickLook()
         else if (a === "settings") win.openSettings()
+        else if (a === "trash-view") { trashPanel.show(dirModel.trash_list()); win.qaDump("trash-open") }
         else if (a === "pin-row" || a === "unpin-row") {
             const p = dirModel.entry_path(dirModel.cursor)
             const err = a === "pin-row" ? dirModel.bookmark_add(p) : dirModel.bookmark_remove(p)
@@ -1599,6 +1600,7 @@ Window {
                 devices: win.deviceList
                 bookmarks: win.bookmarkList
                 onDeviceChosen: (path, mounted) => win.openDevice(path, mounted)
+                onTrashChosen: win.runAction("trash-view")
                 onBookmarkMenu: (path, x, y) => {
                     win.bookmarkMenuPath = path
                     contextMenu.popup(x, y, [
@@ -2211,6 +2213,22 @@ Window {
         onActionRequested: (a) => win.runAction(a)
     }
 
+    TrashPanel {
+        id: trashPanel
+        onRestoreRequested: (name) => {
+            const err = dirModel.trash_restore(name)
+            trashPanel.error = err
+            if (err === "") {
+                hints.status = qsTr("Restored ") + name
+                trashPanel.items = JSON.parse(dirModel.trash_list())
+                trashPanel.current = Math.min(trashPanel.current, trashPanel.items.length - 1)
+            }
+            win.qaDump("trash-restore")
+        }
+        onShowFolder: (path) => { trashPanel.hide(); dirModel.navigate(path) }
+        onClosed: { win.focusList(); win.qaDump("trash-closed") }
+    }
+
     SettingsPanel {
         id: settingsPanel
         onChanged: (key, value) => {
@@ -2470,6 +2488,9 @@ Window {
             chooserMode: chooserBar.mode,
             chooserError: chooserBar.error,
             settingsOpen: settingsPanel.open,
+            trashOpen: trashPanel.open,
+            trashItems: trashPanel.items.map(i => i.shown + "|" + i.from),
+            trashError: trashPanel.error,
             settings: settingsPanel.s,
             keyPreset: win.keyPreset,
             sidebarVisible: win.sidebarVisible,
