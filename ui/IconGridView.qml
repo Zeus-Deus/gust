@@ -193,7 +193,8 @@ FocusScope {
             Text {
                 anchors.centerIn: parent
                 visible: grid.count === 0
-                text: (root.model ? root.model.filter : "").length > 0 ? "No match for \"" + (root.model ? root.model.filter : "") + "\""
+                text: (root.model && root.model.empty_reason !== "") ? root.model.empty_reason
+                                  : (root.model ? root.model.filter : "").length > 0 ? "No match for \"" + (root.model ? root.model.filter : "") + "\""
                                                    : "This folder is empty"
                 color: Tokens.foregroundDim
                 font.family: Tokens.fontFamily

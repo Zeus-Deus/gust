@@ -18,6 +18,7 @@ pub mod selection;
 pub mod stall;
 pub mod theme;
 pub mod views;
+pub mod watch;
 
 pub use entry::{
     Completeness, DirectorySnapshot, Entry, EntryId, EntryKind, Metadata, SortField, SortSpec,

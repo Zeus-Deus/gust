@@ -133,6 +133,22 @@ pub struct Job {
     #[serde(default)]
     pub preexisting_at_dest: Vec<PathBuf>,
     pub created_unix: i64,
+    /// The process that ran the job and the boot it ran in. Together they
+    /// tell a crashed job from one still running in another Gust window.
+    /// Records from before these existed read as pid 0: owner unknown.
+    #[serde(default)]
+    pub pid: u32,
+    #[serde(default)]
+    pub boot: String,
+    /// What the job set out to do, written before the first byte, so a
+    /// crash during the first file still leaves a record that says where.
+    #[serde(default)]
+    pub planned: Vec<PathBuf>,
+    #[serde(default)]
+    pub dest_dir: Option<PathBuf>,
+    /// The user has seen the start-up notice for this interrupted job.
+    #[serde(default)]
+    pub acknowledged: bool,
 }
 
 impl Job {
@@ -146,6 +162,11 @@ impl Job {
             subtree_identities: Vec::new(),
             preexisting_at_dest: Vec::new(),
             created_unix: now_unix(),
+            pid: std::process::id(),
+            boot: crate::staging::boot_id(),
+            planned: Vec::new(),
+            dest_dir: None,
+            acknowledged: false,
         }
     }
 
@@ -219,6 +240,65 @@ impl Journal {
             .collect()
     }
 
+    /// Jobs whose process died before they ended, not yet acknowledged —
+    /// what the start-up notice reports.
+    ///
+    /// A job still running in a live Gust window of this boot is NOT
+    /// interrupted. A record from an earlier boot is, whatever its pid: that
+    /// number may now belong to an unrelated process.
+    pub fn interrupted(&self) -> Vec<Interrupted> {
+        let boot = crate::staging::boot_id();
+        let mut latest: std::collections::BTreeMap<String, Job> = Default::default();
+        let mut order: Vec<String> = Vec::new();
+        for j in self.load() {
+            if !latest.contains_key(&j.id) {
+                order.push(j.id.clone());
+            }
+            latest.insert(j.id.clone(), j);
+        }
+        order
+            .into_iter()
+            .filter_map(|id| latest.remove(&id))
+            // Conflict also ends a run: the worker returns after recording
+            // it, having told the user at the time.
+            .filter(|j| !j.state.is_terminal() && j.state != JobState::Conflict)
+            .filter(|j| !j.acknowledged)
+            // No owner recorded: written by an older build, whose fate cannot
+            // be known. Never guess a crash from it.
+            .filter(|j| j.pid != 0 && !j.boot.is_empty())
+            .filter(|j| {
+                let alive = j.boot == boot
+                    && j.pid != 0
+                    && Path::new(&format!("/proc/{}", j.pid)).exists();
+                !alive
+            })
+            .map(|j| {
+                let finished = j.entries.iter().filter(|e| e.done).count();
+                let total = j.planned.len().max(j.entries.len());
+                let dest_dir = j.dest_dir.clone().or_else(|| {
+                    j.entries
+                        .iter()
+                        .find_map(|e| e.destination.as_ref()?.parent().map(Path::to_path_buf))
+                });
+                let first = j
+                    .planned
+                    .first()
+                    .or_else(|| j.entries.first().map(|e| &e.source))
+                    .cloned();
+                Interrupted { id: j.id, kind: j.kind, first, finished, total, dest_dir }
+            })
+            .collect()
+    }
+
+    /// Mark an interrupted job as seen, durably, so the notice is shown once.
+    pub fn acknowledge(&self, id: &str) -> std::io::Result<()> {
+        let Some(mut j) = self.load().into_iter().filter(|j| j.id == id).last() else {
+            return Ok(());
+        };
+        j.acknowledged = true;
+        self.record(&j)
+    }
+
     /// Jobs that were interrupted and need recovery on next start.
     pub fn unfinished(&self) -> Vec<Job> {
         let mut latest: std::collections::BTreeMap<String, Job> = Default::default();
@@ -229,6 +309,53 @@ impl Journal {
             .into_values()
             .filter(|j| !j.state.is_terminal())
             .collect()
+    }
+}
+
+/// One job a crash interrupted, as the start-up notice reports it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Interrupted {
+    pub id: String,
+    pub kind: JobKind,
+    /// The first item it was working on, for naming the job.
+    pub first: Option<PathBuf>,
+    pub finished: usize,
+    pub total: usize,
+    pub dest_dir: Option<PathBuf>,
+}
+
+impl Interrupted {
+    /// One plain sentence: what, where, how far.
+    pub fn sentence(&self) -> String {
+        let verb = match self.kind {
+            JobKind::Copy => "Copying",
+            JobKind::Move => "Moving",
+            JobKind::Trash => "Moving to Trash",
+            JobKind::Extract => "Extracting",
+            JobKind::Rename => "Renaming",
+            JobKind::NewFolder => "Creating",
+            JobKind::DeletePermanent => "Deleting",
+        };
+        let name = self
+            .first
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "an item".into());
+        let more = self.total.saturating_sub(1);
+        let what = if more > 0 { format!("{name} and {more} more") } else { name };
+        let dest = self
+            .dest_dir
+            .as_ref()
+            .and_then(|d| d.file_name())
+            .map(|n| format!(" to {}", n.to_string_lossy()))
+            .unwrap_or_default();
+        let how_far = if self.finished == 0 {
+            "nothing had finished".to_string()
+        } else {
+            format!("{} of {} finished", self.finished, self.total)
+        };
+        format!("{verb} {what}{dest} was interrupted: {how_far}.")
     }
 }
 

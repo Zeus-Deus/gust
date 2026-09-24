@@ -251,6 +251,12 @@ fn start_full(
 
     let mut rec = crate::journal::Job::new(id.clone(), kind);
     rec.conflict_policy = policy;
+    // The plan is part of the first durable record, before any byte moves.
+    rec.planned = req.sources();
+    rec.dest_dir = match &req {
+        Request::Copy { dest_dir, .. } | Request::Move { dest_dir, .. } => Some(dest_dir.clone()),
+        Request::CopyAs { dest_path, .. } => dest_path.parent().map(|p| p.to_path_buf()),
+    };
     let record = Arc::new(Mutex::new(rec));
 
     let worker_progress = Arc::clone(&progress);

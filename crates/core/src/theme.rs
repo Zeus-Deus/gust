@@ -362,6 +362,23 @@ pub fn load_from_theme_dir(theme_dir: &Path, name: &str) -> Tokens {
 }
 
 /// Load the currently active Omarchy theme, or the fallback off-Omarchy.
+/// Folders to watch so a theme switch is noticed.
+///
+/// `omarchy-theme-set` replaces `current/theme` with `rm -rf` + `mv`, which a
+/// watch on `current/` sees. Older layouts swap a `current` SYMLINK
+/// atomically, which only a watch on the state folder itself sees. Both are
+/// watched; each event just triggers one cheap reload.
+pub fn theme_watch_dirs(state: &Path) -> Vec<PathBuf> {
+    vec![state.to_path_buf(), state.join("current")]
+}
+
+/// Whether a complete theme is in place. False in the gap between removing
+/// the old theme and moving the new one in, where reloading would paint the
+/// fallback palette for a frame.
+pub fn theme_ready(state: &Path) -> bool {
+    state.join("current/theme/colors.toml").is_file()
+}
+
 pub fn load_current() -> Tokens {
     let Some(state) = default_state_dir() else {
         return Tokens::fallback();
