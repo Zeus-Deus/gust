@@ -87,7 +87,7 @@ Rust 1.98.1, cxx-qt 0.10.0, Mesa llvmpipe (software rendering, Virtio GPU),
 | Cloud remotes (rclone) | **proven** | discovery reads the installed rclone's config and opens no socket; connect mounts with a VFS write cache; "cached ≠ uploaded" shown as a notice; disconnect refuses while uploads are outstanding and never lazy-unmounts; degrades with a reason when rclone is absent |
 | Cloud OAuth in Gust's own UI | not built | deliberate: `rclone config` handles every provider correctly, and Drive's flow is not a template for Proton or Filen (plan §3) |
 | Two panes | **proven** | `:split` / `:unsplit`, Tab crosses the divider, F5 copies and F6 moves to the other pane through the normal journal and undo; a pane with no tabs closes itself; closing a pane keeps its tabs |
-| Tab drag to split / detach | **proven by hand** | real mouse drag of a tab out of the window: a new window opened in the same folder, grid view, same cursor and selection, and Back went to the folder the tab came from; the tab closed only after the new window reported ready (`handoff` 4: a child that dies or never appears keeps the tab). DESIGN §6.20 corrected to match the code on `splitPane()` |
+| Tab drag to split / detach | **proven** (`just qa` §10x2 for detach) | real mouse drag of a tab out of the window: a new window opened in the same folder, grid view, same cursor and selection, and Back went to the folder the tab came from; the tab closed only after the new window reported ready (`handoff` 4: a child that dies or never appears keeps the tab). DESIGN §6.20 corrected to match the code on `splitPane()` |
 | 100k benchmark | **proven** | `just bench`: 100k listed+settled in 470 ms (release), first window 155 ms |
 | Listing off the UI thread | **proven** | worker thread + generation-tagged snapshots; names paint before metadata |
 | PSS budget (≤ 90 MiB) | **met on machines without a GPU** | 85.8–86.5 MiB with 100k entries open (3 runs). Gust detects "no GPU" from sysfs and uses Qt's raster renderer instead of llvmpipe; see below. With a GPU: not yet measured |
@@ -216,9 +216,13 @@ list is worse than none, because it makes working features look broken.
 4. **Memory with a real GPU is unmeasured.** Without a GPU the budget is
    met (86 MiB, raster renderer). On GPU hardware Qt uses its hardware
    renderer, whose cost this VM cannot show.
-5. **Tab detach is proven by hand, not in `just qa`.** The last-tab refusal
-   branch is exercised only by reading the code: with one tab the strip is
-   hidden, so there is nothing to drag.
+5. **Tab detach last-tab refusal is guarded by the UI, not by a gesture
+   test.** `just qa` §10x2 now drags a real tab out with the uinput mouse:
+   a second window opens in the tab's folder with the cursor carried over,
+   and the tab leaves only after that window reports ready. With one tab
+   the strip is hidden (asserted: no tab to drag), so the refusal branch in
+   `tabDragDropped` cannot be reached by a pointer and stays covered only by
+   reading the code.
 6. **Release gates are proven in the VM, not on a clean machine.** A real
    `makepkg` built the package (release, `!lto`, `--remap-path-prefix`): the
    shipped binary contains **0** `/home/` paths (the dev build had 1336), is
