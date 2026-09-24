@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Gust
+GenericName=File Manager
+Comment=Your files, wherever they are
+Exec=gust %U
+Icon=system-file-manager
+Terminal=false
+Categories=System;FileTools;FileManager;
+MimeType=inode/directory;x-scheme-handler/file;
+Keywords=files;folder;manager;browser;explorer;
+StartupNotify=true
+StartupWMClass=gust

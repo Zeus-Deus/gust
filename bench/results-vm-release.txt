@@ -1,0 +1,13 @@
+names only, 100000 entries (first paint)       127.1 ms target < 400 ms     PASS
+names + metadata, 100000 entries               229.5 ms target < 1500 ms    PASS
+first state written (window is up)               155 ms target < 400 ms     PASS
+listed+settled 100000 entries                    470 ms target < 2000 ms    PASS
+PSS with 100000 entries open                  211.6 MiB target < 90 MiB     OVER
+RSS with 100000 entries open                  233.5 MiB target (informational) 
+End key reached row 99999                    responsive target responds     PASS
+host:     Linux 7.2.3-arch1-3 x86_64
+cpu:      AMD Ryzen 5 7600 6-Core Processor
+cores:    8
+memory:   2891 MiB
+renderer: unknown (likely software in a VM)
+build:    release

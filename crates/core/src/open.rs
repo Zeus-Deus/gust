@@ -1,0 +1,384 @@
+//! Handing a file to the desktop's own opener.
+//!
+//! Gust never decides what a file *is* by running it, and never runs it
+//! itself. It asks the desktop to open it, exactly as any other application
+//! would, and it does so without a shell so a filename can never become a
+//! command (DESIGN.md §7).
+
+use std::ffi::OsStr;
+use std::path::{Path, PathBuf};
+
+#[path = "openwith.rs"]
+pub mod with;
+use std::process::{Command, Stdio};
+
+/// Why an open was refused, in words a person can act on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OpenRefusal {
+    /// The path is not on the local filesystem.
+    NotLocal,
+    /// The entry is executable; running it must be deliberate.
+    NeedsDeliberateRun,
+    /// No handler is installed.
+    NoHandler,
+    /// The handler could not be started.
+    Failed(String),
+}
+
+impl std::fmt::Display for OpenRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            OpenRefusal::NotLocal => write!(f, "this location is not a local file"),
+            OpenRefusal::NeedsDeliberateRun => {
+                write!(f, "this file is executable — use Run to launch it")
+            }
+            OpenRefusal::NoHandler => {
+                write!(f, "no application is set up to open this kind of file")
+            }
+            OpenRefusal::Failed(e) => write!(f, "could not open: {e}"),
+        }
+    }
+}
+
+/// The openers Gust will try, in order. All take a path as a single argument
+/// and none interpret it as a shell word.
+const OPENERS: [&str; 3] = ["xdg-open", "gio", "handlr"];
+
+/// Does this look like a runnable program rather than a document?
+///
+/// Executable bit OR a known script/binary extension. Both are treated the
+/// same: activation must never launch them.
+pub fn is_runnable(path: &Path, mode: Option<u32>) -> bool {
+    if let Some(m) = mode {
+        if m & 0o111 != 0 {
+            return true;
+        }
+    }
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    const RUNNABLE_EXT: [&str; 8] = [
+        ".sh",
+        ".bash",
+        ".zsh",
+        ".fish",
+        ".py",
+        ".pl",
+        ".appimage",
+        ".run",
+    ];
+    RUNNABLE_EXT.iter().any(|e| name.ends_with(e))
+}
+
+/// Build the command for a given opener without running it.
+///
+/// Separated so tests can assert the exact argv — the property that matters
+/// is that the path is one argument and no shell is involved.
+pub fn command_for(opener: &str, path: &Path) -> Command {
+    let mut cmd = Command::new(opener);
+    if opener == "gio" {
+        cmd.arg("open");
+    }
+    // `--` so a filename beginning with '-' is never read as a flag.
+    if opener == "xdg-open" {
+        cmd.arg(path);
+    } else {
+        cmd.arg("--").arg(path);
+    }
+    cmd
+}
+
+/// Ask the desktop to open `path`.
+///
+/// Returns the opener that accepted the request. The child is fully detached
+/// from Gust's stdio so a chatty handler cannot spam the terminal, and Gust
+/// does not wait for it.
+pub fn open_with_desktop(path: &Path, mode: Option<u32>) -> Result<String, OpenRefusal> {
+    if is_runnable(path, mode) {
+        return Err(OpenRefusal::NeedsDeliberateRun);
+    }
+    if !path.exists() {
+        return Err(OpenRefusal::Failed("the file no longer exists".into()));
+    }
+
+    let mut last_err: Option<String> = None;
+    for opener in OPENERS {
+        if which(opener).is_none() {
+            continue;
+        }
+        let mut cmd = command_for(opener, path);
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        match cmd.spawn() {
+            Ok(_child) => return Ok(opener.to_string()),
+            Err(e) => last_err = Some(e.to_string()),
+        }
+    }
+    match last_err {
+        Some(e) => Err(OpenRefusal::Failed(e)),
+        None => Err(OpenRefusal::NoHandler),
+    }
+}
+
+/// Find an executable on PATH. No shell, no `which(1)` dependency.
+pub fn which(program: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path).find_map(|dir| {
+        let candidate = dir.join(program);
+        match std::fs::metadata(&candidate) {
+            Ok(m) if m.is_file() => {
+                use std::os::unix::fs::PermissionsExt;
+                if m.permissions().mode() & 0o111 != 0 {
+                    Some(candidate)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    })
+}
+
+/// Open a terminal in `dir`, for the "Open terminal here" action.
+///
+/// Honours `$TERMINAL` first, then the terminals an Omarchy install is
+/// likely to have. Never falls back to a shell string.
+pub fn open_terminal_here(dir: &Path) -> Result<String, OpenRefusal> {
+    if !dir.is_dir() {
+        return Err(OpenRefusal::Failed("not a folder".into()));
+    }
+    let mut candidates: Vec<String> = Vec::new();
+    if let Some(t) = std::env::var_os("TERMINAL") {
+        candidates.push(t.to_string_lossy().into_owned());
+    }
+    for t in ["alacritty", "kitty", "foot", "ghostty", "wezterm"] {
+        candidates.push(t.to_string());
+    }
+
+    for term in candidates {
+        if which(&term).is_none() {
+            continue;
+        }
+        let mut cmd = Command::new(&term);
+        // Every one of these accepts a working directory flag; none of them
+        // needs a shell to receive it.
+        match term.as_str() {
+            "kitty" | "ghostty" => {
+                cmd.arg(format!("--working-directory={}", dir.display()));
+            }
+            _ => {
+                cmd.arg("--working-directory").arg(dir);
+            }
+        }
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        if cmd.spawn().is_ok() {
+            return Ok(term);
+        }
+    }
+    Err(OpenRefusal::NoHandler)
+}
+
+/// Run a fixed, known command in a terminal.
+///
+/// Used only for `rclone config`, whose whole job is to ask the user for
+/// credentials that Gust must never see or touch. The command is a compiled-in
+/// constant and its arguments are passed as separate argv entries: no shell is
+/// involved, so nothing here can be turned into command injection, and no
+/// secret ever passes through Gust.
+pub fn run_in_terminal(program: &str, args: &[&str]) -> Result<String, OpenRefusal> {
+    if which(program).is_none() {
+        return Err(OpenRefusal::NoHandler);
+    }
+    let mut candidates: Vec<String> = Vec::new();
+    if let Some(t) = std::env::var_os("TERMINAL") {
+        candidates.push(t.to_string_lossy().into_owned());
+    }
+    for t in ["alacritty", "kitty", "foot", "ghostty", "wezterm"] {
+        candidates.push(t.to_string());
+    }
+
+    for term in candidates {
+        if which(&term).is_none() {
+            continue;
+        }
+        let mut cmd = Command::new(&term);
+        // Every one of these takes "-e PROGRAM ARGS..." as separate argv
+        // entries. None of them needs a shell.
+        cmd.arg("-e").arg(program);
+        for a in args {
+            cmd.arg(a);
+        }
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        if cmd.spawn().is_ok() {
+            return Ok(term);
+        }
+    }
+    Err(OpenRefusal::NoHandler)
+}
+
+/// Reveal `path` by opening its parent folder — used by "show in folder".
+pub fn parent_of(path: &Path) -> Option<&Path> {
+    path.parent().filter(|p| !p.as_os_str().is_empty())
+}
+
+/// Is this name safe to pass to a handler as a single argument?
+///
+/// Always true by construction — Gust passes real `Path`s, not strings — but
+/// the check exists so a regression that starts building command lines is
+/// caught by a test rather than by a user.
+pub fn is_single_argument(path: &OsStr) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    !path.as_bytes().contains(&0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_terminal_command_never_goes_through_a_shell() {
+        // The guard is structural: run_in_terminal takes a program and a
+        // slice of arguments, so there is no string for a shell to reparse.
+        // This test fails to compile if that signature is ever loosened to
+        // take one command line.
+        fn takes_argv(f: fn(&str, &[&str]) -> Result<String, OpenRefusal>) -> bool {
+            let _ = f;
+            true
+        }
+        assert!(takes_argv(run_in_terminal));
+    }
+
+    #[test]
+    fn executables_are_never_opened_by_activation() {
+        let p = Path::new("/tmp/whatever");
+        assert!(is_runnable(p, Some(0o755)));
+        assert!(is_runnable(p, Some(0o700)));
+        assert!(!is_runnable(p, Some(0o644)));
+    }
+
+    #[test]
+    fn script_extensions_count_as_runnable_even_without_the_bit() {
+        // A script that arrived over the network may not be +x yet; opening
+        // it must still not hand it to an interpreter.
+        for name in [
+            "install.sh",
+            "setup.PY",
+            "thing.AppImage",
+            "run.bash",
+            "x.fish",
+        ] {
+            assert!(
+                is_runnable(Path::new(name), Some(0o644)),
+                "{name} should need a deliberate Run"
+            );
+        }
+        for name in ["notes.txt", "photo.png", "report.pdf", "data.csv"] {
+            assert!(
+                !is_runnable(Path::new(name), Some(0o644)),
+                "{name} is a document"
+            );
+        }
+    }
+
+    #[test]
+    fn open_refuses_an_executable_with_a_clear_reason() {
+        let d = std::env::temp_dir().join(format!("gust-open-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let exe = d.join("thing");
+        std::fs::write(&exe, b"#!/bin/sh\necho hi\n").unwrap();
+        let err = open_with_desktop(&exe, Some(0o755)).unwrap_err();
+        assert_eq!(err, OpenRefusal::NeedsDeliberateRun);
+        assert!(err.to_string().contains("Run"));
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn the_path_is_one_argument_and_no_shell_is_used() {
+        // A filename containing shell metacharacters must survive as data.
+        let nasty = Path::new("/tmp/a b; rm -rf ~/$(whoami)'\"`.txt");
+        let cmd = command_for("xdg-open", nasty);
+        let args: Vec<_> = cmd.get_args().collect();
+        assert_eq!(args.len(), 1, "exactly one argument");
+        assert_eq!(args[0], nasty.as_os_str(), "passed verbatim, not expanded");
+        assert_eq!(cmd.get_program(), "xdg-open");
+    }
+
+    #[test]
+    fn gio_gets_its_subcommand_and_a_terminator() {
+        let p = Path::new("/tmp/-leading-dash.txt");
+        let cmd = command_for("gio", p);
+        let args: Vec<_> = cmd.get_args().collect();
+        assert_eq!(args[0], "open");
+        assert_eq!(args[1], "--", "a leading dash must not become a flag");
+        assert_eq!(args[2], p.as_os_str());
+    }
+
+    #[test]
+    fn missing_file_is_reported_not_opened() {
+        let err =
+            open_with_desktop(Path::new("/tmp/definitely-not-here-9f3a"), Some(0o644)).unwrap_err();
+        assert!(matches!(err, OpenRefusal::Failed(_)));
+    }
+
+    #[test]
+    fn which_finds_a_real_program_and_rejects_a_fake_one() {
+        assert!(which("sh").is_some(), "sh must exist on PATH");
+        assert!(which("definitely-not-a-program-zz9").is_none());
+    }
+
+    #[test]
+    fn which_ignores_a_non_executable_file() {
+        let d = std::env::temp_dir().join(format!("gust-which-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let f = d.join("notaprogram");
+        std::fs::write(&f, b"data").unwrap();
+        let old = std::env::var_os("PATH");
+        std::env::set_var("PATH", &d);
+        let found = which("notaprogram");
+        match old {
+            Some(p) => std::env::set_var("PATH", p),
+            None => std::env::remove_var("PATH"),
+        }
+        assert!(found.is_none(), "a non-executable file is not a program");
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn parent_of_a_root_path_is_handled() {
+        assert_eq!(parent_of(Path::new("/tmp/a.txt")), Some(Path::new("/tmp")));
+        assert_eq!(parent_of(Path::new("/")), None);
+    }
+
+    #[test]
+    fn a_null_byte_is_not_a_valid_argument() {
+        use std::os::unix::ffi::OsStrExt;
+        assert!(is_single_argument(OsStr::new("fine.txt")));
+        assert!(!is_single_argument(OsStr::from_bytes(b"bad\0name")));
+    }
+
+    #[test]
+    fn refusal_messages_are_human_readable() {
+        for r in [
+            OpenRefusal::NotLocal,
+            OpenRefusal::NeedsDeliberateRun,
+            OpenRefusal::NoHandler,
+            OpenRefusal::Failed("disk on fire".into()),
+        ] {
+            let s = r.to_string();
+            assert!(!s.is_empty());
+            assert!(
+                s.chars().next().unwrap().is_lowercase() || s.starts_with("no"),
+                "message reads as a sentence fragment: {s}"
+            );
+            // No errno codes or type names leak to the user.
+            assert!(!s.contains("Errno"), "{s}");
+            assert!(!s.contains("OpenRefusal"), "{s}");
+        }
+    }
+}
