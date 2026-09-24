@@ -260,37 +260,70 @@ fn temp_name(dir: &Path, index: usize) -> PathBuf {
 /// Two phases, because `a→b` and `b→a` in one batch is a legitimate swap and
 /// renaming in sequence destroys one of them. Everything moves to a unique
 /// temporary name first, then to its final name.
+///
+/// Every rename refuses to replace an existing name (`RENAME_NOREPLACE`).
+/// The plan was checked when it was shown, but time passes while a preview
+/// is on screen: a file that appears under a target name in the meantime is
+/// someone's work and is never overwritten. If any step is refused, the
+/// whole batch is put back, so the folder is never left half renamed.
 pub fn execute(dir: &Path, plan: &RenamePlan) -> RenameOutcome {
+    use crate::anchor::rename_noreplace_paths as mv;
     let mut out = RenameOutcome::default();
     if !plan.is_safe() {
         return out;
     }
     let work: Vec<&PlannedRename> = plan.renames.iter().filter(|r| !r.unchanged).collect();
 
+    // Put everything back to its original name: finished renames first go
+    // back to their temporary names, then every temporary name to its origin.
+    let roll_back = |staged: &[(PathBuf, &PlannedRename)], finished: usize, out: &mut RenameOutcome| {
+        for (tmp, r) in staged[..finished].iter().rev() {
+            if let Err(e) = mv(&r.to, tmp) {
+                out.failed.push(format!("{}: could not be put back ({e})", r.new_name));
+            }
+        }
+        for (tmp, r) in staged.iter().rev() {
+            if tmp.symlink_metadata().is_ok() {
+                if let Err(e) = mv(tmp, &r.from) {
+                    out.failed.push(format!(
+                        "{}: left as {} ({e})",
+                        r.old_name,
+                        tmp.file_name().unwrap_or_default().to_string_lossy()
+                    ));
+                }
+            }
+        }
+    };
+
     // Phase one: everything to a temporary name.
     let mut staged: Vec<(PathBuf, &PlannedRename)> = Vec::new();
     for (i, r) in work.iter().enumerate() {
         let tmp = temp_name(dir, i);
-        match std::fs::rename(&r.from, &tmp) {
+        match mv(&r.from, &tmp) {
             Ok(()) => staged.push((tmp, r)),
             Err(e) => {
                 out.failed.push(format!("{}: {e}", r.old_name));
-                // Put back whatever has already moved: a half-done first
-                // phase must not leave temporary names lying around.
-                for (t, back) in staged.iter().rev() {
-                    let _ = std::fs::rename(t, &back.from);
-                }
+                // A half-done first phase must not leave temporary names.
+                roll_back(&staged, 0, &mut out);
                 return out;
             }
         }
     }
 
     // Phase two: temporary names to their finals.
-    for (tmp, r) in &staged {
-        match std::fs::rename(tmp, &r.to) {
-            Ok(()) => out.done.push((r.from.clone(), r.to.clone())),
-            Err(e) => out.failed.push(format!("{}: {e}", r.old_name)),
+    for (n, (tmp, r)) in staged.iter().enumerate() {
+        if let Err(e) = mv(tmp, &r.to) {
+            let why = if e.kind() == std::io::ErrorKind::AlreadyExists {
+                format!("{}: {} appeared meanwhile — nothing was renamed", r.old_name, r.new_name)
+            } else {
+                format!("{}: {e} — nothing was renamed", r.old_name)
+            };
+            out.failed.push(why);
+            roll_back(&staged, n, &mut out);
+            out.done.clear();
+            return out;
         }
+        out.done.push((r.from.clone(), r.to.clone()));
     }
     out
 }

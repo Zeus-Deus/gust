@@ -131,10 +131,13 @@ pub fn copy_regular_file(
     if dst_dir.stat_child(dst_name).is_ok() {
         match policy {
             ConflictPolicy::Skip => return Ok(0),
-            ConflictPolicy::Ask => {
+            // KeepBoth is resolved by the caller choosing a free name; if a
+            // name is taken here anyway, it was taken by someone else in the
+            // meantime and is theirs.
+            ConflictPolicy::Ask | ConflictPolicy::KeepBoth => {
                 return Err(OpError::Conflict(PathBuf::from(dst_name)));
             }
-            ConflictPolicy::Replace | ConflictPolicy::KeepBoth => {}
+            ConflictPolicy::Replace => {}
         }
     }
 

@@ -224,6 +224,10 @@ pub struct Extracted {
     pub dirs: usize,
     /// Entries the policy refused. Shown to the user, never swallowed.
     pub refused: Vec<String>,
+    /// Entries that clashed with something already there and landed under a
+    /// free name instead, as `(archive name, name used)`. The existing file
+    /// is the user's and is never replaced.
+    pub renamed: Vec<(String, String)>,
 }
 
 impl Extracted {
@@ -238,6 +242,13 @@ impl Extracted {
                 plural(d)
             ),
         };
+        if !self.renamed.is_empty() {
+            s.push_str(&format!(
+                " · {} renamed to keep existing file{}",
+                self.renamed.len(),
+                plural(self.renamed.len())
+            ));
+        }
         if !self.refused.is_empty() {
             s.push_str(&format!(
                 " · refused {} unsafe entr{}",
@@ -310,6 +321,7 @@ pub fn extract(
             files: 0,
             dirs: 0,
             refused: refused.iter().map(describe_rejection).collect(),
+            ..Default::default()
         });
     }
 
@@ -362,8 +374,29 @@ pub fn extract(
             }
             continue;
         }
-        if std::fs::rename(&from, &to).is_ok() {
-            done.files += 1;
+        // Never onto an existing name: a same-named file already in the
+        // folder is the user's. The archive's copy takes a free name beside
+        // it, chosen and taken atomically so a race cannot clobber either.
+        let wanted = to.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let parent = to.parent().map(Path::to_path_buf).unwrap_or_else(|| dest.to_path_buf());
+        let mut target = to.clone();
+        for _ in 0..16 {
+            match crate::anchor::rename_noreplace_paths(&from, &target) {
+                Ok(()) => {
+                    done.files += 1;
+                    if target != to {
+                        done.renamed.push((
+                            rel.to_string_lossy().into_owned(),
+                            target.file_name().unwrap_or_default().to_string_lossy().into_owned(),
+                        ));
+                    }
+                    break;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    target = unique_name(&parent, &wanted);
+                }
+                Err(_) => break,
+            }
         }
     }
     let _ = super::cleanup_staging(&staging);
@@ -491,6 +524,7 @@ mod tests {
             files: 3,
             dirs: 1,
             refused: vec!["evil (asks for extra privilege)".into()],
+            ..Default::default()
         };
         let s = e.summary();
         assert!(s.contains("3 files"));
