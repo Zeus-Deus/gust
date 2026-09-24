@@ -23,6 +23,28 @@ FocusScope {
     property int dropRow: -1
     signal contextRequested(int row, real x, real y)
 
+    // Parent and preview columns, filled on a worker (see request_columns).
+    readonly property var side: {
+        const s = root.model ? root.model.columns_side : ""
+        if (!s) return null
+        try { return JSON.parse(s) } catch (e) { return null }
+    }
+    // Ask again when the cursor, the folder or visibility changes; a short
+    // delay coalesces a held-down arrow key into one request.
+    Timer {
+        id: sideTimer
+        interval: 60
+        onTriggered: if (root.visible && root.model) root.model.request_columns()
+    }
+    Connections {
+        target: root.model
+        function onCursorChanged() { sideTimer.restart() }
+        function onLocationChanged() { sideTimer.restart() }
+        function onCountChanged() { sideTimer.restart() }
+    }
+    onVisibleChanged: if (visible) sideTimer.restart()
+    onModelChanged: sideTimer.restart()
+
     function cursorAnchor() {
         const it = list.itemAtIndex(root.model ? root.model.cursor : -1)
         if (it) return it.mapToItem(null, Tokens.rowPaddingX * 3, it.height)
@@ -52,27 +74,66 @@ FocusScope {
                 height: parent.height
                 color: Tokens.backgroundDark
 
-                Column {
+                // The folder above, with this one marked. Click a sibling to
+                // go there — the column is navigation, not a label.
+                ListView {
+                    id: parentList
+                    objectName: "columnsParent"
                     anchors.fill: parent
-                    Text {
-                        width: parent.width
+                    clip: true
+                    boundsBehavior: Flickable.StopAtBounds
+                    model: root.side && root.side.parent ? root.side.parent.names : []
+                    header: Text {
+                        width: parentList.width
                         height: Tokens.controlHeight
                         leftPadding: Tokens.rowPaddingX
                         verticalAlignment: Text.AlignVCenter
-                        text: "Parent"
+                        text: root.side && root.side.parent
+                              ? (root.side.parent.error !== "" ? root.side.parent.error
+                                 : root.side.parent.path)
+                              : ""
                         color: Tokens.foregroundDim
                         font.family: Tokens.fontFamily
                         font.pixelSize: Tokens.fontCaption
+                        elide: Text.ElideLeft
                     }
-                    Text {
-                        width: parent.width
+                    delegate: Rectangle {
+                        required property var modelData
+                        width: parentList.width
+                        height: Tokens.rowHeight
+                        color: modelData.cur
+                               ? Tokens.withAlpha(Tokens.selectedBackground, Math.max(Tokens.selectedAlpha, 0.14))
+                               : pMouse.containsMouse ? Tokens.withAlpha(Tokens.foreground, 0.06) : "transparent"
+                        Text {
+                            anchors.verticalCenter: parent.verticalCenter
+                            leftPadding: Tokens.rowPaddingX
+                            width: parent.width - Tokens.rowPaddingX
+                            text: modelData.n + (modelData.d ? "  ›" : "")
+                            color: modelData.cur ? Tokens.foregroundBright
+                                   : modelData.d ? Tokens.foreground : Tokens.foregroundDim
+                            font.family: Tokens.fontFamily
+                            font.pixelSize: Tokens.fontSmall
+                            elide: Text.ElideMiddle
+                        }
+                        MouseArea {
+                            id: pMouse
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: modelData.d ? Qt.PointingHandCursor : Qt.ArrowCursor
+                            onClicked: {
+                                if (!modelData.d || modelData.cur) return
+                                root.model.navigate(root.side.parent.path + "/" + modelData.n)
+                            }
+                        }
+                    }
+                    footer: Text {
+                        visible: root.side && root.side.parent && root.side.parent.more > 0
+                        width: parentList.width
                         leftPadding: Tokens.rowPaddingX
-                        rightPadding: Tokens.rowPaddingX
-                        text: root.model ? root.model.location_display : ""
-                        color: Tokens.foreground
+                        text: root.side && root.side.parent ? qsTr("and %1 more").arg(root.side.parent.more) : ""
+                        color: Tokens.foregroundDim
                         font.family: Tokens.fontFamily
-                        font.pixelSize: Tokens.fontSmall
-                        wrapMode: Text.WrapAnywhere
+                        font.pixelSize: Tokens.fontCaption
                     }
                 }
 
@@ -194,59 +255,117 @@ FocusScope {
                 }
             }
 
-            // Preview pane. Metadata only — no decoding in this process.
+            // Preview column: a folder's first entries, or a file's kind,
+            // size and (for text) its first lines — from a bounded read on
+            // a worker. Nothing is decoded here and nothing is run.
             Rectangle {
                 width: parent.width - parentCol.width - currentCol.width
                 height: parent.height
                 color: Tokens.backgroundDark
+                readonly property var peek: root.side ? root.side.peek : null
 
                 Column {
-                    anchors.fill: parent
+                    id: prevHead
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.top: parent.top
                     anchors.margins: Tokens.spaceXl
-                    spacing: Tokens.spaceLg
-
+                    spacing: Tokens.spaceSm
                     Text {
                         width: parent.width
-                        text: (root.model && root.model.count > 0)
-                              ? root.model.entry_name(root.model.cursor) : ""
+                        text: parent.parent.peek ? parent.parent.peek.name : ""
                         color: Tokens.foregroundBright
                         font.family: Tokens.fontFamily
                         font.pixelSize: Tokens.fontSubtitle
                         wrapMode: Text.WrapAnywhere
                     }
-
+                    Text {
+                        width: parent.width
+                        readonly property var p: parent.parent.peek
+                        text: !p ? qsTr("Nothing selected")
+                              : p.kind === "dir"
+                                ? (p.error !== "" ? p.error
+                                   : (p.names.length + p.more) === 0 ? qsTr("Empty folder")
+                                   : qsTr("Folder · %1 items").arg(p.names.length + p.more))
+                              : [p.kindWords, p.sizeText, p.mode].filter(x => x).join("  ·  ")
+                        color: Tokens.foregroundDim
+                        font.family: Tokens.fontFamily
+                        font.pixelSize: Tokens.fontSmall
+                        wrapMode: Text.Wrap
+                    }
                     Rectangle {
                         width: parent.width
                         height: Tokens.borderWidth
                         color: Tokens.withAlpha(Tokens.border, Tokens.borderAlpha)
                     }
+                }
 
-                    Text {
-                        width: parent.width
-                        text: (root.model ? root.model.count : 0) > 0
-                              ? (root.model.is_dir(root.model.cursor) ? "Folder" : "File")
-                              : "Nothing selected"
-                        color: Tokens.foregroundDim
-                        font.family: Tokens.fontFamily
-                        font.pixelSize: Tokens.fontSmall
+                // Folder: its entries (click one to go straight there).
+                ListView {
+                    id: peekList
+                    objectName: "columnsPeek"
+                    visible: parent.peek && parent.peek.kind === "dir"
+                    anchors.top: prevHead.bottom
+                    anchors.topMargin: Tokens.spaceSm
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.bottom: parent.bottom
+                    clip: true
+                    boundsBehavior: Flickable.StopAtBounds
+                    model: visible ? parent.peek.names : []
+                    delegate: Rectangle {
+                        required property var modelData
+                        width: peekList.width
+                        height: Tokens.rowHeight
+                        color: kMouse.containsMouse ? Tokens.withAlpha(Tokens.foreground, 0.06) : "transparent"
+                        Text {
+                            anchors.verticalCenter: parent.verticalCenter
+                            leftPadding: Tokens.rowPaddingX
+                            width: parent.width - Tokens.rowPaddingX
+                            text: modelData.n + (modelData.d ? "  ›" : "")
+                            color: modelData.d ? Tokens.foreground : Tokens.foregroundDim
+                            font.family: Tokens.fontFamily
+                            font.pixelSize: Tokens.fontSmall
+                            elide: Text.ElideMiddle
+                        }
+                        MouseArea {
+                            id: kMouse
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            onClicked: {
+                                const here = root.model.entry_path(root.model.cursor)
+                                if (modelData.d) root.model.navigate(here + "/" + modelData.n)
+                                else root.model.navigate(here)
+                            }
+                        }
                     }
+                }
 
+                // File: first lines of text, or why there is no preview.
+                Flickable {
+                    visible: parent.peek && parent.peek.kind === "file"
+                    anchors.top: prevHead.bottom
+                    anchors.topMargin: Tokens.spaceSm
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.bottom: parent.bottom
+                    anchors.leftMargin: Tokens.spaceXl
+                    anchors.rightMargin: Tokens.spaceXl
+                    clip: true
+                    contentHeight: peekText.implicitHeight
+                    boundsBehavior: Flickable.StopAtBounds
                     Text {
+                        id: peekText
                         width: parent.width
-                        text: (root.model ? root.model.count : 0) > 0 ? root.model.entry_path(root.model.cursor) : ""
-                        color: Tokens.foregroundDim
+                        readonly property var p: parent.parent.peek
+                        text: !p || p.kind !== "file" ? ""
+                              : p.lines && p.lines.length > 0 ? p.lines.join("\n")
+                              : p.noPreview
+                        color: p && p.lines && p.lines.length > 0 ? Tokens.foreground : Tokens.foregroundDim
                         font.family: Tokens.fontFamily
                         font.pixelSize: Tokens.fontCaption
-                        wrapMode: Text.WrapAnywhere
-                    }
-
-                    Text {
-                        width: parent.width
-                        text: "Preview follows selection. Files never open by themselves."
-                        color: Tokens.foregroundDim
-                        font.family: Tokens.fontFamily
-                        font.pixelSize: Tokens.fontCaption
-                        wrapMode: Text.Wrap
+                        textFormat: Text.PlainText
+                        wrapMode: p && p.lines && p.lines.length > 0 ? Text.NoWrap : Text.Wrap
                     }
                 }
             }

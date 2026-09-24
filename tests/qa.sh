@@ -1247,12 +1247,16 @@ typ "$VW/alpha"; key Return
 wait_for "d['model']['location']" "$VW/alpha" >/dev/null
 wait_for "d['view']" "grid" 20 >/dev/null
 expect "alpha returns to grid by itself" "d['view']" "grid"
+# The pane must actually SHOW it, not just the switcher (they drifted apart:
+# the switcher said grid while the pane kept the previous view).
+expect "the pane shows the remembered view too" "d['paneView']" "grid"
 
 vm wtype -M ctrl -k l -m ctrl >/dev/null 2>&1; sleep 0.8
 typ "$VW/beta"; key Return
 wait_for "d['model']['location']" "$VW/beta" >/dev/null
 wait_for "d['view']" "rows" 20 >/dev/null
 expect "beta returns to rows by itself" "d['view']" "rows"
+expect "the pane shows rows too" "d['paneView']" "rows"
 
 say "10s · A corrupt preferences file never breaks startup"
 printf 'GARBAGE\nevil:../../etc/passwd = "grid"\nlocal:zz = "grid"\n' \
@@ -1422,6 +1426,10 @@ sys.exit(0 if (w and w[0].get("floating")) else 1)'; then
   mouse doubleclick $((WX + 400)) "$ROW0"
   sleep 2
   expect "double-clicking a folder opens it" "d['model']['location']" "$MG/target"
+
+  # After opening a folder, Back must LOOK available, not just work: the
+  # arrows used to keep their start-up look forever.
+  expect "Back shows as available after navigating" "d['canBack']" "True"
 
   # A breadcrumb navigates back.
   mouse click $((WX + 150)) "$HDR"

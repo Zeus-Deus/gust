@@ -51,7 +51,7 @@ Rust 1.98.1, cxx-qt 0.10.0, Mesa llvmpipe (software rendering, Virtio GPU),
 | --- | --- | --- |
 | Rows view | proven | default view, sortable headers, `just qa` |
 | Grid view | proven | uniform tiles, row-aware Up/Down, screenshot |
-| Columns view | proven | parent + current + preview pane, screenshot |
+| Columns view | **proven by hand** | real Miller columns: the parent folder's entries (click a sibling to go there) and a preview column (a folder's contents, or a file's kind, size and first lines), read bounded on a worker; `columns` (5); evidence `B-columns` |
 | Navigation (open, up, back, forward, breadcrumbs) | proven | `just qa` asserts each transition |
 | Type-ahead selection (Standard preset) | proven | buffers keystrokes; "Pro" selects Projects |
 | `/` filter | proven | narrows 11 → 1 and Escape restores |
@@ -153,7 +153,7 @@ Rust 1.98.1, cxx-qt 0.10.0, Mesa llvmpipe (software rendering, Virtio GPU),
 | Gust restarts cleanly over a crashed folder | **proven** | `just qa` §10n |
 | **A full disk leaves no debris** | **proven** | `engine::out_of_space_tests`, verified against a real 2 MB tmpfs |
 | **Failures are explained in words, not errno** | **proven** | `engine::plain_message_tests` + `just qa` §10p |
-| Close-during-work prompt | **partial** | see the note below — a platform gap, not a code gap |
+| Close-during-work prompt | **proven by hand** | covers every tab: with a copy running in a background tab, closing the window (Hyprland `closewindow`) asked "A transfer is running in another tab"; Stop and close ended it with no partial or staging file. A background tab's job now finishes and refreshes while another tab is shown (it used to stay "Running" until its tab was shown again) |
 | Opening a document via the desktop handler | proven | `just qa` §10g: xdg-open receives the path as one argument |
 | Never executing a file to open it | proven | `just qa` §10g: a booby-trapped script is refused with or without +x |
 | Open terminal here | built | wired to the palette; no QA assertion yet |
@@ -276,10 +276,11 @@ work on this platform:
 1. **`onClosing` handler** (implemented). Blocks the close, asks whether to
    stop the transfer, cancels the job and waits for the worker before
    quitting. This is correct and fires for toolkit-reported closes.
-2. **It does not fire for Hyprland's `closewindow`.** Verified with a
-   control: a bare seven-line Qt Quick window with nothing but an
-   `onClosing` handler behaves identically — the handler never runs and the
-   window stays open. **This is a Qt 6.11 / Wayland gap, not Gust's code.**
+2. **Earlier this did not fire for Hyprland's `closewindow`** (Omarchy 4.0.3,
+   Qt 6.11). Re-tested on 2026-09-24 in the same VM with the current build:
+   `hl.dsp.window.close` DID reach `onClosing` and the prompt appeared. The
+   earlier result is kept here because it was measured; which of the two
+   changed (Hyprland's Lua dispatcher, or Gust) was not isolated.
 
 What protects the user regardless of how the process dies:
 
