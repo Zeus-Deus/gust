@@ -592,6 +592,7 @@ Window {
         }
         const err = asMove ? src.move_selection_to(dest.location)
                            : src.copy_selection_to(dest.location)
+        if (err === "?conflict") { win.transferStarted(src, err, "pane-send"); return }
         if (err !== "") {
             win.alertText = err
             win.qaDump("pane-send-refused")
@@ -820,6 +821,7 @@ Window {
         // window used to steal the keyboard, leaving a prompt on screen that
         // could not be typed into.
         if (palette.visible || confirm.visible || contextMenu.open
+            || conflictDialog.visible
             || prompt.visible || prompt.claimingFocus)
             return
         listFocus.forceActiveFocus()
@@ -874,9 +876,7 @@ Window {
         else if (a === "copy-path") hints.status = dirModel.copy_path(dirModel.cursor)
         else if (a === "copy-path-folder") hints.status = dirModel.copy_path(-1)
         else if (a === "paste-into") {
-            const perr = dirModel.clip_paste_into(dirModel.cursor)
-            if (perr !== "") win.alertText = perr
-            else { hints.status = qsTr("Started"); jobTimer.start() }
+            win.transferStarted(dirModel, dirModel.clip_paste_into(dirModel.cursor), "paste")
         }
         else if (a === "view-rows") win.setView("rows")
         else if (a === "split") win.splitPane()
@@ -1069,11 +1069,32 @@ Window {
     }
 
     function doPaste() {
-        const err = dirModel.clip_paste()
-        if (err !== "") { win.alertText = err; win.qaDump("paste-refused"); return }
+        win.transferStarted(dirModel, dirModel.clip_paste(), "paste")
+    }
+
+    /// Every copy/move funnel returns "" (started), "?conflict" (names are
+    /// taken: ask first) or a refusal. One handler, so paste, drop and
+    /// send-to-pane cannot answer the same situation three different ways.
+    function transferStarted(model, err, tag) {
+        if (err === "?conflict") {
+            win.conflictModel = model
+            win.showNextConflict()
+            return
+        }
+        if (err !== "") { win.alertText = err; win.qaDump(tag + "-refused"); return }
         hints.status = qsTr("Started")
         jobTimer.start()
-        win.qaDump("paste-started")
+        win.qaDump(tag + "-started")
+    }
+
+    /// The model whose transfer is waiting on the conflict dialog.
+    property var conflictModel: null
+
+    function showNextConflict() {
+        const raw = win.conflictModel ? win.conflictModel.conflict_json() : ""
+        if (raw === "") { conflictDialog.close(); return }
+        conflictDialog.show(JSON.parse(raw))
+        win.qaDump("conflict")
     }
 
     function doDuplicate() {
@@ -1408,7 +1429,7 @@ Window {
                     onSelectionTouched: { win.focusPane(0); win.qaDump("select") }
                     onDragBegan: { win.focusPane(0); win.qaDump("drag-begin") }
                     onDropPreview: (t) => { hints.status = t }
-                    onDropFailed: (m) => { win.alertText = m; win.qaDump("drop") }
+                    onDropFailed: (m) => { win.transferStarted(win.paneAModel, m, "drop") }
                     onDropDone: { hints.status = ""; jobTimer.start(); win.qaDump("drop") }
                     onContextRequested: (r, x, y) => { win.focusPane(0); win.openContextMenu(r, x, y) }
                 }
@@ -1442,7 +1463,7 @@ Window {
                         onSelectionTouched: { win.focusPane(1); win.qaDump("select") }
                         onDragBegan: { win.focusPane(1); win.qaDump("drag-begin") }
                         onDropPreview: (t) => { hints.status = t }
-                        onDropFailed: (m) => { win.alertText = m; win.qaDump("drop") }
+                        onDropFailed: (m) => { win.transferStarted(win.paneBModel, m, "drop") }
                         onDropDone: { hints.status = ""; jobTimer.start(); win.qaDump("drop") }
                         onContextRequested: (r, x, y) => { win.focusPane(1); win.openContextMenu(r, x, y) }
                     }
@@ -1925,6 +1946,30 @@ Window {
         onClosed: { win.focusList(); win.qaDump("context-menu") }
     }
 
+    ConflictDialog {
+        id: conflictDialog
+        objectName: "conflictDialog"
+        onAnswered: (choice, all) => {
+            const m = win.conflictModel
+            if (!m) { conflictDialog.close(); return }
+            const err = m.conflict_answer(choice, all)
+            if (err === "?conflict") { win.showNextConflict(); return }
+            win.conflictModel = null
+            conflictDialog.close()
+            if (err !== "") { win.alertText = err; win.qaDump("conflict-refused"); return }
+            hints.status = qsTr("Started")
+            jobTimer.start()
+            win.qaDump("conflict-resolved")
+        }
+        onCancelled: {
+            if (win.conflictModel) win.conflictModel.conflict_cancel()
+            win.conflictModel = null
+            hints.status = qsTr("Cancelled — nothing was changed")
+            win.qaDump("conflict-cancelled")
+        }
+        onClosed: win.focusList()
+    }
+
     ConfirmDialog {
         id: confirm
         objectName: "confirmDialog"
@@ -2096,6 +2141,8 @@ Window {
                        ? contextMenu.items.map(it => it.separator ? "-" : (it.enabled === false ? "(" + it.label + ")" : it.label))
                        : [],
             confirmOpen: confirm.visible,
+            conflictOpen: conflictDialog.visible,
+            conflictName: conflictDialog.clash ? conflictDialog.clash.name : "",
             confirmTitle: confirm.title,
             confirmBody: confirm.body,
             confirmIsDangerous: confirm.dangerous,

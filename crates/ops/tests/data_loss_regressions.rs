@@ -569,3 +569,76 @@ fn replace_trashes_the_old_item_and_undo_restores_it() {
     assert!(!trash.info.join("notes.txt.trashinfo").exists(), "stale trash record left");
     fs::remove_dir_all(&d).ok();
 }
+
+/// The conflict dialog's answers, one per clashing item, in ONE job: Replace
+/// for one, Keep both for another, Skip for a third, and an item with no
+/// clash copied normally. Nothing is written before the user answered, so
+/// the clash list comes from a pre-flight check.
+#[test]
+fn per_item_conflict_answers_are_honoured_in_one_job() {
+    use gust_ops::trash::TrashDir;
+    use std::collections::HashMap;
+    let d = fixture("per-item");
+    fs::create_dir_all(d.join("src")).unwrap();
+    fs::create_dir_all(d.join("dest")).unwrap();
+    for (n, b) in [("r.txt", "new r"), ("k.txt", "new k"), ("s.txt", "new s"), ("fresh.txt", "fresh")] {
+        fs::write(d.join("src").join(n), b).unwrap();
+    }
+    for (n, b) in [("r.txt", "OLD R"), ("k.txt", "OLD K"), ("s.txt", "OLD S")] {
+        fs::write(d.join("dest").join(n), b).unwrap();
+    }
+    let sources: Vec<PathBuf> = ["r.txt", "k.txt", "s.txt", "fresh.txt"]
+        .iter().map(|n| d.join("src").join(n)).collect();
+    let req = jobs::Request::Copy { sources: sources.clone(), dest_dir: d.join("dest") };
+
+    // Pre-flight finds exactly the three clashes, in source order.
+    let clashes = jobs::conflicts(&req);
+    let names: Vec<String> = clashes.iter()
+        .map(|c| c.source.file_name().unwrap().to_string_lossy().into_owned()).collect();
+    assert_eq!(names, ["r.txt", "k.txt", "s.txt"]);
+    assert_eq!(clashes[0].existing, d.join("dest/r.txt"));
+
+    let mut answers = HashMap::new();
+    answers.insert(sources[0].clone(), ConflictPolicy::Replace);
+    answers.insert(sources[1].clone(), ConflictPolicy::KeepBoth);
+    answers.insert(sources[2].clone(), ConflictPolicy::Skip);
+    let trash = TrashDir::at(d.join("Trash"));
+    let mut job = jobs::start_resolved("pi", req, answers, None, Some(trash.clone()));
+    let s = job.wait();
+    assert_eq!(s.state, JobState::Confirmed, "{s:?}");
+
+    assert_eq!(fs::read(d.join("dest/r.txt")).unwrap(), b"new r");
+    assert_eq!(fs::read(trash.files.join("r.txt")).unwrap(), b"OLD R", "replaced item must be in the Trash");
+    assert_eq!(fs::read(d.join("dest/k.txt")).unwrap(), b"OLD K");
+    assert_eq!(fs::read(d.join("dest/k (copy).txt")).unwrap(), b"new k");
+    assert_eq!(fs::read(d.join("dest/s.txt")).unwrap(), b"OLD S");
+    assert_eq!(fs::read(d.join("dest/fresh.txt")).unwrap(), b"fresh");
+    fs::remove_dir_all(&d).ok();
+}
+
+/// An item that clashes but got NO answer is never overwritten, even though
+/// other items in the same job were answered "Replace".
+#[test]
+fn an_unanswered_clash_is_never_overwritten() {
+    use std::collections::HashMap;
+    let d = fixture("unanswered");
+    fs::create_dir_all(d.join("src")).unwrap();
+    fs::create_dir_all(d.join("dest")).unwrap();
+    fs::write(d.join("src/a"), b"new a").unwrap();
+    fs::write(d.join("src/b"), b"new b").unwrap();
+    fs::write(d.join("dest/a"), b"OLD A").unwrap();
+    fs::write(d.join("dest/b"), b"OLD B").unwrap();
+    let mut answers = HashMap::new();
+    answers.insert(d.join("src/a"), ConflictPolicy::KeepBoth);
+    let mut job = jobs::start_resolved(
+        "ua",
+        jobs::Request::Copy { sources: vec![d.join("src/a"), d.join("src/b")], dest_dir: d.join("dest") },
+        answers,
+        None,
+        None,
+    );
+    let s = job.wait();
+    assert_eq!(s.state, JobState::Conflict, "{s:?}");
+    assert_eq!(fs::read(d.join("dest/b")).unwrap(), b"OLD B");
+    fs::remove_dir_all(&d).ok();
+}
