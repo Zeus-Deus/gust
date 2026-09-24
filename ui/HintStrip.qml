@@ -29,10 +29,16 @@ Rectangle {
     }
 
     Row {
+        id: hintRow
         anchors.left: parent.left
         anchors.leftMargin: Tokens.rowPaddingX
         anchors.verticalCenter: parent.verticalCenter
         spacing: Tokens.spaceXl
+        // In a narrow (tiled) window the hints and the status used to
+        // overlap into one unreadable line. The status is about what just
+        // happened, so it wins: hints that would collide are clipped away.
+        width: Math.max(0, statusText.x - Tokens.spaceXl - x)
+        clip: true
 
         Repeater {
             model: root.preset === "vim"
@@ -74,9 +80,14 @@ Rectangle {
     }
 
     Text {
+        id: statusText
         anchors.right: parent.right
         anchors.rightMargin: Tokens.rowPaddingX
         anchors.verticalCenter: parent.verticalCenter
+        // Never wider than two thirds of the strip; a long path elides.
+        width: Math.min(implicitWidth, Math.round(root.width * 0.66))
+        elide: Text.ElideMiddle
+        horizontalAlignment: Text.AlignRight
         text: root.displayText
         // An alert is the one thing here the user must actually read.
         color: root.alert !== "" ? Tokens.danger : Tokens.foregroundDim

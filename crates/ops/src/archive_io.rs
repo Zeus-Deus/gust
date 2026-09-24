@@ -148,16 +148,75 @@ fn parse_mode(s: &str) -> u32 {
     mode
 }
 
+/// The command that lists an archive. Where bubblewrap and prlimit exist
+/// (the same tools the thumbnail sandbox needs), the archive parser runs
+/// with no network, no home folder, nothing writable, the archive on stdin
+/// only, and CPU/memory/time limits — a hostile archive is parsed by a
+/// process that can reach nothing. Otherwise plain bsdtar, reading only.
+pub fn list_command(path: &Path, sandbox: bool) -> std::io::Result<Command> {
+    if !sandbox {
+        let mut c = Command::new("bsdtar");
+        c.arg("-tvf").arg(path).stdin(Stdio::null());
+        return Ok(c);
+    }
+    let file = std::fs::File::open(path)?;
+    let mut c = Command::new("bwrap");
+    c.args([
+        "--unshare-all",
+        "--die-with-parent",
+        "--new-session",
+        "--clearenv",
+        "--setenv",
+        "PATH",
+        "/usr/bin",
+        "--ro-bind",
+        "/usr",
+        "/usr",
+        "--symlink",
+        "usr/lib",
+        "/lib",
+        "--symlink",
+        "usr/lib",
+        "/lib64",
+        "--symlink",
+        "usr/bin",
+        "/bin",
+        "--proc",
+        "/proc",
+        "--dev",
+        "/dev",
+        "--tmpfs",
+        "/tmp",
+        "--chdir",
+        "/",
+        "prlimit",
+        "--cpu=20",
+        "--as=536870912",
+        "--nproc=64",
+        "timeout",
+        "30",
+        "bsdtar",
+        "-tvf",
+        "-",
+    ])
+    .stdin(Stdio::from(file));
+    Ok(c)
+}
+
+fn sandbox_tools() -> bool {
+    let on_path = |b: &str| {
+        std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(b).is_file()))
+    };
+    on_path("bwrap") && on_path("prlimit")
+}
+
 /// What is inside this archive? Reads only; writes nothing.
 pub fn list(path: &Path) -> Result<Vec<ArchiveEntry>, ArchiveError> {
     if !tool_available() {
         return Err(ArchiveError::NoTool);
     }
-    let out = Command::new("bsdtar")
-        .arg("-tvf")
-        .arg(path)
-        .stdin(Stdio::null())
-        .output()
+    let out = list_command(path, sandbox_tools())
+        .and_then(|mut c| c.output())
         .map_err(|e| ArchiveError::Failed(e.to_string()))?;
 
     if !out.status.success() {
