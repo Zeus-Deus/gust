@@ -1559,6 +1559,54 @@ else
     || bad "a drag destroyed an unrelated file"
 fi
 
+say "10x2 · Dragging a tab out opens it in its own window; the last tab refuses"
+if [[ "$MOUSE_OK" -ne 1 ]]; then
+  bad "SKIPPED: no pointer injection"
+else
+  TD="$FIXTURE/tabdrag"
+  rm -rf "$TD"; mkdir -p "$TD/first" "$TD/second"
+  for n in apple banana cherry; do echo "$n" > "$TD/second/$n.txt"; done
+  start_gust
+  rm -f "$(dirname "$STATE")"/$(basename "$STATE" .json)-detached-*.json
+  goto "$TD/first" || bad "could not reach the tab fixture"
+  ctrl t; sleep 0.8
+  goto "$TD/second" || bad "the second tab could not navigate"
+  wait_for "d['model']['settled']" "True" 30 >/dev/null
+  key Down; sleep 0.4           # cursor on banana.txt
+  expect "two tabs are open" "d['tabCount']" "2"
+  expect "the cursor is on banana" "d['model']['cursor_name']" "banana.txt"
+
+  read -r WX WY WW WH <<<"$(win_geo)"
+  read -r TX TY <<<"$(state "' '.join(map(str, d['tabCenters'][1]))")"
+  # Out of the window, well below it: a real drag, not a click.
+  mouse drag $((WX + TX)) $((WY + TY)) $((WX + TX)) $((WY + WH + 40))
+  wait_for "d['tag']" "tab-detached" 25 >/dev/null
+  expect "the tab left once the new window was up" "d['tabCount']" "1"
+  DET="$(ls "$(dirname "$STATE")"/$(basename "$STATE" .json)-detached-*.json 2>/dev/null | head -1)"
+  if [[ -n "$DET" ]]; then
+    read -r DLOC DCUR <<<"$(python3 -c "import json;d=json.load(open('$DET'));print(d['model']['location'], d['model']['cursor_name'])")"
+    [[ "$DLOC" == "$TD/second" ]] && ok "the new window opened the tab's folder" \
+      || bad "the new window is in '$DLOC', expected $TD/second"
+    [[ "$DCUR" == "banana.txt" ]] && ok "the cursor came with the tab" \
+      || bad "the cursor was lost in the move (got '$DCUR')"
+  else
+    bad "the detached window never reported its state"
+  fi
+  N="$(vm hyprctl clients -j | python3 -c 'import sys,json; print(len([c for c in json.load(sys.stdin) if c.get("class")=="gust"]))')"
+  [[ "$N" == "2" ]] && ok "there are now two Gust windows" || bad "expected 2 Gust windows, found $N"
+  # Close the detached window so it does not steal later keystrokes.
+  for p in $(pgrep -x gust); do
+    grep -qz 'GUST_HANDOFF' /proc/$p/environ 2>/dev/null && kill "$p"
+  done
+  sleep 1
+  vm hyprctl dispatch 'hl.dsp.focuswindow({ "class:gust" })' >/dev/null 2>&1; sleep 0.5
+
+  # The last tab: with one tab the strip is hidden, so there is nothing to
+  # drag and no window can be closed by a tab gesture. Prove the strip is
+  # gone rather than trusting it.
+  expect "with one tab the strip shows no tabs to drag" "len(d['tabCenters'])" "0"
+fi
+
 say "10z · :find searches a scope the user chose, and Escape gets out"
 FD="$FIXTURE/findtest"
 rm -rf "$FD"; mkdir -p "$FD/a/b/c/d" "$FD/other/deep"

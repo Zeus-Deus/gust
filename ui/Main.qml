@@ -189,6 +189,18 @@ Window {
         }
     }
 
+    /// Visible tab centres in window coordinates, for the mouse QA harness.
+    function tabCenters() {
+        let out = []
+        for (let i = 0; i < tabRepeater.count; i++) {
+            const t = tabRepeater.itemAt(i)
+            if (!t || !t.visible || !tabStrip.visible) continue
+            const p = t.mapToItem(null, t.width / 2, t.height / 2)
+            out.push([Math.round(p.x), Math.round(p.y)])
+        }
+        return out
+    }
+
     function refreshDevices() {
         try {
             win.deviceList = JSON.parse(dirModel.devices_json())
@@ -1358,6 +1370,7 @@ Window {
                 spacing: Tokens.spaceSm
 
                 Repeater {
+                    id: tabRepeater
                     model: tabList
                     delegate: Rectangle {
                         // Only this pane's tabs. A strip mixing both panes
@@ -2547,6 +2560,7 @@ Window {
             jobEta: win.job ? (win.job.eta || "") : "",
             conflictName: conflictDialog.clash ? conflictDialog.clash.name : "",
             devices: win.deviceList.map((x) => x.label + "|" + x.state),
+            tabCenters: win.tabCenters(),
             confirmTitle: confirm.title,
             confirmBody: confirm.body,
             confirmButtons: confirm.visible ? confirm.buttonCenters() : null,
