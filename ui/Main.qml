@@ -113,6 +113,34 @@ Window {
     /// is worse than one that says nothing (DESIGN §6.13).
     property var deviceList: []
 
+    // Pinned folders from ~/.config/gtk-3.0/bookmarks (shared with the
+    // desktop). Re-read when Gust changes them; another app's edit shows on
+    // the next start or pin.
+    property var bookmarkList: []
+    property string bookmarkMenuPath: ""
+    function refreshBookmarks() {
+        try { win.bookmarkList = JSON.parse(dirModel.bookmarks_json()) }
+        catch (e) { win.bookmarkList = [] }
+    }
+
+    // --- settings --------------------------------------------------------
+    /// Apply saved settings to this window. Called at start and after every
+    /// change; the renderer choice alone waits for the next start.
+    function applySettings() {
+        let s = {}
+        try { s = JSON.parse(dirModel.settings_json()) } catch (e) { return }
+        win.keyPreset = s.key_preset === "vim" ? "vim" : "standard"
+        win.sidebarVisible = s.sidebar !== false
+        Tokens.density = s.spacing > 0 ? s.spacing : 1.0
+        win.defaultShowHidden = s.show_hidden === true
+    }
+    property bool defaultShowHidden: false
+    function openSettings() {
+        settingsPanel.show(dirModel.settings_json())
+        win.qaDump("settings")
+    }
+    // qaDump for close lives in the panel's onClosed as well.
+
     function refreshDevices() {
         try {
             win.deviceList = JSON.parse(dirModel.devices_json())
@@ -618,7 +646,7 @@ Window {
     // context menu, a confirm or conflict dialog), a file created or deleted
     // by another program must not shift the rows under it: the rename would
     // hit the wrong file. Live updates wait, and land when it closes.
-    readonly property bool liveHold: palette.visible || confirm.visible
+    readonly property bool liveHold: palette.visible || confirm.visible || settingsPanel.open
                                      || contextMenu.open || conflictDialog.visible
                                      || prompt.visible || prompt.claimingFocus
     onLiveHoldChanged: {
@@ -836,7 +864,7 @@ Window {
         // window used to steal the keyboard, leaving a prompt on screen that
         // could not be typed into.
         if (palette.visible || confirm.visible || contextMenu.open
-            || conflictDialog.visible
+            || conflictDialog.visible || settingsPanel.open
             || prompt.visible || prompt.claimingFocus)
             return
         listFocus.forceActiveFocus()
@@ -886,6 +914,32 @@ Window {
     function runAction(a) {
         if (a === "open") win.activateRow(dirModel.cursor)
         else if (a === "quicklook") win.toggleQuickLook()
+        else if (a === "settings") win.openSettings()
+        else if (a === "pin-row" || a === "unpin-row") {
+            const p = dirModel.entry_path(dirModel.cursor)
+            const err = a === "pin-row" ? dirModel.bookmark_add(p) : dirModel.bookmark_remove(p)
+            if (err !== "") win.alertText = err
+            else hints.status = (a === "pin-row" ? qsTr("Added to Bookmarks: ") : qsTr("Removed from Bookmarks: ")) + p
+            win.refreshBookmarks()
+            win.qaDump(a)
+        }
+        else if (a === "pin-here" || a === "unpin-here") {
+            const err = a === "pin-here" ? dirModel.bookmark_add(dirModel.location)
+                                         : dirModel.bookmark_remove(dirModel.location)
+            if (err !== "") win.alertText = err
+            else hints.status = (a === "pin-here" ? qsTr("Added to Bookmarks: ") : qsTr("Removed from Bookmarks: ")) + dirModel.location
+            win.refreshBookmarks()
+            win.qaDump(a)
+        }
+        else if (a === "bm-open") { dirModel.navigate(win.bookmarkMenuPath); win.focusList() }
+        else if (a === "bm-open-tab") win.newTab(win.bookmarkMenuPath)
+        else if (a === "bm-remove") {
+            const err = dirModel.bookmark_remove(win.bookmarkMenuPath)
+            if (err !== "") win.alertText = err
+            else hints.status = qsTr("Removed from Bookmarks: ") + win.bookmarkMenuPath
+            win.refreshBookmarks()
+            win.qaDump(a)
+        }
         else if (a === "open-with") { palette.openWith("open with "); return }
         else if (a === "open-tab") win.newTab(dirModel.entry_path(dirModel.cursor))
         else if (a === "copy-path") hints.status = dirModel.copy_path(dirModel.cursor)
@@ -901,7 +955,7 @@ Window {
         else if (a === "view-grid") win.setView("grid")
         else if (a === "view-columns") win.setView("columns")
         else if (a === "toggle-hidden") dirModel.toggle_hidden()
-        else if (a === "reload") dirModel.reload()
+        else if (a === "reload") dirModel.reload_all()
         else if (a === "up") dirModel.navigate_up()
         else if (a === "trash") win.askTrash()
         else if (a === "new-folder") win.askNewFolder()
@@ -1014,6 +1068,9 @@ Window {
                 sep,
                 { label: qsTr("Open terminal here"), hint: "", action: "terminal" },
                 { label: qsTr("Copy folder path"), hint: "", action: "copy-path-folder" },
+                win.bookmarkList.some(b => b.path === dirModel.location)
+                    ? { label: qsTr("Remove this folder from Bookmarks"), hint: "", action: "unpin-here" }
+                    : { label: qsTr("Add this folder to Bookmarks"), hint: "Ctrl+B", action: "pin-here" },
                 sep,
                 { label: dirModel.show_hidden ? qsTr("Hide hidden files") : qsTr("Show hidden files"),
                   hint: "Ctrl+H", action: "toggle-hidden" },
@@ -1026,8 +1083,16 @@ Window {
         if (many) list.push({ label: qsTr("Open ") + dirModel.sel_count() + qsTr(" items"), hint: "Enter", action: "open" })
         else list.push({ label: qsTr("Open"), hint: "Enter", action: "open" })
         if (!many && dir) list.push({ label: qsTr("Open in new tab"), hint: "", action: "open-tab" })
+        if (!many && dir) {
+            const p = dirModel.entry_path(row)
+            const pinned = win.bookmarkList.some(b => b.path === p)
+            list.push(pinned
+                ? { label: qsTr("Remove from Bookmarks"), hint: "", action: "unpin-row" }
+                : { label: qsTr("Add to Bookmarks"), hint: "Ctrl+B", action: "pin-row" })
+        }
         if (!many && !dir) list.push({ label: qsTr("Open with…"), hint: win.keyPreset === "vim" ? "o" : "", action: "open-with" })
         list.push({ label: qsTr("Quick Look"), hint: "Space", action: "quicklook" })
+        if (!many) list.push({ label: qsTr("Properties"), hint: "Alt+Enter", action: "quicklook" })
         list.push(sep)
         list.push({ label: qsTr("Cut"), hint: "Ctrl+X", action: "cut" })
         list.push({ label: qsTr("Copy"), hint: "Ctrl+C", action: "copy" })
@@ -1398,6 +1463,32 @@ Window {
                         Accessible.name: modelData.nm
                     }
                 }
+
+                Item { width: Tokens.spaceSm; height: 1 }
+
+                // Settings: a visible control, never only a shortcut.
+                Rectangle {
+                    objectName: "settingsButton"
+                    width: Tokens.controlHeight
+                    height: Tokens.controlHeight
+                    color: setHover.hovered ? Tokens.withAlpha(Tokens.foreground, 0.1) : "transparent"
+                    radius: Tokens.radius
+                    HoverHandler { id: setHover }
+                    Text {
+                        anchors.centerIn: parent
+                        text: "⚙"
+                        color: Tokens.foreground
+                        font.family: Tokens.fontFamily
+                        font.pixelSize: Tokens.fontBody
+                    }
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: win.openSettings()
+                    }
+                    Accessible.role: Accessible.Button
+                    Accessible.name: qsTr("Settings")
+                }
             }
         }
 
@@ -1417,7 +1508,17 @@ Window {
                 onPlaceChosen: (p) => { dirModel.navigate(p); win.focusList() }
                 remotePlaces: win.connectedPlaces
                 devices: win.deviceList
+                bookmarks: win.bookmarkList
                 onDeviceChosen: (path, mounted) => win.openDevice(path, mounted)
+                onBookmarkMenu: (path, x, y) => {
+                    win.bookmarkMenuPath = path
+                    contextMenu.popup(x, y, [
+                        { label: qsTr("Open"), hint: "", action: "bm-open" },
+                        { label: qsTr("Open in new tab"), hint: "", action: "bm-open-tab" },
+                        { separator: true },
+                        { label: qsTr("Remove from Bookmarks"), hint: "", action: "bm-remove" }
+                    ])
+                }
             }
 
             Item {
@@ -1670,6 +1771,13 @@ Window {
                 event.accepted = true; return
             }
 
+            // Alt+Enter: Properties, the convention on every desktop.
+            if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter)
+                    && (event.modifiers & Qt.AltModifier)) {
+                win.toggleQuickLook()
+                event.accepted = true; return
+            }
+
             switch (event.key) {
             case Qt.Key_Space:
                 // Space is Quick Look (the plan's mockups say so in three
@@ -1726,6 +1834,13 @@ Window {
                     quickLook.hide()
                     win.focusList()
                     win.qaDump("quicklook")
+                    event.accepted = true; return
+                }
+                // Settings opened by mouse may not hold the keyboard yet;
+                // Escape still closes it rather than acting underneath.
+                if (settingsPanel.open) {
+                    settingsPanel.hide()
+                    win.qaDump("settings-closed")
                     event.accepted = true; return
                 }
                 if (dirModel.job_running()) {
@@ -1797,7 +1912,17 @@ Window {
                 if (event.key === Qt.Key_Backtab) {
                     win.nextTab(-1); event.accepted = true; return
                 }
-                if (event.key === Qt.Key_R) { dirModel.reload(); event.accepted = true; return }
+                if (event.key === Qt.Key_R) { dirModel.reload_all(); event.accepted = true; return }
+                if (event.key === Qt.Key_Comma) { win.openSettings(); event.accepted = true; return }
+                if (event.key === Qt.Key_B) {
+                    // The folder under the cursor, else the one being viewed.
+                    const onDir = dirModel.count > 0 && dirModel.is_dir(dirModel.cursor)
+                    const p = onDir ? dirModel.entry_path(dirModel.cursor) : dirModel.location
+                    const pinned = win.bookmarkList.some(b => b.path === p)
+                    if (onDir) win.runAction(pinned ? "unpin-row" : "pin-row")
+                    else win.runAction(pinned ? "unpin-here" : "pin-here")
+                    event.accepted = true; return
+                }
                 if (event.key === Qt.Key_Z) {
                     const label = dirModel.undo_label()
                     const err = dirModel.undo_last()
@@ -1967,6 +2092,34 @@ Window {
         onClosed: win.focusList()
         onNavigateRequested: (p) => { dirModel.navigate(p); win.focusList() }
         onActionRequested: (a) => win.runAction(a)
+    }
+
+    SettingsPanel {
+        id: settingsPanel
+        onChanged: (key, value) => {
+            const err = dirModel.settings_set(key, value)
+            if (err !== "") win.alertText = err
+            // New tabs honour hidden-files; the current one follows too,
+            // since the user just asked for it.
+            if (key === "show_hidden" && (value === "true") !== dirModel.show_hidden)
+                dirModel.toggle_hidden()
+            win.applySettings()
+            settingsPanel.s = JSON.parse(dirModel.settings_json())
+            win.qaDump("settings-changed")
+        }
+        onKeysRequested: (on) => {
+            const err = dirModel.set_omarchy_keys(on)
+            if (err !== "") win.alertText = err
+            settingsPanel.s = JSON.parse(dirModel.settings_json())
+            win.qaDump("settings-keys")
+        }
+        onDefaultRequested: (on) => {
+            const err = dirModel.set_default_file_manager(on)
+            if (err !== "") win.alertText = err
+            settingsPanel.s = JSON.parse(dirModel.settings_json())
+            win.qaDump("settings-default")
+        }
+        onClosed: { win.focusList(); win.qaDump("settings-closed") }
     }
 
     QuickLook {
@@ -2154,6 +2307,7 @@ Window {
             quickLookLines: quickLook.info && quickLook.info.lines
                             ? quickLook.info.lines.length : 0,
             quickLookNoPreview: quickLook.info ? quickLook.info.noPreview : "",
+            quickLookFacts: quickLook.info && quickLook.info.facts ? quickLook.info.facts : [],
             tabDropZone: win.tabDropZone,
             paletteOpen: palette.visible,
             paletteResults: palette.visible ? palette.resultLabels() : [],
@@ -2181,10 +2335,17 @@ Window {
             live: dirModel.is_live(),
             emptyReason: dirModel.empty_reason,
             theme: Tokens.themeName,
+            renderer: win.GraphicsInfo.api === GraphicsInfo.Software ? "software" : "hardware",
             themeBackground: "" + Tokens.background,
             themeRevision: Tokens.tokens.revision,
             interrupted: interruptedNotice.items.map(i => i.text),
             liveHold: win.liveHold,
+            settingsOpen: settingsPanel.open,
+            settings: settingsPanel.s,
+            keyPreset: win.keyPreset,
+            sidebarVisible: win.sidebarVisible,
+            density: Tokens.density,
+            bookmarks: win.bookmarkList.map(b => b.label + "=" + b.path),
             jobState: win.job ? win.job.state : "",
             jobBytes: win.job ? (win.job.bytes_text || "") : "",
             jobSpeed: win.job ? (win.job.speed || "") : "",
@@ -2267,6 +2428,9 @@ Window {
         applyRememberedView()
         // A local read of the kernel's own view: no daemon, no network.
         win.refreshDevices()
+        win.refreshBookmarks()
+        win.applySettings()
+        if (win.defaultShowHidden && !dirModel.show_hidden) dirModel.toggle_hidden()
         qaStatePath = qaWriter.env_path("GUST_QA_STATE")
         console.log("GUST_READY location=" + dirModel.location
                     + " count=" + dirModel.count

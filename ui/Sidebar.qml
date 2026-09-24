@@ -20,6 +20,11 @@ Rectangle {
     /// Aliases of places that are connected right now.
     property var remotePlaces: []
 
+    /// Pinned folders, shared with every GTK file dialog on the desktop.
+    property var bookmarks: []
+    /// Right-click on a bookmark: Main shows its menu (Remove).
+    signal bookmarkMenu(string path, real x, real y)
+
     /// Removable devices the kernel reports. Refreshed by Main; never
     /// polled from here, because a rail that lies about what is attached is
     /// worse than one that says nothing.
@@ -107,6 +112,60 @@ Rectangle {
 
                 Accessible.role: Accessible.Button
                 Accessible.name: "Go to " + model.label
+            }
+        }
+
+        // Bookmarks — the same list Nautilus and the GTK Open/Save dialogs
+        // use, so a folder pinned here is pinned everywhere.
+        Item {
+            width: 1
+            height: Tokens.spaceXl
+            visible: root.bookmarks.length > 0
+        }
+        Text {
+            leftPadding: Tokens.rowPaddingX
+            text: qsTr("Bookmarks")
+            color: Tokens.foregroundDim
+            font.family: Tokens.fontFamily
+            font.pixelSize: Tokens.fontCaption
+            visible: root.bookmarks.length > 0
+        }
+        Repeater {
+            model: root.bookmarks
+            delegate: Rectangle {
+                required property var modelData
+                width: column.width
+                height: Tokens.rowHeight
+                color: bmMouse.containsMouse ? Tokens.withAlpha(Tokens.foreground, 0.06) : "transparent"
+                Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    leftPadding: Tokens.rowPaddingX
+                    width: column.width - Tokens.rowPaddingX
+                    text: modelData.label
+                    // A pinned folder that is gone (unplugged drive, deleted)
+                    // is dimmed rather than hidden: it may come back.
+                    color: modelData.exists ? Tokens.foreground : Tokens.foregroundDim
+                    font.family: Tokens.fontFamily
+                    font.pixelSize: Tokens.fontBody
+                    elide: Text.ElideRight
+                }
+                MouseArea {
+                    id: bmMouse
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    acceptedButtons: Qt.LeftButton | Qt.RightButton
+                    onClicked: (mouse) => {
+                        if (mouse.button === Qt.RightButton) {
+                            const g = mapToItem(null, mouse.x, mouse.y)
+                            root.bookmarkMenu(modelData.path, g.x, g.y)
+                        } else {
+                            root.placeChosen(modelData.path)
+                        }
+                    }
+                }
+                Accessible.role: Accessible.Button
+                Accessible.name: qsTr("Go to bookmark ") + modelData.label
             }
         }
 
@@ -241,6 +300,7 @@ Rectangle {
             // exactly this class of QML layout bug).
             readonly property int placesHeight:
                 Tokens.spaceXl + (places.count + 1) * Tokens.rowHeight
+                + (root.bookmarks.length > 0 ? Tokens.spaceXl + (root.bookmarks.length + 1) * Tokens.rowHeight : 0)
             // The note explains why the list is empty, so it belongs only
             // when the list IS empty. Saying "no places added yet" beside a
             // connected place is a lie the rail must never tell.

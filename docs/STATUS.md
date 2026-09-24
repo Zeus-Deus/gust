@@ -28,6 +28,15 @@ Rust 1.98.1, cxx-qt 0.10.0, Mesa llvmpipe (software rendering, Virtio GPU),
 | Packaged QML loading | proven | qrc alias verified; a bad path now exits 2 loudly |
 | First paint on a real compositor | proven | window appears on Hyprland, screenshots captured |
 | Theme token adapter | proven | 22/22 installed themes, `just theme-matrix` |
+| **Folder sizes** | **proven by hand** | `dir_size` (8): symlinks never followed, hard links counted once, other filesystems not entered, unreadable parts make it "≥", bounded and cancellable. Live: Photos shows 7.6 MB (2 files) where `du -l` over-counts to 11 MB. Measured on a worker, local folders only. A change deep inside a sub-folder is picked up by Ctrl+R, not live |
+| **Properties** (right-click, Alt+Enter) | **proven by hand** | `properties` (8): location, local times, owner by name from /etc/passwd, permissions, link target shown not followed, hostile names made visible. Lives in the Quick Look panel rather than a second window |
+| **Times in the list are local** | **proven** | were UTC ("today 14:49" at 16:49 CEST); `relative_time` uses the local offset and local calendar days, older dates written out |
+| **Super+Shift+F opens Gust** (Omarchy) | **proven by hand** | `omarchy_keys` (6); `gust --bind-keys on` or Settings adds one marked block to `~/.config/hypr/bindings.lua` (Omarchy's documented override file) and reloads Hyprland; a real Super+Shift+F keypress in the VM opened Gust, not Nautilus. `--bind-keys off` left the file byte-identical to before. Super+Alt+Shift+F opens the terminal's folder via `omarchy-cmd-terminal-cwd` |
+| **Drag and drop with other apps** | **proven by hand** | evidence `B-drag-between-apps`: real mouse drags Gust → Nautilus and Nautilus → Gust, both byte-identical copies with the source kept. Out: text/uri-list, text/plain and the GNOME type. In: the normal planner and engine. Grid and Columns now have the drag gesture too (they had none) |
+| **"Show in folder" from other apps** (`org.freedesktop.FileManager1`) | **proven by hand** | `filemanager1` (10); evidence `C-show-in-folder`: after `gust --default on` (or Settings → Default app), a real `ShowItems` call on the session bus D-Bus-activated `gust --dbus-service` and opened Gust in the folder with the file under the cursor, 60 ms. `--default off` removes only Gust's activation file; another app's is never touched |
+| **Bookmarks** | **proven by hand** | `bookmarks` (6); evidence `B-bookmarks-settings`: the desktop's own `~/.config/gtk-3.0/bookmarks` (shared with Nautilus and GTK file dialogs) is the store; pin by right-click or Ctrl+B appends exactly one line; unpin restores the file byte-for-byte; sftp:// and smb:// entries from other apps are kept verbatim |
+| **Settings** (gear button, Ctrl+, , `:settings`) | **proven by hand** | `settings` (7): keys (Standard/Vim), density, hidden files, sidebar, renderer (next start), default file manager. Every choice is honoured; saved 0600, atomic, one bad line resets only itself. Live: Compact/Vim applied at once and survived a restart; "Use Gust" / "Previous app" claimed and restored `mimeapps.list` byte-for-byte |
+| **Names that are not valid UTF-8** | **proven** | copy, clipboard URIs and bookmarks keep the raw bytes (a Latin-1 `café` became `caf%EF%BF%BD`, naming no file); test red on the old code |
 | **Live theme switching** | **proven by hand** | `theme_live` (3); evidence `B-live-theme`: `omarchy-theme-set` to catppuccin-latte, gruvbox, white and back while Gust is open — one repaint each, no restart |
 | Generation-tagged model updates | built | generation plumbed; no concurrent-navigation stress test yet |
 | Weak hardware: no GPU at all | **proven** | every number in this file is llvmpipe software rendering in a VM with no GPU; copies were also run with the disk capped at 2–8 MB/s |
@@ -54,10 +63,11 @@ Rust 1.98.1, cxx-qt 0.10.0, Mesa llvmpipe (software rendering, Virtio GPU),
 | Keyboard focus returns from every overlay | proven | regression test in `just qa` |
 | **Right-click menus** (file, folder, several files, empty space; Menu key, Shift+F10) | **proven by hand** | evidence `B1-context-menu`: rows, grid and columns views; "Paste into folder" on a folder row; right-click inside a selection keeps it, outside replaces it; a keyboard-opened menu ignores the pointer until it moves; delete goes through the normal confirm and Trash, Ctrl+Z restores |
 | **Live folder updates** | **proven by hand** | 13 tests (`dir_watch`); evidence `B-live-updates`: files made, deleted and renamed by another program appear in 160 ms with the scroll position and cursor kept; 50 000 files created outside Gust show in 1.8 s with the window responsive; a burst is 1–3 refreshes, a file being written refreshes once when closed; rows do not move while a rename prompt, menu or dialog is open; a deleted folder says "This folder no longer exists", not "empty". Local folders only — network mounts keep Ctrl+R |
-| Vim preset | built | implemented, not yet asserted in QA |
+| Vim preset | proven by hand | selectable in Settings; `j` moves the cursor; persists across restarts |
 | **Per-location view memory** | **proven** | `views::tests` + `just qa` §10r; survives a restart |
 | Tabs | **proven** | per-tab location, history, selection, filter and view; Ctrl+T/W/Tab/1-9; last tab cannot be closed; a tab with a running job asks before closing |
 | "Send with LocalSend" (mockup C) | **not possible** | LocalSend's desktop entry is `Exec=localsend` with no `%F` and no `MimeType`, it has no CLI, and it registers no D-Bus service. There is no supported way to hand it files. Recorded as unbuildable rather than pending. |
+| **One copy, every format** | **proven** | `clipboard_live` 9/9 (the new check failed on the old code, which offered only the GNOME type): a copy is readable as files by other file managers, as `text/uri-list` by browsers and chat apps, and as plain text by terminals — and it survives closing the Gust window (held by `gust --clip-serve`, which exits when another app copies) |
 | System clipboard interop | **proven** | 12 unit + 8 live tests: a copy in Gust is readable by another file manager, a cut survives as a cut, and what Nautilus leaves is pasteable in Gust. `x-special/gnome-copied-files` with percent-encoded URIs; an http:// URI and ordinary prose are both refused as file lists; no path reaches a command line. Degrades to an internal clipboard, saying so, when wl-copy is absent. |
 | Multi-file open | **proven** | 7 unit tests + live: three text files open ONE editor, not three. Respects the freedesktop distinction — `%F`/`%U` take a list, `%f`/`%u` are launched per file — because passing five paths to a `%f` program opens the first and silently drops four. Bounded at 50; a folder or executable in the selection falls back to single-row activation. |
 | Open with… | **proven** | 16 unit tests + verified live against this machine's real desktop database (nvim/LibreOffice/Omawrite for text, imv/Chromium/Pinta/Kdenlive for PNG, with the default marked). Read from `mimeinfo.cache` and `mimeapps.list`, never from `gio mime`'s localized output; `NoDisplay` entries are still offered; `Exec` is parsed to argv so a hostile filename stays one argument. |
@@ -69,7 +79,7 @@ Rust 1.98.1, cxx-qt 0.10.0, Mesa llvmpipe (software rendering, Virtio GPU),
 | Blocked mount does not block Gust | **proven** | measured: a direct listing of a frozen sshfs mount took 280s; the bounded probe returns in 4s. Startup, navigate and the listing worker are all guarded; only stallable filesystems pay for it |
 | Accessibility (AT-SPI) | **proven** | 46 named nodes in the live tree, files exposed as list items, controls named ("Back", "Up one folder", "Rows view"); needs `QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1`, which Gust does not set globally |
 | Font / spacing scaling | **proven** | starts, lists and navigates at font 9/12/18 and spacing 0.8/1.0/1.3 with no missing tokens |
-| Quick Look (Space) | **proven** | bounded text peek, kind in words, mode line; escape sequences shown not obeyed; symlinks described not followed; images described without decoding here; multi-select moved to Ctrl+Space |
+| Quick Look (Space) | **proven** — now shows text in any language (it printed dots for every non-ASCII byte); bounded text peek, kind in words, mode line; escape sequences shown not obeyed; symlinks described not followed; images described without decoding here; multi-select moved to Ctrl+Space |
 | Content search (`:grep`) | **proven** | scoped, recursive, cancellable; binaries skipped on a NUL sniff; symlinks not followed; bounded per file and overall, and says when it stopped early |
 | Cloud remotes (rclone) | **proven** | discovery reads the installed rclone's config and opens no socket; connect mounts with a VFS write cache; "cached ≠ uploaded" shown as a notice; disconnect refuses while uploads are outstanding and never lazy-unmounts; degrades with a reason when rclone is absent |
 | Cloud OAuth in Gust's own UI | not built | deliberate: `rclone config` handles every provider correctly, and Drive's flow is not a template for Proton or Filen (plan §3) |
@@ -77,7 +87,8 @@ Rust 1.98.1, cxx-qt 0.10.0, Mesa llvmpipe (software rendering, Virtio GPU),
 | Tab drag to split / detach | not started | needs cross-window Qt drag sessions; recorded unbuilt rather than half-built (DESIGN §6.7) |
 | 100k benchmark | **proven** | `just bench`: 100k listed+settled in 470 ms (release), first window 155 ms |
 | Listing off the UI thread | **proven** | worker thread + generation-tagged snapshots; names paint before metadata |
-| PSS budget (≤ 90 MiB) | **MISSED — platform floor** | a BARE Qt Quick window costs 155 MiB here; Gust adds ~10 MiB. Needs a GPU machine to judge |
+| PSS budget (≤ 90 MiB) | **met on machines without a GPU** | 85.8–86.5 MiB with 100k entries open (3 runs). Gust detects "no GPU" from sysfs and uses Qt's raster renderer instead of llvmpipe; see below. With a GPU: not yet measured |
+| **No-GPU renderer auto-selection** | **proven** | `renderer::tests` (8) on sysfs fixtures incl. this VM's virtio-without-3D shape, virgl, i915/amdgpu/nvidia, hybrid laptops, unknown drivers (never guessed); live: auto → software 66 MiB, `GUST_RENDERER=gpu` or the user's own `QT_QUICK_BACKEND` → respected, 177 MiB. Full `just qa` passes on the raster renderer |
 
 ## M2 · operate
 
@@ -168,9 +179,7 @@ Rust 1.98.1, cxx-qt 0.10.0, Mesa llvmpipe (software rendering, Virtio GPU),
 
 Filter, scoped find, palette actions, archives, packaging and `--default` are
 proven (see the tables above). **Not started:** the file-chooser portal (other
-apps' Open/Save dialogs), the `org.freedesktop.FileManager1` D-Bus service
-("Show in folder" from a browser), a Settings screen, folder sizes, a
-Properties window, bookmarks, and dragging files out to other apps.
+apps' Open/Save dialogs).
 
 ## Known gaps worth stating plainly
 
@@ -195,14 +204,9 @@ list is worse than none, because it makes working features look broken.
    is tested end to end against a local WebDAV backend. Drive, Dropbox,
    Proton and Filen each have their own auth and capability quirks; a fixture
    passing is not provider certification.
-4. **The memory target is missed on software rendering.** Every number
-   here comes from llvmpipe in a VM with no GPU. First window 155 ms and
-   100k entries settled in 470 ms are well inside target, but PSS is
-   212 MiB against ≤ 90 MiB — and a bare Qt Quick window with no Gust code
-   already costs 155 MiB here, 59 MiB of it llvmpipe. Machines with no GPU
-   are a real target (not everyone has one), so this is not waved away:
-   `QT_QUICK_BACKEND=software` (Qt's raster renderer, no LLVM) is the next
-   thing to measure. It has not been measured yet.
+4. **Memory with a real GPU is unmeasured.** Without a GPU the budget is
+   met (86 MiB, raster renderer). On GPU hardware Qt uses its hardware
+   renderer, whose cost this VM cannot show.
 5. **Tab drag-to-split and drag-out-to-detach are not built.** The split
    itself works from the palette and the keyboard; the drag gestures need
    cross-window Qt drag sessions and are recorded unbuilt rather than
@@ -225,9 +229,14 @@ Run `just bench`. Numbers below are a release build inside the development VM
 | first window on screen | 155 ms | < 400 ms | pass |
 | 100k listed and settled in the UI | 470 ms | < 2000 ms | pass |
 | still answers keys at 100k | End reaches row 99999 | responds | pass |
-| PSS with 100k open | 212 MiB | < 90 MiB | **miss** |
+| PSS with 100k open (llvmpipe, forced) | 208–229 MiB | < 90 MiB | miss |
+| PSS with 100k open (raster, the no-GPU default) | 85.8–86.5 MiB | < 90 MiB | **pass** |
+| first window (raster) | 104–105 ms | < 400 ms | pass |
+| 100k listed and settled (raster) | 423–430 ms | < 2000 ms | pass |
 
-The memory target is missed, and a control experiment says why.
+The memory target was missed under llvmpipe, and a control experiment said
+why; the fix (Qt's raster renderer when there is no GPU) is now automatic.
+The analysis that led there:
 
 **A bare Qt Quick window with no Gust code in it costs 155 MiB PSS on this
 machine.** That is the M0 spike: one QML file, one rectangle, nothing else.

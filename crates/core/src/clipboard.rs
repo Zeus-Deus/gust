@@ -74,9 +74,11 @@ pub fn text_payload(paths: &[PathBuf]) -> String {
 /// Spaces and `#` in a file name would otherwise truncate or corrupt the
 /// URI at the receiving end.
 pub fn path_to_uri(path: &Path) -> String {
-    let raw = path.to_string_lossy();
+    // The raw bytes, not a lossy string: a name that is not valid UTF-8
+    // must still name the same file on the other side.
+    let raw = path.as_os_str().as_encoded_bytes();
     let mut out = String::from("file://");
-    for b in raw.bytes() {
+    for &b in raw {
         let safe = b.is_ascii_alphanumeric() || matches!(b, b'/' | b'-' | b'_' | b'.' | b'~');
         if safe {
             out.push(b as char);
@@ -183,49 +185,152 @@ pub fn system_clipboard_available() -> bool {
         .unwrap_or(false)
 }
 
-/// Offer `paths` to the rest of the desktop.
+/// Every type one copy is offered as, in order of preference.
 ///
-/// `wl-copy` stays running to hold the offer — that is how a Wayland
-/// clipboard works — so it is spawned and deliberately not waited on. The
-/// payload goes in on **stdin**: a file list can be long and a file name can
-/// contain anything, neither of which belongs in argv.
+/// A file manager reads the GNOME type (it carries copy-vs-cut), a browser
+/// upload box or chat app reads `text/uri-list`, and a terminal or editor
+/// reads plain text. All three are offered by ONE owner: `wl-copy` can hold
+/// only a single type, and running it once per type left just the last.
+pub fn offer_types(verb: ClipVerb, paths: &[PathBuf]) -> Vec<(String, Vec<u8>)> {
+    vec![
+        ("x-special/gnome-copied-files".into(), gnome_payload(verb, paths).into_bytes()),
+        ("text/uri-list".into(), uri_list_payload(paths).into_bytes()),
+        ("text/plain;charset=utf-8".into(), text_payload(paths).into_bytes()),
+        ("text/plain".into(), text_payload(paths).into_bytes()),
+        ("UTF8_STRING".into(), text_payload(paths).into_bytes()),
+    ]
+}
+
+/// Who keeps the offer alive. A Wayland clipboard is served by the process
+/// that set it, so something must stay running until another app copies.
+pub enum Holder {
+    /// A helper process (`gust --clip-serve`): the copy outlives the window,
+    /// the way `wl-copy` did.
+    Helper(PathBuf),
+    /// A thread of this process. For tests and for when no helper exists.
+    InProcess,
+}
+
+/// Offer `paths` to the rest of the desktop in every useful format.
+///
+/// Payloads never touch argv: a file list can be long and a file name can
+/// contain anything.
 pub fn offer(verb: ClipVerb, paths: &[PathBuf]) -> Result<(), String> {
+    offer_with(verb, paths, &Holder::InProcess)
+}
+
+pub fn offer_with(verb: ClipVerb, paths: &[PathBuf], holder: &Holder) -> Result<(), String> {
     if paths.is_empty() {
         return Err("nothing to copy".into());
     }
-    if !system_clipboard_available() {
-        return Err("wl-copy is not installed".into());
+    if std::env::var_os("WAYLAND_DISPLAY").is_none() {
+        return Err("no Wayland session".into());
     }
-
-    // One wl-copy per type: each holds its own offer. The GNOME type is
-    // what other file managers read, so it goes first.
-    let offers: [(&str, String); 3] = [
-        ("x-special/gnome-copied-files", gnome_payload(verb, paths)),
-        ("text/uri-list", uri_list_payload(paths)),
-        ("text/plain", text_payload(paths)),
-    ];
-
-    // wl-copy replaces the whole clipboard each time it runs, so the types
-    // cannot simply be offered one after another. `--type` with several
-    // invocations would leave only the last. Offer the GNOME type, which is
-    // the one a file manager needs; the others ride along as fallbacks only
-    // when it is unavailable.
-    let (ty, payload) = &offers[0];
-    let mut child = Command::new("wl-copy")
-        .arg("--type")
-        .arg(ty)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|e| e.to_string())?;
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(payload.as_bytes())
-            .map_err(|e| e.to_string())?;
+    let types = offer_types(verb, paths);
+    match holder {
+        Holder::InProcess => serve_types(types, false),
+        Holder::Helper(exe) => {
+            let mut child = Command::new(exe)
+                .arg("--clip-serve")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .map_err(|e| e.to_string())?;
+            if let Some(mut stdin) = child.stdin.take() {
+                stdin.write_all(&encode_types(&types)).map_err(|e| e.to_string())?;
+            }
+            // Wait for "ready" so the offer exists when this returns: a
+            // paste straight after Ctrl+C must not find the OLD clipboard.
+            // The helper is then left running; it exits by itself as soon
+            // as another application takes the clipboard.
+            use std::io::Read;
+            let mut ok = [0u8; 2];
+            let ready = child
+                .stdout
+                .take()
+                .map(|mut o| o.read_exact(&mut ok).is_ok() && &ok == b"ok")
+                .unwrap_or(false);
+            // Reap it whenever it exits, without blocking the caller.
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+            if ready {
+                Ok(())
+            } else {
+                Err("the clipboard could not be set".into())
+            }
+        }
     }
-    // Deliberately NOT waited on: wl-copy lives as long as the offer does.
-    Ok(())
+}
+
+/// `len\nmime\nbytes` records: binary-safe, no escaping.
+fn encode_types(types: &[(String, Vec<u8>)]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for (mime, data) in types {
+        out.extend_from_slice(format!("{}\n{}\n", data.len(), mime).as_bytes());
+        out.extend_from_slice(data);
+    }
+    out
+}
+
+fn decode_types(mut buf: &[u8]) -> Option<Vec<(String, Vec<u8>)>> {
+    let mut out = Vec::new();
+    while !buf.is_empty() {
+        let nl = buf.iter().position(|b| *b == b'\n')?;
+        let len: usize = std::str::from_utf8(&buf[..nl]).ok()?.parse().ok()?;
+        buf = &buf[nl + 1..];
+        let nl = buf.iter().position(|b| *b == b'\n')?;
+        let mime = std::str::from_utf8(&buf[..nl]).ok()?.to_string();
+        buf = &buf[nl + 1..];
+        if buf.len() < len {
+            return None;
+        }
+        out.push((mime, buf[..len].to_vec()));
+        buf = &buf[len..];
+    }
+    Some(out)
+}
+
+fn serve_types(types: Vec<(String, Vec<u8>)>, foreground: bool) -> Result<(), String> {
+    use wl_clipboard_rs::copy::{MimeSource, MimeType, Options, Source};
+    let sources = types
+        .into_iter()
+        .map(|(mime, data)| MimeSource {
+            source: Source::Bytes(data.into_boxed_slice()),
+            mime_type: MimeType::Specific(mime),
+        })
+        .collect();
+    let mut opts = Options::new();
+    opts.foreground(foreground);
+    if foreground {
+        // Report readiness only once the offer is live, then serve until
+        // another application replaces the clipboard.
+        let prepared = opts.prepare_copy_multi(sources).map_err(|e| e.to_string())?;
+        let mut out = std::io::stdout();
+        let _ = out.write_all(b"ok");
+        let _ = out.flush();
+        prepared.serve().map_err(|e| e.to_string())
+    } else {
+        opts.copy_multi(sources).map_err(|e| e.to_string())
+    }
+}
+
+/// Entry point for `gust --clip-serve`: read the offer from stdin, hold the
+/// clipboard until another application takes it, then exit.
+pub fn serve_from_stdin() -> i32 {
+    use std::io::Read;
+    let mut buf = Vec::new();
+    if std::io::stdin().read_to_end(&mut buf).is_err() {
+        return 2;
+    }
+    let Some(types) = decode_types(&buf) else {
+        return 2;
+    };
+    match serve_types(types, true) {
+        Ok(()) => 0,
+        Err(_) => 1,
+    }
 }
 
 /// The text "Copy path" puts on the clipboard: one absolute path per line,
@@ -309,6 +414,31 @@ pub fn read() -> Option<ClipContents> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod codec_tests {
+    use super::*;
+
+    #[test]
+    fn the_helper_protocol_carries_any_bytes() {
+        let types = vec![
+            ("text/uri-list".to_string(), b"file:///a\r\n".to_vec()),
+            ("text/plain".to_string(), "x\n9\ny\u{202e}".as_bytes().to_vec()),
+            ("empty".to_string(), Vec::new()),
+        ];
+        assert_eq!(decode_types(&encode_types(&types)), Some(types));
+        assert_eq!(decode_types(b"99\ntext/plain\nshort"), None);
+    }
+
+    #[test]
+    fn a_copy_offers_files_uris_and_text() {
+        let t = offer_types(ClipVerb::Cut, &[PathBuf::from("/a b/c")]);
+        let names: Vec<&str> = t.iter().map(|(m, _)| m.as_str()).collect();
+        assert_eq!(names[0], "x-special/gnome-copied-files");
+        assert!(names.contains(&"text/uri-list") && names.contains(&"text/plain"));
+        assert!(String::from_utf8_lossy(&t[0].1).starts_with("cut\n"));
+    }
 }
 
 #[cfg(test)]

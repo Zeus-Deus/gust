@@ -48,6 +48,8 @@ for theme_path in "${THEMES[@]}"; do
 #!/usr/bin/env bash
 exec > /tmp/gust-theme.log 2>&1
 export HOME="$FIXTURE"
+export XDG_CONFIG_HOME="$FIXTURE/.config"
+export XDG_STATE_HOME="$FIXTURE/.local/state"
 export XDG_DATA_HOME="$FIXTURE/.local/share"
 export GUST_OMARCHY_STATE="$state"
 export GUST_QA_STATE=/tmp/gust-theme-state.json

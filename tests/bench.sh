@@ -90,10 +90,15 @@ cat > "$OUT/first.sh" <<EOF
 REAL_HOME="$REAL_HOME"
 exec > "$FIRST_RUN" 2>&1
 export HOME=$OUT/home
+export XDG_CONFIG_HOME=$OUT/home/.config
+export XDG_STATE_HOME=$OUT/home/.local/state
 export XDG_DATA_HOME=$OUT/home/.local/share
 export XDG_CACHE_HOME=$OUT/home/.cache
 export GUST_OMARCHY_STATE=\${GUST_OMARCHY_STATE:-\$REAL_HOME/.local/state/omarchy}
 export GUST_QA_STATE=$STATE
+# Compare renderers on machines without a GPU: "software" is Qt's raster
+# scene graph (no LLVM); unset uses the platform default (llvmpipe here).
+${GUST_BENCH_QT_BACKEND:+export QT_QUICK_BACKEND=$GUST_BENCH_QT_BACKEND}
 exec "$BIN" "$BIG"
 EOF
 chmod +x "$OUT/first.sh"

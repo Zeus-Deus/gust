@@ -93,14 +93,20 @@ pub fn mode_line(mode: u32, is_dir: bool, is_link: bool) -> String {
 /// terminal, the theme, or a QML string. A file is *shown*, never obeyed.
 pub fn sanitise_line(raw: &[u8]) -> String {
     let mut out = String::with_capacity(raw.len());
-    for &b in raw {
-        match b {
-            b'\t' => out.push_str("    "),
-            0x20..=0x7e => out.push(b as char),
-            _ => {
-                // Valid UTF-8 sequences are kept; anything else becomes a dot.
-                out.push('·');
+    for chunk in raw.utf8_chunks() {
+        for c in chunk.valid().chars() {
+            let bidi = matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}');
+            match c {
+                '\t' => out.push_str("    "),
+                // Control characters and bidi overrides become a visible dot
+                // rather than escaping into the terminal, the theme, or a
+                // QML string, or reversing the rest of the line.
+                c if c.is_control() || bidi => out.push('·'),
+                c => out.push(c),
             }
+        }
+        if !chunk.invalid().is_empty() {
+            out.push('·');
         }
     }
     out
@@ -324,6 +330,18 @@ mod tests {
         assert!(!out.contains('\x07'));
         assert!(out.contains("before"));
         assert!(out.contains("after"));
+    }
+
+    #[test]
+    fn text_in_any_language_is_shown_as_written() {
+        // The comment always promised this; the code turned every
+        // non-ASCII byte into a dot, so a German or Japanese file was
+        // unreadable in Quick Look.
+        assert_eq!(sanitise_line("Grüße, 写真 ✓".as_bytes()), "Grüße, 写真 ✓");
+        // Invalid bytes are still made visible, one mark per bad sequence.
+        assert_eq!(sanitise_line(b"ok\xff\xfeend"), "ok··end");
+        // Bidi overrides would visually reverse the rest of a line.
+        assert!(!sanitise_line("a\u{202e}b".as_bytes()).contains('\u{202e}'));
     }
 
     #[test]
