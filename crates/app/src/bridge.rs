@@ -57,6 +57,10 @@ pub mod qobject {
         /// The views show it instead of "This folder is empty", which would
         /// be a lie about a folder Gust could not read.
         #[qproperty(QString, empty_reason)]
+        /// Columns view side panes, as JSON: the parent folder's entries
+        /// (current one marked) and a peek at the item under the cursor.
+        /// Filled on a worker after request_columns().
+        #[qproperty(QString, columns_side)]
         /// True while a scoped find is running or its results are shown.
         #[qproperty(bool, finding)]
         #[qproperty(QString, find_needle, cxx_name = "findNeedle")]
@@ -97,6 +101,9 @@ pub mod qobject {
         /// where Ctrl+R is the only way to see changes made elsewhere).
         #[qinvokable]
         fn is_live(self: &DirModel) -> bool;
+        /// Columns view: fill `columns_side` for the cursor row, on a worker.
+        #[qinvokable]
+        fn request_columns(self: Pin<&mut DirModel>);
         /// Settings as JSON, plus whether Gust is the default file manager.
         #[qinvokable]
         fn settings_json(self: &DirModel) -> QString;
@@ -597,6 +604,8 @@ const ROLE_THUMB: i32 = 0x010A;
 
 pub struct DirModelRust {
     empty_reason: QString,
+    columns_side: QString,
+    columns_gen: u64,
     location: QString,
     location_display: QString,
     count: i32,
@@ -807,6 +816,8 @@ impl DirModelRust {
             selection_text: QString::from(""),
             notice: QString::from(""),
             empty_reason: QString::from(""),
+            columns_side: QString::from(""),
+            columns_gen: 0,
             sort_field: QString::from("name"),
             sort_ascending: true,
             filter: QString::from(""),
@@ -1409,6 +1420,102 @@ impl qobject::DirModel {
             })
             .collect();
         QString::from(&format!("[{}]", items.join(",")))
+    }
+
+    fn request_columns(mut self: Pin<&mut Self>) {
+        let Some(here) = self.as_ref().key.as_path().map(|p| p.to_path_buf()) else {
+            self.as_mut().set_columns_side(QString::default());
+            return;
+        };
+        let gen = self.as_ref().columns_gen.wrapping_add(1);
+        self.as_mut().rust_mut().columns_gen = gen;
+        let show_hidden = self.as_ref().show_hidden;
+        let cursor = self
+            .as_ref()
+            .entry_at(self.as_ref().cursor)
+            .map(|e| (e.name.clone(), e.kind == EntryKind::Dir));
+        let Some(thread) = self.as_ref().qt_thread_handle() else {
+            return;
+        };
+        std::thread::Builder::new()
+            .name("gust-columns".into())
+            .spawn(move || {
+                let deadline = std::time::Duration::from_secs(2);
+                let names_json = |b: &gust_core::columns::Bounded, mark: Option<&std::ffi::OsStr>| {
+                    let items: Vec<String> = b
+                        .names
+                        .iter()
+                        .map(|(n, d)| {
+                            format!(
+                                "{{\"n\":{},\"d\":{},\"cur\":{}}}",
+                                Self::json_str(&n.to_string_lossy()),
+                                d,
+                                mark.is_some_and(|m| m == n.as_os_str())
+                            )
+                        })
+                        .collect();
+                    format!(
+                        "\"names\":[{}],\"more\":{},\"error\":{}",
+                        items.join(","),
+                        b.more,
+                        Self::json_str(b.error.as_deref().unwrap_or(""))
+                    )
+                };
+                // Parent column: the folder above, with this one marked.
+                let parent = match (here.parent(), here.file_name()) {
+                    (Some(p), Some(me)) => {
+                        let b = gust_core::columns::list_names_bounded(p, 200, show_hidden, deadline);
+                        format!(
+                            "{{\"path\":{},{}}}",
+                            Self::json_str(&p.to_string_lossy()),
+                            names_json(&b, Some(me))
+                        )
+                    }
+                    _ => "null".into(),
+                };
+                // Preview column: a folder's first entries, or a file's peek.
+                let peek = match &cursor {
+                    Some((name, true)) => {
+                        let p = here.join(name);
+                        let b = gust_core::columns::list_names_bounded(&p, 60, show_hidden, deadline);
+                        format!(
+                            "{{\"kind\":\"dir\",\"name\":{},{}}}",
+                            Self::json_str(&name.to_string_lossy()),
+                            names_json(&b, None)
+                        )
+                    }
+                    Some((name, false)) => {
+                        let p = here.join(name);
+                        if gust_core::stall::needs_probe(&p) {
+                            format!(
+                                "{{\"kind\":\"file\",\"name\":{},\"kindWords\":\"\",\"sizeText\":\"\",\"lines\":[],\"noPreview\":\"Previews are off on network places\"}}",
+                                Self::json_str(&name.to_string_lossy())
+                            )
+                        } else {
+                            let pk = gust_core::peek::peek(&p);
+                            let lines: Vec<String> =
+                                pk.text.iter().take(40).map(|l| Self::json_str(l)).collect();
+                            format!(
+                                "{{\"kind\":\"file\",\"name\":{},\"kindWords\":{},\"sizeText\":{},\"mode\":{},\"lines\":[{}],\"noPreview\":{}}}",
+                                Self::json_str(&pk.name),
+                                Self::json_str(&pk.kind_words),
+                                Self::json_str(&human_size(pk.size)),
+                                Self::json_str(&pk.mode_line),
+                                lines.join(","),
+                                Self::json_str(pk.no_preview_reason.as_deref().unwrap_or(""))
+                            )
+                        }
+                    }
+                    None => "null".into(),
+                };
+                let json = format!("{{\"parent\":{parent},\"peek\":{peek}}}");
+                let _ = thread.queue(move |mut model| {
+                    if model.as_ref().columns_gen == gen {
+                        model.as_mut().set_columns_side(QString::from(&json));
+                    }
+                });
+            })
+            .ok();
     }
 
     fn settings_json(&self) -> QString {

@@ -65,14 +65,31 @@ Window {
     // is that a copy stages under a private name and is renamed atomically,
     // and that a listing sweeps staging files left by dead processes, so a
     // killed transfer can never publish a partial file or leave debris.
+    /// Every tab whose transfer is still running — not just the one on
+    /// screen. A copy started in another tab is just as much the user's.
+    function runningJobModels() {
+        const out = []
+        for (let i = 0; i < tabList.count; i++) {
+            const m = tabs.objectAt(i)
+            if (m && m.job_running()) out.push(m)
+        }
+        return out
+    }
+
     onClosing: (close) => {
-        if (win.closing || !dirModel.job_running())
+        if (win.closing)
+            return
+        const running = win.runningJobModels()
+        if (running.length === 0)
             return
         close.accepted = false
         confirm.purpose = "close"
-        const detail = (win.job && win.job.message) ? win.job.message + ". " : ""
+        const detail = running.length > 1
+            ? qsTr("%1 transfers are running in different tabs. ").arg(running.length)
+            : (win.job && win.job.message && running[0] === dirModel) ? win.job.message + ". "
+            : qsTr("A transfer is running in another tab. ")
         confirm.open(
-            qsTr("A transfer is still running"),
+            running.length > 1 ? qsTr("Transfers are still running") : qsTr("A transfer is still running"),
             detail + qsTr("Closing now stops it. Files already copied are kept; "
                           + "the one in progress is discarded."),
             qsTr("Stop and close"),
@@ -89,7 +106,7 @@ Window {
         property int ticks: 0
         onTriggered: {
             ticks += 1
-            if (!dirModel.job_running() || ticks > 20) {
+            if (win.runningJobModels().length === 0 || ticks > 20) {
                 stop()
                 Qt.quit()
             }
@@ -672,6 +689,13 @@ Window {
     // changes.
     property var dirModel: null
 
+    // Back/Forward availability. can_go_back() is a call, which QML never
+    // re-evaluates on its own: the arrows kept whatever look they had at
+    // start-up (Back dim while it worked). Reading `location` makes the
+    // binding re-run on every navigation.
+    readonly property bool canBack: dirModel ? (dirModel.location, dirModel.can_go_back()) : false
+    readonly property bool canForward: dirModel ? (dirModel.location, dirModel.can_go_forward()) : false
+
     // While an overlay refers to a row BY INDEX (the rename prompt, a
     // context menu, a confirm or conflict dialog), a file created or deleted
     // by another program must not shift the rows under it: the rename would
@@ -708,7 +732,12 @@ Window {
                 tabList.setProperty(i, "label", name)
         }
     }
-    onActiveTabChanged: refreshActiveModel()
+    onActiveTabChanged: {
+        refreshActiveModel()
+        // The transfer card belongs to the tab on screen.
+        win.job = null
+        if (win.runningJobModels().length > 0) jobTimer.start()
+    }
     // tabList.count, NOT tabs.count: Instantiator's count does not notify,
     // so the strip stayed hidden after a second tab appeared. The ListModel
     // is the source of truth for how many tabs there are.
@@ -871,6 +900,10 @@ Window {
         const want = dirModel.view_for_here()
         if (want !== "" && want !== viewMode) {
             viewMode = want
+            // The pane shows tabViews, not viewMode: update both, or the
+            // switcher says one view while the pane shows another.
+            if (win.activeTab >= 0) win.tabViews[win.activeTab] = want
+            win.refreshPanes()
             if (want === "grid")
                 dirModel.request_thumbnails()
             qaDump("view")
@@ -1439,8 +1472,8 @@ Window {
                         height: Tokens.controlHeight
                         radius: Tokens.radius
                         objectName: "nav-" + modelData.act
-                        property bool enabledAct: modelData.act === "back" ? dirModel.can_go_back()
-                                                : modelData.act === "forward" ? dirModel.can_go_forward()
+                        property bool enabledAct: modelData.act === "back" ? win.canBack
+                                                : modelData.act === "forward" ? win.canForward
                                                 : true
                         color: navHover.hovered && enabledAct
                                ? Tokens.withAlpha(Tokens.foreground, 0.1) : "transparent"
@@ -2083,11 +2116,23 @@ Window {
         repeat: true
         running: false
         onTriggered: {
+            // Every tab's job advances and finishes even when its tab is not
+            // on screen: a job is finalised (reload, undo record) only when
+            // its own model is polled, and a background copy used to hang
+            // there as "running" until its tab was shown again.
+            for (let i = 0; i < tabList.count; i++) {
+                const o = tabs.objectAt(i)
+                if (o && o !== dirModel && o.job_running()) o.poll_job()
+            }
             const raw = dirModel.poll_job()
             if (raw === "") {
-                // Job finished and was cleared by the model.
-                jobTimer.stop()
-                win.qaDump("job-done")
+                // This tab has no job (finished, or never had one). Keep
+                // ticking while any other tab still does.
+                win.job = null
+                if (win.runningJobModels().length === 0) {
+                    jobTimer.stop()
+                    win.qaDump("job-done")
+                }
                 return
             }
             try {
@@ -2099,7 +2144,7 @@ Window {
             if (win.job && win.job.state === "Running" && (++jobTimer.ticks % 5) === 0)
                 win.qaDump("job-progress")
             if (win.job && win.job.state !== "Running") {
-                jobTimer.stop()
+                if (win.runningJobModels().length === 0) jobTimer.stop()
                 hints.status = win.job.message
                 win.qaDump("job-finished")
             }
@@ -2274,10 +2319,10 @@ Window {
                 return
             }
             if (confirm.purpose === "close") {
-                // The user chose to abandon the transfer. Cancel it first so
-                // the worker stops and its staging file is cleaned up, then
-                // close once it has actually stopped.
-                dirModel.cancel_job()
+                // The user chose to abandon the transfers. Cancel every one
+                // so each worker stops and removes its staging file, then
+                // close once they have actually stopped.
+                win.runningJobModels().forEach(m => m.cancel_job())
                 win.closing = true
                 win.qaDump("close-confirmed")
                 closeAfterCancel.start()
@@ -2398,6 +2443,7 @@ Window {
             hintShown: hints.displayText,
             alertText: win.alertText,
             jobRunning: dirModel.job_running(),
+            jobsRunningAllTabs: win.runningJobModels().length,
             jobState: win.job ? win.job.state : "",
             jobStopping: win.job ? !!win.job.stopping : false,
             jobMessage: win.job ? win.job.message : "",
@@ -2418,6 +2464,9 @@ Window {
             themeRevision: Tokens.tokens.revision,
             interrupted: interruptedNotice.items.map(i => i.text),
             liveHold: win.liveHold,
+            canBack: win.canBack,
+            paneView: win.activePane === 1 ? win.paneBView : win.paneAView,
+            canForward: win.canForward,
             chooserMode: chooserBar.mode,
             chooserError: chooserBar.error,
             settingsOpen: settingsPanel.open,

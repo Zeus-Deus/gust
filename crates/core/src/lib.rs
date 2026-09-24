@@ -5,6 +5,7 @@
 pub mod bookmarks;
 pub mod chooser;
 pub mod clipboard;
+pub mod columns;
 pub mod defaults;
 pub mod devices;
 pub mod dirsize;
