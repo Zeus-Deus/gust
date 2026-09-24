@@ -130,7 +130,8 @@ pub fn thumbnail_mime(name: &OsStr) -> Option<&'static str> {
         "webm" => Some("video/webm"),
         "mov" => Some("video/quicktime"),
         "avi" => Some("video/x-msvideo"),
-        // Not thumbnailed: svg (scriptable), pdf (needs its own reader),
+        "pdf" => Some("application/pdf"),
+        // Not thumbnailed: svg (scriptable),
         // anything executable, and everything unknown.
         _ => None,
     }
@@ -143,6 +144,8 @@ mod thumbnail_mime_tests {
     #[test]
     fn images_and_videos_get_a_family() {
         assert_eq!(thumbnail_mime(OsStr::new("a.png")), Some("image/png"));
+        // A PDF's first page is rendered in the same sandbox (poppler).
+        assert_eq!(thumbnail_mime(OsStr::new("Invoice.PDF")), Some("application/pdf"));
         assert_eq!(thumbnail_mime(OsStr::new("A.JPG")), Some("image/jpeg"));
         assert_eq!(thumbnail_mime(OsStr::new("clip.mp4")), Some("video/mp4"));
     }
@@ -151,7 +154,6 @@ mod thumbnail_mime_tests {
     fn scriptable_and_unknown_formats_are_refused() {
         // SVG can carry script; it never goes to an image helper.
         assert_eq!(thumbnail_mime(OsStr::new("logo.svg")), None);
-        assert_eq!(thumbnail_mime(OsStr::new("doc.pdf")), None);
         assert_eq!(thumbnail_mime(OsStr::new("prog")), None);
         assert_eq!(thumbnail_mime(OsStr::new("script.sh")), None);
         assert_eq!(thumbnail_mime(OsStr::new("data.bin")), None);

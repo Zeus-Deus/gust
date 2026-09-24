@@ -943,7 +943,7 @@ Window {
             return
         }
         if (!dirModel || dirModel.count === 0) return
-        quickLook.show(dirModel.peek_row(dirModel.cursor))
+        quickLook.show(dirModel.peek_row(dirModel.cursor), dirModel.cursor)
         win.qaDump("quicklook")
     }
 
@@ -2265,6 +2265,8 @@ Window {
 
     QuickLook {
         id: quickLook
+        model: dirModel
+        onVisualChanged: win.qaDump("quicklook-visual")
         onClosed: win.focusList()
     }
 
@@ -2449,6 +2451,7 @@ Window {
                             ? quickLook.info.lines.length : 0,
             quickLookNoPreview: quickLook.info ? quickLook.info.noPreview : "",
             quickLookFacts: quickLook.info && quickLook.info.facts ? quickLook.info.facts : [],
+            quickLookVisual: quickLook.visual ? (quickLook.visual.image ? "image" : quickLook.visual.archive ? "archive:" + quickLook.visual.total : "why:" + quickLook.visual.why) : "",
             tabDropZone: win.tabDropZone,
             paletteOpen: palette.visible,
             paletteResults: palette.visible ? palette.resultLabels() : [],
