@@ -101,6 +101,12 @@ pub mod qobject {
         /// where Ctrl+R is the only way to see changes made elsewhere).
         #[qinvokable]
         fn is_live(self: &DirModel) -> bool;
+        /// The Trash: JSON list of name, original path and deletion date.
+        #[qinvokable]
+        fn trash_list(self: &DirModel) -> QString;
+        /// Put a Trash item back where it came from. "" or why not.
+        #[qinvokable]
+        fn trash_restore(self: Pin<&mut DirModel>, name: &QString) -> QString;
         /// Columns view: fill `columns_side` for the cursor row, on a worker.
         #[qinvokable]
         fn request_columns(self: Pin<&mut DirModel>);
@@ -1420,6 +1426,50 @@ impl qobject::DirModel {
             })
             .collect();
         QString::from(&format!("[{}]", items.join(",")))
+    }
+
+    fn trash_list(&self) -> QString {
+        let Some(t) = gust_ops::trash::TrashDir::home() else {
+            return QString::from("[]");
+        };
+        let items: Vec<String> = gust_ops::trash::list(&t)
+            .into_iter()
+            .take(2000)
+            .map(|e| {
+                let when = e.deleted.replace('T', " ");
+                format!(
+                    "{{\"name\":{},\"shown\":{},\"from\":{},\"when\":{}}}",
+                    Self::json_str(&e.trashed_name.to_string_lossy()),
+                    Self::json_str(
+                        &e.original
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default()
+                    ),
+                    Self::json_str(&e.original.parent().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default()),
+                    Self::json_str(when.get(..16).unwrap_or(&when))
+                )
+            })
+            .collect();
+        QString::from(&format!("[{}]", items.join(",")))
+    }
+
+    fn trash_restore(mut self: Pin<&mut Self>, name: &QString) -> QString {
+        let Some(t) = gust_ops::trash::TrashDir::home() else {
+            return QString::from("no Trash folder");
+        };
+        let n = std::ffi::OsString::from(name.to_string());
+        match gust_ops::trash::restore_named(&t, &n) {
+            Ok(()) => {
+                // The folder on screen may be where it went back to.
+                self.as_mut().reload();
+                QString::default()
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => QString::from(
+                "Something with that name is there now. Rename or move it first; nothing was overwritten.",
+            ),
+            Err(e) => QString::from(&e.to_string()),
+        }
     }
 
     fn request_columns(mut self: Pin<&mut Self>) {

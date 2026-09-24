@@ -64,6 +64,7 @@ Rectangle {
         { id: "up",           label: "Go up one folder",      hint: "" },
         { id: "keys",         label: "Show keyboard help",    hint: "F1" },
         { id: "settings",     label: "Settings",              hint: "Ctrl+," },
+        { id: "trash-view",   label: "Open the Trash",        hint: "" },
         { id: "pin-here",     label: "Add this folder to Bookmarks", hint: "Ctrl+B" }
     ]
 
