@@ -193,12 +193,16 @@ original list (placeholder thumbnails, only-Trash-is-wired, no packaging)
 were all closed and have been removed rather than left to rot: a stale gap
 list is worse than none, because it makes working features look broken.
 
-1. **Device mount/eject is unproven on real hardware.** Discovery is built
-   and tested — the sidebar lists removable volumes and discs, and the
-   exclusions that matter (system disk, swap, zram, loop, LVM) have unit
-   tests. But this VM's only removable block device is an empty virtual DVD
-   drive, so *mounting a stick and ejecting it* has never run. The argv is
-   tested; the round trip is not.
+1. **Device mount/eject is unproven.** Discovery is proven live: a real
+   removable SCSI disk hot-plugged into the VM (`scsi_debug removable=1`)
+   appears in the sidebar within 2 s and disappears when pulled, through a
+   watch on udev's `/dev/disk` links (evidence `B-device-hotplug`; before
+   this, devices were read once at startup). A disk with no filesystem now
+   says "no readable filesystem" instead of "nothing in the drive". But
+   *mounting and ejecting* has not run: it needs a formatted disk, and
+   formatting is blocked for the agent. The udisksctl argv is tested; the
+   round trip is not. To close it: `mkfs.vfat` on that disk by hand, then
+   click it in the sidebar and Eject.
 2. **Tailscale is not built.** There is no tailnet here, so peer discovery
    could not be qualified even if written; the plan is explicit that online
    status grants neither SSH access nor a username, so the interesting part

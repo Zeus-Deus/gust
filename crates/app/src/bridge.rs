@@ -77,6 +77,15 @@ pub mod qobject {
         #[qsignal]
         fn place_done(self: Pin<&mut DirModel>, op: QString, name: QString, message: QString);
 
+        /// A removable device came, went, or had its media or mount change.
+        /// The UI asks `devices_json` again.
+        #[qsignal]
+        fn devices_changed(self: Pin<&mut DirModel>);
+        /// Start following device changes (udev's /dev/disk links). Called
+        /// once by the window; the watch lives as long as the model.
+        #[qinvokable]
+        fn watch_devices(self: Pin<&mut DirModel>);
+
         #[qinvokable]
         fn navigate(self: Pin<&mut DirModel>, path: &QString);
         #[qinvokable]
@@ -681,6 +690,9 @@ pub struct DirModelRust {
     /// Live updates for the folder on screen. Replaced on every navigation,
     /// dropped (thread stopped) when the folder is left.
     watch: Option<gust_core::watch::DirWatch>,
+    /// Watches on udev's /dev/disk folders, so a stick plugged in or
+    /// pulled out shows up without a restart.
+    device_watches: Vec<gust_core::watch::DirWatch>,
     /// Which folder `watch` is on, so a same-folder reload keeps it.
     watch_key: Option<PathBuf>,
     /// Increments per watch, so a late change from a replaced watch is
@@ -875,6 +887,7 @@ impl DirModelRust {
             job: None,
             load_cancel: CancelToken::new(),
             watch: None,
+            device_watches: Vec::new(),
             watch_key: None,
             watch_gen: 0,
             live_hold: false,
@@ -2556,6 +2569,30 @@ impl qobject::DirModel {
     }
 
     // --- removable devices (DESIGN §6.13) --------------------------------
+
+    fn watch_devices(mut self: Pin<&mut Self>) {
+        if !self.as_ref().device_watches.is_empty() {
+            return;
+        }
+        let Some(thread) = self.as_ref().qt_thread_handle() else {
+            return;
+        };
+        let mut watches = Vec::new();
+        // by-diskseq changes on every add, remove and media change;
+        // by-label and by-uuid change when a filesystem appears or goes
+        // (a formatted stick). /dev itself is avoided: every terminal
+        // opened there would wake Gust. Mounts are reported by the place
+        // operations that make them.
+        for dir in gust_core::devices::DEVICE_WATCH_DIRS {
+            let thread = thread.clone();
+            if let Ok(w) = gust_core::watch::DirWatch::start(std::path::Path::new(dir), move |_| {
+                let _ = thread.queue(|model| model.devices_changed());
+            }) {
+                watches.push(w);
+            }
+        }
+        self.as_mut().rust_mut().device_watches = watches;
+    }
 
     fn devices_json(&self) -> QString {
         let found = gust_core::devices::list_devices();
