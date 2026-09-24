@@ -1326,16 +1326,24 @@ impl qobject::DirModel {
             if i > 0 {
                 out.push(',');
             }
-            let mounted = gust_remote::mount::mount_point_for(&h.alias)
-                .map(|p| gust_remote::mount::is_mounted(&p))
-                .unwrap_or(false);
+            let mp = gust_remote::mount::mount_point_for(&h.alias);
+            let mounted = mp.as_ref().map(|p| gust_remote::mount::is_mounted(p)).unwrap_or(false);
+            // Mounted is not the same as working: a server that went away
+            // leaves the mount in the table, answering every read with an
+            // I/O error. Only a mounted place is asked, by a killable child
+            // with a short limit, so this never hangs the window.
+            let lost = mounted
+                && mp.as_ref().is_some_and(|p| {
+                    !gust_core::stall::probe(p, std::time::Duration::from_millis(500)).is_responsive()
+                });
             // Escaped: an alias is arbitrary text from a user's config.
             out.push_str(&format!(
-                r#"{{"alias":{},"host":{},"proxy":{},"connected":{}}}"#,
+                r#"{{"alias":{},"host":{},"proxy":{},"connected":{},"lost":{}}}"#,
                 Self::json_str(&h.alias),
                 Self::json_str(h.hostname.as_deref().unwrap_or(&h.alias)),
                 h.has_proxy,
-                mounted
+                mounted,
+                lost
             ));
         }
         out.push(']');
