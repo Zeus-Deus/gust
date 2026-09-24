@@ -1,0 +1,6 @@
+[portal]
+DBusName=org.freedesktop.impl.portal.desktop.gust
+Interfaces=org.freedesktop.impl.portal.FileChooser;
+# Only used when portals.conf chooses it: `gust --file-dialogs on` or
+# Settings > Open/Save dialogs. Installing Gust changes nothing by itself.
+UseIn=Hyprland;wlroots;

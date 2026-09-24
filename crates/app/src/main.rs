@@ -2,6 +2,7 @@
 
 pub mod bridge;
 mod fm1;
+mod portal;
 
 use cxx_qt_lib::{QGuiApplication, QQmlApplicationEngine, QString, QUrl};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -83,6 +84,88 @@ fn run_default(mode: &str) -> i32 {
             1
         }
     }
+}
+
+/// Point the FileChooser portal at Gust in the user's portals.conf, or put
+/// back what was there. The previous value is kept in Gust's state folder.
+fn run_file_dialogs(mode: &str) -> i32 {
+    use gust_core::portal_conf::*;
+    let Some((user, system)) = paths() else {
+        eprintln!("gust: cannot find your config directory (is HOME set?)");
+        return 1;
+    };
+    let state = std::env::var_os("XDG_STATE_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".local/state")))
+        .map(|b| b.join("gust/file-dialogs.previous"));
+    let existed = user.exists();
+    let text = std::fs::read_to_string(&user).ok();
+    let sys = std::fs::read_to_string(&system).unwrap_or_else(|_| "[preferred]\ndefault=gtk\n".into());
+    match mode {
+        "on" => {
+            if text.as_deref().is_some_and(is_claimed) {
+                println!("gust already answers Open/Save dialogs");
+                return 0;
+            }
+            let (next, previous) = claim(text.as_deref(), &sys);
+            if let Some(st) = &state {
+                let _ = std::fs::create_dir_all(st.parent().unwrap_or(st));
+                // "created" marks a file Gust made, removed again on off.
+                let rec = match (&previous, existed) {
+                    (_, false) => "created".to_string(),
+                    (Some(p), true) => format!("value={p}"),
+                    (None, true) => "none".to_string(),
+                };
+                let _ = std::fs::write(st, rec);
+            }
+            if let Some(dir) = user.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            if let Err(e) = gust_core::omarchy_keys::write_atomic(&user, &next) {
+                eprintln!("gust: cannot update {}: {e}", user.display());
+                return 1;
+            }
+        }
+        "off" => {
+            let Some(text) = text else {
+                println!("gust was not answering Open/Save dialogs; nothing to undo");
+                return 0;
+            };
+            let rec = state.as_ref().and_then(|s| std::fs::read_to_string(s).ok()).unwrap_or_default();
+            if rec == "created" && is_claimed(&text) && same_config(&release(&text, None), &sys) {
+                let _ = std::fs::remove_file(&user);
+            } else {
+                let prev = rec.strip_prefix("value=");
+                let next = release(&text, prev);
+                if next != text {
+                    if let Err(e) = gust_core::omarchy_keys::write_atomic(&user, &next) {
+                        eprintln!("gust: cannot update {}: {e}", user.display());
+                        return 1;
+                    }
+                }
+            }
+            if let Some(s) = &state {
+                let _ = std::fs::remove_file(s);
+            }
+        }
+        other => {
+            eprintln!("gust: unknown option --file-dialogs {other} (expected on or off)");
+            return 1;
+        }
+    }
+    // The portal reads its config at start; restart it so the change is
+    // live now. Harmless when it is not running under systemd.
+    let _ = std::process::Command::new("systemctl")
+        .args(["--user", "try-restart", "xdg-desktop-portal.service"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    if mode == "on" {
+        println!("Open and Save dialogs in other apps now use gust");
+    } else {
+        println!("Open and Save dialogs are back to the previous chooser");
+    }
+    0
 }
 
 /// Add or remove Gust's marked block in `~/.config/hypr/bindings.lua`, the
@@ -173,10 +256,19 @@ fn main() {
         let mode = args.get(pos + 1).map(String::as_str).unwrap_or("on");
         std::process::exit(run_default(mode));
     }
+    // Other apps' Open/Save dialogs through Gust (opt-in, reversible).
+    if let Some(pos) = args.iter().position(|a| a == "--file-dialogs") {
+        let mode = args.get(pos + 1).map(String::as_str).unwrap_or("on");
+        std::process::exit(run_file_dialogs(mode));
+    }
     // Omarchy: make Super+Shift+F open Gust (opt-in, reversible).
     if let Some(pos) = args.iter().position(|a| a == "--bind-keys") {
         let mode = args.get(pos + 1).map(String::as_str).unwrap_or("on");
         std::process::exit(run_bind_keys(mode));
+    }
+    // D-Bus activated by xdg-desktop-portal: other apps' Open/Save dialogs.
+    if args.first().map(String::as_str) == Some("--portal") {
+        std::process::exit(portal::run());
     }
     // D-Bus activated: answer "Show in folder" from other apps.
     if args.first().map(String::as_str) == Some("--dbus-service") {
@@ -190,6 +282,7 @@ fn main() {
         println!("gust [PATH]              open a folder");
         println!("gust --default [on|off]  set or restore the default file manager");
         println!("gust --bind-keys [on|off] make Super+Shift+F open gust (Omarchy)");
+        println!("gust --file-dialogs [on|off] answer other apps' Open/Save dialogs");
         std::process::exit(0);
     }
 

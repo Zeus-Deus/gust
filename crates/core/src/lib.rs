@@ -3,6 +3,7 @@
 //! No Qt, no UI. Everything here is safe to call from a worker thread.
 
 pub mod bookmarks;
+pub mod chooser;
 pub mod clipboard;
 pub mod defaults;
 pub mod devices;
@@ -10,6 +11,7 @@ pub mod dirsize;
 pub mod drop;
 pub mod entry;
 pub mod filemanager1;
+pub mod handoff;
 pub mod grep;
 pub mod lister;
 pub mod location;
@@ -17,6 +19,7 @@ pub mod mime;
 pub mod omarchy_keys;
 pub mod open;
 pub mod peek;
+pub mod portal_conf;
 pub mod properties;
 pub mod renderer;
 pub mod search;

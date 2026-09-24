@@ -31,6 +31,7 @@ Rust 1.98.1, cxx-qt 0.10.0, Mesa llvmpipe (software rendering, Virtio GPU),
 | **Folder sizes** | **proven by hand** | `dir_size` (8): symlinks never followed, hard links counted once, other filesystems not entered, unreadable parts make it "≥", bounded and cancellable. Live: Photos shows 7.6 MB (2 files) where `du -l` over-counts to 11 MB. Measured on a worker, local folders only. A change deep inside a sub-folder is picked up by Ctrl+R, not live |
 | **Properties** (right-click, Alt+Enter) | **proven by hand** | `properties` (8): location, local times, owner by name from /etc/passwd, permissions, link target shown not followed, hostile names made visible. Lives in the Quick Look panel rather than a second window |
 | **Times in the list are local** | **proven** | were UTC ("today 14:49" at 16:49 CEST); `relative_time` uses the local offset and local calendar days, older dates written out |
+| **Other apps' Open/Save dialogs** (portal FileChooser) | **proven by hand** | `chooser` (7), `portal_conf` (6); evidence `C-file-dialogs`: through the real xdg-desktop-portal, an app's Open got `wanted.pdf` picked by mouse, Save returned `sub/meeting notes.txt` with a typed name, Cancel returned code 1. Opt-in (`gust --file-dialogs on` / Settings), changes one line of the user's portals.conf, fully reverted by `off`. Installed files are inert until chosen |
 | **Super+Shift+F opens Gust** (Omarchy) | **proven by hand** | `omarchy_keys` (6); `gust --bind-keys on` or Settings adds one marked block to `~/.config/hypr/bindings.lua` (Omarchy's documented override file) and reloads Hyprland; a real Super+Shift+F keypress in the VM opened Gust, not Nautilus. `--bind-keys off` left the file byte-identical to before. Super+Alt+Shift+F opens the terminal's folder via `omarchy-cmd-terminal-cwd` |
 | **Drag and drop with other apps** | **proven by hand** | evidence `B-drag-between-apps`: real mouse drags Gust → Nautilus and Nautilus → Gust, both byte-identical copies with the source kept. Out: text/uri-list, text/plain and the GNOME type. In: the normal planner and engine. Grid and Columns now have the drag gesture too (they had none) |
 | **"Show in folder" from other apps** (`org.freedesktop.FileManager1`) | **proven by hand** | `filemanager1` (10); evidence `C-show-in-folder`: after `gust --default on` (or Settings → Default app), a real `ShowItems` call on the session bus D-Bus-activated `gust --dbus-service` and opened Gust in the folder with the file under the cursor, 60 ms. `--default off` removes only Gust's activation file; another app's is never touched |
@@ -84,7 +85,7 @@ Rust 1.98.1, cxx-qt 0.10.0, Mesa llvmpipe (software rendering, Virtio GPU),
 | Cloud remotes (rclone) | **proven** | discovery reads the installed rclone's config and opens no socket; connect mounts with a VFS write cache; "cached ≠ uploaded" shown as a notice; disconnect refuses while uploads are outstanding and never lazy-unmounts; degrades with a reason when rclone is absent |
 | Cloud OAuth in Gust's own UI | not built | deliberate: `rclone config` handles every provider correctly, and Drive's flow is not a template for Proton or Filen (plan §3) |
 | Two panes | **proven** | `:split` / `:unsplit`, Tab crosses the divider, F5 copies and F6 moves to the other pane through the normal journal and undo; a pane with no tabs closes itself; closing a pane keeps its tabs |
-| Tab drag to split / detach | not started | needs cross-window Qt drag sessions; recorded unbuilt rather than half-built (DESIGN §6.7) |
+| Tab drag to split / detach | **proven by hand** | real mouse drag of a tab out of the window: a new window opened in the same folder, grid view, same cursor and selection, and Back went to the folder the tab came from; the tab closed only after the new window reported ready (`handoff` 4: a child that dies or never appears keeps the tab). DESIGN §6.20 corrected to match the code on `splitPane()` |
 | 100k benchmark | **proven** | `just bench`: 100k listed+settled in 470 ms (release), first window 155 ms |
 | Listing off the UI thread | **proven** | worker thread + generation-tagged snapshots; names paint before metadata |
 | PSS budget (≤ 90 MiB) | **met on machines without a GPU** | 85.8–86.5 MiB with 100k entries open (3 runs). Gust detects "no GPU" from sysfs and uses Qt's raster renderer instead of llvmpipe; see below. With a GPU: not yet measured |
@@ -135,7 +136,7 @@ Rust 1.98.1, cxx-qt 0.10.0, Mesa llvmpipe (software rendering, Virtio GPU),
 | **Remote places (SSH/SFTP)** | **proven** | 38 lib + 6 live sshfs tests against a private server; `just qa` §10aa |
 | **Scoped search (`:find`)** | **proven** | `search::tests` + `just qa` §10z: recursive, cancellable, symlink-loop safe |
 | **`--default` on/off** | **proven** | `defaults::tests` (10) + `just qa` §10y: claims, restores, preserves later edits |
-| **PKGBUILD + desktop entry** | **proven** | `makepkg` builds and packages; `desktop-file-validate` clean |
+| **PKGBUILD + desktop entry** | **proven** | `makepkg` builds and packages; `desktop-file-validate` clean; complete optdepends (every external program Gust calls); 0 home paths in the shipped binary; `pacman -U`/`-R` cycle clean in the VM |
 | **Drag and drop** | **proven** | `drop::tests` (14) + `just qa` §10x: copy by default, self-drop refused |
 | **Mouse: view buttons, rows, breadcrumbs, sidebar** | **proven** | `just qa` §10v via `tests/uinput-mouse.py` |
 | **Destructive confirm is safe by mouse too** | **proven** | `just qa` §10w: Cancel changes nothing, confirm trashes restorably |
@@ -178,8 +179,8 @@ Rust 1.98.1, cxx-qt 0.10.0, Mesa llvmpipe (software rendering, Virtio GPU),
 ## M4–M5
 
 Filter, scoped find, palette actions, archives, packaging and `--default` are
-proven (see the tables above). **Not started:** the file-chooser portal (other
-apps' Open/Save dialogs).
+proven (see the tables above), as are the Omarchy hooks: Super+Shift+F,
+"Show in folder" and other apps' Open/Save dialogs.
 
 ## Known gaps worth stating plainly
 
@@ -207,14 +208,15 @@ list is worse than none, because it makes working features look broken.
 4. **Memory with a real GPU is unmeasured.** Without a GPU the budget is
    met (86 MiB, raster renderer). On GPU hardware Qt uses its hardware
    renderer, whose cost this VM cannot show.
-5. **Tab drag-to-split and drag-out-to-detach are not built.** The split
-   itself works from the palette and the keyboard; the drag gestures need
-   cross-window Qt drag sessions and are recorded unbuilt rather than
-   half-built (DESIGN §6.7).
-6. **A real `pacman -U` install/uninstall cycle has not been run.** The
-   package builds, the binary inside it has been extracted and run, and the
-   `--default` claim/rollback round trip is tested against a fake HOME — but
-   installing to the live system would touch the user's machine.
+5. **Tab detach is proven by hand, not in `just qa`.** The last-tab refusal
+   branch is exercised only by reading the code: with one tab the strip is
+   hidden, so there is nothing to drag.
+6. **Release gates are proven in the VM, not on a clean machine.** A real
+   `makepkg` built the package (release, `!lto`, `--remap-path-prefix`): the
+   shipped binary contains **0** `/home/` paths (the dev build had 1336), is
+   5.7 MB, and `pacman -U` / run / `pacman -R` completed cleanly in the VM,
+   leaving no default claimed. An AUR `-bin` package and an Omarchy repo
+   submission are not done: both need accounts only the maintainer has.
 
 
 ## Measured performance (this VM only)

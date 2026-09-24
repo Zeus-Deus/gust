@@ -107,9 +107,26 @@ pub mod qobject {
         /// same tested path as the command line.
         #[qinvokable]
         fn set_default_file_manager(self: &DirModel, on: bool) -> QString;
+        /// Chooser mode when another app's Open/Save dialog started this
+        /// window: "", "open", "open-many", "open-folder" or "save".
+        #[qinvokable]
+        fn chooser_mode(self: &DirModel) -> QString;
+        /// The dialog's title and, for Save, the suggested name.
+        #[qinvokable]
+        fn chooser_title(self: &DirModel) -> QString;
+        #[qinvokable]
+        fn chooser_name(self: &DirModel) -> QString;
+        /// Hand the choice back and let the window close. Open modes send
+        /// the selection (or the cursor row); Save sends folder + name.
+        /// Returns "" or why it cannot be accepted.
+        #[qinvokable]
+        fn chooser_accept(self: &DirModel, save_name: &QString) -> QString;
         /// Make Super+Shift+F open Gust (Omarchy), or give it back.
         #[qinvokable]
         fn set_omarchy_keys(self: &DirModel, on: bool) -> QString;
+        /// Answer other apps' Open/Save dialogs, or give them back.
+        #[qinvokable]
+        fn set_file_dialogs(self: &DirModel, on: bool) -> QString;
         /// Bookmarks shared with the desktop (GTK format), as a JSON list of
         /// label, path and exists. Only local folders; other entries in the
         /// file are kept but not listed.
@@ -346,7 +363,18 @@ pub mod qobject {
         /// Hyprland sees an independent client). Returns "" on success or
         /// the reason it was refused (DESIGN §6.20).
         #[qinvokable]
-        fn detach_here(self: &DirModel) -> QString;
+        fn detach_here(self: &DirModel, view: &QString) -> QString;
+        /// After detach_here: "wait" while the new window is starting,
+        /// "ready" once it is on screen (the tab may close now), or a
+        /// reason it failed (the tab stays).
+        #[qinvokable]
+        fn poll_detach(self: &DirModel) -> QString;
+        /// For a window started by a detach: the view it should show, and
+        /// the ready signal back to the window it came from.
+        #[qinvokable]
+        fn handoff_view(self: &DirModel) -> QString;
+        #[qinvokable]
+        fn signal_ready(self: &DirModel);
         /// Open every selected file with its default handler. One launch
         /// when the handler takes a list, one per file when it does not
         /// (DESIGN §6.18). Returns "" when there is nothing multi-file to
@@ -744,6 +772,31 @@ pub fn startup_location() -> PathBuf {
 impl Default for DirModelRust {
     fn default() -> Self {
         let home = startup_location();
+        let mut model = Self::fresh(home.clone());
+        // A window started by a tab detach picks up where the tab was:
+        // history, selection, cursor, hidden files, view. Taken once (the
+        // file is deleted), and only if it names this same folder.
+        if let Some(h) = std::env::var_os("GUST_HANDOFF")
+            .inspect(|_| std::env::remove_var("GUST_HANDOFF"))
+            .and_then(|p| gust_core::handoff::Handoff::take(std::path::Path::new(&p)))
+            .filter(|h| h.location == home)
+        {
+            model.back = h.back.iter().map(LocationKey::local).collect();
+            model.show_hidden = h.show_hidden;
+            if model.focus_name.is_none() {
+                model.focus_name = h.cursor_name.clone();
+            }
+            model.selection.select_all_by_name(&h.selected);
+            if let Ok(mut v) = HANDOFF_VIEW.lock() {
+                *v = h.view.clone();
+            }
+        }
+        model
+    }
+}
+
+impl DirModelRust {
+    fn fresh(home: PathBuf) -> Self {
         DirModelRust {
             location: QString::from(&home.to_string_lossy().to_string()),
             location_display: QString::from(&home.to_string_lossy().to_string()),
@@ -803,9 +856,7 @@ impl Default for DirModelRust {
             last_job: None,
         }
     }
-}
 
-impl DirModelRust {
     fn sort_spec(&self) -> gust_core::entry::SortSpec {
         let field = match self.sort_field.to_string().as_str() {
             "size" => SortField::Size,
@@ -1390,6 +1441,13 @@ impl qobject::DirModel {
                     .to_string(),
             ),
             (
+                "file_dialogs",
+                gust_core::portal_conf::paths()
+                    .and_then(|(u, _)| std::fs::read_to_string(u).ok())
+                    .is_some_and(|t| gust_core::portal_conf::is_claimed(&t))
+                    .to_string(),
+            ),
+            (
                 "is_omarchy",
                 gust_core::omarchy_keys::bindings_path().is_some_and(|p| p.exists()).to_string(),
             ),
@@ -1423,6 +1481,78 @@ impl qobject::DirModel {
         };
         match std::process::Command::new(exe)
             .arg("--default")
+            .arg(if on { "on" } else { "off" })
+            .stdin(std::process::Stdio::null())
+            .output()
+        {
+            Ok(o) if o.status.success() => QString::default(),
+            Ok(o) => QString::from(String::from_utf8_lossy(&o.stderr).trim()),
+            Err(e) => QString::from(&e.to_string()),
+        }
+    }
+
+    fn chooser_mode(&self) -> QString {
+        QString::from(&std::env::var("GUST_CHOOSER").unwrap_or_default())
+    }
+
+    fn chooser_title(&self) -> QString {
+        QString::from(&std::env::var("GUST_CHOOSER_TITLE").unwrap_or_default())
+    }
+
+    fn chooser_name(&self) -> QString {
+        QString::from(&std::env::var("GUST_CHOOSER_NAME").unwrap_or_default())
+    }
+
+    fn chooser_accept(&self, save_name: &QString) -> QString {
+        let Some(out) = std::env::var_os("GUST_CHOOSER_RESULT").map(PathBuf::from) else {
+            return QString::from("not choosing for another app");
+        };
+        let mode = std::env::var("GUST_CHOOSER").unwrap_or_default();
+        let here = self.key.as_path().map(|p| p.to_path_buf());
+        let picked: Vec<PathBuf> = match mode.as_str() {
+            "save" => {
+                let name = save_name.to_string();
+                let bare = std::path::Path::new(&name).file_name().map(|n| n.to_owned());
+                let (Some(dir), Some(bare)) = (here, bare) else {
+                    return QString::from("type a file name");
+                };
+                if name.contains('/') {
+                    return QString::from("a file name cannot contain /");
+                }
+                vec![dir.join(bare)]
+            }
+            "open-folder" => {
+                // The folder under the cursor if it is one, else this folder.
+                let cur = self.path_of_row(self.cursor).filter(|p| p.is_dir());
+                match cur.or(here) {
+                    Some(p) => vec![p],
+                    None => return QString::from("choose a folder"),
+                }
+            }
+            _ => {
+                let mut v = self.target_paths();
+                v.retain(|p| !p.is_dir());
+                if mode != "open-many" {
+                    v.truncate(1);
+                }
+                if v.is_empty() {
+                    return QString::from("choose a file (folders open with Enter)");
+                }
+                v
+            }
+        };
+        match gust_core::chooser::write_result(&out, &picked) {
+            Ok(()) => QString::default(),
+            Err(e) => QString::from(&e.to_string()),
+        }
+    }
+
+    fn set_file_dialogs(&self, on: bool) -> QString {
+        let Ok(exe) = std::env::current_exe() else {
+            return QString::from("cannot find the gust program");
+        };
+        match std::process::Command::new(exe)
+            .arg("--file-dialogs")
             .arg(if on { "on" } else { "off" })
             .stdin(std::process::Stdio::null())
             .output()
@@ -1530,7 +1660,7 @@ impl qobject::DirModel {
     /// "a normal window that Hyprland can tile", and a second window inside
     /// one process shares that process's fate — one stuck mount would freeze
     /// both, which is the opposite of what §6.12 guarantees.
-    fn detach_here(&self) -> QString {
+    fn detach_here(&self, view: &QString) -> QString {
         // A running job belongs to the process that started it. Handing this
         // location to a new process would leave the transfer running here
         // with nothing on screen to represent it.
@@ -1592,17 +1722,93 @@ impl qobject::DirModel {
             }
         }
 
+        // What the tab carries: history, selection, cursor and view, not
+        // just the location (a detach used to open a bare folder).
+        let runtime = std::env::var_os("XDG_RUNTIME_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir)
+            .join("gust");
+        let _ = std::fs::create_dir_all(&runtime);
+        let tag = format!(
+            "{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        );
+        let handoff_path = runtime.join(format!("handoff-{tag}"));
+        let ready_path = runtime.join(format!("ready-{tag}"));
+        let visible = self.visible_entries();
+        let handoff = gust_core::handoff::Handoff {
+            location: dir.clone(),
+            view: view.to_string(),
+            cursor_name: self.entry_at(self.cursor).map(|e| e.name.clone()),
+            selected: self.selection.resolve(&visible).iter().map(|e| e.name.clone()).collect(),
+            back: self.back.iter().filter_map(|k| k.as_path().map(|p| p.to_path_buf())).collect(),
+            show_hidden: self.show_hidden,
+        };
+        if handoff.write(&handoff_path).is_ok() {
+            cmd.env("GUST_HANDOFF", &handoff_path);
+        }
+        cmd.env("GUST_READY_FILE", &ready_path);
+
         match cmd.spawn() {
-            // Deliberately not waited on: the new window is independent, and
-            // blocking on it would tie the two processes back together. The
-            // handle is parked in a process-wide list and reaped
-            // opportunistically with try_wait, so a detached window that is
-            // closed does not linger as a zombie.
+            // Not waited on: the new window is independent. The tab stays
+            // until the new window says it is on screen (poll_detach), so a
+            // child that dies at startup never takes the tab with it.
             Ok(child) => {
-                Self::reap_detached(Some(child));
+                if let Ok(mut g) = DETACH_PENDING.lock() {
+                    // A previous detach still pending is simply let go.
+                    if let Some((c, _)) = g.take() {
+                        Self::reap_detached(Some(c));
+                    }
+                    *g = Some((
+                        child,
+                        gust_core::handoff::ReadyWait::new(ready_path, std::time::Duration::from_secs(20)),
+                    ));
+                }
                 QString::default()
             }
-            Err(e) => QString::from(format!("Could not open a new window: {e}")),
+            Err(e) => {
+                let _ = std::fs::remove_file(&handoff_path);
+                QString::from(format!("Could not open a new window: {e}"))
+            }
+        }
+    }
+
+    fn poll_detach(&self) -> QString {
+        let Ok(mut g) = DETACH_PENDING.lock() else {
+            return QString::from("ready");
+        };
+        let Some((child, wait)) = g.as_mut() else {
+            return QString::from("ready");
+        };
+        match wait.poll(child) {
+            Ok(false) => QString::from("wait"),
+            Ok(true) => {
+                if let Some((c, _)) = g.take() {
+                    Self::reap_detached(Some(c));
+                }
+                QString::from("ready")
+            }
+            Err(why) => {
+                if let Some((c, _)) = g.take() {
+                    Self::reap_detached(Some(c));
+                }
+                QString::from(&why)
+            }
+        }
+    }
+
+    fn handoff_view(&self) -> QString {
+        QString::from(&HANDOFF_VIEW.lock().map(|v| v.clone()).unwrap_or_default())
+    }
+
+    fn signal_ready(&self) {
+        if let Some(p) = std::env::var_os("GUST_READY_FILE") {
+            let _ = std::fs::write(&p, b"ok");
+            std::env::remove_var("GUST_READY_FILE");
         }
     }
 
@@ -5156,3 +5362,11 @@ fn clip_holder() -> gust_core::clipboard::Holder {
         Err(_) => gust_core::clipboard::Holder::InProcess,
     }
 }
+
+/// The detached child waiting to report that its window is up.
+static DETACH_PENDING: std::sync::Mutex<
+    Option<(std::process::Child, gust_core::handoff::ReadyWait)>,
+> = std::sync::Mutex::new(None);
+
+/// The view a detached window should start in (from its handoff).
+static HANDOFF_VIEW: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());

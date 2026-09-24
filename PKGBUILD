@@ -21,14 +21,26 @@ license=('MIT')
 # Arch enables LTO by default, so this must be explicit.
 options=(!lto)
 depends=('qt6-base' 'qt6-declarative' 'dbus')
+# xdg-desktop-portal is needed only for the opt-in Open/Save dialogs.
 makedepends=('rust' 'cargo' 'cmake' 'just')
+# Every external program Gust calls, and what is missing without it.
+# Checked against every Command::new in crates/ (none are required to start).
 optdepends=(
+  'wl-clipboard: copy and paste with other applications'
   'bubblewrap: sandboxed thumbnail rendering'
-  'util-linux: resource limits for thumbnail helpers'
+  'util-linux: resource limits for thumbnail helpers, device list'
   'imagemagick: image thumbnails'
+  'ffmpegthumbnailer: video thumbnails'
+  'libarchive: open, extract and create archives (bsdtar)'
+  'udisks2: mount and eject USB drives and discs'
   'sshfs: browse other computers over SSH'
+  'fuse3: disconnect SSH and cloud places cleanly (fusermount3)'
   'rclone: cloud storage accounts'
-  'gvfs: network shares and system trash integration'
+  'gvfs: network shares (SMB, NFS)'
+  'gvfs-smb: Windows and Samba shares'
+  'gvfs-nfs: NFS shares'
+  'xdg-utils: open files with their default application'
+  'xdg-desktop-portal: let other apps use gust for Open and Save dialogs'
 )
 source=("$pkgname-$pkgver.tar.gz")
 sha256sums=('SKIP')
@@ -57,5 +69,13 @@ package() {
   install -Dm644 "packaging/gust.desktop" \
     "$pkgdir/usr/share/applications/gust.desktop"
   install -Dm644 "LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  # No FileManager1 activation file here: that name belongs to whichever
+  # file manager the user chose. `gust --default on` writes a per-user one.
+  # The file-chooser backend is installed but inert: xdg-desktop-portal uses
+  # it only when portals.conf selects it (`gust --file-dialogs on`).
+  install -Dm644 "packaging/gust.portal" \
+    "$pkgdir/usr/share/xdg-desktop-portal/portals/gust.portal"
+  install -Dm644 "packaging/org.freedesktop.impl.portal.desktop.gust.service" \
+    "$pkgdir/usr/share/dbus-1/services/org.freedesktop.impl.portal.desktop.gust.service"
   install -Dm644 "README.md" "$pkgdir/usr/share/doc/$pkgname/README.md"
 }

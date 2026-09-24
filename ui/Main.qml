@@ -141,6 +141,33 @@ Window {
     }
     // qaDump for close lives in the panel's onClosed as well.
 
+    // The tab being handed to a new window, while it starts.
+    property var detachModel: null
+    Timer {
+        id: detachTimer
+        interval: 100
+        repeat: true
+        onTriggered: {
+            const m = win.detachModel
+            if (!m) { stop(); return }
+            const r = m.poll_detach()
+            if (r === "wait") return
+            stop()
+            win.detachModel = null
+            if (r === "ready") {
+                // Find the tab again: others may have moved meanwhile.
+                for (let i = 0; i < tabList.count; i++) {
+                    if (tabs.objectAt(i) === m) { win.closeTab(i); break }
+                }
+                hints.status = qsTr("Opened in a new window")
+                win.qaDump("tab-detached")
+            } else {
+                win.alertText = r
+                win.qaDump("tab-detach-failed")
+            }
+        }
+    }
+
     function refreshDevices() {
         try {
             win.deviceList = JSON.parse(dirModel.devices_json())
@@ -305,15 +332,18 @@ Window {
             }
             const m = win.tabModelAt(index)
             if (!m) return
-            const err = m.detach_here()
+            const err = m.detach_here(win.tabViews[index] || win.viewMode)
             if (err !== "") {
                 win.alertText = err
                 win.qaDump("tab-detach-refused")
                 return
             }
-            win.closeTab(index)
-            hints.status = qsTr("Opened in a new window")
-            win.qaDump("tab-detached")
+            // The tab closes only once the new window says it is on screen:
+            // a window that fails to start must not take the tab with it.
+            hints.status = qsTr("Opening in a new window…")
+            win.detachModel = m
+            detachTimer.start()
+            win.qaDump("tab-detach-waiting")
             return
         }
 
@@ -884,7 +914,33 @@ Window {
         win.qaDump("quicklook")
     }
 
+    /// Choosing for another app: hand back the pick and close. Nothing is
+    /// opened, copied or changed — the app does what it wants with it.
+    function chooserAccept() {
+        // A Save is never answered by a stray Return meant for the list:
+        // Return in the list opens folders; only the name field or the
+        // Save button accept (DESIGN: dialogs never act on a guess).
+        const err = dirModel.chooser_accept(chooserBar.name)
+        chooserBar.error = err
+        win.qaDump("chooser-accept")
+        if (err === "") Qt.quit()
+    }
+
     function activateRow(row) {
+        // Saving: Enter on a file puts its name in the field (to replace it,
+        // the user still presses Save); folders open as usual.
+        if (chooserBar.active && chooserBar.mode === "save" && !dirModel.is_dir(row)) {
+            chooserBar.name = dirModel.entry_name(row)
+            chooserBar.focusName()
+            return
+        }
+        // In an Open dialog, Enter on a file is "Open"; folders still open.
+        if (chooserBar.active && chooserBar.mode !== "save" && chooserBar.mode !== "open-folder"
+                && !dirModel.is_dir(row)) {
+            dirModel.focus_row(row)
+            win.chooserAccept()
+            return
+        }
         // Several files selected: one viewer showing all of them beats five
         // viewers showing one each (DESIGN §6.18). Returns "" when this is
         // not a multi-file situation, so ordinary activation still runs.
@@ -1497,7 +1553,7 @@ Window {
             id: body
             width: parent.width
             height: parent.height - headerBar.height - filterBar.height
-                    - interruptedNotice.height - jobDrawer.height - hints.height
+                    - chooserBar.height - interruptedNotice.height - jobDrawer.height - hints.height
 
             Sidebar {
                 id: sidebar
@@ -1542,7 +1598,10 @@ Window {
                     viewMode: win.paneAView
                     dropAsMove: win.dropAsMove
                     onActivated: (r) => { win.focusPane(0); win.activateRow(r) }
-                    onSelectionTouched: { win.focusPane(0); win.qaDump("select") }
+                    // A click in the list gives the list the keyboard, even
+                    // when this pane was already active (e.g. from a text
+                    // field such as the Save name).
+                    onSelectionTouched: { win.focusPane(0); win.focusList(); win.qaDump("select") }
                     onDragBegan: { win.focusPane(0); win.qaDump("drag-begin") }
                     onDropPreview: (t) => { hints.status = t }
                     onDropFailed: (m) => { win.transferStarted(win.paneAModel, m, "drop") }
@@ -1576,7 +1635,7 @@ Window {
                         viewMode: win.paneBView
                         dropAsMove: win.dropAsMove
                         onActivated: (r) => { win.focusPane(1); win.activateRow(r) }
-                        onSelectionTouched: { win.focusPane(1); win.qaDump("select") }
+                        onSelectionTouched: { win.focusPane(1); win.focusList(); win.qaDump("select") }
                         onDragBegan: { win.focusPane(1); win.qaDump("drag-begin") }
                         onDropPreview: (t) => { hints.status = t }
                         onDropFailed: (m) => { win.transferStarted(win.paneBModel, m, "drop") }
@@ -1675,6 +1734,14 @@ Window {
                     Accessible.name: "Filter this folder"
                 }
             }
+        }
+
+        // Another app's Open/Save dialog: what it asked, and the answer.
+        ChooserBar {
+            id: chooserBar
+            width: parent.width
+            onAccepted: win.chooserAccept()
+            onCancelled: Qt.quit()
         }
 
         InterruptedNotice {
@@ -1847,6 +1914,11 @@ Window {
                     dirModel.cancel_job()
                     hints.status = qsTr("Cancelling…")
                     win.qaDump("job-cancel")
+                    event.accepted = true; return
+                }
+                if (chooserBar.active && dirModel.sel_count() === 0 && dirModel.filter === "") {
+                    // Escape in an Open/Save dialog is Cancel, as everywhere.
+                    Qt.quit()
                     event.accepted = true; return
                 }
                 if (dirModel.finding) {
@@ -2107,6 +2179,12 @@ Window {
             settingsPanel.s = JSON.parse(dirModel.settings_json())
             win.qaDump("settings-changed")
         }
+        onDialogsRequested: (on) => {
+            const err = dirModel.set_file_dialogs(on)
+            if (err !== "") win.alertText = err
+            settingsPanel.s = JSON.parse(dirModel.settings_json())
+            win.qaDump("settings-dialogs")
+        }
         onKeysRequested: (on) => {
             const err = dirModel.set_omarchy_keys(on)
             if (err !== "") win.alertText = err
@@ -2340,6 +2418,8 @@ Window {
             themeRevision: Tokens.tokens.revision,
             interrupted: interruptedNotice.items.map(i => i.text),
             liveHold: win.liveHold,
+            chooserMode: chooserBar.mode,
+            chooserError: chooserBar.error,
             settingsOpen: settingsPanel.open,
             settings: settingsPanel.s,
             keyPreset: win.keyPreset,
@@ -2430,8 +2510,20 @@ Window {
         win.refreshDevices()
         win.refreshBookmarks()
         win.applySettings()
+        chooserBar.mode = dirModel.chooser_mode()
+        if (chooserBar.active) {
+            chooserBar.title = dirModel.chooser_title()
+            chooserBar.name = dirModel.chooser_name()
+            win.title = Qt.binding(() => (chooserBar.title || qsTr("Choose")) + " — Gust")
+            if (chooserBar.mode === "save") Qt.callLater(chooserBar.focusName)
+        }
         if (win.defaultShowHidden && !dirModel.show_hidden) dirModel.toggle_hidden()
         qaStatePath = qaWriter.env_path("GUST_QA_STATE")
+        // Started by a tab detach: take the view it had, then tell the
+        // window it came from that this one is on screen.
+        const hv = dirModel.handoff_view()
+        if (hv !== "") win.setView(hv)
+        Qt.callLater(() => dirModel.signal_ready())
         console.log("GUST_READY location=" + dirModel.location
                     + " count=" + dirModel.count
                     + " theme=" + Tokens.themeName)

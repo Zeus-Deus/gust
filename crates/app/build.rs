@@ -24,6 +24,7 @@ fn main() {
         "ui/ConflictDialog.qml",
         "ui/InterruptedNotice.qml",
         "ui/SettingsPanel.qml",
+        "ui/ChooserBar.qml",
     ];
 
     let mut module = QmlModule::new("com.gust.app").qml_files(views);
