@@ -113,6 +113,24 @@ pub fn copy_regular_file(
     policy: ConflictPolicy,
     cancel: &CancelToken,
 ) -> OpResult<u64> {
+    copy_regular_file_with(src_dir, src_name, dst_dir, dst_name, policy, cancel, &mut |_| {})
+}
+
+/// How often a copy reports bytes from inside one file.
+const REPORT_EVERY: u64 = 1024 * 1024;
+
+/// [`copy_regular_file`], reporting the bytes written so far in this file
+/// every megabyte — so one big file moves the progress bar instead of
+/// sitting at zero until it is done.
+pub fn copy_regular_file_with(
+    src_dir: &DirHandle,
+    src_name: &OsStr,
+    dst_dir: &DirHandle,
+    dst_name: &OsStr,
+    policy: ConflictPolicy,
+    cancel: &CancelToken,
+    on_bytes: &mut dyn FnMut(u64),
+) -> OpResult<u64> {
     let st = src_dir.stat_child(src_name)?;
     match classify(&st) {
         FileClass::Regular => {}
@@ -176,6 +194,7 @@ pub fn copy_regular_file(
     }
 
     let mut written = 0u64;
+    let mut reported = 0u64;
     let mut buf = vec![0u8; 128 * 1024];
 
     // Any failure from here on must remove the staging file. A disk that
@@ -201,6 +220,10 @@ pub fn copy_regular_file(
                 }
                 off += w;
                 written += w as u64;
+            }
+            if written - reported >= REPORT_EVERY {
+                reported = written;
+                on_bytes(written);
             }
         }
 

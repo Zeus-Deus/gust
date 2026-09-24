@@ -10,6 +10,7 @@ pub mod engine;
 pub mod jobs;
 pub mod journal;
 pub mod permanent;
+pub mod rate;
 pub mod recursive;
 pub mod staging;
 pub mod trash;

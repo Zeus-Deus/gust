@@ -511,6 +511,9 @@ pub struct DirModelRust {
     job: Option<gust_ops::jobs::JobHandle>,
     /// A copy/move waiting for the user to answer its name clashes.
     pending: Option<PendingTransfer>,
+    /// Speed of the running job, sampled on each poll.
+    job_rate: gust_ops::rate::RateMeter,
+    job_clock: Option<std::time::Instant>,
     /// Cancels the listing worker when the user navigates away.
     load_cancel: CancelToken,
     /// name -> cached thumbnail path, for the rows currently listed.
@@ -652,6 +655,8 @@ impl Default for DirModelRust {
             last_bulk_rename: Vec::new(),
             clipboard: None,
             pending: None,
+            job_rate: gust_ops::rate::RateMeter::new(),
+            job_clock: None,
             job: None,
             load_cancel: CancelToken::new(),
             thumbs: std::collections::HashMap::new(),
@@ -3534,6 +3539,8 @@ impl qobject::DirModel {
         );
         let mut r = self.as_mut().rust_mut();
         r.job = Some(handle);
+        r.job_rate = gust_ops::rate::RateMeter::new();
+        r.job_clock = None;
         // A new operation supersedes the previous undo.
         r.last_job = None;
         r.last_trashed_batch.clear();
@@ -4110,10 +4117,33 @@ impl qobject::DirModel {
         };
 
         let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+        let stopping = snap.state == gust_ops::journal::JobState::Running
+            && self.as_ref().job.as_ref().is_some_and(|j| j.cancel_requested());
+        // Speed and time left, from the bytes seen on successive polls.
+        let (speed, eta) = {
+            let mut r = self.as_mut().rust_mut();
+            let start = *r.job_clock.get_or_insert_with(std::time::Instant::now);
+            r.job_rate.observe(start.elapsed().as_secs_f64(), snap.bytes_done);
+            let running = snap.state == gust_ops::journal::JobState::Running && !stopping;
+            let speed = r
+                .job_rate
+                .bytes_per_sec()
+                .filter(|_| running)
+                .map(gust_ops::rate::format_rate)
+                .unwrap_or_default();
+            let eta = r
+                .job_rate
+                .eta_secs(snap.bytes_total.saturating_sub(snap.bytes_done))
+                .filter(|_| running && snap.bytes_total > 0)
+                .map(gust_ops::rate::format_eta)
+                .unwrap_or_default();
+            (speed, eta)
+        };
         let json = format!(
             concat!(
                 "{{\"id\":\"{}\",\"state\":\"{:?}\",\"done\":{},\"total\":{},",
-                "\"bytes_done\":{},\"bytes_total\":{},\"message\":\"{}\",\"refused\":{}}}"
+                "\"bytes_done\":{},\"bytes_total\":{},\"message\":\"{}\",\"refused\":{},",
+                "\"bytes_text\":\"{}\",\"speed\":\"{}\",\"eta\":\"{}\",\"stopping\":{}}}"
             ),
             esc(&snap.id),
             snap.state,
@@ -4122,7 +4152,15 @@ impl qobject::DirModel {
             snap.bytes_done,
             snap.bytes_total,
             esc(&snap.message),
-            snap.refused.len()
+            snap.refused.len(),
+            if snap.bytes_total > 0 {
+                format!("{} of {}", human_size(snap.bytes_done), human_size(snap.bytes_total))
+            } else {
+                String::new()
+            },
+            speed,
+            eta,
+            stopping,
         );
 
         if snap.is_finished() || snap.state == gust_ops::journal::JobState::Conflict {
@@ -4139,6 +4177,8 @@ impl qobject::DirModel {
             {
                 let mut r = self.as_mut().rust_mut();
                 r.job = None;
+                r.job_rate = gust_ops::rate::RateMeter::new();
+                r.job_clock = None;
                 r.last_job = match record {
                     Some(rec) if rec.offers_undo() => Some(rec),
                     _ => None,
