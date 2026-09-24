@@ -62,6 +62,7 @@ pub mod qobject {
         /// Filled on a worker after request_columns().
         #[qproperty(QString, columns_side)]
         #[qproperty(QString, peek_visual)]
+        #[qproperty(QString, delete_total)]
         /// True while a scoped find is running or its results are shown.
         #[qproperty(bool, finding)]
         #[qproperty(QString, find_needle, cxx_name = "findNeedle")]
@@ -102,6 +103,11 @@ pub mod qobject {
         /// where Ctrl+R is the only way to see changes made elsewhere).
         #[qinvokable]
         fn is_live(self: &DirModel) -> bool;
+        /// Measure what a delete would remove (the targets, folders
+        /// counted recursively) on a worker; the answer arrives in
+        /// `delete_total` as a sentence, e.g. "2 folders, 1,204 files, 3.2 GB".
+        #[qinvokable]
+        fn request_delete_total(self: Pin<&mut DirModel>);
         /// Recent files from the desktop's list, as JSON (name, folder,
         /// path, when, exists). Local files only.
         #[qinvokable]
@@ -631,6 +637,8 @@ pub struct DirModelRust {
     columns_gen: u64,
     peek_visual: QString,
     peek_gen: u64,
+    delete_total: QString,
+    delete_gen: u64,
     location: QString,
     location_display: QString,
     count: i32,
@@ -845,6 +853,8 @@ impl DirModelRust {
             columns_gen: 0,
             peek_visual: QString::from(""),
             peek_gen: 0,
+            delete_total: QString::from(""),
+            delete_gen: 0,
             sort_field: QString::from("name"),
             sort_ascending: true,
             filter: QString::from(""),
@@ -1503,6 +1513,52 @@ impl qobject::DirModel {
                 let _ = thread.queue(move |mut model| {
                     if model.as_ref().peek_gen == gen {
                         model.as_mut().set_peek_visual(QString::from(&json));
+                    }
+                });
+            })
+            .ok();
+    }
+
+    fn request_delete_total(mut self: Pin<&mut Self>) {
+        let gen = self.as_ref().delete_gen.wrapping_add(1);
+        self.as_mut().rust_mut().delete_gen = gen;
+        self.as_mut().set_delete_total(QString::default());
+        let targets = self.as_ref().target_paths();
+        if targets.is_empty() || targets.iter().any(|p| gust_core::stall::needs_probe(p)) {
+            // Never walk a network place just to phrase a dialog.
+            return;
+        }
+        let Some(thread) = self.as_ref().qt_thread_handle() else {
+            return;
+        };
+        std::thread::Builder::new()
+            .name("gust-delete-total".into())
+            .spawn(move || {
+                let cancel = CancelToken::new();
+                let (mut folders, mut files, mut bytes, mut complete) = (0u64, 0u64, 0u64, true);
+                for p in &targets {
+                    let Ok(md) = std::fs::symlink_metadata(p) else {
+                        continue;
+                    };
+                    if md.is_dir() {
+                        folders += 1;
+                        let s = gust_core::dirsize::dir_size(
+                            p,
+                            &cancel,
+                            gust_core::dirsize::SizeLimits { max_entries: 500_000 },
+                        );
+                        files += s.files;
+                        bytes += s.bytes;
+                        complete &= s.complete;
+                    } else {
+                        files += 1;
+                        bytes += md.len();
+                    }
+                }
+                let text = delete_total_sentence(folders, files, bytes, complete);
+                let _ = thread.queue(move |mut model| {
+                    if model.as_ref().delete_gen == gen {
+                        model.as_mut().set_delete_total(QString::from(&text));
                     }
                 });
             })
@@ -5686,5 +5742,40 @@ mod iso_tests {
         assert_eq!(gust_core::properties::full_time(t, 0), "2021-03-04 05:06");
         assert_eq!(super::parse_iso_utc("1970-01-01T00:00:00"), Some(0));
         assert_eq!(super::parse_iso_utc("junk"), None);
+    }
+}
+
+/// "1 folder with 1,204 files · 3.2 GB" — what a delete really removes.
+fn delete_total_sentence(folders: u64, files: u64, bytes: u64, complete: bool) -> String {
+    fn grouped(n: u64) -> String {
+        let s = n.to_string();
+        let mut out = String::new();
+        for (i, c) in s.chars().enumerate() {
+            if i > 0 && (s.len() - i) % 3 == 0 {
+                out.push(',');
+            }
+            out.push(c);
+        }
+        out
+    }
+    let plural = |n: u64, one: &str, many: &str| if n == 1 { one.to_string() } else { format!("{} {many}", grouped(n)) };
+    let at_least = if complete { "" } else { "at least " };
+    let files_s = if files == 1 { "1 file".to_string() } else { format!("{} files", grouped(files)) };
+    let head = match folders {
+        0 => format!("{at_least}{files_s}"),
+        f => format!("{} with {at_least}{files_s}", plural(f, "1 folder", "folders")),
+    };
+    format!("{head} · {}", human_size(bytes))
+}
+
+#[cfg(test)]
+mod delete_total_tests {
+    use super::delete_total_sentence as s;
+    #[test]
+    fn says_what_is_really_inside() {
+        assert_eq!(s(1, 1204, 3_435_973_837, true), "1 folder with 1,204 files · 3.2 GB");
+        assert_eq!(s(0, 1, 10, true), "1 file · 10 B");
+        assert_eq!(s(2, 0, 0, true), "2 folders with 0 files · 0 B");
+        assert_eq!(s(1, 500_000, 1024, false), "1 folder with at least 500,000 files · 1.0 KB");
     }
 }

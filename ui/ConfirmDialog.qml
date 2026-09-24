@@ -23,6 +23,15 @@ Rectangle {
     visible: false
     z: 100
 
+    /// Button centres in window coordinates, for the mouse QA harness:
+    /// clicking a fixed offset from the window centre broke whenever the
+    /// dialog's height changed (e.g. when the delete total line appears).
+    function buttonCenters() {
+        const c = cancelButton.mapToItem(null, cancelButton.width / 2, cancelButton.height / 2)
+        const k = confirmButton.mapToItem(null, confirmButton.width / 2, confirmButton.height / 2)
+        return { cancel: [Math.round(c.x), Math.round(c.y)], confirm: [Math.round(k.x), Math.round(k.y)] }
+    }
+
     function open(t, b, c, danger) {
         title = t; body = b; confirmText = c; dangerous = danger
         visible = true

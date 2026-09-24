@@ -105,6 +105,7 @@ Rust 1.98.1, cxx-qt 0.10.0, Mesa llvmpipe (software rendering, Virtio GPU),
 | Cross-device move keeps source unless verified | proven | unit test |
 | Trash / restore, freedesktop format | proven | round-trip, duplicate names, occupied-path refusal |
 | Trash ≠ delete wording | proven | unit test + live confirmation dialog |
+| **Delete confirmation shows the real total** | **proven** | "That is 1 folder with 1,205 files · 29 MB" (matches `find`/`du`); measured on a worker, never on a network place; `just qa` §10 |
 | Subtree-safe undo | proven | refuses when a descendant changed or new work appeared |
 | Undo never offered for permanent delete | proven | unit test |
 | Journal survives a torn write; private perms | proven | unit tests |

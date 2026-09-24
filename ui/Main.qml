@@ -1276,6 +1276,20 @@ Window {
         win.qaDump("dup-started")
     }
 
+    // The confirmation's body before the total arrives.
+    property string deleteBody: ""
+    Connections {
+        target: dirModel
+        function onDelete_totalChanged() {
+            if (!confirm.visible || (confirm.purpose !== "trash") || dirModel.delete_total === "") return
+            if (win.deleteBody === "") win.deleteBody = confirm.body.split("\n\n")[0]
+            confirm.body = win.deleteBody + "\n\n" + qsTr("That is ") + dirModel.delete_total + "."
+            // Dump after the dialog has laid out the new text, so the
+            // button positions in the state match the screen.
+            Qt.callLater(() => win.qaDump("delete-total"))
+        }
+    }
+
     function askTrash() {
         confirm.purpose = "trash"
         if (dirModel.count === 0) return
@@ -1291,13 +1305,20 @@ Window {
             ? n + " selected items"
             : "\"" + dirModel.entry_name(dirModel.cursor) + "\""
 
+        // What is really inside, measured on a worker; the dialog's body
+        // gains the total when it arrives (see onDelete_totalChanged).
+        win.deleteBody = ""
+        dirModel.request_delete_total()
+        // The body carries a placeholder line that the total later fills,
+        // so the buttons do not jump under the pointer when it arrives.
         confirm.open(
             hard ? "Delete permanently?" : "Move to Trash?",
-            hard
+            (hard
               ? subject + " cannot be moved to Trash from this location. "
                 + "Deleting " + (n > 1 ? "them" : "it") + " permanently CANNOT be undone."
               : subject + " will be moved to Trash. You can restore "
-                + (n > 1 ? "them" : "it") + " later.",
+                + (n > 1 ? "them" : "it") + " later.")
+              + "\n\n" + qsTr("Counting what is inside…"),
             dirModel.delete_action_label(),
             hard)
     }
@@ -2507,6 +2528,7 @@ Window {
             settingsOpen: settingsPanel.open,
             trashOpen: trashPanel.open,
             recentOpen: recentPanel.open,
+            deleteTotal: dirModel.delete_total,
             recentItems: recentPanel.items.slice(0, 5).map(i => i.name + "|" + i.folder),
             trashItems: trashPanel.items.map(i => i.shown + "|" + i.from),
             trashError: trashPanel.error,
@@ -2522,6 +2544,7 @@ Window {
             conflictName: conflictDialog.clash ? conflictDialog.clash.name : "",
             confirmTitle: confirm.title,
             confirmBody: confirm.body,
+            confirmButtons: confirm.visible ? confirm.buttonCenters() : null,
             confirmIsDangerous: confirm.dangerous,
             hintStatus: hints.status,
             hintAlert: hints.alert,
