@@ -42,6 +42,7 @@ Window {
             // Mounts and connections finish on a worker; every tab reports
             // here, so a result still lands if the user switched tabs.
             onPlace_done: (op, name, message) => win.placeDone(op, name, message)
+            Component.onCompleted: hold_live_updates(win.liveHold)
         }
         onObjectAdded: win.refreshActiveModel()
         onObjectRemoved: win.refreshActiveModel()
@@ -612,6 +613,20 @@ Window {
     // plain property, refreshed whenever the tab set or the active tab
     // changes.
     property var dirModel: null
+
+    // While an overlay refers to a row BY INDEX (the rename prompt, a
+    // context menu, a confirm or conflict dialog), a file created or deleted
+    // by another program must not shift the rows under it: the rename would
+    // hit the wrong file. Live updates wait, and land when it closes.
+    readonly property bool liveHold: palette.visible || confirm.visible
+                                     || contextMenu.open || conflictDialog.visible
+                                     || prompt.visible || prompt.claimingFocus
+    onLiveHoldChanged: {
+        for (let i = 0; i < tabList.count; i++) {
+            const m = tabs.objectAt(i)
+            if (m) m.hold_live_updates(win.liveHold)
+        }
+    }
 
     function refreshActiveModel() {
         // The Instantiator drops and rebuilds delegates when the tab set
@@ -1391,7 +1406,7 @@ Window {
             id: body
             width: parent.width
             height: parent.height - headerBar.height - filterBar.height
-                    - jobDrawer.height - hints.height
+                    - interruptedNotice.height - jobDrawer.height - hints.height
 
             Sidebar {
                 id: sidebar
@@ -1558,6 +1573,20 @@ Window {
                     Accessible.role: Accessible.EditableText
                     Accessible.name: "Filter this folder"
                 }
+            }
+        }
+
+        InterruptedNotice {
+            id: interruptedNotice
+            width: parent.width
+            onOpenDestination: (path) => {
+                dirModel.navigate(path)
+                win.qaDump("interrupted-open")
+            }
+            onDismiss: {
+                dirModel.acknowledge_interrupted()
+                interruptedNotice.items = []
+                win.qaDump("interrupted-dismissed")
             }
         }
 
@@ -2149,6 +2178,13 @@ Window {
                        : [],
             confirmOpen: confirm.visible,
             conflictOpen: conflictDialog.visible,
+            live: dirModel.is_live(),
+            emptyReason: dirModel.empty_reason,
+            theme: Tokens.themeName,
+            themeBackground: "" + Tokens.background,
+            themeRevision: Tokens.tokens.revision,
+            interrupted: interruptedNotice.items.map(i => i.text),
+            liveHold: win.liveHold,
             jobState: win.job ? win.job.state : "",
             jobBytes: win.job ? (win.job.bytes_text || "") : "",
             jobSpeed: win.job ? (win.job.speed || "") : "",
@@ -2215,10 +2251,18 @@ Window {
         function onShow_hiddenChanged() { win.qaDump("hidden") }
     }
 
+    // A theme switch repaints everything by itself; record it for QA.
+    Connections {
+        target: Tokens.tokens
+        function onRevisionChanged() { win.qaDump("theme") }
+    }
+
     Component.onCompleted: {
         // The model does not list anything until it is told to: construction
         // must not do I/O. This is the one explicit kick at startup.
         dirModel.reload()
+        // After a crash, say what was interrupted — read once, here.
+        try { interruptedNotice.items = JSON.parse(dirModel.interrupted_jobs()) } catch (e) {}
         // The folder Gust opens with gets its remembered view too.
         applyRememberedView()
         // A local read of the kernel's own view: no daemon, no network.

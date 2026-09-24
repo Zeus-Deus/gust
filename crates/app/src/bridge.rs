@@ -52,6 +52,11 @@ pub mod qobject {
         /// Separate from status, which describes the last action and is
         /// rewritten by every listing.
         #[qproperty(QString, notice)]
+        /// Why the list has no rows when it is not simply an empty folder
+        /// ("This folder no longer exists", "Permission denied"), or "".
+        /// The views show it instead of "This folder is empty", which would
+        /// be a lie about a folder Gust could not read.
+        #[qproperty(QString, empty_reason)]
         /// True while a scoped find is running or its results are shown.
         #[qproperty(bool, finding)]
         #[qproperty(QString, find_needle, cxx_name = "findNeedle")]
@@ -80,6 +85,22 @@ pub mod qobject {
         fn can_go_forward(self: &DirModel) -> bool;
         #[qinvokable]
         fn reload(self: Pin<&mut DirModel>);
+        /// While true, changes made by other programs wait instead of moving
+        /// rows. QML holds this while a rename prompt, menu or dialog refers
+        /// to a row by its index; releasing it applies anything that waited.
+        #[qinvokable]
+        fn hold_live_updates(self: Pin<&mut DirModel>, hold: bool);
+        /// Whether this folder updates by itself (false for network mounts,
+        /// where Ctrl+R is the only way to see changes made elsewhere).
+        #[qinvokable]
+        fn is_live(self: &DirModel) -> bool;
+        /// Operations a crash interrupted, as JSON `[{id, text, dest}]`.
+        /// Read once at start-up.
+        #[qinvokable]
+        fn interrupted_jobs(self: &DirModel) -> QString;
+        /// The user has seen the interrupted-operations notice.
+        #[qinvokable]
+        fn acknowledge_interrupted(self: &DirModel);
         #[qinvokable]
         fn toggle_hidden(self: Pin<&mut DirModel>);
         /// QML calls this when a view that shows thumbnails becomes active.
@@ -388,6 +409,37 @@ pub mod qobject {
             parent: &QModelIndex,
         ) -> QModelIndex;
 
+        /// # Safety
+        /// Inherited beginInsertRows; `end_insert_rows` must follow.
+        #[inherit]
+        #[cxx_name = "beginInsertRows"]
+        unsafe fn begin_insert_rows(
+            self: Pin<&mut DirModel>,
+            parent: &QModelIndex,
+            first: i32,
+            last: i32,
+        );
+        /// # Safety
+        /// Inherited endInsertRows; only valid after `begin_insert_rows`.
+        #[inherit]
+        #[cxx_name = "endInsertRows"]
+        unsafe fn end_insert_rows(self: Pin<&mut DirModel>);
+        /// # Safety
+        /// Inherited beginRemoveRows; `end_remove_rows` must follow.
+        #[inherit]
+        #[cxx_name = "beginRemoveRows"]
+        unsafe fn begin_remove_rows(
+            self: Pin<&mut DirModel>,
+            parent: &QModelIndex,
+            first: i32,
+            last: i32,
+        );
+        /// # Safety
+        /// Inherited endRemoveRows; only valid after `begin_remove_rows`.
+        #[inherit]
+        #[cxx_name = "endRemoveRows"]
+        unsafe fn end_remove_rows(self: Pin<&mut DirModel>);
+
         /// Repaint a row span without resetting the model (which would lose
         /// the scroll position and every delegate).
         /// # Safety
@@ -437,7 +489,14 @@ pub mod qobject {
         #[qml_element]
         #[qproperty(QString, name)]
         #[qproperty(bool, is_light)]
+        /// Bumped whenever the token values change. QML bindings read it so
+        /// they re-evaluate: `color()` is a call, which QML cannot track.
+        #[qproperty(i32, revision)]
         type ThemeTokens = super::ThemeTokensRust;
+
+        /// Follow Omarchy theme switches from now on (live reload).
+        #[qinvokable]
+        fn watch_theme(self: Pin<&mut ThemeTokens>);
 
         #[qinvokable]
         fn color(self: &ThemeTokens, key: &QString) -> QString;
@@ -451,6 +510,7 @@ pub mod qobject {
 
     // Lets a worker thread queue work back onto the GUI thread.
     impl cxx_qt::Threading for DirModel {}
+    impl cxx_qt::Threading for ThemeTokens {}
 }
 
 use core::pin::Pin;
@@ -477,6 +537,7 @@ const ROLE_SELECTED: i32 = 0x0109;
 const ROLE_THUMB: i32 = 0x010A;
 
 pub struct DirModelRust {
+    empty_reason: QString,
     location: QString,
     location_display: QString,
     count: i32,
@@ -516,6 +577,23 @@ pub struct DirModelRust {
     job_clock: Option<std::time::Instant>,
     /// Cancels the listing worker when the user navigates away.
     load_cancel: CancelToken,
+    /// Live updates for the folder on screen. Replaced on every navigation,
+    /// dropped (thread stopped) when the folder is left.
+    watch: Option<gust_core::watch::DirWatch>,
+    /// Which folder `watch` is on, so a same-folder reload keeps it.
+    watch_key: Option<PathBuf>,
+    /// Increments per watch, so a late change from a replaced watch is
+    /// ignored.
+    watch_gen: u64,
+    /// Rows are referred to by index while a prompt/menu is up.
+    live_hold: bool,
+    /// After a rename or new folder, the cursor goes to this name once it
+    /// appears in the listing.
+    focus_name: Option<std::ffi::OsString>,
+    /// A change arrived during the hold; apply it when the hold ends.
+    live_dirty: bool,
+    /// A live relist is running; another change waits for it.
+    live_busy: bool,
     /// name -> cached thumbnail path, for the rows currently listed.
     thumbs: std::collections::HashMap<std::ffi::OsString, String>,
     /// Cancels the thumbnail pass when the location changes.
@@ -640,6 +718,7 @@ impl Default for DirModelRust {
             status: QString::from("starting"),
             selection_text: QString::from(""),
             notice: QString::from(""),
+            empty_reason: QString::from(""),
             sort_field: QString::from("name"),
             sort_ascending: true,
             filter: QString::from(""),
@@ -659,6 +738,13 @@ impl Default for DirModelRust {
             job_clock: None,
             job: None,
             load_cancel: CancelToken::new(),
+            watch: None,
+            watch_key: None,
+            watch_gen: 0,
+            live_hold: false,
+            focus_name: None,
+            live_dirty: false,
+            live_busy: false,
             thumbs: std::collections::HashMap::new(),
             thumb_cancel: CancelToken::new(),
             drag_payload: Vec::new(),
@@ -698,35 +784,7 @@ impl DirModelRust {
     /// every entry, which is O(n²): a 100k directory spent minutes here and
     /// the window never finished loading. Index arithmetic keeps it linear.
     fn recompute_visible(&mut self) {
-        let needle = self.filter.to_string();
-        let show_hidden = self.show_hidden;
-
-        if needle.is_empty() {
-            self.visible = self
-                .all
-                .iter()
-                .enumerate()
-                .filter(|(_, e)| show_hidden || !e.is_hidden())
-                .map(|(i, _)| i)
-                .collect();
-            return;
-        }
-
-        // `filter_entries` returns borrows into `self.all`; turn each one back
-        // into its index by pointer offset rather than searching for it.
-        let base = self.all.as_ptr();
-        let matched = filter_entries(&self.all, &needle);
-        let mut idx: Vec<usize> = matched
-            .into_iter()
-            .filter(|e| show_hidden || !e.is_hidden())
-            .map(|e| {
-                // Safety: every element of `matched` is a reference into
-                // `self.all`, so the offset is in bounds and well defined.
-                unsafe { (e as *const Entry).offset_from(base) as usize }
-            })
-            .collect();
-        idx.sort_unstable();
-        self.visible = idx;
+        self.visible = visible_indices(&self.all, &self.filter.to_string(), self.show_hidden);
     }
 
     fn entry_at(&self, row: i32) -> Option<&Entry> {
@@ -899,6 +957,12 @@ impl qobject::DirModel {
         self.as_mut().rust_mut().load_cancel.cancel();
         let cancel = CancelToken::new();
         self.as_mut().rust_mut().load_cancel = cancel.clone();
+
+        // Leaving the watched folder ends its watch now, not when the next
+        // listing settles: its changes no longer describe what is on screen.
+        if self.as_ref().watch_key.as_deref() != key.as_path() {
+            self.as_mut().stop_watch();
+        }
 
         let display = key.display_path();
         self.as_mut().set_location(QString::from(&display));
@@ -1226,41 +1290,39 @@ impl qobject::DirModel {
         ))
     }
 
-    /// Operations that were in flight when this process last died.
-    ///
-    /// Read once at startup. Returns one plain sentence per interrupted job,
-    /// so the UI can tell the user what was happening rather than silently
-    /// leaving half-finished work behind.
-    fn unfinished_operations() -> Vec<String> {
+    /// Operations a crash interrupted, as JSON for the start-up notice.
+    fn interrupted_jobs(&self) -> QString {
         let Some(j) = Self::production_journal() else {
-            return Vec::new();
+            return QString::from("[]");
         };
-        j.unfinished()
+        let items: Vec<String> = j
+            .interrupted()
             .into_iter()
-            .map(|job| {
-                let what = match job.kind {
-                    gust_ops::journal::JobKind::Copy => "Copying",
-                    gust_ops::journal::JobKind::Move => "Moving",
-                    gust_ops::journal::JobKind::Trash => "Moving to Trash",
-                    gust_ops::journal::JobKind::Extract => "Extracting",
-                    gust_ops::journal::JobKind::Rename => "Renaming",
-                    gust_ops::journal::JobKind::NewFolder => "Creating a folder",
-                    gust_ops::journal::JobKind::DeletePermanent => "Deleting",
-                };
-                let name = job
-                    .entries
-                    .first()
-                    .and_then(|e| e.source.file_name())
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_else(|| "an item".to_string());
-                let more = job.entries.len().saturating_sub(1);
-                if more > 0 {
-                    format!("{what} {name} and {more} more did not finish")
-                } else {
-                    format!("{what} {name} did not finish")
-                }
+            .map(|i| {
+                let dest = i
+                    .dest_dir
+                    .as_ref()
+                    .filter(|d| d.is_dir())
+                    .map(|d| d.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                format!(
+                    "{{\"id\":{},\"text\":{},\"dest\":{}}}",
+                    Self::json_str(&i.id),
+                    Self::json_str(&i.sentence()),
+                    Self::json_str(&dest)
+                )
             })
-            .collect()
+            .collect();
+        QString::from(&format!("[{}]", items.join(",")))
+    }
+
+    fn acknowledge_interrupted(&self) {
+        let Some(j) = Self::production_journal() else {
+            return;
+        };
+        for i in j.interrupted() {
+            let _ = j.acknowledge(&i.id);
+        }
     }
 
     /// Park a detached child and reap any that have already exited.
@@ -2586,6 +2648,7 @@ impl qobject::DirModel {
         // status bar keeps announcing a selection that no longer exists.
         self.as_mut().refresh_selection_flags();
 
+        self.as_mut().publish_empty_reason(&snap.complete);
         let status = match &snap.complete {
             gust_core::entry::Completeness::Failed { error } => format!("cannot open: {error}"),
             _ if !settled => format!("{n} items — reading details…"),
@@ -2605,7 +2668,295 @@ impl qobject::DirModel {
         if settled && snap.settled {
             self.as_mut().start_thumbnails();
             self.as_mut().start_cloud_notice();
+            self.as_mut().ensure_watch();
         }
+    }
+
+    /// Publish why a listing has no rows, from how it ended.
+    fn publish_empty_reason(mut self: Pin<&mut Self>, complete: &gust_core::entry::Completeness) {
+        let reason = match complete {
+            gust_core::entry::Completeness::Failed { error } => empty_reason_for(error),
+            _ => String::new(),
+        };
+        if self.as_ref().empty_reason.to_string() != reason {
+            self.as_mut().set_empty_reason(QString::from(&reason));
+        }
+    }
+
+    /// Watch the folder on screen, if it is local and not already watched.
+    ///
+    /// Started after the listing settles so the first paint never waits on
+    /// it. A network or FUSE mount is not watched: inotify cannot see what
+    /// changed on the server, and touching a stalled mount can hang.
+    fn ensure_watch(mut self: Pin<&mut Self>) {
+        let dir = match self.as_ref().key.as_path() {
+            Some(p) if !self.as_ref().finding => p.to_path_buf(),
+            _ => {
+                self.as_mut().stop_watch();
+                return;
+            }
+        };
+        if self.as_ref().watch.is_some() && self.as_ref().watch_key.as_deref() == Some(&dir) {
+            return;
+        }
+        self.as_mut().stop_watch();
+        if gust_core::stall::needs_probe(&dir) {
+            return;
+        }
+        let Some(thread) = self.as_ref().qt_thread_handle() else {
+            return;
+        };
+        let wgen = self.as_ref().watch_gen + 1;
+        let started = gust_core::watch::DirWatch::start(&dir, move |change| {
+            let _ = thread.queue(move |model| Self::live_change(model, wgen, change));
+        });
+        let mut r = self.as_mut().rust_mut();
+        r.watch_gen = wgen;
+        if let Ok(w) = started {
+            r.watch = Some(w);
+            r.watch_key = Some(dir);
+        }
+    }
+
+    fn stop_watch(mut self: Pin<&mut Self>) {
+        let mut r = self.as_mut().rust_mut();
+        // Dropping joins the watch thread; it wakes on its stop fd at once.
+        r.watch = None;
+        r.watch_key = None;
+        r.watch_gen += 1;
+        r.live_dirty = false;
+    }
+
+    /// A change reported by the watch. GUI thread.
+    fn live_change(mut self: Pin<&mut Self>, wgen: u64, change: gust_core::watch::Change) {
+        if wgen != self.as_ref().watch_gen {
+            return;
+        }
+        match change {
+            gust_core::watch::Change::Gone => {
+                // Stay put: jumping somewhere else would lose the user's
+                // place (tabs, history). The relist fails, which empties the
+                // list — nothing that no longer exists can be acted on — and
+                // the list says why instead of "This folder is empty".
+                self.as_mut().stop_watch();
+                self.as_mut().start_live_relist();
+            }
+            gust_core::watch::Change::Contents => {
+                if self.as_ref().live_hold || self.as_ref().live_busy {
+                    self.as_mut().rust_mut().live_dirty = true;
+                } else {
+                    self.as_mut().start_live_relist();
+                }
+            }
+        }
+    }
+
+    /// Relist the current folder on a worker and merge it in place.
+    fn start_live_relist(mut self: Pin<&mut Self>) {
+        let Some(thread) = self.as_ref().qt_thread_handle() else {
+            return;
+        };
+        let key = self.as_ref().key.clone();
+        let gen = self.as_ref().generation;
+        let sort = self.as_ref().sort_spec();
+        let cancel = self.as_ref().load_cancel.clone();
+        let mut r = self.as_mut().rust_mut();
+        r.live_busy = true;
+        r.live_dirty = false;
+        std::thread::Builder::new()
+            .name("gust-live".into())
+            .spawn(move || {
+                let mut snap = list_names(&key, gen, &cancel, |_| {});
+                if !cancel.is_cancelled() {
+                    fill_metadata(&mut snap, &cancel);
+                }
+                snap.sort = sort;
+                snap.sort_entries();
+                let _ = thread.queue(move |model| Self::apply_live(model, snap, cancel));
+            })
+            .ok();
+    }
+
+    /// Merge a relisted folder into the rows on screen WITHOUT a reset:
+    /// rows are removed and inserted individually, so the view keeps its
+    /// scroll position, the cursor stays on the same file, and a file
+    /// another program is writing appears in place.
+    fn apply_live(
+        mut self: Pin<&mut Self>,
+        snap: gust_core::entry::DirectorySnapshot,
+        cancel: CancelToken,
+    ) {
+        self.as_mut().rust_mut().live_busy = false;
+        // Navigated away, or a newer listing superseded this one.
+        if cancel.is_cancelled() || snap.generation != self.as_ref().generation {
+            return;
+        }
+        let snap_complete = snap.complete.clone();
+        // The folder could not be read any more. DELETE_SELF is not a
+        // reliable signal: while any process still has its cwd inside the
+        // folder the kernel delays it, so the failed relist is what ends
+        // the watch — a watch on a dead inode would never fire again.
+        if matches!(snap_complete, gust_core::entry::Completeness::Failed { .. }) {
+            self.as_mut().stop_watch();
+        }
+        // The model may have been reset meanwhile (a filter, a sort): only
+        // merge onto what is on screen, never onto a stale idea of it.
+        let cursor_name = self.as_ref().entry_at(self.as_ref().cursor).map(|e| e.name.clone());
+        let old_names: Vec<std::ffi::OsString> = {
+            let r = self.as_ref();
+            r.visible.iter().filter_map(|i| r.all.get(*i)).map(|e| e.name.clone()).collect()
+        };
+
+        // The new visible list, by the same rule as recompute_visible.
+        let new_visible = visible_indices(
+            &snap.entries,
+            &self.as_ref().filter.to_string(),
+            self.as_ref().show_hidden,
+        );
+        let new_visible_names: Vec<std::ffi::OsString> =
+            new_visible.iter().map(|&i| snap.entries[i].name.clone()).collect();
+
+        let edits = gust_core::watch::row_edits(&old_names, &new_visible_names);
+        let root = cxx_qt_lib::QModelIndex::default();
+
+        // Removals, highest row first. Contiguous rows go in one signal: an
+        // archive unpacked into the folder is one insert, not 50 000.
+        let removes: Vec<usize> = edits
+            .iter()
+            .filter_map(|e| match *e {
+                gust_core::watch::RowEdit::Remove(i) => Some(i),
+                _ => None,
+            })
+            .collect();
+        let mut k = 0;
+        while k < removes.len() {
+            // `removes` descends; extend while the next is one row above.
+            let hi = removes[k];
+            let mut lo = hi;
+            while k + 1 < removes.len() && removes[k + 1] + 1 == lo {
+                k += 1;
+                lo = removes[k];
+            }
+            k += 1;
+            unsafe { self.as_mut().begin_remove_rows(&root, lo as i32, hi as i32) };
+            self.as_mut().rust_mut().visible.drain(lo..=hi);
+            unsafe { self.as_mut().end_remove_rows() };
+        }
+
+        // Swap in the new entries. `visible` now holds only surviving rows,
+        // still pointing into the OLD `all`; re-point them by name into the
+        // new list, then insert the new rows.
+        let survivors: Vec<std::ffi::OsString> = {
+            let r = self.as_ref();
+            r.visible.iter().filter_map(|i| r.all.get(*i)).map(|e| e.name.clone()).collect()
+        };
+        let index_of: std::collections::HashMap<std::ffi::OsString, usize> = snap
+            .entries
+            .iter()
+            .enumerate()
+            .map(|(i, e)| (e.name.clone(), i))
+            .collect();
+        {
+            let mut r = self.as_mut().rust_mut();
+            r.all = snap.entries;
+            r.visible = survivors.iter().filter_map(|n| index_of.get(n).copied()).collect();
+        }
+        // Inserts, lowest row first; `at` is also the row in the new list,
+        // so a run of consecutive `at` values is one contiguous block.
+        let inserts: Vec<usize> = edits
+            .iter()
+            .filter_map(|e| match *e {
+                gust_core::watch::RowEdit::Insert { at, .. } => Some(at),
+                _ => None,
+            })
+            .collect();
+        let mut k = 0;
+        while k < inserts.len() {
+            let first = inserts[k];
+            let mut last = first;
+            while k + 1 < inserts.len() && inserts[k + 1] == last + 1 {
+                k += 1;
+                last = inserts[k];
+            }
+            k += 1;
+            unsafe { self.as_mut().begin_insert_rows(&root, first as i32, last as i32) };
+            {
+                let mut r = self.as_mut().rust_mut();
+                let block: Vec<usize> = new_visible[first..=last].to_vec();
+                r.visible.splice(first..first, block);
+            }
+            unsafe { self.as_mut().end_insert_rows() };
+        }
+
+        // By construction the edits produced exactly the new visible list.
+        debug_assert_eq!(self.as_ref().visible, new_visible);
+        self.as_mut().rust_mut().visible = new_visible;
+
+        // Rows that stayed may still have changed (size while a download
+        // finished, mtime, a thumbnail): repaint them all, cheaply.
+        let n = self.as_ref().visible.len() as i32;
+        if n > 0 {
+            unsafe {
+                let top = self.as_ref().index(0, 0, &root);
+                let bottom = self.as_ref().index(n - 1, 0, &root);
+                let roles = cxx_qt_lib::QVector::<i32>::default();
+                self.as_mut().data_changed(&top, &bottom, &roles);
+            }
+        }
+
+        // Selection: files that vanished leave it. The cursor follows its
+        // file; if that file is gone it stays at the same height.
+        {
+            let mut r = self.as_mut().rust_mut();
+            r.selection.retain_names(&new_visible_names);
+        }
+        let wanted = self.as_mut().rust_mut().focus_name.take();
+        let new_cursor = wanted
+            .and_then(|w| new_visible_names.iter().position(|n| *n == w))
+            .or_else(|| cursor_name.and_then(|c| new_visible_names.iter().position(|n| *n == c)))
+            .map(|p| p as i32)
+            .unwrap_or_else(|| self.as_ref().cursor.min((n - 1).max(0)));
+        if new_cursor != self.as_ref().cursor {
+            self.as_mut().set_cursor(new_cursor);
+        }
+        self.as_mut().refresh_selection_flags();
+        self.as_mut().set_count(n);
+        self.as_mut().publish_empty_reason(&snap_complete);
+        let status = match &snap_complete {
+            gust_core::entry::Completeness::Failed { error } => format!("cannot open: {error}"),
+            _ => format!("{n} items"),
+        };
+        self.as_mut().set_status(QString::from(&status));
+        self.as_mut().start_thumbnails();
+
+        // Changes that arrived while this relist ran.
+        if self.as_ref().live_dirty && !self.as_ref().live_hold {
+            self.as_mut().start_live_relist();
+        }
+    }
+
+    /// After Gust itself changed this folder: merge the change in place and
+    /// put the cursor on `name`. A full reload here reset the view, so the
+    /// list jumped and the cursor stayed at the old row NUMBER — on
+    /// whichever file had moved into it.
+    fn relist_focusing(mut self: Pin<&mut Self>, name: std::ffi::OsString) {
+        self.as_mut().rust_mut().focus_name = Some(name);
+        if self.as_ref().live_busy {
+            self.as_mut().rust_mut().live_dirty = true;
+        } else {
+            self.as_mut().start_live_relist();
+        }
+    }
+
+    fn hold_live_updates(mut self: Pin<&mut Self>, hold: bool) {
+        self.as_mut().rust_mut().live_hold = hold;
+        if !hold && self.as_ref().live_dirty && !self.as_ref().live_busy {
+            self.as_mut().start_live_relist();
+        }
+    }
+
+    fn is_live(&self) -> bool {
+        self.watch.is_some()
     }
 
     /// Ask rclone, on a worker, whether this cloud location has uploads
@@ -3820,7 +4171,7 @@ impl qobject::DirModel {
         let name = std::ffi::OsString::from(new_name.to_string());
         match gust_ops::recursive::rename_in_place(&path, &name, false) {
             Ok(_) => {
-                self.as_mut().reload();
+                self.as_mut().relist_focusing(name);
                 QString::default()
             }
             Err(gust_ops::engine::OpError::Conflict(_)) => {
@@ -3929,7 +4280,7 @@ impl qobject::DirModel {
         }
         match std::fs::create_dir(&target) {
             Ok(()) => {
-                self.as_mut().reload();
+                self.as_mut().relist_focusing(raw);
                 QString::default()
             }
             Err(e) => QString::from(&format!("{e}")),
@@ -4292,7 +4643,10 @@ impl qobject::QaWriter {
 pub struct ThemeTokensRust {
     name: QString,
     is_light: bool,
+    revision: i32,
     tokens: Tokens,
+    /// Watches on the Omarchy state folders; dropped with the object.
+    watches: Vec<gust_core::watch::DirWatch>,
 }
 
 impl Default for ThemeTokensRust {
@@ -4301,7 +4655,9 @@ impl Default for ThemeTokensRust {
         ThemeTokensRust {
             name: QString::from(&t.name),
             is_light: t.is_light(),
+            revision: 0,
             tokens: t,
+            watches: Vec::new(),
         }
     }
 }
@@ -4315,24 +4671,123 @@ impl qobject::ThemeTokens {
         self.tokens.metric(&key.to_string())
     }
 
-    fn reload(mut self: Pin<&mut Self>) {
+    fn reload(self: Pin<&mut Self>) {
         let t = gust_core::theme::load_current();
+        self.install(t);
+    }
+
+    fn load_theme_dir(self: Pin<&mut Self>, dir: &QString, name: &QString) {
+        let t = gust_core::theme::load_from_theme_dir(
+            std::path::Path::new(&dir.to_string()),
+            &name.to_string(),
+        );
+        self.install(t);
+    }
+
+    /// Adopt a token set. Only a real change repaints: the state folder also
+    /// holds unrelated files (clipboard history, notifications) whose writes
+    /// wake the watch.
+    fn install(mut self: Pin<&mut Self>, t: Tokens) {
+        if t == self.as_ref().tokens {
+            return;
+        }
         let name = QString::from(&t.name);
         let light = t.is_light();
         self.as_mut().rust_mut().tokens = t;
         self.as_mut().set_name(name);
         self.as_mut().set_is_light(light);
+        let rev = self.as_ref().revision.wrapping_add(1);
+        self.as_mut().set_revision(rev);
     }
 
-    fn load_theme_dir(mut self: Pin<&mut Self>, dir: &QString, name: &QString) {
-        let t = gust_core::theme::load_from_theme_dir(
-            std::path::Path::new(&dir.to_string()),
-            &name.to_string(),
+    fn watch_theme(mut self: Pin<&mut Self>) {
+        let Some(state) = gust_core::theme::default_state_dir() else {
+            return;
+        };
+        let thread = <qobject::ThemeTokens as cxx_qt::Threading>::qt_thread(&self.as_ref());
+        let mut watches = Vec::new();
+        for dir in gust_core::theme::theme_watch_dirs(&state) {
+            let thread = thread.clone();
+            let state = state.clone();
+            let w = gust_core::watch::DirWatch::start(&dir, move |change| {
+                let state = state.clone();
+                let _ = thread.queue(move |mut tokens| match change {
+                    // Mid-switch there is no theme at all: wait for the move
+                    // that completes it rather than flash the fallback.
+                    gust_core::watch::Change::Contents => {
+                        if gust_core::theme::theme_ready(&state) {
+                            tokens.as_mut().reload();
+                        }
+                    }
+                    // A watched folder was replaced: watch the new one.
+                    gust_core::watch::Change::Gone => tokens.as_mut().watch_theme(),
+                });
+            });
+            if let Ok(w) = w {
+                watches.push(w);
+            }
+        }
+        self.as_mut().rust_mut().watches = watches;
+    }
+}
+
+/// Which entries are shown, in order, for a filter and the hidden-files
+/// setting. O(n): this used to build a `Vec` of kept pointers and call
+/// `contains` for every entry, which is O(n²) — a 100k directory spent
+/// minutes here. Index arithmetic keeps it linear. Pure — no I/O.
+fn visible_indices(all: &[Entry], needle: &str, show_hidden: bool) -> Vec<usize> {
+    if needle.is_empty() {
+        return all
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| show_hidden || !e.is_hidden())
+            .map(|(i, _)| i)
+            .collect();
+    }
+    // `filter_entries` returns borrows into `all`; turn each one back into
+    // its index by pointer offset rather than searching for it.
+    let base = all.as_ptr();
+    let mut idx: Vec<usize> = filter_entries(all, needle)
+        .into_iter()
+        .filter(|e| show_hidden || !e.is_hidden())
+        .map(|e| {
+            // Safety: every element is a reference into `all`, so the
+            // offset is in bounds and well defined.
+            unsafe { (e as *const Entry).offset_from(base) as usize }
+        })
+        .collect();
+    idx.sort_unstable();
+    idx
+}
+
+/// Plain words for a folder that could not be listed. `error` is the
+/// io::Error text, e.g. "Permission denied (os error 13)".
+fn empty_reason_for(error: &str) -> String {
+    let e = error.split(" (os error").next().unwrap_or(error);
+    match e {
+        "No such file or directory" => "This folder no longer exists".into(),
+        "Permission denied" => "You don't have permission to open this folder".into(),
+        _ => format!("Can't open this folder: {e}"),
+    }
+}
+
+#[cfg(test)]
+mod empty_reason_tests {
+    use super::empty_reason_for;
+
+    #[test]
+    fn a_folder_that_could_not_be_read_never_claims_to_be_empty() {
+        assert_eq!(
+            empty_reason_for("No such file or directory (os error 2)"),
+            "This folder no longer exists"
         );
-        let n = QString::from(&t.name);
-        let light = t.is_light();
-        self.as_mut().rust_mut().tokens = t;
-        self.as_mut().set_name(n);
-        self.as_mut().set_is_light(light);
+        assert_eq!(
+            empty_reason_for("Permission denied (os error 13)"),
+            "You don't have permission to open this folder"
+        );
+        assert_eq!(
+            empty_reason_for("Input/output error (os error 5)"),
+            "Can't open this folder: Input/output error"
+        );
     }
 }

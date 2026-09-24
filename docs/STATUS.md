@@ -5,8 +5,15 @@ pass. Three states only:
 
 - **proven** — there is a test or a captured artifact, and it runs in `just test`,
   `just qa` or `just theme-matrix`.
+- **proven by hand** — driven with real mouse input in the VM, with the result
+  checked on disk (`cmp`, `sha256sum`, `ls`) and screenshots kept, plus unit
+  tests for the logic underneath; the UI journey itself is not yet an
+  automated `just qa` step.
 - **built** — the code exists and compiles, but no end-to-end proof yet.
 - **not started** — nothing beyond types.
+
+Every bug fixed since m41 has a test that was run against the old code and
+failed there first.
 
 Baseline for every result below: Omarchy 4.0.3-1 KVM guest, Qt 6.11.2,
 Rust 1.98.1, cxx-qt 0.10.0, Mesa llvmpipe (software rendering, Virtio GPU),
@@ -21,9 +28,11 @@ Rust 1.98.1, cxx-qt 0.10.0, Mesa llvmpipe (software rendering, Virtio GPU),
 | Packaged QML loading | proven | qrc alias verified; a bad path now exits 2 loudly |
 | First paint on a real compositor | proven | window appears on Hyprland, screenshots captured |
 | Theme token adapter | proven | 22/22 installed themes, `just theme-matrix` |
+| **Live theme switching** | **proven by hand** | `theme_live` (3); evidence `B-live-theme`: `omarchy-theme-set` to catppuccin-latte, gruvbox, white and back while Gust is open — one repaint each, no restart |
 | Generation-tagged model updates | built | generation plumbed; no concurrent-navigation stress test yet |
+| Weak hardware: no GPU at all | **proven** | every number in this file is llvmpipe software rendering in a VM with no GPU; copies were also run with the disk capped at 2–8 MB/s |
 | **Thumbnails (image + video)** | **proven** | sandboxed helper, `just qa` §10q; 200 images in <6 s with the UI live |
-| Clipboard / DnD / IME / fractional scaling | not started | — |
+| IME / fractional scaling | not started | — |
 | GPU matrix | not tested | llvmpipe only; NVIDIA/AMD/Intel unverified |
 
 ## M1 · browse
@@ -43,6 +52,8 @@ Rust 1.98.1, cxx-qt 0.10.0, Mesa llvmpipe (software rendering, Virtio GPU),
 | Broken symlink badge | proven | dangling link listed and marked |
 | 5000-entry directory | proven | lists, settles, cursor still responds |
 | Keyboard focus returns from every overlay | proven | regression test in `just qa` |
+| **Right-click menus** (file, folder, several files, empty space; Menu key, Shift+F10) | **proven by hand** | evidence `B1-context-menu`: rows, grid and columns views; "Paste into folder" on a folder row; right-click inside a selection keeps it, outside replaces it; a keyboard-opened menu ignores the pointer until it moves; delete goes through the normal confirm and Trash, Ctrl+Z restores |
+| **Live folder updates** | **proven by hand** | 13 tests (`dir_watch`); evidence `B-live-updates`: files made, deleted and renamed by another program appear in 160 ms with the scroll position and cursor kept; 50 000 files created outside Gust show in 1.8 s with the window responsive; a burst is 1–3 refreshes, a file being written refreshes once when closed; rows do not move while a rename prompt, menu or dialog is open; a deleted folder says "This folder no longer exists", not "empty". Local folders only — network mounts keep Ctrl+R |
 | Vim preset | built | implemented, not yet asserted in QA |
 | **Per-location view memory** | **proven** | `views::tests` + `just qa` §10r; survives a restart |
 | Tabs | **proven** | per-tab location, history, selection, filter and view; Ctrl+T/W/Tab/1-9; last tab cannot be closed; a tab with a running job asks before closing |
@@ -90,9 +101,12 @@ Rust 1.98.1, cxx-qt 0.10.0, Mesa llvmpipe (software rendering, Virtio GPU),
 | Background job runner (UI thread never blocks) | proven | worker thread + snapshot polling; cancel/conflict/refused tests |
 | Copy wired to UI (Ctrl+C / Ctrl+V) | proven | `just qa` §10c: nested tree arrives byte-identical, source untouched |
 | Move wired to UI (Ctrl+X / Ctrl+V) | proven | `just qa` §10d: tree arrives, source removed only after success |
-| Rename wired to UI (F2) | proven | `just qa` §10f: lands on disk, old name gone |
+| Rename wired to UI (F2) | proven | `just qa` §10f: lands on disk, old name gone, cursor follows the renamed file |
 | Rename conflict refused, nothing overwritten | proven | `just qa` §10e: prompt stays open, existing contents survive |
-| New folder (Ctrl+N), Duplicate (Ctrl+D) | built | implemented and manually exercised; not yet asserted in QA |
+| New folder (Ctrl+N or right-click), Duplicate (Ctrl+D) | proven by hand | new folder by right-click, evidence `B1-context-menu`; the cursor lands on the new folder |
+| **Never overwrite by accident** (rename, extract, "Keep both") | **proven** | `data_loss_regressions` (6): each was able to replace an existing file before; each failed against the old code first. No-clobber rename (`RENAME_NOREPLACE`); "Replace" moves the old file to Trash |
+| **Conflict dialog** (copy, move, drop) | **proven by hand** | 2 tests + evidence `B2-conflict-dialog`: asks before anything is written; Replace / Keep both / Skip per file in one job, "do this for all" only while more clashes remain; Escape writes nothing; Replace is disabled, with the reason, where there is no Trash; Ctrl+Z restores every original |
+| **Transfer card: bytes, speed, time left, Cancel** | **proven by hand** | `transfer_progress` (7, red on the old engine); evidence `B3-transfer-card`: on a drive capped at 8 MB/s it reads "51 MB of 152 MB · 6.7 MB/s · 16 s left"; the uncancelled copy is byte-identical; Cancel says "Stopping" at once and leaves no partial or staging file |
 | **Multi-select** (Space, Shift+arrows, Ctrl+A, Ctrl/Shift+click) | **proven** | `just qa` §10h; selection painted distinctly from the cursor |
 | Selection survives a re-sort; drops vanished files | **proven** | unit tests + `just qa` §10i: external delete takes 5 → 4 |
 | Ctrl+A never selects what the filter hides | **proven** | `just qa` §10h |
@@ -131,10 +145,13 @@ Rust 1.98.1, cxx-qt 0.10.0, Mesa llvmpipe (software rendering, Virtio GPU),
 | Opening a document via the desktop handler | proven | `just qa` §10g: xdg-open receives the path as one argument |
 | Never executing a file to open it | proven | `just qa` §10g: a booby-trapped script is refused with or without +x |
 | Open terminal here | built | wired to the palette; no QA assertion yet |
-| Job drawer with progress and cancel | proven | live screenshot; cancel path unit-tested |
+| Job drawer with progress and cancel | proven | see the transfer card above |
+| **Notice after a crash** | **proven by hand** | `crash_recovery` (10); evidence `C-crash-notice`: SIGKILL during a 402 MB copy, relaunch says "Copying holiday-video.mkv and 1 more to usb was interrupted: nothing had finished."; Open destination shows the folder with the partial file already swept; Dismiss is remembered across restarts. Jobs still running in another window, stopped at a clash, or from older builds are never reported |
+| **Places connect without freezing the window** | **proven by hand** | evidence `A5-offthread`: mount/connect/eject/disconnect run on workers; a server that never answers leaves the window responsive; killed helpers are reaped (no zombies); a dead FUSE mount counts as mounted until it is really gone |
+| **Cloud control port is private** | **proven** | rclone's remote control is a Unix socket under `$XDG_RUNTIME_DIR/gust/rc/`, owner-only; no TCP listener, so no other user or web page can reach it |
 | Opening a path from argv (`gust /some/dir`) | proven | live: honours the argument, falls back to $HOME |
-| Permanent delete wired to UI | not started | deliberately refused with a message rather than guessed |
-| Real extraction/compression | not started | policy layer only |
+| Permanent delete wired to UI | proven | `just qa` §10ab: offered only where Trash cannot work, red confirm with Cancel focused |
+| Real extraction/compression | proven | see Archives under M1 |
 
 ## M3 · connect
 
@@ -144,14 +161,16 @@ Rust 1.98.1, cxx-qt 0.10.0, Mesa llvmpipe (software rendering, Virtio GPU),
 | Include cycles, wildcards, multi-alias hosts | proven | unit tests |
 | Capability probing (Unknown ≠ No) | proven | unit tests on rclone fsinfo shapes |
 | Upload state: cached ≠ uploaded | proven | unit tests; confirmation bound to a revision |
-| Actual sshfs/gio/rclone mounting | not started | — |
-| Discovery UI, Add a place | not started | sidebar shows the honest empty state |
+| Actual sshfs/gio/rclone mounting | proven | `sshfs_live`, SMB/NFS live tests, rclone against WebDAV; `just qa` §10aa |
+| Discovery UI, Add a place | proven | `just qa` §10aa: saved computers listed without connecting |
 
 ## M4–M5
 
-Filter and scoped find are proven at the library level (depth bounds, no
-symlink following, cancellation). Palette actions, archives, portal, packaging,
-`--default` integration: **not started.**
+Filter, scoped find, palette actions, archives, packaging and `--default` are
+proven (see the tables above). **Not started:** the file-chooser portal (other
+apps' Open/Save dialogs), the `org.freedesktop.FileManager1` D-Bus service
+("Show in folder" from a browser), a Settings screen, folder sizes, a
+Properties window, bookmarks, and dragging files out to other apps.
 
 ## Known gaps worth stating plainly
 
@@ -176,13 +195,14 @@ list is worse than none, because it makes working features look broken.
    is tested end to end against a local WebDAV backend. Drive, Dropbox,
    Proton and Filen each have their own auth and capability quirks; a fixture
    passing is not provider certification.
-4. **Software rendering only, so the memory target is unresolved.** Every
-   performance number here comes from llvmpipe in a 2 GB VM. First paint is
-   206 ms (inside the ≤250 ms target) and 100k entries settle in ~510 ms, but
-   PSS measures 218 MiB against a ≤90 MiB target — and a bare Qt Quick window
-   with no Gust code in it already costs 155 MiB on this machine, 59 MiB of
-   which is llvmpipe. The target can only be judged on real GPU hardware.
-   This is the single genuinely open question in the project.
+4. **The memory target is missed on software rendering.** Every number
+   here comes from llvmpipe in a VM with no GPU. First window 155 ms and
+   100k entries settled in 470 ms are well inside target, but PSS is
+   212 MiB against ≤ 90 MiB — and a bare Qt Quick window with no Gust code
+   already costs 155 MiB here, 59 MiB of it llvmpipe. Machines with no GPU
+   are a real target (not everyone has one), so this is not waved away:
+   `QT_QUICK_BACKEND=software` (Qt's raster renderer, no LLVM) is the next
+   thing to measure. It has not been measured yet.
 5. **Tab drag-to-split and drag-out-to-detach are not built.** The split
    itself works from the palette and the keyboard; the drag gestures need
    cross-window Qt drag sessions and are recorded unbuilt rather than

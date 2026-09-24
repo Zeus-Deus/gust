@@ -564,6 +564,11 @@ sleep 1.0
   && ok "the rename landed on disk" || bad "rename did not take effect"
 [[ ! -d "$OPS/clash/one" ]] \
   && ok "the old name is gone" || bad "the old name still exists"
+# The cursor follows the file to its new place in the sort order. It used
+# to stay at the old row NUMBER, so the next key acted on another file.
+[[ "$(state "d['model']['cursor_name']")" == "renamed-one" ]] \
+  && ok "the cursor is on the renamed item" \
+  || bad "cursor on '$(state "d['model']['cursor_name']")' after rename, not the renamed item"
 
 say "10g · Enter opens a document but never executes a script"
 OPEN="$FIXTURE/opening"
@@ -1036,10 +1041,29 @@ say "10o · Debris from a dead process is swept; a live copy's file is not"
 SW="$FIXTURE/sweeping"
 rm -rf "$SW"; mkdir -p "$SW"
 echo "ordinary" > "$SW/keeper.txt"
+# Ownership comes from the claim store, never from the filename (the m41
+# data-loss fix): a crashed copy leaves a claim naming its file, its dev/ino
+# and a pid that is gone. Plant exactly that. Gust runs with HOME=$FIXTURE
+# and no XDG_STATE_HOME, so its claim store is here.
+CLAIMS="$FIXTURE/.local/state/gust/staging-claims"
+mkdir -p "$CLAIMS"; chmod 700 "$CLAIMS"
+BOOT="$(cat /proc/sys/kernel/random/boot_id)"
+plant_claim() {  # <file> <pid>
+  local f="$1" pid="$2"
+  printf 'path=%s\nboot=%s\npid=%s\ndev=%s\nino=%s\n' \
+    "$f" "$BOOT" "$pid" "$(stat -c %d "$f")" "$(stat -c %i "$f")" \
+    > "$CLAIMS/$pid-$(printf '%s' "$f" | sha1sum | cut -c1-16).claim"
+}
 printf 'partial' > "$SW/.gust-staging-999999-dead.pdf"
 printf 'partial' > "$SW/.gust-staging-999998-dead2.jpg"
+plant_claim "$SW/.gust-staging-999999-dead.pdf" 999999
+plant_claim "$SW/.gust-staging-999998-dead2.jpg" 999998
 # A staging file owned by a process that IS alive (this shell).
 printf 'inflight' > "$SW/.gust-staging-$$-inflight.bin"
+plant_claim "$SW/.gust-staging-$$-inflight.bin" $$
+# Named like debris but never claimed: a user may name a file anything, so
+# it must survive (PIDs are recycled; the name proves nothing).
+printf 'mine' > "$SW/.gust-staging-999997-lookalike.txt"
 
 vm wtype -M ctrl -k l -m ctrl >/dev/null 2>&1; sleep 0.8
 typ "$SW"; key Return
@@ -1052,6 +1076,10 @@ sleep 1.0
 [[ -e "$SW/.gust-staging-$$-inflight.bin" ]] \
   && ok "a LIVE copy's staging file was left alone" \
   || bad "the sweep stole a running copy's staging file"
+[[ "$(cat "$SW/.gust-staging-999997-lookalike.txt" 2>/dev/null)" == "mine" ]] \
+  && ok "a file that only LOOKS like debris (no claim) is never swept" \
+  || bad "the sweep removed an unclaimed file because of its name"
+rm -f "$CLAIMS"/$$-*.claim
 [[ "$(cat "$SW/keeper.txt" 2>/dev/null)" == "ordinary" ]] \
   && ok "ordinary files are never swept" || bad "the sweep touched a real file"
 expect "debris is not shown in the listing" "d['model']['count']" "1"

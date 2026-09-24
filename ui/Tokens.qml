@@ -7,36 +7,44 @@ import com.gust.app
 QtObject {
     id: root
 
-    property ThemeTokens tokens: ThemeTokens {}
+    // Watches Omarchy's theme folder: switching themes repaints Gust live.
+    property ThemeTokens tokens: ThemeTokens {
+        Component.onCompleted: watch_theme()
+    }
+
+    // Every token goes through these so it depends on `revision`: `color()`
+    // is a call, and QML only re-evaluates a binding for PROPERTIES it read.
+    function col(k) { return tokens.revision >= 0 ? tokens.color(k) : "" }
+    function met(k) { return tokens.revision >= 0 ? tokens.metric(k) : 0 }
 
     readonly property string themeName: tokens.name
     readonly property bool isLight: tokens.is_light
 
     // --- colour tokens -----------------------------------------------------
-    readonly property color background: tokens.color("background")
-    readonly property color backgroundDark: tokens.color("dark_background")
-    readonly property color backgroundLighter: tokens.color("lighter_background")
-    readonly property color foreground: tokens.color("foreground")
-    readonly property color foregroundDim: tokens.color("dark_foreground")
-    readonly property color foregroundBright: tokens.color("bright_foreground")
-    readonly property color accent: tokens.color("accent")
-    readonly property color selection: tokens.color("selection")
-    readonly property color muted: tokens.color("muted")
-    readonly property color border: tokens.color("border")
-    readonly property color danger: tokens.color("red")
-    readonly property color ok: tokens.color("green")
-    readonly property color warn: tokens.color("yellow")
-    readonly property color barBackground: tokens.color("bar_background")
-    readonly property color menuBackground: tokens.color("menu_background")
-    readonly property color selectedBackground: tokens.color("selected_background")
-    readonly property color selectedText: tokens.color("selected_text")
+    readonly property color background: root.col("background")
+    readonly property color backgroundDark: root.col("dark_background")
+    readonly property color backgroundLighter: root.col("lighter_background")
+    readonly property color foreground: root.col("foreground")
+    readonly property color foregroundDim: root.col("dark_foreground")
+    readonly property color foregroundBright: root.col("bright_foreground")
+    readonly property color accent: root.col("accent")
+    readonly property color selection: root.col("selection")
+    readonly property color muted: root.col("muted")
+    readonly property color border: root.col("border")
+    readonly property color danger: root.col("red")
+    readonly property color ok: root.col("green")
+    readonly property color warn: root.col("yellow")
+    readonly property color barBackground: root.col("bar_background")
+    readonly property color menuBackground: root.col("menu_background")
+    readonly property color selectedBackground: root.col("selected_background")
+    readonly property color selectedText: root.col("selected_text")
 
     // --- metrics -----------------------------------------------------------
-    readonly property real fontBase: tokens.metric("font_base")
-    readonly property real spacingScale: tokens.metric("spacing_scale")
-    readonly property real selectedAlpha: tokens.metric("selected_background_alpha")
-    readonly property real borderAlpha: tokens.metric("normal_border_alpha")
-    readonly property real borderWidth: Math.max(1, tokens.metric("border_width"))
+    readonly property real fontBase: root.met("font_base")
+    readonly property real spacingScale: root.met("spacing_scale")
+    readonly property real selectedAlpha: root.met("selected_background_alpha")
+    readonly property real borderAlpha: root.met("normal_border_alpha")
+    readonly property real borderWidth: Math.max(1, root.met("border_width"))
 
     // Derived type scale (shell.toml semantics: body = base).
     readonly property real fontCaption: Math.round(fontBase * 0.84)
