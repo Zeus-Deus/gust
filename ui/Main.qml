@@ -521,13 +521,21 @@ Window {
 
     function refreshPlaces() {
         let names = []
+        let lost = []
         try {
             const hosts = JSON.parse(dirModel.remote_suggestions())
-            for (let i = 0; i < hosts.length; i++)
-                if (hosts[i].connected) names.push(hosts[i].alias)
-        } catch (e) { names = [] }
+            for (let i = 0; i < hosts.length; i++) {
+                if (!hosts[i].connected) continue
+                names.push(hosts[i].alias)
+                if (hosts[i].lost) lost.push(hosts[i].alias)
+            }
+        } catch (e) { names = []; lost = [] }
         win.connectedPlaces = names
+        win.lostPlaces = lost
     }
+    // Mounted places whose server no longer answers. Still mounted (so
+    // Disconnect is what clears them) but never shown as "connected".
+    property var lostPlaces: []
     width: 1180
     height: 720
     minimumWidth: 520
@@ -1636,6 +1644,7 @@ Window {
                 model: dirModel
                 onPlaceChosen: (p) => { dirModel.navigate(p); win.focusList() }
                 remotePlaces: win.connectedPlaces
+                lostPlaces: win.lostPlaces
                 devices: win.deviceList
                 bookmarks: win.bookmarkList
                 onDeviceChosen: (path, mounted) => win.openDevice(path, mounted)
@@ -2188,6 +2197,10 @@ Window {
             if (win.job && win.job.state !== "Running") {
                 if (win.runningJobModels().length === 0) jobTimer.stop()
                 hints.status = win.job.message
+                // A failed transfer is often a place that went away: say so
+                // in the sidebar at once rather than still showing it
+                // "connected".
+                if (win.job.state === "Failed") win.refreshPlaces()
                 win.qaDump("job-finished")
             }
         }
@@ -2560,6 +2573,8 @@ Window {
             jobEta: win.job ? (win.job.eta || "") : "",
             conflictName: conflictDialog.clash ? conflictDialog.clash.name : "",
             devices: win.deviceList.map((x) => x.label + "|" + x.state),
+            connectedPlaces: win.connectedPlaces,
+            lostPlaces: win.lostPlaces,
             tabCenters: win.tabCenters(),
             confirmTitle: confirm.title,
             confirmBody: confirm.body,

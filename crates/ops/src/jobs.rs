@@ -578,9 +578,13 @@ fn run(
             }
             Err(e) => {
                 set_rec(&|r| r.state = crate::journal::JobState::Failed);
+                let msg = match &e {
+                    crate::engine::OpError::Io(io) => crate::engine::plain_io_message_at(io, &dst),
+                    other => format!("{other}"),
+                };
                 set(&progress, |p| {
                     p.state = JobState::Failed;
-                    p.message = format!("{e}");
+                    p.message = msg.clone();
                 });
                 return;
             }

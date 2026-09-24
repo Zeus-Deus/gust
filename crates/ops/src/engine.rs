@@ -57,6 +57,29 @@ impl std::fmt::Display for OpError {
 /// in front of them. Every message here says what happened and, where there
 /// is one, what to do about it. Anything unrecognised falls back to the OS
 /// text rather than inventing a friendlier lie.
+/// [`plain_io_message`] for a failure while writing to `dest`. On a network
+/// place (sshfs, SMB, rclone...) an I/O error almost always means the
+/// connection went, and "the disk reported a read/write error" sends the
+/// user looking for a broken disk that does not exist.
+pub fn plain_io_message_at(e: &io::Error, dest: &Path) -> String {
+    let fstype = gust_core::stall::fstype_for(dest);
+    plain_io_message_on(e, dest, fstype.as_deref())
+}
+
+/// The decision behind [`plain_io_message_at`], with the filesystem type
+/// passed in so it can be tested without a real mount.
+pub fn plain_io_message_on(e: &io::Error, dest: &Path, fstype: Option<&str>) -> String {
+    // EIO, ENOTCONN, ECONNABORTED, ECONNRESET, ETIMEDOUT.
+    let lost = matches!(e.raw_os_error(), Some(5) | Some(107) | Some(103) | Some(104) | Some(110));
+    if lost && fstype.is_some_and(gust_core::stall::can_stall) {
+        return format!(
+            "The connection to {} was lost. Nothing was replaced; reconnect and copy again.",
+            gust_core::stall::place_name_for(dest)
+        );
+    }
+    plain_io_message(e)
+}
+
 pub fn plain_io_message(e: &io::Error) -> String {
     use io::ErrorKind::*;
     match e.kind() {
@@ -98,6 +121,26 @@ fn staging_name(final_name: &OsStr) -> OsString {
     s.push(format!("{}-", std::process::id()));
     s.push(final_name);
     s
+}
+
+/// Remove a staging file after a failure and drop its claim — but only if
+/// the file is really gone. On a remote whose connection just died the
+/// unlink fails too; releasing the claim then would leave bytes on the
+/// server that no later sweep could prove were ours. Keeping it lets the
+/// next visit, with the server back, clean up.
+fn discard_staged(dst_dir: &DirHandle, stage: &OsStr, claim: &Option<PathBuf>, written: u64) {
+    let gone = match rustix::fs::unlinkat(dst_dir.as_fd(), stage, rustix::fs::AtFlags::empty()) {
+        Ok(()) => true,
+        Err(rustix::io::Errno::NOENT) => true,
+        Err(_) => false,
+    };
+    if let Some(c) = claim {
+        if gone {
+            crate::staging::release(c);
+        } else {
+            crate::staging::mark_unremoved(c, written);
+        }
+    }
 }
 
 /// Copy one regular file into `dst_dir` under `dst_name`.
@@ -170,6 +213,17 @@ pub fn copy_regular_file_with(
     // Record ownership BEFORE the file exists. A staging file with no claim is
     // never reclaimed by the sweep, so the claim must be durable first.
     let staged_abs = PathBuf::from(dst_dir.display()).join(&stage);
+    // Registered as in flight BEFORE the claim exists and for exactly as
+    // long as this function holds the file, so no sweep — not even one in
+    // this process — can take a copy that is still being written.
+    struct Active<'a>(&'a Path);
+    impl Drop for Active<'_> {
+        fn drop(&mut self) {
+            crate::staging::end(self.0);
+        }
+    }
+    crate::staging::begin(&staged_abs);
+    let _active = Active(&staged_abs);
     let claim = crate::staging::claim(&staged_abs).ok();
     // Create with the source's permission bits masked to owner-only first;
     // widened at the end. Never world-readable in between.
@@ -240,20 +294,14 @@ pub fn copy_regular_file_with(
     drop(dst);
 
     if let Err(e) = copy_result {
-        let _ = rustix::fs::unlinkat(dst_dir.as_fd(), &stage, rustix::fs::AtFlags::empty());
-        if let Some(c) = &claim {
-            crate::staging::release(c);
-        }
+        discard_staged(dst_dir, &stage, &claim, written);
         return Err(e);
     }
 
     rustix::fs::renameat(dst_dir.as_fd(), &stage, dst_dir.as_fd(), dst_name).inspect_err(|_| {
         // Even the final rename can fail (a full directory, a vanished
         // parent). The staging file is ours; do not abandon it.
-        let _ = rustix::fs::unlinkat(dst_dir.as_fd(), &stage, rustix::fs::AtFlags::empty());
-        if let Some(c) = &claim {
-            crate::staging::release(c);
-        }
+        discard_staged(dst_dir, &stage, &claim, written);
     })?;
     // Committed under its real name: the claim no longer describes anything.
     if let Some(c) = &claim {
@@ -298,9 +346,8 @@ pub fn copy_symlink(
     }
     let r = rustix::fs::renameat(dst_dir.as_fd(), &stage, dst_dir.as_fd(), dst_name);
     if r.is_err() {
-        let _ = rustix::fs::unlinkat(dst_dir.as_fd(), &stage, rustix::fs::AtFlags::empty());
-    }
-    if let Some(c) = &claim {
+        discard_staged(dst_dir, &stage, &claim, 0);
+    } else if let Some(c) = &claim {
         crate::staging::release(c);
     }
     r?;
@@ -435,6 +482,76 @@ mod tests {
     fn handles(dir: &Path, name: &str) -> (DirHandle, OsString) {
         resolve_parent(&dir.join(name)).unwrap()
     }
+
+    #[test]
+    fn a_lost_connection_is_not_called_a_disk_error() {
+        // Found live: killing the SFTP server mid-copy showed "The disk
+        // reported a read/write error." There was no disk problem.
+        let dest = Path::new("/run/user/1000/gust/places/studio/holiday.mkv");
+        let eio = io::Error::from_raw_os_error(5);
+        let m = plain_io_message_on(&eio, dest, Some("fuse.sshfs"));
+        assert!(m.contains("connection to studio was lost"), "{m}");
+        assert!(!m.contains("disk"), "{m}");
+        let m = plain_io_message_on(&io::Error::from_raw_os_error(107), dest, Some("cifs"));
+        assert!(m.contains("was lost"), "{m}");
+        // A local disk still reports a disk error, honestly.
+        let m = plain_io_message_on(&eio, Path::new("/home/u/x"), Some("ext4"));
+        assert_eq!(m, "The disk reported a read/write error.");
+        // A full remote is still "full", not "connection lost".
+        let m = plain_io_message_on(&io::Error::from_raw_os_error(28), dest, Some("fuse.sshfs"));
+        assert!(m.contains("full"), "{m}");
+    }
+
+    #[test]
+    fn a_staging_file_that_cannot_be_removed_keeps_its_claim() {
+        // Found live: the SFTP server died mid-copy, the unlink of the
+        // staging file failed too (the connection was gone), and the claim
+        // was released anyway — leaving 231 MB on the server that no later
+        // sweep could ever prove was Gust's. A failed removal must keep
+        // the claim so the next visit, with the server back, cleans it up.
+        let _g = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        use std::os::unix::fs::PermissionsExt;
+        let d = tmp("unremovable");
+        std::env::set_var("XDG_STATE_HOME", d.join("state"));
+        fs::create_dir_all(d.join("src")).unwrap();
+        fs::create_dir_all(d.join("dst")).unwrap();
+        fs::write(d.join("src/big.bin"), vec![7u8; 3 * 1024 * 1024]).unwrap();
+        let (sd, sn) = handles(&d.join("src"), "big.bin");
+        let (dd, dn) = handles(&d.join("dst"), "big.bin");
+        let cancel = CancelToken::new();
+        let dst = d.join("dst");
+        let mut once = false;
+        let r = copy_regular_file_with(&sd, &sn, &dd, &dn, ConflictPolicy::Ask, &cancel, &mut |_| {
+            if !once {
+                once = true;
+                // The destination stops accepting removals, then the copy fails.
+                fs::set_permissions(&dst, fs::Permissions::from_mode(0o555)).unwrap();
+                cancel.cancel();
+            }
+        });
+        assert!(r.is_err());
+        let left: Vec<_> = fs::read_dir(&dst).unwrap().flatten().map(|e| e.path()).collect();
+        fs::set_permissions(&dst, fs::Permissions::from_mode(0o755)).unwrap();
+        if left.is_empty() {
+            // Running as root: the removal succeeded, nothing to prove.
+            fs::remove_dir_all(&d).ok();
+            return;
+        }
+        assert!(
+            crate::staging::load_all().iter().any(|c| left.contains(&c.path)),
+            "the staging file that could not be removed lost its ownership record: {left:?}"
+        );
+        // With the destination reachable again, the next visit reclaims it
+        // even though its owner — this process — is still running.
+        assert_eq!(sweep_stale_staging(&dst), 1, "the failed copy's debris is reclaimed");
+        assert!(fs::read_dir(&dst).unwrap().next().is_none(), "nothing is left behind");
+        assert!(
+            !crate::staging::load_all().iter().any(|c| left.contains(&c.path)),
+            "the claim went with the file"
+        );
+        fs::remove_dir_all(&d).ok();
+    }
+
 
     #[test]
     fn copies_a_regular_file_with_contents_and_mode() {
@@ -662,8 +779,11 @@ pub fn sweep_stale_staging(dir: &Path) -> usize {
         if c.path.parent() != Some(dir) {
             continue;
         }
-        // A live owner in this same boot is a copy in flight right now.
-        if crate::staging::owner_is_live(&c) {
+        // A copy in flight right now — in another process or in this one —
+        // is never touched. A claim this process holds for a copy that has
+        // already failed is debris: that is how a remote that dropped
+        // mid-copy gets cleaned up once it is back.
+        if !crate::staging::is_abandoned(&c) {
             continue;
         }
         // The claim must describe the object that is actually there.
@@ -679,12 +799,14 @@ pub fn sweep_stale_staging(dir: &Path) -> usize {
             // An unconfirmed claim cannot prove which object it owns.
             continue;
         }
-        if md.dev() != c.dev || md.ino() != c.ino {
+        if !crate::staging::describes(&c, &md) {
             // Something else occupies that path now. Not ours to remove.
             continue;
         }
         if std::fs::remove_file(&c.path).is_ok() {
             removed += 1;
+            // The record described that file and nothing else.
+            crate::staging::release(&c.claim_file);
         }
     }
     removed
@@ -695,7 +817,7 @@ pub fn sweep_stale_staging(dir: &Path) -> usize {
 pub fn prune_dead_claims() -> usize {
     let mut pruned = 0usize;
     for c in crate::staging::load_all() {
-        if crate::staging::owner_is_live(&c) {
+        if !crate::staging::is_abandoned(&c) {
             continue;
         }
         if c.path.symlink_metadata().is_ok() {
@@ -780,6 +902,47 @@ mod sweep_tests {
             b"keep me",
             "ordinary files are never touched"
         );
+        fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn stranded_debris_on_a_network_place_is_recognised_after_a_reconnect() {
+        // Found live: after the SFTP server came back, sshfs numbered the
+        // same file inode 2 instead of 5, so a dev+inode check could never
+        // match and 232 MB stayed on the server for good.
+        let _g = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        use std::os::unix::fs::MetadataExt;
+        let d = tmp("netdebris");
+        std::env::set_var("XDG_STATE_HOME", d.join("state"));
+        let debris = d.join(".gust-staging-999999-holiday.mkv");
+        fs::write(&debris, vec![1u8; 4096]).unwrap();
+        let claim = crate::staging::claim(&debris).unwrap();
+        let md = debris.symlink_metadata().unwrap();
+        let write_claim = |net: u8, written: u64, ino: u64| {
+            fs::write(
+                &claim,
+                format!(
+                    "path={}\nboot={}\npid=999999\ndev={}\nino={ino}\nsince={}\nnet={net}\nwritten={written}\n",
+                    debris.display(),
+                    crate::staging::boot_id(),
+                    md.dev(),
+                    md.mtime()
+                ),
+            )
+            .unwrap();
+        };
+        // The inode changed, on a LOCAL disk: never removed on weaker proof.
+        write_claim(0, 4096, md.ino() + 1000);
+        assert_eq!(sweep_stale_staging(&d), 0, "a local file needs its exact identity");
+        // A network place, but the file holds MORE than Gust ever wrote:
+        // somebody else wrote to it. Not ours.
+        write_claim(1, 1024, md.ino() + 1000);
+        assert_eq!(sweep_stale_staging(&d), 0, "larger than what Gust wrote");
+        // A network place, and the file holds no more than Gust wrote (live:
+        // 218 365 952 written, 217 149 440 arrived before the link died).
+        write_claim(1, 8192, md.ino() + 1000);
+        assert_eq!(sweep_stale_staging(&d), 1);
+        assert!(!debris.exists());
         fs::remove_dir_all(&d).ok();
     }
 

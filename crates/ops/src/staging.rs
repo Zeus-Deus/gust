@@ -27,6 +27,15 @@ pub struct StagingClaim {
     /// match a live PID, and its files are genuinely abandoned.
     pub boot_id: String,
     pub pid: u32,
+    /// The claim file this was read from, so a sweep that removes the
+    /// staging file can drop the record with it.
+    pub claim_file: PathBuf,
+    /// Staging file's mtime when the claim was confirmed.
+    pub since: i64,
+    /// Created on a network filesystem, where inode numbers are per mount.
+    pub net: bool,
+    /// Bytes written before a failure left the file stranded; 0 otherwise.
+    pub written: u64,
 }
 
 /// Where claims live: private, per-user, and outside any directory Gust
@@ -108,17 +117,51 @@ pub fn confirm(claim_path: &Path, staged: &Path) -> std::io::Result<()> {
         use std::os::unix::fs::PermissionsExt;
         let _ = f.set_permissions(fs::Permissions::from_mode(0o600));
     }
+    // A network filesystem (sshfs without use_ino, SMB, rclone) numbers
+    // inodes per mount, so after a reconnect dev+ino can never match. Say
+    // so now, while the mount is known to be good.
+    let net = gust_core::stall::fstype_for(staged).is_some_and(|t| gust_core::stall::can_stall(&t));
     writeln!(
         f,
-        "path={}\nboot={}\npid={}\ndev={}\nino={}",
+        "path={}\nboot={}\npid={}\ndev={}\nino={}\nsince={}\nnet={}",
         staged.display(),
         boot_id(),
         std::process::id(),
         md.dev(),
-        md.ino()
+        md.ino(),
+        md.mtime(),
+        u8::from(net)
     )?;
     f.sync_all()?;
     Ok(())
+}
+
+/// A copy failed and its staging file could not be removed (the place it
+/// was on stopped answering). Record how many bytes Gust had written, so a
+/// later sweep can recognise the file on a network place whose inode
+/// numbers changed with the reconnect.
+pub fn mark_unremoved(claim_path: &Path, written: u64) {
+    if let Ok(mut f) = fs::OpenOptions::new().append(true).open(claim_path) {
+        let _ = writeln!(f, "written={written}");
+        let _ = f.sync_all();
+    }
+}
+
+/// Is `md` (what is at a claim's path now) the file this claim describes?
+///
+/// Normally dev+inode. On a network place, where inode numbers do not
+/// survive a remount, a weaker but still specific proof is accepted — only
+/// for a copy that failed with the file stranded: a regular file at the
+/// exact staging path (a name containing the owner's process id), no
+/// larger than what Gust wrote — the last writes may have died in flight,
+/// but a larger file means somebody else wrote to it — and not older than
+/// the claim.
+pub fn describes(c: &StagingClaim, md: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    if c.dev != 0 && c.ino != 0 && md.dev() == c.dev && md.ino() == c.ino {
+        return true;
+    }
+    c.net && c.written > 0 && md.is_file() && md.len() <= c.written && md.mtime() >= c.since
 }
 
 /// Drop a claim once the staging file has been committed or removed.
@@ -144,8 +187,14 @@ pub fn load_all() -> Vec<StagingClaim> {
         let mut pid = 0u32;
         let mut dev = 0u64;
         let mut ino = 0u64;
+        let mut since = 0i64;
+        let mut net = false;
+        let mut written = 0u64;
         for line in text.lines() {
             match line.split_once('=') {
+                Some(("since", v)) => since = v.parse().unwrap_or(0),
+                Some(("net", v)) => net = v == "1",
+                Some(("written", v)) => written = v.parse().unwrap_or(0),
                 Some(("path", v)) => path = Some(PathBuf::from(v)),
                 Some(("boot", v)) => boot = v.to_string(),
                 Some(("pid", v)) => pid = v.parse().unwrap_or(0),
@@ -161,10 +210,45 @@ pub fn load_all() -> Vec<StagingClaim> {
                 ino,
                 boot_id: boot,
                 pid,
+                claim_file: e.path(),
+                since,
+                net,
+                written,
             });
         }
     }
     out
+}
+
+/// Staging files this process is writing right now. A claim owned by this
+/// process whose path is NOT here belongs to a copy that already failed —
+/// typically one whose cleanup could not reach a remote that had gone —
+/// and is debris even though its owner (us) is alive.
+static ACTIVE: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+/// Mark a staging path as being written by this process.
+pub fn begin(path: &Path) {
+    if let Ok(mut a) = ACTIVE.lock() {
+        a.push(path.to_path_buf());
+    }
+}
+
+/// The copy writing `path` has finished, one way or another.
+pub fn end(path: &Path) {
+    if let Ok(mut a) = ACTIVE.lock() {
+        if let Some(i) = a.iter().position(|p| p == path) {
+            a.swap_remove(i);
+        }
+    }
+}
+
+/// May a sweep remove this claim's file? Never while any process —
+/// including this one — is still writing it.
+pub fn is_abandoned(c: &StagingClaim) -> bool {
+    if c.boot_id == boot_id() && c.pid == std::process::id() {
+        return !ACTIVE.lock().map(|a| a.contains(&c.path)).unwrap_or(true);
+    }
+    !owner_is_live(c)
 }
 
 /// Is this claim's owning process still running in this same boot?
@@ -230,6 +314,10 @@ mod tests {
             ino: 2,
             boot_id: "a-different-boot-entirely".into(),
             pid: std::process::id(),
+            claim_file: PathBuf::new(),
+            since: 0,
+            net: false,
+            written: 0,
         };
         assert!(
             !owner_is_live(&c),
@@ -248,6 +336,10 @@ mod tests {
             ino: 2,
             boot_id: boot_id(),
             pid: std::process::id(),
+            claim_file: PathBuf::new(),
+            since: 0,
+            net: false,
+            written: 0,
         };
         assert!(owner_is_live(&c));
         fs::remove_dir_all(&d).ok();

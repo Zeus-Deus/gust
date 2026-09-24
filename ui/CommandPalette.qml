@@ -112,7 +112,8 @@ Rectangle {
                 results.append({ kind: "action",
                                  label: (h.connected ? "Disconnect from " : "Connect to ")
                                         + h.alias + "  (" + h.host + ")"
-                                        + (h.proxy ? " · via a jump host" : ""),
+                                        + (h.proxy ? " · via a jump host" : "")
+                                        + (h.lost ? " · connection lost" : ""),
                                  payload: (h.connected ? "remote-off:" : "remote-on:") + h.alias })
             }
             return

@@ -19,6 +19,7 @@ Rectangle {
 
     /// Aliases of places that are connected right now.
     property var remotePlaces: []
+    property var lostPlaces: []
 
     /// Pinned folders, shared with every GTK file dialog on the desktop.
     property var bookmarks: []
@@ -323,8 +324,10 @@ Rectangle {
                 width: column.width
                 height: Tokens.rowHeight
                 verticalAlignment: Text.AlignVCenter
-                text: modelData + "  ·  connected"
-                color: Tokens.foreground
+                readonly property bool lost: root.lostPlaces.indexOf(modelData) >= 0
+                // Colour alone never carries the state (plan §2 mockup F).
+                text: modelData + (lost ? "  ·  lost" : "  ·  connected")
+                color: lost ? Tokens.danger : Tokens.foreground
                 font.family: Tokens.fontFamily
                 font.pixelSize: Tokens.fontBody
                 elide: Text.ElideRight
