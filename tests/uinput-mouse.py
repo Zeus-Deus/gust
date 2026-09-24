@@ -16,7 +16,7 @@ passes once fail the next time.
 
 Usage:
     uinput-mouse.py move X Y
-    uinput-mouse.py click X Y [left|right|middle]
+    uinput-mouse.py click X Y [left|right|middle|back|forward]
     uinput-mouse.py drag X1 Y1 X2 Y2
     uinput-mouse.py wheel X Y TICKS      (negative scrolls down)
 """
@@ -31,6 +31,8 @@ import time
 EV_SYN, EV_KEY, EV_REL, EV_ABS = 0x00, 0x01, 0x02, 0x03
 SYN_REPORT = 0
 BTN_LEFT, BTN_RIGHT, BTN_MIDDLE = 0x110, 0x111, 0x112
+# The side buttons most mice have: Back and Forward.
+BTN_SIDE, BTN_EXTRA = 0x113, 0x114
 REL_WHEEL = 0x08
 ABS_X, ABS_Y = 0x00, 0x01
 
@@ -57,7 +59,7 @@ def open_device(width, height):
     fd = os.open("/dev/uinput", os.O_WRONLY | os.O_NONBLOCK)
 
     _ioctl(fd, UI_SET_EVBIT, EV_KEY)
-    for btn in (BTN_LEFT, BTN_RIGHT, BTN_MIDDLE):
+    for btn in (BTN_LEFT, BTN_RIGHT, BTN_MIDDLE, BTN_SIDE, BTN_EXTRA):
         _ioctl(fd, UI_SET_KEYBIT, btn)
     _ioctl(fd, UI_SET_EVBIT, EV_REL)
     _ioctl(fd, UI_SET_RELBIT, REL_WHEEL)
@@ -123,7 +125,8 @@ def button(fd, btn, down):
     time.sleep(0.06)
 
 
-BUTTONS = {"left": BTN_LEFT, "right": BTN_RIGHT, "middle": BTN_MIDDLE}
+BUTTONS = {"left": BTN_LEFT, "right": BTN_RIGHT, "middle": BTN_MIDDLE,
+           "back": BTN_SIDE, "forward": BTN_EXTRA}
 
 
 def main():

@@ -1607,6 +1607,30 @@ else
   expect "with one tab the strip shows no tabs to drag" "len(d['tabCenters'])" "0"
 fi
 
+say "10x3 · Back and Forward from the keyboard (Alt+←/→) and the mouse's side buttons"
+HB="$FIXTURE/history"
+rm -rf "$HB"; mkdir -p "$HB/one/two"
+start_gust
+goto "$HB" || bad "could not reach the history fixture"
+goto "$HB/one" >/dev/null
+goto "$HB/one/two" >/dev/null
+vm wtype -M alt -k Left -m alt >/dev/null 2>&1; sleep 0.8
+expect "Alt+Left goes back" "d['model']['location']" "$HB/one"
+vm wtype -M alt -k Left -m alt >/dev/null 2>&1; sleep 0.8
+expect "Alt+Left again goes back again" "d['model']['location']" "$HB"
+vm wtype -M alt -k Right -m alt >/dev/null 2>&1; sleep 0.8
+expect "Alt+Right goes forward" "d['model']['location']" "$HB/one"
+if [[ "$MOUSE_OK" -eq 1 ]]; then
+  read -r WX WY WW WH <<<"$(win_geo)"
+  mouse click $((WX + WW / 2)) $((WY + WH / 2)) forward; sleep 0.8
+  expect "the mouse's Forward button goes forward" "d['model']['location']" "$HB/one/two"
+  mouse click $((WX + WW / 2)) $((WY + WH / 2)) back; sleep 0.8
+  expect "the mouse's Back button goes back" "d['model']['location']" "$HB/one"
+  expect "a side-button press selected nothing" "d['selCount']" "0"
+else
+  bad "SKIPPED: no pointer injection"
+fi
+
 say "10z · :find searches a scope the user chose, and Escape gets out"
 FD="$FIXTURE/findtest"
 rm -rf "$FD"; mkdir -p "$FD/a/b/c/d" "$FD/other/deep"
