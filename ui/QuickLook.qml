@@ -21,13 +21,23 @@ Item {
 
     signal closed()
 
-    function show(json) {
+    /// The model, so the panel can ask for and receive its visual preview.
+    property var model: null
+    /// Image path or archive listing, rendered on a worker (sandboxed).
+    readonly property var visual: {
+        const s = root.model && root.open ? root.model.peek_visual : ""
+        if (!s) return null
+        try { return JSON.parse(s) } catch (e) { return null }
+    }
+
+    function show(json, row) {
         try {
             root.info = JSON.parse(json)
         } catch (e) {
             root.info = null
         }
         root.open = root.info !== null && root.info.ok
+        if (root.open && root.model && row !== undefined) root.model.request_peek_visual(row)
     }
     function hide() {
         root.open = false
@@ -54,7 +64,8 @@ Item {
         // As tall as it needs: a folder or a binary has no preview, and a
         // mostly-empty panel reads as "something failed to load".
         readonly property bool hasPreview: root.info !== null
-            && ((root.info.lines && root.info.lines.length > 0) || root.info.noPreview !== "")
+            && ((root.info.lines && root.info.lines.length > 0) || root.info.noPreview !== ""
+                || root.visual !== null)
         height: hasPreview
                 ? Math.min(parent.height - Tokens.spaceXl * 4, Math.round(Tokens.rowHeight * 24))
                 : Math.min(parent.height - Tokens.spaceXl * 4,
@@ -137,9 +148,61 @@ Item {
                         - Tokens.rowHeight * 3 - Tokens.spaceLg * 4
                         - (factsGrid.visible ? factsGrid.height : 0)
 
+                // Image, PDF first page or video frame: a PNG the sandboxed
+                // helper made. Only this PNG is decoded here, never the file.
+                Image {
+                    id: visualImage
+                    anchors.fill: parent
+                    visible: root.visual && root.visual.image !== undefined
+                    source: visible ? "file://" + root.visual.image : ""
+                    fillMode: Image.PreserveAspectFit
+                    asynchronous: true
+                    cache: false
+                    smooth: true
+                }
+
+                // Archive: what is inside, listed without extracting.
+                ListView {
+                    anchors.fill: parent
+                    visible: root.visual && root.visual.archive !== undefined
+                    clip: true
+                    boundsBehavior: Flickable.StopAtBounds
+                    model: visible ? root.visual.archive : []
+                    header: Text {
+                        text: root.visual && root.visual.total !== undefined
+                              ? qsTr("%1 entries").arg(root.visual.total) : ""
+                        color: Tokens.foregroundDim
+                        font.family: Tokens.fontFamily
+                        font.pixelSize: Tokens.fontCaption
+                        bottomPadding: Tokens.spaceSm
+                    }
+                    delegate: Text {
+                        required property var modelData
+                        width: ListView.view.width
+                        text: modelData
+                        color: Tokens.foreground
+                        font.family: Tokens.fontFamily
+                        font.pixelSize: Tokens.fontSmall
+                        textFormat: Text.PlainText
+                        elide: Text.ElideMiddle
+                    }
+                }
+
+                // The sandboxed helper could not render it (a damaged or
+                // disguised file): say so rather than show an empty frame.
                 Text {
                     anchors.fill: parent
-                    visible: root.info && root.info.noPreview !== ""
+                    visible: root.visual && root.visual.why !== undefined
+                    text: visible ? qsTr("No preview: the file could not be read as what its name says (%1)").arg(root.visual.why) : ""
+                    color: Tokens.foregroundDim
+                    font.family: Tokens.fontFamily
+                    font.pixelSize: Tokens.fontSmall
+                    wrapMode: Text.WordWrap
+                }
+
+                Text {
+                    anchors.fill: parent
+                    visible: root.info && root.info.noPreview !== "" && !root.visual
                     text: root.info ? root.info.noPreview : ""
                     color: Tokens.foregroundDim
                     font.family: Tokens.fontFamily
@@ -150,7 +213,7 @@ Item {
                 Flickable {
                     anchors.fill: parent
                     visible: root.info && root.info.lines
-                             && root.info.lines.length > 0
+                             && root.info.lines.length > 0 && !root.visual
                     clip: true
                     contentHeight: peekText.implicitHeight
                     contentWidth: width

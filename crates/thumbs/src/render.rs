@@ -80,6 +80,27 @@ fn helpers_for(mime: &str) -> Vec<Helper> {
             ],
         });
     }
+    if mime == "application/pdf" {
+        // First page only, rendered by poppler inside the same sandbox as
+        // every other helper: no network, no home, read-only input, killed
+        // on the time and memory limits. `-singlefile` writes exactly
+        // /out/thumb.png, the path the validator reads.
+        v.push(Helper {
+            binary: "pdftoppm",
+            args: &[
+                "-png",
+                "-f",
+                "1",
+                "-l",
+                "1",
+                "-singlefile",
+                "-scale-to",
+                "256",
+                "/in/input",
+                "/out/thumb",
+            ],
+        });
+    }
     if mime.starts_with("video/") {
         v.push(Helper {
             binary: "ffmpegthumbnailer",
@@ -329,6 +350,8 @@ mod tests {
         assert!(can_thumbnail("image/png"));
         assert!(can_thumbnail("image/jpeg"));
         assert!(can_thumbnail("video/mp4"));
+        // A PDF's first page, through poppler, in the sandbox.
+        assert!(can_thumbnail("application/pdf"));
         // Never guess at something we cannot safely render.
         assert!(!can_thumbnail("application/x-executable"));
         assert!(!can_thumbnail("text/plain"));
@@ -340,7 +363,7 @@ mod tests {
     fn a_helper_never_receives_the_real_path_as_an_argument() {
         // The input is bound at a fixed in-sandbox path, so a filename can
         // never be interpreted as an option by the helper.
-        for h in helpers_for("image/png") {
+        for h in helpers_for("image/png").into_iter().chain(helpers_for("application/pdf")) {
             for a in h.args {
                 assert!(
                     !a.contains("{in}") && !a.contains("{out}"),

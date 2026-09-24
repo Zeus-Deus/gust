@@ -61,6 +61,7 @@ pub mod qobject {
         /// (current one marked) and a peek at the item under the cursor.
         /// Filled on a worker after request_columns().
         #[qproperty(QString, columns_side)]
+        #[qproperty(QString, peek_visual)]
         /// True while a scoped find is running or its results are shown.
         #[qproperty(bool, finding)]
         #[qproperty(QString, find_needle, cxx_name = "findNeedle")]
@@ -336,6 +337,11 @@ pub mod qobject {
         /// (DESIGN §6.9).
         #[qinvokable]
         fn peek_row(self: &DirModel, row: i32) -> QString;
+        /// Quick Look's visual: render a large preview for the row on a
+        /// worker (sandboxed helpers only) and publish it in `peek_visual`
+        /// as JSON — an image path, or an archive's entry list.
+        #[qinvokable]
+        fn request_peek_visual(self: Pin<&mut DirModel>, row: i32);
         #[qinvokable]
         fn drag_begin(self: Pin<&mut DirModel>, row: i32);
         #[qinvokable]
@@ -612,6 +618,8 @@ pub struct DirModelRust {
     empty_reason: QString,
     columns_side: QString,
     columns_gen: u64,
+    peek_visual: QString,
+    peek_gen: u64,
     location: QString,
     location_display: QString,
     count: i32,
@@ -824,6 +832,8 @@ impl DirModelRust {
             empty_reason: QString::from(""),
             columns_side: QString::from(""),
             columns_gen: 0,
+            peek_visual: QString::from(""),
+            peek_gen: 0,
             sort_field: QString::from("name"),
             sort_ascending: true,
             filter: QString::from(""),
@@ -1426,6 +1436,66 @@ impl qobject::DirModel {
             })
             .collect();
         QString::from(&format!("[{}]", items.join(",")))
+    }
+
+    fn request_peek_visual(mut self: Pin<&mut Self>, row: i32) {
+        let gen = self.as_ref().peek_gen.wrapping_add(1);
+        self.as_mut().rust_mut().peek_gen = gen;
+        self.as_mut().set_peek_visual(QString::default());
+        let Some(path) = self.as_ref().path_of_row(row) else {
+            return;
+        };
+        let Some(thread) = self.as_ref().qt_thread_handle() else {
+            return;
+        };
+        let name = path.file_name().map(|n| n.to_owned()).unwrap_or_default();
+        std::thread::Builder::new()
+            .name("gust-peek".into())
+            .spawn(move || {
+                // Nothing is fetched from a place that can stall.
+                if gust_core::stall::needs_probe(&path) {
+                    return;
+                }
+                let is_archive = gust_ops::archive::io::looks_like_archive(&name.to_string_lossy());
+                let json = if let Some(mime) = gust_core::mime::thumbnail_mime(&name) {
+                    match gust_thumbs::render::thumbnail(
+                        &path,
+                        mime,
+                        gust_thumbs::cache::ThumbSize::Large,
+                    ) {
+                        Ok(img) => format!(
+                            "{{\"image\":{}}}",
+                            Self::json_str(&img.to_string_lossy())
+                        ),
+                        Err(e) => format!("{{\"why\":{}}}", Self::json_str(&e.to_string())),
+                    }
+                } else if is_archive {
+                    match gust_ops::archive::io::list(&path) {
+                        Ok(entries) => {
+                            let total = entries.len();
+                            let shown: Vec<String> = entries
+                                .iter()
+                                .take(200)
+                                .map(|e| Self::json_str(&gust_core::peek::sanitise_line(e.name.as_bytes())))
+                                .collect();
+                            format!(
+                                "{{\"archive\":[{}],\"total\":{}}}",
+                                shown.join(","),
+                                total
+                            )
+                        }
+                        Err(e) => format!("{{\"why\":{}}}", Self::json_str(&e.message())),
+                    }
+                } else {
+                    return;
+                };
+                let _ = thread.queue(move |mut model| {
+                    if model.as_ref().peek_gen == gen {
+                        model.as_mut().set_peek_visual(QString::from(&json));
+                    }
+                });
+            })
+            .ok();
     }
 
     fn trash_list(&self) -> QString {

@@ -2140,8 +2140,37 @@ key space
 sleep 1.2
 expect "an image is named by kind" "d['quickLookKind']" "PNG image"
 expect "and is not decoded into text" "d['quickLookLines']" "0"
+# The fake PNG goes to the sandboxed helper, which fails; the panel says
+# why instead of showing an empty frame.
+wait_for "d['quickLookVisual'][:4]" "why:" 20 >/dev/null
+[[ "$(state "d['quickLookVisual']")" == why:* ]] \
+  && ok "a disguised image explains why there is no preview" \
+  || bad "a disguised image left an empty preview ($(state "d['quickLookVisual']"))"
 key Escape
 sleep 0.8
+
+# Real image, real PDF and an archive: rendered or listed by sandboxed /
+# read-only helpers, never decoded in this process.
+if command -v magick >/dev/null 2>&1 && command -v pdftoppm >/dev/null 2>&1 && command -v bsdtar >/dev/null 2>&1; then
+  magick -size 320x200 gradient:blue-orange "$QLDIR/real.jpg" 2>/dev/null
+  magick -size 300x400 xc:white -fill black -draw "rectangle 20,20 280,40" "$QLDIR/paper.pdf" 2>/dev/null
+  mkdir -p "$QLDIR/.pack/a" && echo x > "$QLDIR/.pack/a/f" && bsdtar -czf "$QLDIR/bundle.tar.gz" -C "$QLDIR/.pack" a && rm -rf "$QLDIR/.pack"
+  sleep 1.5
+  for pair in "real:image" "paper:image" "bundle:archive:"; do
+    name="${pair%%:*}"; want="${pair#*:}"
+    typ "$name"; key space
+    wait_for "d['quickLookVisual'][:${#want}]" "$want" 25 >/dev/null
+    got="$(state "d['quickLookVisual']")"
+    [[ "$got" == "$want"* ]] \
+      && ok "Quick Look previews $name  ($got)" \
+      || bad "Quick Look gave no $want preview for $name (got '$got')"
+    key Escape; sleep 0.8
+  done
+  shot "12q-visual"
+  [[ ! -e "$QLDIR/a" ]] && ok "listing an archive extracted nothing" || bad "Quick Look extracted an archive"
+else
+  ok "(magick/pdftoppm/bsdtar absent — visual previews skipped)"
+fi
 typ "blob"
 key space
 sleep 1.2
