@@ -1,0 +1,32 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/ops",
+    "crates/remote",
+    "crates/thumbs",
+    "crates/app",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.90"
+
+[workspace.dependencies]
+gust-core = { path = "crates/core" }
+gust-ops = { path = "crates/ops" }
+gust-remote = { path = "crates/remote" }
+gust-thumbs = { path = "crates/thumbs" }
+
+rustix = { version = "1.0", features = ["fs", "process", "thread"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+[profile.release]
+opt-level = 2
+lto = "thin"
+codegen-units = 4
+strip = true

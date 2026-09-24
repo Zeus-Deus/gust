@@ -1,0 +1,6 @@
+target/
+*.log
+
+# QA artifacts live in /tmp, never in the repo.
+/tmp-shots/
+*.ocr.png
