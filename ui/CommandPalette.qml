@@ -60,7 +60,7 @@ Rectangle {
         { id: "paste",        label: "Paste here",            hint: "Ctrl+V" },
         { id: "terminal",     label: "Open terminal here",    hint: "" },
         { id: "trash",        label: "Move to Trash",         hint: "Delete" },
-        { id: "reload",       label: "Reload this folder",    hint: "F5" },
+        { id: "reload",       label: "Reload this folder",    hint: "Ctrl+R" },
         { id: "up",           label: "Go up one folder",      hint: "" },
         { id: "keys",         label: "Show keyboard help",    hint: "F1" }
     ]

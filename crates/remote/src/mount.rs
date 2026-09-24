@@ -242,6 +242,13 @@ pub fn classify(stderr: &str) -> MountError {
 /// when something is really mounted there. A command exiting zero is not
 /// evidence that a filesystem appeared.
 pub fn is_mounted(path: &Path) -> bool {
+    // The kernel's mount table, not `stat`: a FUSE mount whose server died
+    // fails every stat with ENOTCONN/ECONNREFUSED, which read as "not
+    // mounted" — so disconnect did nothing and every reconnect failed with
+    // "File exists" until a reboot.
+    if let Some(listed) = listed_in_mountinfo(path) {
+        return listed;
+    }
     use std::os::unix::fs::MetadataExt;
     let Ok(here) = std::fs::metadata(path) else {
         return false;
@@ -253,6 +260,39 @@ pub fn is_mounted(path: &Path) -> bool {
         return false;
     };
     here.dev() != up.dev()
+}
+
+/// Is `path` a mount point in `/proc/self/mountinfo`? `None` when the table
+/// cannot be read (not Linux, or /proc hidden), so the caller falls back.
+fn listed_in_mountinfo(path: &Path) -> Option<bool> {
+    let table = std::fs::read_to_string("/proc/self/mountinfo").ok()?;
+    let want = path.to_string_lossy();
+    let want = match want.trim_end_matches('/') {
+        "" => "/",
+        w => w,
+    };
+    Some(table.lines().any(|l| {
+        // Field 5 is the mount point, with space, tab, newline and
+        // backslash octal-escaped.
+        l.split(' ').nth(4).is_some_and(|mp| unescape_mountinfo(mp) == want)
+    }))
+}
+
+fn unescape_mountinfo(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'\\' && i + 4 <= b.len() && b[i + 1..i + 4].iter().all(|c| (b'0'..=b'7').contains(c)) {
+            let v = (b[i + 1] - b'0') * 64 + (b[i + 2] - b'0') * 8 + (b[i + 3] - b'0');
+            out.push(v);
+            i += 4;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// The arguments for a mount. Separated from running it so the safety
@@ -395,6 +435,7 @@ pub fn mount(spec: &RemoteSpec, mount_point: &Path, timeout: Duration) -> Result
             Ok(None) => {
                 if Instant::now() >= deadline {
                     let _ = child.kill();
+                    gust_core::stall::reap_in_background(child);
                     return Err(MountError::Timeout);
                 }
                 std::thread::sleep(Duration::from_millis(50));
@@ -733,6 +774,18 @@ mod tests {
             "an ordinary directory claimed to be a mount"
         );
         let _ = std::fs::remove_dir(&d);
+    }
+
+    #[test]
+    fn mountinfo_escapes_are_decoded() {
+        assert_eq!(unescape_mountinfo(r"/run/media/me/My\040Disk"), "/run/media/me/My Disk");
+        assert_eq!(unescape_mountinfo(r"/a\134b"), r"/a\b");
+        assert_eq!(unescape_mountinfo(r"/trailing\04"), r"/trailing\04");
+    }
+
+    #[test]
+    fn the_root_is_a_mount_point() {
+        assert!(is_mounted(Path::new("/")) || listed_in_mountinfo(Path::new("/")).is_none());
     }
 
     #[test]

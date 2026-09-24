@@ -251,6 +251,7 @@ pub fn mount(
             Ok(None) => {
                 if started.elapsed() >= timeout {
                     let _ = child.kill();
+                    gust_core::stall::reap_in_background(child);
                     return Err(ShareError::Refused(
                         "The server did not answer in time.".into(),
                     ));

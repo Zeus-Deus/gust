@@ -39,6 +39,9 @@ Window {
                 return (cut >= 0 && cut < p.length - 1) ? p.substring(cut + 1) : p
             }
             onTabLabelChanged: win.refreshTabLabels()
+            // Mounts and connections finish on a worker; every tab reports
+            // here, so a result still lands if the user switched tabs.
+            onPlace_done: (op, name, message) => win.placeDone(op, name, message)
         }
         onObjectAdded: win.refreshActiveModel()
         onObjectRemoved: win.refreshActiveModel()
@@ -147,11 +150,9 @@ Window {
         if (text.trim().toLowerCase().startsWith("nfs://")) {
             prompt.close()
             win.shareUser = ""
-            hints.status = qsTr("Connecting…")
             const nerr = dirModel.share_mount(text, "", "", "")
             if (nerr !== "") win.alertText = nerr
             win.shareAddress = ""
-            win.qaDump("share-mount")
             return
         }
         prompt.secret = false
@@ -173,14 +174,29 @@ Window {
     }
 
     function sharePasswordEntered(text) {
-        hints.status = qsTr("Connecting…")
         const err = dirModel.share_mount(win.shareAddress, win.shareUser, "", text)
         // Whatever happened, the secret does not stay in QML.
         prompt.secret = false
         win.shareAddress = ""
         win.shareUser = ""
         if (err !== "") win.alertText = err
-        win.qaDump("share-mount")
+    }
+
+    /// A mount, connect, eject or disconnect finished on its worker.
+    /// "" is success; "ASK:" is a decision only the user can make.
+    function placeDone(op, name, message) {
+        if (op === "cloud-disconnect" && message.startsWith("ASK:")) {
+            win.pendingCloudOff = name
+            confirm.purpose = "clouddirty"
+            confirm.open(qsTr("Uploads are not finished"),
+                         message.substring(4),
+                         qsTr("Disconnect anyway"), true)
+        } else if (message !== "") {
+            win.alertText = message
+        }
+        if (op.startsWith("device")) win.refreshDevices()
+        win.refreshPlaces()
+        win.qaDump("place-" + op + (message === "" ? "" : "-failed"))
     }
 
     // --- dragging a tab (DESIGN §6.20) -----------------------------------
@@ -396,9 +412,6 @@ Window {
     function ejectDevice(path) {
         const err = dirModel.device_unmount(path)
         if (err !== "") win.alertText = err
-        else hints.status = qsTr("Safe to remove")
-        win.refreshDevices()
-        win.qaDump("device-eject")
     }
 
     /// A device row was clicked: browse it if it is mounted, otherwise
@@ -410,11 +423,8 @@ Window {
             else win.alertText = qsTr("That device is mounted, but Gust could not tell where.")
             return
         }
-        hints.status = qsTr("Mounting…")
         const err = dirModel.device_mount(path)
         if (err !== "") win.alertText = err
-        win.refreshDevices()
-        win.qaDump("device-mount")
     }
 
     function refreshPlaces() {
@@ -1771,32 +1781,16 @@ Window {
             }
             else if (a.startsWith("cloud-on:")) {
                 const cname = a.substring(9)
-                hints.status = qsTr("Connecting to ") + cname + "…"
                 const cerr = dirModel.cloud_connect(cname)
                 if (cerr !== "") win.alertText = cerr
-                win.refreshPlaces()
-                win.qaDump("cloud-connect")
             }
             else if (a.startsWith("cloud-off:")) {
                 const cname2 = a.substring(10)
                 // Never force on the first try: unfinished uploads must be
                 // reported, not silently discarded (DESIGN §6.8).
+                // The answer ("ASK:" or a failure) arrives in placeDone.
                 const cerr2 = dirModel.cloud_disconnect(cname2, false)
-                // "ASK:" means a decision is available; anything else is a
-                // failure that confirming would only repeat.
-                if (cerr2 !== "" && !cerr2.startsWith("ASK:")) {
-                    win.alertText = cerr2
-                    win.qaDump("cloud-disconnect-failed")
-                } else if (cerr2 !== "") {
-                    win.pendingCloudOff = cname2
-                    confirm.purpose = "clouddirty"
-                    confirm.open(qsTr("Uploads are not finished"),
-                                 cerr2.substring(4),
-                                 qsTr("Disconnect anyway"), true)
-                } else {
-                    win.refreshPlaces()
-                }
-                win.qaDump("cloud-disconnect")
+                if (cerr2 !== "") win.alertText = cerr2
             }
             else if (a === "cloud-setup") {
                 // rclone's own config tool, in a terminal. Gust never asks
@@ -1809,20 +1803,14 @@ Window {
             }
             else if (a.startsWith("remote-on:")) {
                 const alias = a.substring(10)
-                hints.status = "Connecting to " + alias + "…"
-                // Bounded inside the bridge; a stuck server fails rather
-                // than freezing the window.
+                // Runs on a worker; the window stays usable meanwhile.
                 const err = dirModel.remote_connect(alias)
                 if (err !== "") win.alertText = err
-                win.refreshPlaces()
-                win.qaDump("remote-connect")
             }
             else if (a.startsWith("remote-off:")) {
                 const alias2 = a.substring(11)
                 const err2 = dirModel.remote_disconnect(alias2)
                 if (err2 !== "") win.alertText = err2
-                win.refreshPlaces()
-                win.qaDump("remote-disconnect")
             }
             else if (a.startsWith("find:")) {
                 dirModel.find_start(a.substring(5))
@@ -1863,8 +1851,6 @@ Window {
                 if (cn === "") return
                 const e = dirModel.cloud_disconnect(cn, true)
                 if (e !== "") win.alertText = e
-                win.refreshPlaces()
-                win.qaDump("cloud-disconnect-forced")
                 return
             }
             if (confirm.purpose === "closetab") {

@@ -190,16 +190,44 @@ impl VfsPending {
     }
 }
 
+/// Where a mount's remote-control endpoint lives.
+///
+/// The RC can flush, drop and reconfigure a mount, so it must answer to this
+/// user only. A TCP port on loopback answers to every local user and every
+/// browser tab that can reach 127.0.0.1; rclone's `--rc-no-auth` then hands
+/// all of them the mount. A Unix socket inside `$XDG_RUNTIME_DIR` (mode 0700,
+/// owned by the user) needs no secret at all: nobody else can open it.
+pub fn rc_socket_path(runtime_dir: &std::path::Path, mount_leaf: &str) -> std::path::PathBuf {
+    runtime_dir.join("gust").join("rc").join(format!("{mount_leaf}.sock"))
+}
+
+/// The `--rc-addr` value that binds a socket at `path`.
+pub fn rc_bind_arg(path: &std::path::Path) -> String {
+    format!("unix://{}", path.display())
+}
+
+/// The arguments that point `rclone rc` at an RC address. `unix://` (and a
+/// bare absolute path) dials the socket; anything else is a URL, as the
+/// test fixtures and older mounts use.
+pub fn rc_client_args(rc_addr: &str) -> Vec<String> {
+    let sock = rc_addr
+        .strip_prefix("unix://")
+        .or_else(|| rc_addr.starts_with('/').then_some(rc_addr));
+    match sock {
+        Some(p) => vec!["--unix-socket".into(), p.into()],
+        None => vec!["--url".into(), rc_addr.into()],
+    }
+}
+
 /// Ask a mount's private RC endpoint what is still pending.
 ///
-/// The RC is a privileged control surface (plan §9), so it is bound to
-/// loopback, belongs to a mount Gust started, and is never exposed to
-/// previews or page content.
+/// The RC is a privileged control surface (plan §9): it belongs to a mount
+/// Gust started, listens on a user-only Unix socket (see [`rc_socket_path`]),
+/// and is never exposed to previews or page content.
 pub fn vfs_pending(rc_addr: &str, timeout: Duration) -> Result<VfsPending, CloudError> {
     let out = Command::new("rclone")
         .arg("rc")
-        .arg("--url")
-        .arg(rc_addr)
+        .args(rc_client_args(rc_addr))
         .arg("vfs/stats")
         .arg("--timeout")
         .arg(format!("{}s", timeout.as_secs().max(1)))
@@ -371,6 +399,19 @@ pub fn config_command() -> (&'static str, Vec<&'static str>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_rc_is_a_user_only_socket_not_a_port() {
+        let p = rc_socket_path(std::path::Path::new("/run/user/1000"), "drive");
+        assert_eq!(p, std::path::PathBuf::from("/run/user/1000/gust/rc/drive.sock"));
+        assert_eq!(rc_bind_arg(&p), "unix:///run/user/1000/gust/rc/drive.sock");
+        assert_eq!(
+            rc_client_args(&rc_bind_arg(&p)),
+            vec!["--unix-socket", "/run/user/1000/gust/rc/drive.sock"]
+        );
+        // URLs keep working for fixtures.
+        assert_eq!(rc_client_args("http://127.0.0.1:9"), vec!["--url", "http://127.0.0.1:9"]);
+    }
 
     #[test]
     fn listremotes_long_is_parsed() {
