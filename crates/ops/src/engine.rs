@@ -717,6 +717,7 @@ mod sweep_tests {
 
     #[test]
     fn debris_from_a_dead_process_is_removed() {
+        let _g = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let d = tmp("dead");
         // Isolate the claim store so this test owns it.
         std::env::set_var("XDG_STATE_HOME", d.join("state"));
@@ -758,6 +759,7 @@ mod sweep_tests {
 
     #[test]
     fn a_staging_shaped_file_with_no_claim_is_never_removed() {
+        let _g = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let d = tmp("unclaimed");
         std::env::set_var("XDG_STATE_HOME", d.join("state"));
 

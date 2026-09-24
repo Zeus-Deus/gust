@@ -15,6 +15,12 @@ pub mod staging;
 pub mod trash;
 pub mod undo;
 
+/// Tests that repoint `XDG_STATE_HOME` (the staging-claims store) must not
+/// overlap: the variable is process-global and cargo runs tests in parallel,
+/// so one test's claims would vanish into another's directory.
+#[cfg(test)]
+pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub use anchor::{resolve_parent, DirHandle, FileIdentity};
 pub use engine::{classify, copy_regular_file, move_cross_fs, move_same_fs, FileClass, OpError};
 pub use jobs::{JobHandle, JobProgress, Request};
