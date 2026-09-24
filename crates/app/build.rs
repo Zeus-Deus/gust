@@ -26,6 +26,7 @@ fn main() {
         "ui/SettingsPanel.qml",
         "ui/ChooserBar.qml",
         "ui/TrashPanel.qml",
+        "ui/RecentPanel.qml",
     ];
 
     let mut module = QmlModule::new("com.gust.app").qml_files(views);
