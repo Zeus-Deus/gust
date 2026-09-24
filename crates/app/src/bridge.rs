@@ -102,6 +102,17 @@ pub mod qobject {
         /// where Ctrl+R is the only way to see changes made elsewhere).
         #[qinvokable]
         fn is_live(self: &DirModel) -> bool;
+        /// Recent files from the desktop's list, as JSON (name, folder,
+        /// path, when, exists). Local files only.
+        #[qinvokable]
+        fn recent_list(self: &DirModel) -> QString;
+        /// Open a file by path with its default app, under the same rules
+        /// as activating a row (executables never launch). "" or why not.
+        #[qinvokable]
+        fn open_path(self: &DirModel, path: &QString) -> QString;
+        /// Go to a file's folder with the cursor on it.
+        #[qinvokable]
+        fn reveal(self: Pin<&mut DirModel>, path: &QString);
         /// The Trash: JSON list of name, original path and deletion date.
         #[qinvokable]
         fn trash_list(self: &DirModel) -> QString;
@@ -1496,6 +1507,56 @@ impl qobject::DirModel {
                 });
             })
             .ok();
+    }
+
+    fn recent_list(&self) -> QString {
+        let offset = gust_core::properties::local_offset_seconds();
+        let items: Vec<String> = gust_core::recent::load(300)
+            .into_iter()
+            .map(|r| {
+                // Stored in UTC; shown in local time like every other date.
+                let when = parse_iso_utc(&r.when)
+                    .map(|t| gust_core::properties::full_time(t, offset))
+                    .unwrap_or_else(|| r.when.replace('T', " "));
+                // Never stat a network mount here; assume present.
+                let exists = gust_core::stall::needs_probe(&r.path) || r.path.exists();
+                format!(
+                    "{{\"name\":{},\"folder\":{},\"path\":{},\"when\":{},\"exists\":{}}}",
+                    Self::json_str(&r.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()),
+                    Self::json_str(&r.path.parent().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default()),
+                    Self::json_str(&r.path.to_string_lossy()),
+                    Self::json_str(&when),
+                    exists
+                )
+            })
+            .collect();
+        QString::from(&format!("[{}]", items.join(",")))
+    }
+
+    fn open_path(&self, path: &QString) -> QString {
+        let p = PathBuf::from(path.to_string());
+        let Ok(md) = std::fs::symlink_metadata(&p) else {
+            return QString::from("That file is no longer there.");
+        };
+        use std::os::unix::fs::PermissionsExt;
+        let mode = Some(md.permissions().mode());
+        let name = p.file_name().map(|n| n.to_owned()).unwrap_or_default();
+        if gust_core::mime::needs_trusted_launch(&name, mode) {
+            return QString::from("Programs are not started from here.");
+        }
+        match gust_core::open::open_with_desktop(&p, mode) {
+            Ok(_) => QString::default(),
+            Err(e) => QString::from(&e.to_string()),
+        }
+    }
+
+    fn reveal(mut self: Pin<&mut Self>, path: &QString) {
+        let p = PathBuf::from(path.to_string());
+        let (Some(dir), Some(name)) = (p.parent(), p.file_name()) else {
+            return;
+        };
+        self.as_mut().rust_mut().focus_name = Some(name.to_owned());
+        self.navigate(&QString::from(dir.to_string_lossy().as_ref()));
     }
 
     fn trash_list(&self) -> QString {
@@ -5597,3 +5658,33 @@ static DETACH_PENDING: std::sync::Mutex<
 
 /// The view a detached window should start in (from its handoff).
 static HANDOFF_VIEW: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+/// `YYYY-MM-DDThh:mm:ss` (UTC) to Unix seconds.
+fn parse_iso_utc(s: &str) -> Option<i64> {
+    let b = s.as_bytes();
+    if b.len() < 19 {
+        return None;
+    }
+    let n = |r: std::ops::Range<usize>| s.get(r)?.parse::<i64>().ok();
+    let (y, m, d, hh, mm, ss) = (n(0..4)?, n(5..7)?, n(8..10)?, n(11..13)?, n(14..16)?, n(17..19)?);
+    // days_from_civil (H. Hinnant)
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    Some(days * 86_400 + hh * 3600 + mm * 60 + ss)
+}
+
+#[cfg(test)]
+mod iso_tests {
+    #[test]
+    fn iso_round_trips_through_full_time() {
+        let t = super::parse_iso_utc("2021-03-04T05:06:07").unwrap();
+        assert_eq!(gust_core::properties::full_time(t, 0), "2021-03-04 05:06");
+        assert_eq!(super::parse_iso_utc("1970-01-01T00:00:00"), Some(0));
+        assert_eq!(super::parse_iso_utc("junk"), None);
+    }
+}

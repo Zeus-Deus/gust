@@ -22,6 +22,7 @@ pub mod open;
 pub mod peek;
 pub mod portal_conf;
 pub mod properties;
+pub mod recent;
 pub mod renderer;
 pub mod search;
 pub mod selection;

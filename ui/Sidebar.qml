@@ -25,6 +25,7 @@ Rectangle {
     /// Right-click on a bookmark: Main shows its menu (Remove).
     signal bookmarkMenu(string path, real x, real y)
     signal trashChosen()
+    signal recentChosen()
 
     /// Removable devices the kernel reports. Refreshed by Main; never
     /// polled from here, because a rail that lies about what is attached is
@@ -114,6 +115,29 @@ Rectangle {
                 Accessible.role: Accessible.Button
                 Accessible.name: "Go to " + model.label
             }
+        }
+
+        // Recent files, from the desktop's own list.
+        Rectangle {
+            width: column.width
+            height: Tokens.rowHeight
+            color: recentHover.hovered ? Tokens.withAlpha(Tokens.foreground, 0.06) : "transparent"
+            HoverHandler { id: recentHover }
+            Text {
+                anchors.verticalCenter: parent.verticalCenter
+                leftPadding: Tokens.rowPaddingX
+                text: qsTr("Recent")
+                color: Tokens.foreground
+                font.family: Tokens.fontFamily
+                font.pixelSize: Tokens.fontBody
+            }
+            MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.recentChosen()
+            }
+            Accessible.role: Accessible.Button
+            Accessible.name: qsTr("Recent files")
         }
 
         // Trash: what was deleted, and a way back.
@@ -323,7 +347,7 @@ Rectangle {
             // binding visible to it would be a loop (plan §8 warns about
             // exactly this class of QML layout bug).
             readonly property int placesHeight:
-                Tokens.spaceXl + (places.count + 2) * Tokens.rowHeight
+                Tokens.spaceXl + (places.count + 3) * Tokens.rowHeight
                 + (root.bookmarks.length > 0 ? Tokens.spaceXl + (root.bookmarks.length + 1) * Tokens.rowHeight : 0)
             // The note explains why the list is empty, so it belongs only
             // when the list IS empty. Saying "no places added yet" beside a
