@@ -20,6 +20,7 @@ fn main() {
         "ui/ScrollIndicator.qml",
         "ui/TextPrompt.qml",
         "ui/JobDrawer.qml",
+        "ui/ContextMenu.qml",
     ];
 
     let mut module = QmlModule::new("com.gust.app").qml_files(views);

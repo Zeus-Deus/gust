@@ -228,6 +228,57 @@ pub fn offer(verb: ClipVerb, paths: &[PathBuf]) -> Result<(), String> {
     Ok(())
 }
 
+/// The text "Copy path" puts on the clipboard: one absolute path per line,
+/// exactly as the shell would want them, with no trailing newline.
+pub fn paths_as_text(paths: &[PathBuf]) -> String {
+    paths
+        .iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Put plain text on the desktop clipboard ("Copy path"). Like [`offer`],
+/// the text goes in on stdin and `wl-copy` is left holding the offer.
+pub fn offer_text(text: &str) -> Result<(), String> {
+    if !system_clipboard_available() {
+        return Err("wl-copy is not installed".into());
+    }
+    let mut child = Command::new("wl-copy")
+        .arg("--type")
+        .arg("text/plain;charset=utf-8")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(text.as_bytes()).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Does the desktop clipboard hold files right now? One `wl-paste
+/// --list-types` call: cheap enough to ask each time a menu opens, and it
+/// reads no payload.
+pub fn offers_files() -> bool {
+    let Ok(out) = Command::new("wl-paste")
+        .arg("--list-types")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+    else {
+        return false;
+    };
+    types_include_files(&String::from_utf8_lossy(&out.stdout))
+}
+
+fn types_include_files(list: &str) -> bool {
+    list.lines()
+        .map(str::trim)
+        .any(|t| t == "x-special/gnome-copied-files" || t == "text/uri-list")
+}
+
 /// Read whatever the desktop currently offers.
 pub fn read() -> Option<ClipContents> {
     // In preference order: the format with a verb, then the standard URI
@@ -363,5 +414,20 @@ mod tests {
     #[test]
     fn copying_nothing_is_refused() {
         assert!(offer(ClipVerb::Copy, &[]).is_err());
+    }
+
+    #[test]
+    fn copy_path_text_is_one_absolute_path_per_line() {
+        let t = paths_as_text(&[PathBuf::from("/a/b c.txt"), PathBuf::from("/d")]);
+        assert_eq!(t, "/a/b c.txt\n/d");
+        assert_eq!(paths_as_text(&[]), "");
+    }
+
+    #[test]
+    fn only_file_types_count_as_files_on_the_clipboard() {
+        assert!(types_include_files("text/plain\ntext/uri-list\n"));
+        assert!(types_include_files("x-special/gnome-copied-files"));
+        assert!(!types_include_files("text/plain;charset=utf-8\nUTF8_STRING\n"));
+        assert!(!types_include_files(""));
     }
 }

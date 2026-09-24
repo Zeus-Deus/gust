@@ -19,9 +19,28 @@ FocusScope {
 
     function ensureCursorVisible() { list.positionViewAtIndex(model.cursor, ListView.Contain) }
 
+    /// Where a keyboard-opened menu should appear: under the cursor row,
+    /// in window coordinates.
+    function cursorAnchor() {
+        const it = list.itemAtIndex(root.model ? root.model.cursor : -1)
+        if (it) return it.mapToItem(null, Tokens.rowPaddingX * 3, it.height)
+        return list.mapToItem(null, Tokens.rowPaddingX, 0)
+    }
+
     Rectangle {
         anchors.fill: parent
         color: Tokens.background
+
+        // Right-click on empty space: the folder's own menu. Declared first
+        // so the rows, which sit above it, keep their clicks.
+        MouseArea {
+            anchors.fill: parent
+            acceptedButtons: Qt.RightButton
+            onClicked: (mouse) => {
+                const g = mapToItem(null, mouse.x, mouse.y)
+                root.contextRequested(-1, g.x, g.y)
+            }
+        }
 
         Column {
             anchors.fill: parent
@@ -278,7 +297,8 @@ FocusScope {
                                 if (!root.model.sel_contains(index))
                                     root.model.sel_only(index)
                                 root.model.focus_row(index)
-                                root.contextRequested(index, mouse.x, mouse.y)
+                                const g = mapToItem(null, mouse.x, mouse.y)
+                                root.contextRequested(index, g.x, g.y)
                                 return
                             }
                             if (mouse.modifiers & Qt.ControlModifier)
