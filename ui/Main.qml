@@ -1348,6 +1348,18 @@ Window {
     }
 
     // --- layout ------------------------------------------------------------
+    // The mouse's side buttons are Back and Forward everywhere in the
+    // window. A handler, not a MouseArea: it takes only those two buttons
+    // and never competes with a click, drag or menu.
+    TapHandler {
+        acceptedButtons: Qt.BackButton | Qt.ForwardButton
+        gesturePolicy: TapHandler.WithinBounds
+        onTapped: (point, button) => {
+            if (button === Qt.BackButton) dirModel.go_back()
+            else dirModel.go_forward()
+        }
+    }
+
     Column {
         anchors.fill: parent
 
@@ -1922,6 +1934,16 @@ Window {
                 event.accepted = true; return
             }
 
+            // Alt+Left / Alt+Right: Back and Forward, as in every browser
+            // and file manager. Without them the history existed but only
+            // the toolbar arrows could reach it.
+            if ((event.modifiers & Qt.AltModifier)
+                    && (event.key === Qt.Key_Left || event.key === Qt.Key_Right)) {
+                if (event.key === Qt.Key_Left) dirModel.go_back()
+                else dirModel.go_forward()
+                event.accepted = true; return
+            }
+
             // Alt+Enter: Properties, the convention on every desktop.
             if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter)
                     && (event.modifiers & Qt.AltModifier)) {
@@ -2038,7 +2060,7 @@ Window {
             case Qt.Key_F1:
                 hints.status = win.keyPreset === "vim"
                     ? "vim: h/j/k/l move, l open, / filter, : command"
-                    : "arrows move, Enter open, Space quick look, Backspace up, / filter, : command"
+                    : "arrows move, Enter open, Space quick look, Backspace up, Alt+← back, / filter, : command"
                 event.accepted = true; return
             }
 
