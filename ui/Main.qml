@@ -1568,7 +1568,9 @@ Window {
             job: win.job
             onRequestCancel: {
                 dirModel.cancel_job()
-                hints.status = qsTr("Cancelling…")
+                // Show "Stopping" now, not on the next poll.
+                const raw = dirModel.poll_job()
+                if (raw !== "") { try { win.job = JSON.parse(raw) } catch (e) {} }
                 win.qaDump("job-cancel")
             }
         }
@@ -1850,6 +1852,7 @@ Window {
     // it only reads a snapshot the job publishes.
     Timer {
         id: jobTimer
+        property int ticks: 0
         interval: 100
         repeat: true
         running: false
@@ -1866,6 +1869,9 @@ Window {
             } catch (e) {
                 win.job = null
             }
+            // Twice a second while running, so QA can watch speed and ETA.
+            if (win.job && win.job.state === "Running" && (++jobTimer.ticks % 5) === 0)
+                win.qaDump("job-progress")
             if (win.job && win.job.state !== "Running") {
                 jobTimer.stop()
                 hints.status = win.job.message
@@ -2132,6 +2138,7 @@ Window {
             alertText: win.alertText,
             jobRunning: dirModel.job_running(),
             jobState: win.job ? win.job.state : "",
+            jobStopping: win.job ? !!win.job.stopping : false,
             jobMessage: win.job ? win.job.message : "",
             jobRefused: win.job ? win.job.refused : 0,
             menuOpen: contextMenu.open,
@@ -2142,6 +2149,10 @@ Window {
                        : [],
             confirmOpen: confirm.visible,
             conflictOpen: conflictDialog.visible,
+            jobState: win.job ? win.job.state : "",
+            jobBytes: win.job ? (win.job.bytes_text || "") : "",
+            jobSpeed: win.job ? (win.job.speed || "") : "",
+            jobEta: win.job ? (win.job.eta || "") : "",
             conflictName: conflictDialog.clash ? conflictDialog.clash.name : "",
             confirmTitle: confirm.title,
             confirmBody: confirm.body,

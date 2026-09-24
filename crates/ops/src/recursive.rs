@@ -5,7 +5,7 @@
 //! the traversal (DESIGN.md §6). Nothing here resolves a path string twice.
 
 use crate::anchor::{resolve_parent, DirHandle, FileIdentity};
-use crate::engine::{classify, copy_regular_file, copy_symlink, FileClass, OpError, OpResult};
+use crate::engine::{classify, copy_regular_file_with, copy_symlink, FileClass, OpError, OpResult};
 use crate::journal::ConflictPolicy;
 use gust_core::lister::CancelToken;
 use rustix::fs::Mode;
@@ -186,7 +186,10 @@ pub fn copy_tree(
             }
             let (sd, sn) = resolve_parent(&src_root.join(rel))?;
             let (dd, dn) = resolve_parent(&dst_root.join(rel))?;
-            copy_regular_file(&sd, &sn, &dd, &dn, policy, cancel)?;
+            let before = bytes_done;
+            copy_regular_file_with(&sd, &sn, &dd, &dn, policy, cancel, &mut |w| {
+                progress(done, total, before.saturating_add(w), plan.total_bytes)
+            })?;
             done += 1;
             bytes_done = bytes_done.saturating_add(*size);
             progress(done, total, bytes_done, plan.total_bytes);
@@ -209,7 +212,9 @@ pub fn copy_tree(
         match classify(&st) {
             FileClass::Symlink => copy_symlink(&sd, &sn, &dd, &dn)?,
             _ => {
-                copy_regular_file(&sd, &sn, &dd, &dn, policy, cancel)?;
+                copy_regular_file_with(&sd, &sn, &dd, &dn, policy, cancel, &mut |w| {
+                    progress(0, total.max(1), w, plan.total_bytes)
+                })?;
                 bytes_done = st.st_size as u64;
             }
         }

@@ -105,6 +105,13 @@ pub struct JobHandle {
 }
 
 impl JobHandle {
+    /// True once `cancel` was asked for. The worker may still be cleaning up
+    /// (removing a partial file can wait on writes already sent to a slow
+    /// drive), so this is "stopping", not "stopped".
+    pub fn cancel_requested(&self) -> bool {
+        self.cancel.is_cancelled()
+    }
+
     /// Current snapshot. Cheap, non-blocking for the GUI thread.
     pub fn snapshot(&self) -> JobProgress {
         self.progress
@@ -316,6 +323,9 @@ fn run(
     // Plan first so the total is known before anything is written.
     let mut total_entries = 0usize;
     let mut total_bytes = 0u64;
+    // Each source's planned size, so a move that is a mere rename (and so
+    // reports no bytes) still advances the byte count by its share.
+    let mut source_bytes: Vec<u64> = Vec::new();
     for src in req.sources() {
         if cancel.is_cancelled() {
             set_rec(&|r| r.state = crate::journal::JobState::Cancelled);
@@ -329,6 +339,7 @@ fn run(
             Ok(plan) => {
                 total_entries += plan.entry_count().max(1);
                 total_bytes += plan.total_bytes;
+                source_bytes.push(plan.total_bytes);
             }
             Err(e) => {
                 set_rec(&|r| r.state = crate::journal::JobState::Failed);
@@ -355,7 +366,8 @@ fn run(
     let mut skipped = 0usize;
     let mut kept_both = 0usize;
 
-    for src in req.sources() {
+    for (src_index, src) in req.sources().into_iter().enumerate() {
+        let bytes_at_start = base_bytes;
         if cancel.is_cancelled() {
             set_rec(&|r| r.state = crate::journal::JobState::Cancelled);
             set(&progress, |p| {
@@ -408,7 +420,12 @@ fn run(
                         skipped += 1;
                     }
                     base_entries += 1;
-                    set(&progress, |p| p.entries_done = base_entries);
+                    // Nothing to write for it: its share of the bytes is done.
+                    base_bytes += source_bytes.get(src_index).copied().unwrap_or(0);
+                    set(&progress, |p| {
+                        p.entries_done = base_entries;
+                        p.bytes_done = base_bytes;
+                    });
                     continue;
                 }
                 ConflictPolicy::KeepBoth => {
@@ -530,6 +547,7 @@ fn run(
                     }
                 } else {
                     base_entries += 1;
+                    base_bytes = bytes_at_start + source_bytes.get(src_index).copied().unwrap_or(0);
                 }
                 set(&progress, |p| {
                     p.entries_done = base_entries;
@@ -687,6 +705,24 @@ mod tests {
             b"ORIGINAL",
             "existing file must survive an unresolved conflict"
         );
+        fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn a_cancel_request_is_visible_before_the_worker_stops() {
+        let d = tmp("stopping");
+        fs::create_dir_all(d.join("src")).unwrap();
+        fs::write(d.join("src/f"), b"x").unwrap();
+        fs::create_dir_all(d.join("dest")).unwrap();
+        let mut job = start(
+            "j-stop",
+            Request::Copy { sources: vec![d.join("src")], dest_dir: d.join("dest") },
+            ConflictPolicy::Ask,
+        );
+        assert!(!job.cancel_requested());
+        job.cancel();
+        assert!(job.cancel_requested(), "the UI must be able to say Stopping at once");
+        job.wait();
         fs::remove_dir_all(&d).ok();
     }
 
