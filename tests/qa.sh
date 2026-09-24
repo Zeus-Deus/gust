@@ -137,6 +137,10 @@ exec > "$LOG" 2>&1
 export HOME="$FIXTURE"
 export XDG_DATA_HOME="$FIXTURE/.local/share"
 export XDG_CACHE_HOME="$FIXTURE/.cache"
+# Every XDG base, or a test Gust reads (and could write) the real user's
+# settings, bookmarks and journal through the inherited session values.
+export XDG_CONFIG_HOME="$FIXTURE/.config"
+export XDG_STATE_HOME="$FIXTURE/.local/state"
 export GUST_OMARCHY_STATE="$REAL_STATE"
 export GUST_QA_STATE="$STATE"
 exec "$BIN"
@@ -1381,18 +1385,29 @@ sys.exit(0 if (w and w[0].get("floating")) else 1)'; then
   RIGHT=$((WX + WW))
   HDR=$((WY + 21))
 
-  # The three view buttons, right-aligned in the header.
-  mouse click $((RIGHT - 56)) "$HDR"
+  # The three view buttons, right-aligned in the header, left of the
+  # Settings button (one control width plus a small gap further left).
+  # Measured on screen: gear R-24, columns R-60, grid R-91, rows R-123.
+  SET=$((RIGHT - 24))
+  mouse click $((RIGHT - 91)) "$HDR"
   sleep 1.2
   expect "the Grid button switches view by mouse" "d['view']" "grid"
 
-  mouse click $((RIGHT - 25)) "$HDR"
+  mouse click $((RIGHT - 60)) "$HDR"
   sleep 1.2
   expect "the Columns button switches view by mouse" "d['view']" "columns"
 
-  mouse click $((RIGHT - 87)) "$HDR"
+  mouse click $((RIGHT - 123)) "$HDR"
   sleep 1.2
   expect "the Rows button switches view by mouse" "d['view']" "rows"
+
+  # The Settings button opens Settings; Escape closes it.
+  mouse click "$SET" "$HDR"
+  sleep 1.0
+  expect "the Settings button opens Settings by mouse" "d['settingsOpen']" "True"
+  key Escape
+  sleep 0.6
+  expect "Escape closes Settings" "d['settingsOpen']" "False"
 
   # A row click moves the cursor; rows begin below the header + column titles.
   ROW0=$((WY + 83))
@@ -1975,6 +1990,8 @@ cat > "$NORCLONE/run.sh" <<EOF
 #!/usr/bin/env bash
 exec > "$OUTDIR/norclone.log" 2>&1
 export HOME="$FIXTURE"
+export XDG_CONFIG_HOME="$FIXTURE/.config"
+export XDG_STATE_HOME="$FIXTURE/.local/state"
 export XDG_DATA_HOME="$FIXTURE/.local/share"
 export XDG_CACHE_HOME="$FIXTURE/.cache"
 export GUST_OMARCHY_STATE="$REAL_STATE"

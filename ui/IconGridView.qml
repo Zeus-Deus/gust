@@ -14,9 +14,15 @@ FocusScope {
     // the whole app from starting.
     signal dragStarted(int row)
     signal dropMovedOver(int row)
+    signal dragMovedTo(real x, real y)
+    function rowAt(x, y) {
+        const p = mapToItem(grid.contentItem, x, y)
+        return grid.indexAt(p.x, p.y)
+    }
     signal dropReleased(int row)
     property bool dragActive: false
     property int dropRow: -1
+    readonly property int dragThreshold: 8
     signal contextRequested(int row, real x, real y)
 
     function cursorAnchor() {
@@ -162,6 +168,38 @@ FocusScope {
                     MouseArea {
                         anchors.fill: parent
                         acceptedButtons: Qt.LeftButton | Qt.RightButton
+                        // Same drag gesture as Rows: nothing happens until the
+                        // pointer has really moved, so a click stays a click.
+                        preventStealing: true
+                        property point pressPos: Qt.point(0, 0)
+                        property bool armed: false
+                        onPressed: (mouse) => {
+                            pressPos = Qt.point(mouse.x, mouse.y)
+                            armed = (mouse.button === Qt.LeftButton)
+                        }
+                        onReleased: {
+                            if (root.dragActive)
+                                root.dropReleased(root.dropRow)
+                            armed = false
+                            root.dragActive = false
+                            root.dropRow = -1
+                        }
+                        onPositionChanged: (mouse) => {
+                            if (!armed)
+                                return
+                            if (!root.dragActive) {
+                                const dx = mouse.x - pressPos.x
+                                const dy = mouse.y - pressPos.y
+                                if (dx * dx + dy * dy < root.dragThreshold * root.dragThreshold)
+                                    return
+                                root.dragStarted(index)
+                            }
+                            const gp = mapToItem(grid.contentItem, mouse.x, mouse.y)
+                            root.dropRow = grid.indexAt(gp.x, gp.y)
+                            root.dropMovedOver(root.dropRow)
+                            const vp = mapToItem(root, mouse.x, mouse.y)
+                            root.dragMovedTo(vp.x, vp.y)
+                        }
                         onClicked: (mouse) => {
                             if (mouse.button === Qt.RightButton) {
                                 if (!root.model.sel_contains(index))

@@ -41,7 +41,9 @@ QtObject {
 
     // --- metrics -----------------------------------------------------------
     readonly property real fontBase: root.met("font_base")
-    readonly property real spacingScale: root.met("spacing_scale")
+    // Density from Settings multiplies the theme's own spacing.
+    property real density: 1.0
+    readonly property real spacingScale: root.met("spacing_scale") * density
     readonly property real selectedAlpha: root.met("selected_background_alpha")
     readonly property real borderAlpha: root.met("normal_border_alpha")
     readonly property real borderWidth: Math.max(1, root.met("border_width"))

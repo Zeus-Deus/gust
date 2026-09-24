@@ -62,7 +62,9 @@ Rectangle {
         { id: "trash",        label: "Move to Trash",         hint: "Delete" },
         { id: "reload",       label: "Reload this folder",    hint: "Ctrl+R" },
         { id: "up",           label: "Go up one folder",      hint: "" },
-        { id: "keys",         label: "Show keyboard help",    hint: "F1" }
+        { id: "keys",         label: "Show keyboard help",    hint: "F1" },
+        { id: "settings",     label: "Settings",              hint: "Ctrl+," },
+        { id: "pin-here",     label: "Add this folder to Bookmarks", hint: "Ctrl+B" }
     ]
 
     ListModel { id: results }

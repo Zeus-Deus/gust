@@ -85,6 +85,9 @@ pub mod qobject {
         fn can_go_forward(self: &DirModel) -> bool;
         #[qinvokable]
         fn reload(self: Pin<&mut DirModel>);
+        /// Ctrl+R: reload and re-measure folder sizes.
+        #[qinvokable]
+        fn reload_all(self: Pin<&mut DirModel>);
         /// While true, changes made by other programs wait instead of moving
         /// rows. QML holds this while a rename prompt, menu or dialog refers
         /// to a row by its index; releasing it applies anything that waited.
@@ -94,6 +97,30 @@ pub mod qobject {
         /// where Ctrl+R is the only way to see changes made elsewhere).
         #[qinvokable]
         fn is_live(self: &DirModel) -> bool;
+        /// Settings as JSON, plus whether Gust is the default file manager.
+        #[qinvokable]
+        fn settings_json(self: &DirModel) -> QString;
+        /// Change one setting and save. Returns "" or why it failed.
+        #[qinvokable]
+        fn settings_set(self: &DirModel, key: &QString, value: &QString) -> QString;
+        /// Make Gust the default file manager, or give it back, through the
+        /// same tested path as the command line.
+        #[qinvokable]
+        fn set_default_file_manager(self: &DirModel, on: bool) -> QString;
+        /// Make Super+Shift+F open Gust (Omarchy), or give it back.
+        #[qinvokable]
+        fn set_omarchy_keys(self: &DirModel, on: bool) -> QString;
+        /// Bookmarks shared with the desktop (GTK format), as a JSON list of
+        /// label, path and exists. Only local folders; other entries in the
+        /// file are kept but not listed.
+        #[qinvokable]
+        fn bookmarks_json(self: &DirModel) -> QString;
+        /// Pin a folder. Returns "" or why it could not be saved.
+        #[qinvokable]
+        fn bookmark_add(self: &DirModel, path: &QString) -> QString;
+        /// Unpin a folder. Returns "" or why it could not be saved.
+        #[qinvokable]
+        fn bookmark_remove(self: &DirModel, path: &QString) -> QString;
         /// Operations a crash interrupted, as JSON `[{id, text, dest}]`.
         /// Read once at start-up.
         #[qinvokable]
@@ -294,6 +321,10 @@ pub mod qobject {
         /// Move the selection into an absolute destination folder.
         #[qinvokable]
         fn move_selection_to(self: Pin<&mut DirModel>, dest: &QString) -> QString;
+        /// What the in-flight drag carries, as text/uri-list, for handing
+        /// to another application when the drag leaves the window.
+        #[qinvokable]
+        fn drag_uri_list(self: &DirModel) -> QString;
         /// Accept a drop of URIs from another application onto `row`.
         #[qinvokable]
         fn drop_uris(self: Pin<&mut DirModel>, row: i32, uris: &QString, as_move: bool) -> QString;
@@ -598,6 +629,10 @@ pub struct DirModelRust {
     thumbs: std::collections::HashMap<std::ffi::OsString, String>,
     /// Cancels the thumbnail pass when the location changes.
     thumb_cancel: CancelToken,
+    /// name -> total size of that sub-folder, filled in the background.
+    dir_sizes: std::collections::HashMap<std::ffi::OsString, gust_core::dirsize::Sized>,
+    /// Cancels the folder-size pass when the location changes.
+    size_cancel: CancelToken,
     /// What the in-flight drag carries, captured when it started.
     drag_payload: Vec<PathBuf>,
     /// True while a find is running or its results are shown.
@@ -742,11 +777,18 @@ impl Default for DirModelRust {
             watch_key: None,
             watch_gen: 0,
             live_hold: false,
-            focus_name: None,
+            // "Show in folder" from another app: the file to put the cursor
+            // on once the first listing is in. Read once; never inherited by
+            // windows this one opens.
+            focus_name: std::env::var_os("GUST_SELECT")
+                .filter(|v| !v.is_empty())
+                .inspect(|_| std::env::remove_var("GUST_SELECT")),
             live_dirty: false,
             live_busy: false,
             thumbs: std::collections::HashMap::new(),
             thumb_cancel: CancelToken::new(),
+            dir_sizes: std::collections::HashMap::new(),
+            size_cancel: CancelToken::new(),
             drag_payload: Vec::new(),
             finding: false,
             find_needle: QString::from(""),
@@ -833,29 +875,27 @@ fn human_size(bytes: u64) -> String {
 }
 
 fn human_time(mtime: i64) -> String {
+    use std::cell::Cell;
+    thread_local! {
+        // (utc offset, when it was read). data() runs per painted row, so the
+        // zone is not re-read every call — once a minute follows DST.
+        static OFFSET: Cell<(i64, i64)> = const { Cell::new((0, i64::MIN)) };
+    }
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
-    let age = now - mtime;
-    if age < 0 {
-        return "future".into();
-    }
-    let day = 86400;
-    if age < day {
-        let secs_today = mtime % day;
-        format!(
-            "today {:02}:{:02}",
-            secs_today / 3600,
-            (secs_today % 3600) / 60
-        )
-    } else if age < 2 * day {
-        "yesterday".into()
-    } else if age < 365 * day {
-        format!("{} days ago", age / day)
-    } else {
-        format!("{} years ago", age / (365 * day))
-    }
+    let offset = OFFSET.with(|c| {
+        let (off, at) = c.get();
+        if now.saturating_sub(at) < 60 {
+            off
+        } else {
+            let off = gust_core::properties::local_offset_seconds();
+            c.set((off, now));
+            off
+        }
+    });
+    gust_core::properties::relative_time(mtime, now, offset)
 }
 
 impl qobject::DirModel {
@@ -962,6 +1002,10 @@ impl qobject::DirModel {
         // listing settles: its changes no longer describe what is on screen.
         if self.as_ref().watch_key.as_deref() != key.as_path() {
             self.as_mut().stop_watch();
+            // Sizes belong to the folder being left, whichever way it was
+            // left (back, forward, up, a path typed in).
+            self.as_mut().rust_mut().size_cancel.cancel();
+            self.as_mut().rust_mut().dir_sizes.clear();
         }
 
         let display = key.display_path();
@@ -1314,6 +1358,142 @@ impl qobject::DirModel {
             })
             .collect();
         QString::from(&format!("[{}]", items.join(",")))
+    }
+
+    fn settings_json(&self) -> QString {
+        use gust_core::settings::Settings;
+        let st = Settings::default_path().map(|p| Settings::load(&p)).unwrap_or_default();
+        let is_default = gust_core::defaults::mimeapps_path()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .map(|t| gust_core::defaults::MimeApps::parse(&t))
+            .and_then(|m| m.get("inode/directory"))
+            .as_deref()
+            == Some(gust_core::defaults::GUST_DESKTOP);
+        let now = if std::env::var("QT_QUICK_BACKEND").as_deref() == Ok("software") {
+            "software"
+        } else {
+            "gpu"
+        };
+        let fields = [
+            ("key_preset", Self::json_str(st.key_preset_name())),
+            ("show_hidden", st.show_hidden.to_string()),
+            ("sidebar", st.sidebar.to_string()),
+            ("density", Self::json_str(st.density_name())),
+            ("renderer", Self::json_str(st.renderer_name())),
+            ("spacing", st.density.spacing().to_string()),
+            ("is_default", is_default.to_string()),
+            (
+                "omarchy_keys",
+                gust_core::omarchy_keys::bindings_path()
+                    .and_then(|p| std::fs::read_to_string(p).ok())
+                    .is_some_and(|t| gust_core::omarchy_keys::has_block(&t))
+                    .to_string(),
+            ),
+            (
+                "is_omarchy",
+                gust_core::omarchy_keys::bindings_path().is_some_and(|p| p.exists()).to_string(),
+            ),
+            ("renderer_now", Self::json_str(now)),
+        ];
+        let body: Vec<String> = fields
+            .iter()
+            .map(|(k, v)| format!("{}:{}", Self::json_str(k), v))
+            .collect();
+        QString::from(&format!("{{{}}}", body.join(",")))
+    }
+
+    fn settings_set(&self, key: &QString, value: &QString) -> QString {
+        use gust_core::settings::Settings;
+        let Some(path) = Settings::default_path() else {
+            return QString::from("no home folder to keep settings in");
+        };
+        let mut st = Settings::load(&path);
+        if let Err(e) = st.set(&key.to_string(), &value.to_string()) {
+            return QString::from(&e);
+        }
+        match st.save(&path) {
+            Ok(()) => QString::default(),
+            Err(e) => QString::from(&format!("could not save settings: {e}")),
+        }
+    }
+
+    fn set_default_file_manager(&self, on: bool) -> QString {
+        let Ok(exe) = std::env::current_exe() else {
+            return QString::from("cannot find the gust program");
+        };
+        match std::process::Command::new(exe)
+            .arg("--default")
+            .arg(if on { "on" } else { "off" })
+            .stdin(std::process::Stdio::null())
+            .output()
+        {
+            Ok(o) if o.status.success() => QString::default(),
+            Ok(o) => QString::from(String::from_utf8_lossy(&o.stderr).trim()),
+            Err(e) => QString::from(&e.to_string()),
+        }
+    }
+
+    fn set_omarchy_keys(&self, on: bool) -> QString {
+        let Ok(exe) = std::env::current_exe() else {
+            return QString::from("cannot find the gust program");
+        };
+        match std::process::Command::new(exe)
+            .arg("--bind-keys")
+            .arg(if on { "on" } else { "off" })
+            .stdin(std::process::Stdio::null())
+            .output()
+        {
+            Ok(o) if o.status.success() => QString::default(),
+            Ok(o) => QString::from(String::from_utf8_lossy(&o.stderr).trim()),
+            Err(e) => QString::from(&e.to_string()),
+        }
+    }
+
+    fn bookmarks_json(&self) -> QString {
+        let Some(file) = gust_core::bookmarks::default_path() else {
+            return QString::from("[]");
+        };
+        let items: Vec<String> = gust_core::bookmarks::load(&file)
+            .into_iter()
+            .filter(|b| b.uri.is_none())
+            .map(|b| {
+                format!(
+                    "{{\"label\":{},\"path\":{},\"exists\":{}}}",
+                    Self::json_str(&b.display()),
+                    Self::json_str(&b.path.to_string_lossy()),
+                    // Never stat a network mount here (it can hang the
+                    // window); those are listed as present and a click
+                    // goes through the normal stall-guarded navigation.
+                    gust_core::stall::needs_probe(&b.path) || b.path.is_dir()
+                )
+            })
+            .collect();
+        QString::from(&format!("[{}]", items.join(",")))
+    }
+
+    fn bookmark_add(&self, path: &QString) -> QString {
+        self.bookmark_edit(path, true)
+    }
+
+    fn bookmark_remove(&self, path: &QString) -> QString {
+        self.bookmark_edit(path, false)
+    }
+
+    fn bookmark_edit(&self, path: &QString, add: bool) -> QString {
+        let Some(file) = gust_core::bookmarks::default_path() else {
+            return QString::from("no home folder to keep bookmarks in");
+        };
+        let mut list = gust_core::bookmarks::load(&file);
+        let p = PathBuf::from(path.to_string());
+        if add {
+            gust_core::bookmarks::add(&mut list, p);
+        } else {
+            gust_core::bookmarks::remove(&mut list, &p);
+        }
+        match gust_core::bookmarks::save(&file, &list) {
+            Ok(()) => QString::default(),
+            Err(e) => QString::from(&format!("could not save bookmarks: {e}")),
+        }
     }
 
     fn acknowledge_interrupted(&self) {
@@ -2417,8 +2597,26 @@ impl qobject::DirModel {
             lines.push_str(&Self::json_str(l).to_string());
         }
         lines.push(']');
+        // Properties: facts about the item, from lstat only.
+        let mut facts: Vec<String> = gust_core::properties::describe(&path)
+            .into_iter()
+            .map(|f| format!("[{},{}]", Self::json_str(f.label), Self::json_str(&f.value)))
+            .collect();
+        // A folder's size is its contents', once measured in the background.
+        if let Some(name) = path.file_name() {
+            if let Some(d) = self.dir_sizes.get(name) {
+                let n = if d.files == 1 { "1 file".to_string() } else { format!("{} files", d.files) };
+                let v = if d.complete {
+                    format!("{} ({n})", human_size(d.bytes))
+                } else {
+                    format!("at least {} ({n}; some could not be read)", human_size(d.bytes))
+                };
+                facts.insert(0, format!("[\"Contents\",{}]", Self::json_str(&v)));
+            }
+        }
         QString::from(format!(
-            r#"{{"ok":true,"name":{},"kind":{},"kindWords":{},"size":{},"sizeText":{},"mode":{},"lines":{},"truncated":{},"noPreview":{}}}"#,
+            r#"{{"ok":true,"facts":[{}],"name":{},"kind":{},"kindWords":{},"size":{},"sizeText":{},"mode":{},"lines":{},"truncated":{},"noPreview":{}}}"#,
+            facts.join(","),
             Self::json_str(&p.name),
             Self::json_str(p.kind.label()),
             Self::json_str(&p.kind_words),
@@ -2565,6 +2763,89 @@ impl qobject::DirModel {
     /// Tagged with the generation it was requested for, so a thumbnail that
     /// finishes after the user has navigated away is dropped rather than
     /// painted over the new folder's tiles.
+    /// Measure every sub-folder on screen on ONE worker, smallest work
+    /// first by position, publishing each row as it finishes.
+    ///
+    /// Local folders only: a network mount's size means walking the whole
+    /// remote tree, and a stalled one would hold the worker forever. Already
+    /// measured folders are kept across live refreshes, so a file appearing
+    /// here does not re-walk every sibling.
+    fn start_dir_sizes(mut self: Pin<&mut Self>) {
+        let Some(dir) = self.as_ref().key.as_path().map(|p| p.to_path_buf()) else {
+            return;
+        };
+        if self.as_ref().finding || gust_core::stall::needs_probe(&dir) {
+            return;
+        }
+        let want: Vec<std::ffi::OsString> = {
+            let r = self.as_ref();
+            r.visible
+                .iter()
+                .filter_map(|i| r.all.get(*i))
+                .filter(|e| e.kind == EntryKind::Dir && !r.dir_sizes.contains_key(&e.name))
+                .map(|e| e.name.clone())
+                .take(500)
+                .collect()
+        };
+        if want.is_empty() {
+            return;
+        }
+        self.as_mut().rust_mut().size_cancel.cancel();
+        let cancel = CancelToken::new();
+        self.as_mut().rust_mut().size_cancel = cancel.clone();
+        let gen = self.as_ref().generation;
+        let Some(thread) = self.as_ref().qt_thread_handle() else {
+            return;
+        };
+        std::thread::Builder::new()
+            .name("gust-sizes".into())
+            .spawn(move || {
+                for name in want {
+                    if cancel.is_cancelled() {
+                        return;
+                    }
+                    let s = gust_core::dirsize::dir_size(
+                        &dir.join(&name),
+                        &cancel,
+                        gust_core::dirsize::SizeLimits::default(),
+                    );
+                    if cancel.is_cancelled() {
+                        return;
+                    }
+                    let _ = thread.queue(move |model| Self::publish_dir_size(model, gen, name, s));
+                }
+            })
+            .ok();
+    }
+
+    fn publish_dir_size(
+        mut self: Pin<&mut Self>,
+        gen: u64,
+        name: std::ffi::OsString,
+        size: gust_core::dirsize::Sized,
+    ) {
+        if self.as_ref().generation != gen {
+            return;
+        }
+        self.as_mut().rust_mut().dir_sizes.insert(name.clone(), size);
+        let Some(row) = self
+            .as_ref()
+            .visible
+            .iter()
+            .position(|i| self.as_ref().all.get(*i).map(|e| &e.name) == Some(&name))
+        else {
+            return;
+        };
+        let mut roles = cxx_qt_lib::QVector::<i32>::default();
+        roles.append(ROLE_SIZE);
+        unsafe {
+            let idx = self
+                .as_ref()
+                .index(row as i32, 0, &cxx_qt_lib::QModelIndex::default());
+            self.as_mut().data_changed(&idx, &idx, &roles);
+        }
+    }
+
     fn publish_thumbnail(
         mut self: Pin<&mut Self>,
         gen: u64,
@@ -2663,12 +2944,27 @@ impl qobject::DirModel {
         if self.as_ref().cursor >= n {
             self.as_mut().set_cursor(if n > 0 { n - 1 } else { 0 });
         }
+        // A name waiting for the cursor (rename, new folder, "Show in
+        // folder") is honoured as soon as the names are in.
+        if let Some(want) = self.as_ref().focus_name.clone() {
+            let row = {
+                let r = self.as_ref();
+                r.visible.iter().position(|i| r.all.get(*i).is_some_and(|e| e.name == want))
+            };
+            if let Some(row) = row {
+                self.as_mut().rust_mut().focus_name = None;
+                self.as_mut().set_cursor(row as i32);
+            } else if settled {
+                self.as_mut().rust_mut().focus_name = None;
+            }
+        }
         self.as_mut().set_status(QString::from(&status));
 
         if settled && snap.settled {
             self.as_mut().start_thumbnails();
             self.as_mut().start_cloud_notice();
             self.as_mut().ensure_watch();
+            self.as_mut().start_dir_sizes();
         }
     }
 
@@ -2792,6 +3088,32 @@ impl qobject::DirModel {
             return;
         }
         let snap_complete = snap.complete.clone();
+        // A sub-folder whose own timestamp moved had something added,
+        // removed or renamed inside it: its cached size is stale. (A file
+        // rewritten deeper down does not move it; Ctrl+R re-measures all.)
+        {
+            let old_mtimes: std::collections::HashMap<std::ffi::OsString, i64> = self
+                .as_ref()
+                .all
+                .iter()
+                .filter(|e| e.kind == EntryKind::Dir)
+                .filter_map(|e| e.meta.map(|m| (e.name.clone(), m.mtime)))
+                .collect();
+            let stale: Vec<std::ffi::OsString> = snap
+                .entries
+                .iter()
+                .filter(|e| e.kind == EntryKind::Dir)
+                .filter(|e| {
+                    let now = e.meta.map(|m| m.mtime);
+                    old_mtimes.get(&e.name).copied() != now
+                })
+                .map(|e| e.name.clone())
+                .collect();
+            let mut r = self.as_mut().rust_mut();
+            for n in stale {
+                r.dir_sizes.remove(&n);
+            }
+        }
         // The folder could not be read any more. DELETE_SELF is not a
         // reliable signal: while any process still has its cwd inside the
         // folder the kernel delays it, so the failed relist is what ends
@@ -2928,6 +3250,7 @@ impl qobject::DirModel {
         };
         self.as_mut().set_status(QString::from(&status));
         self.as_mut().start_thumbnails();
+        self.as_mut().start_dir_sizes();
 
         // Changes that arrived while this relist ran.
         if self.as_ref().live_dirty && !self.as_ref().live_hold {
@@ -3034,6 +3357,8 @@ impl qobject::DirModel {
         let old = self.as_ref().key.clone();
         self.as_mut().rust_mut().thumb_cancel.cancel();
         self.as_mut().rust_mut().thumbs.clear();
+        self.as_mut().rust_mut().size_cancel.cancel();
+        self.as_mut().rust_mut().dir_sizes.clear();
         {
             let mut r = self.as_mut().rust_mut();
             r.back.push(old);
@@ -3056,6 +3381,8 @@ impl qobject::DirModel {
         let old = self.as_ref().key.clone();
         self.as_mut().rust_mut().thumb_cancel.cancel();
         self.as_mut().rust_mut().thumbs.clear();
+        self.as_mut().rust_mut().size_cancel.cancel();
+        self.as_mut().rust_mut().dir_sizes.clear();
         {
             let mut r = self.as_mut().rust_mut();
             r.back.push(old);
@@ -3112,6 +3439,15 @@ impl qobject::DirModel {
     }
 
     fn reload(self: Pin<&mut Self>) {
+        self.load_current();
+    }
+
+    /// Ctrl+R: the user asked for fresh facts, so folders are re-measured
+    /// too. (Internal reloads after an operation keep the sizes of folders
+    /// the operation did not touch; the watch invalidates the ones it did.)
+    fn reload_all(mut self: Pin<&mut Self>) {
+        self.as_mut().rust_mut().size_cancel.cancel();
+        self.as_mut().rust_mut().dir_sizes.clear();
         self.load_current();
     }
 
@@ -3714,7 +4050,12 @@ impl qobject::DirModel {
         // pasted in another file manager (DESIGN §6.19). A failure here
         // does not lose the copy: the internal clipboard still works.
         let shared =
-            gust_core::clipboard::offer(gust_core::clipboard::ClipVerb::Copy, &paths).is_ok();
+            gust_core::clipboard::offer_with(
+                gust_core::clipboard::ClipVerb::Copy,
+                &paths,
+                &clip_holder(),
+            )
+            .is_ok();
         self.as_mut().rust_mut().clipboard = Some((paths, ClipMode::Copy));
         if shared {
             QString::from(&format!("Copied {label} — paste with Ctrl+V"))
@@ -3755,7 +4096,12 @@ impl qobject::DirModel {
         }
         let label = clip_label(&paths);
         let shared =
-            gust_core::clipboard::offer(gust_core::clipboard::ClipVerb::Cut, &paths).is_ok();
+            gust_core::clipboard::offer_with(
+                gust_core::clipboard::ClipVerb::Cut,
+                &paths,
+                &clip_holder(),
+            )
+            .is_ok();
         self.as_mut().rust_mut().clipboard = Some((paths, ClipMode::Cut));
         if shared {
             QString::from(&format!("Cut {label} — paste with Ctrl+V"))
@@ -3996,6 +4342,10 @@ impl qobject::DirModel {
             None => Vec::new(),
         };
         self.as_mut().rust_mut().drag_payload = sources;
+    }
+
+    fn drag_uri_list(&self) -> QString {
+        QString::from(&gust_core::clipboard::uri_list_payload(&self.drag_payload))
     }
 
     /// What the in-flight drag is carrying.
@@ -4550,7 +4900,13 @@ impl qobject::DirModel {
             ROLE_SIZE => {
                 let s = match e.meta {
                     Some(m) if e.kind != EntryKind::Dir => human_size(m.size),
-                    Some(_) => String::new(),
+                    // A folder shows its contents' total once measured; "≥"
+                    // when something inside could not be read or counted.
+                    Some(_) => match self.dir_sizes.get(&e.name) {
+                        Some(d) if d.complete => human_size(d.bytes),
+                        Some(d) => format!("≥ {}", human_size(d.bytes)),
+                        None => String::new(),
+                    },
                     None => "…".into(),
                 };
                 QVariant::from(&QString::from(&s))
@@ -4789,5 +5145,14 @@ mod empty_reason_tests {
             empty_reason_for("Input/output error (os error 5)"),
             "Can't open this folder: Input/output error"
         );
+    }
+}
+
+/// The copy is held by a `gust --clip-serve` helper so it outlives the
+/// window; in-process only if this executable cannot be found.
+fn clip_holder() -> gust_core::clipboard::Holder {
+    match std::env::current_exe() {
+        Ok(exe) => gust_core::clipboard::Holder::Helper(exe),
+        Err(_) => gust_core::clipboard::Holder::InProcess,
     }
 }

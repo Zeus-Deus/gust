@@ -51,6 +51,7 @@ run_at() {
 #!/usr/bin/env bash
 exec > "$OUT/log-$tag.txt" 2>&1
 export HOME="$FIX"
+export XDG_STATE_HOME="$FIX/.local/state"
 export XDG_DATA_HOME="$FIX/.local/share"
 export XDG_CACHE_HOME="$FIX/.cache"
 export XDG_CONFIG_HOME="$FIX/.config"

@@ -51,8 +51,15 @@ Item {
         anchors.centerIn: parent
         width: Math.min(parent.width - Tokens.spaceXl * 4,
                         Math.round(Tokens.rowHeight * 26))
-        height: Math.min(parent.height - Tokens.spaceXl * 4,
-                         Math.round(Tokens.rowHeight * 20))
+        // As tall as it needs: a folder or a binary has no preview, and a
+        // mostly-empty panel reads as "something failed to load".
+        readonly property bool hasPreview: root.info !== null
+            && ((root.info.lines && root.info.lines.length > 0) || root.info.noPreview !== "")
+        height: hasPreview
+                ? Math.min(parent.height - Tokens.spaceXl * 4, Math.round(Tokens.rowHeight * 24))
+                : Math.min(parent.height - Tokens.spaceXl * 4,
+                           Tokens.spaceXl * 2 + Tokens.rowHeight * 3 + Tokens.spaceLg * 4
+                           + (factsGrid.visible ? factsGrid.height : 0))
         color: Tokens.backgroundDark
         border.width: Math.max(1, Tokens.borderWidth)
         border.color: Tokens.withAlpha(Tokens.border, Tokens.borderAlpha)
@@ -87,6 +94,33 @@ Item {
                 wrapMode: Text.WordWrap
             }
 
+            // Properties: where it is, when it changed, who owns it — the
+            // facts a Properties window would hold, without a second window.
+            Grid {
+                id: factsGrid
+                width: parent.width
+                columns: 2
+                columnSpacing: Tokens.spaceXl
+                rowSpacing: Tokens.spaceXs
+                visible: root.info && root.info.facts && root.info.facts.length > 0
+                Repeater {
+                    model: root.info && root.info.facts ? root.info.facts.length * 2 : 0
+                    delegate: Text {
+                        required property int index
+                        readonly property var pair: root.info.facts[Math.floor(index / 2)]
+                        readonly property bool isLabel: index % 2 === 0
+                        width: isLabel ? Math.round(Tokens.rowHeight * 4)
+                                       : factsGrid.width - Math.round(Tokens.rowHeight * 4) - Tokens.spaceXl
+                        text: isLabel ? pair[0] : pair[1]
+                        color: isLabel ? Tokens.foregroundDim : Tokens.foreground
+                        font.family: Tokens.fontFamily
+                        font.pixelSize: Tokens.fontSmall
+                        textFormat: Text.PlainText
+                        elide: Text.ElideMiddle
+                    }
+                }
+            }
+
             Rectangle {
                 width: parent.width
                 height: Math.max(1, Tokens.borderWidth)
@@ -97,9 +131,11 @@ Item {
             // there is nothing to show. "No preview" beats a preview that
             // required running the file.
             Item {
+                visible: panel.hasPreview
                 width: parent.width
                 height: panel.height - Tokens.spaceXl * 2
-                        - Tokens.rowHeight * 3 - Tokens.spaceLg * 3
+                        - Tokens.rowHeight * 3 - Tokens.spaceLg * 4
+                        - (factsGrid.visible ? factsGrid.height : 0)
 
                 Text {
                     anchors.fill: parent

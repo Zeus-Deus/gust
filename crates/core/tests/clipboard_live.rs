@@ -215,3 +215,34 @@ fn no_path_reaches_a_command_line() {
         "the path appeared in a command line; it belongs on stdin"
     );
 }
+
+/// One copy must serve every kind of application at once: a file manager
+/// reads the GNOME type, a browser upload box or chat app reads
+/// text/uri-list, and a terminal or editor reads plain text. Offering only
+/// the GNOME type meant pasting into anything but a file manager gave
+/// nothing at all.
+#[test]
+fn one_copy_is_readable_as_files_uris_and_plain_text() {
+    need_wayland!();
+    let paths = vec![
+        PathBuf::from("/tmp/gust clip/one.txt"),
+        PathBuf::from("/tmp/gust-clip-two.txt"),
+    ];
+    offer(ClipVerb::Copy, &paths).expect("offering should succeed");
+    std::thread::sleep(std::time::Duration::from_millis(600));
+
+    let types = Command::new("wl-paste").arg("--list-types").output().unwrap();
+    let types = String::from_utf8_lossy(&types.stdout).to_string();
+    for want in ["x-special/gnome-copied-files", "text/uri-list", "text/plain"] {
+        assert!(types.lines().any(|t| t == want), "{want} missing from {types:?}");
+    }
+    let gnome = paste("x-special/gnome-copied-files").unwrap();
+    assert!(gnome.starts_with("copy\n"), "{gnome:?}");
+    let uris = paste("text/uri-list").unwrap();
+    assert_eq!(uris, "file:///tmp/gust%20clip/one.txt\r\nfile:///tmp/gust-clip-two.txt\r\n");
+    let text = paste("text/plain").unwrap();
+    assert_eq!(text, "/tmp/gust clip/one.txt\n/tmp/gust-clip-two.txt");
+    // And Gust still reads its own offer back as a file list.
+    let back = read().expect("Gust reads it back");
+    assert_eq!(back.paths, paths);
+}

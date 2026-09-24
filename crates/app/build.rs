@@ -23,6 +23,7 @@ fn main() {
         "ui/ContextMenu.qml",
         "ui/ConflictDialog.qml",
         "ui/InterruptedNotice.qml",
+        "ui/SettingsPanel.qml",
     ];
 
     let mut module = QmlModule::new("com.gust.app").qml_files(views);

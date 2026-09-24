@@ -24,6 +24,8 @@ cat > /tmp/gust-qa-run.sh <<EOF
 #!/usr/bin/env bash
 exec > "$LOG" 2>&1
 export HOME="$FIXTURE"
+export XDG_CONFIG_HOME="$FIXTURE/.config"
+export XDG_STATE_HOME="$FIXTURE/.local/state"
 exec "$REPO/target/debug/gust"
 EOF
 chmod +x /tmp/gust-qa-run.sh

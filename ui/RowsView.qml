@@ -10,6 +10,14 @@ FocusScope {
     // Drag and drop. The view owns the gesture; Main.qml owns the policy.
     signal dragStarted(int row)
     signal dropMovedOver(int row)
+    /// Pointer position during a drag, in this view's coordinates: lets the
+    /// pane hand the drag to other apps once it leaves the window.
+    signal dragMovedTo(real x, real y)
+    /// Row under a point in this view's coordinates, or -1.
+    function rowAt(x, y) {
+        const p = mapToItem(list.contentItem, x, y)
+        return list.indexAt(p.x, p.y)
+    }
     signal dropReleased(int row)
     property bool dragActive: false
     property int dropRow: -1
@@ -289,6 +297,8 @@ FocusScope {
                             const gp = mapToItem(list.contentItem, mouse.x, mouse.y)
                             root.dropRow = list.indexAt(gp.x, gp.y)
                             root.dropMovedOver(root.dropRow)
+                            const vp = mapToItem(root, mouse.x, mouse.y)
+                            root.dragMovedTo(vp.x, vp.y)
                         }
                         onClicked: (mouse) => {
                             if (mouse.button === Qt.RightButton) {

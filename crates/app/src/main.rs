@@ -1,6 +1,7 @@
 //! Gust — a fast, calm file manager for Omarchy.
 
 pub mod bridge;
+mod fm1;
 
 use cxx_qt_lib::{QGuiApplication, QQmlApplicationEngine, QString, QUrl};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -33,6 +34,7 @@ fn run_default(mode: &str) -> i32 {
             // value, which would make rollback restore Gust over itself.
             if state.exists() && current.get("inode/directory").as_deref() == Some(GUST_DESKTOP) {
                 println!("gust is already the default file manager");
+                claim_show_in_folder();
                 return 0;
             }
             let (next, prev) = plan_claim(&current);
@@ -50,6 +52,7 @@ fn run_default(mode: &str) -> i32 {
                 .and_then(|v| v.clone())
                 .unwrap_or_else(|| "nothing".into());
             println!("gust is now the default file manager (was: {was})");
+            claim_show_in_folder();
             println!("run `gust --default off` to put it back");
             0
         }
@@ -69,6 +72,9 @@ fn run_default(mode: &str) -> i32 {
                 // A later choice by something else is reported, not undone.
                 println!("left alone: {s}");
             }
+            if let Some(dir) = gust_core::filemanager1::user_service_dir() {
+                let _ = gust_core::filemanager1::release_service(&dir);
+            }
             println!("the previous default file manager has been restored");
             0
         }
@@ -76,6 +82,68 @@ fn run_default(mode: &str) -> i32 {
             eprintln!("gust: unknown option --default {other} (expected on or off)");
             1
         }
+    }
+}
+
+/// Add or remove Gust's marked block in `~/.config/hypr/bindings.lua`, the
+/// file Omarchy loads after its defaults for exactly this purpose, then ask
+/// Hyprland to reload. Nothing else in the file is touched.
+fn run_bind_keys(mode: &str) -> i32 {
+    use gust_core::omarchy_keys::*;
+    let Some(path) = bindings_path() else {
+        eprintln!("gust: cannot find your config directory (is HOME set?)");
+        return 1;
+    };
+    if !path.exists() {
+        eprintln!("gust: {} does not exist — is this Omarchy?", path.display());
+        return 1;
+    }
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        eprintln!("gust: cannot read {}", path.display());
+        return 1;
+    };
+    let next = match mode {
+        "on" => {
+            let exe = std::env::current_exe().map(|p| p.to_string_lossy().into_owned());
+            add_block(&text, exe.as_deref().unwrap_or("gust"))
+        }
+        "off" => remove_block(&text),
+        other => {
+            eprintln!("gust: unknown option --bind-keys {other} (expected on or off)");
+            return 1;
+        }
+    };
+    if next != text {
+        if let Err(e) = write_atomic(&path, &next) {
+            eprintln!("gust: cannot update {}: {e}", path.display());
+            return 1;
+        }
+    }
+    // Hyprland picks up the change on reload; harmless if not running.
+    let _ = std::process::Command::new("hyprctl")
+        .arg("reload")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    if mode == "on" {
+        println!("Super+Shift+F now opens gust (Super+Alt+Shift+F: in the terminal's folder)");
+    } else {
+        println!("Super+Shift+F is back to Omarchy's default");
+    }
+    0
+}
+
+/// "Show in folder" from browsers and other apps goes over D-Bus, not
+/// mimeapps.list. Being the default means answering that too: a per-user
+/// activation file, which never touches another package's files and is
+/// removed again by `--default off`.
+fn claim_show_in_folder() {
+    let (Some(dir), Ok(exe)) = (gust_core::filemanager1::user_service_dir(), std::env::current_exe()) else {
+        return;
+    };
+    match gust_core::filemanager1::claim_service(&dir, &exe) {
+        Ok(()) => println!("\"Show in folder\" from other apps now opens gust"),
+        Err(e) => println!("left alone: {e}"),
     }
 }
 
@@ -105,9 +173,23 @@ fn main() {
         let mode = args.get(pos + 1).map(String::as_str).unwrap_or("on");
         std::process::exit(run_default(mode));
     }
+    // Omarchy: make Super+Shift+F open Gust (opt-in, reversible).
+    if let Some(pos) = args.iter().position(|a| a == "--bind-keys") {
+        let mode = args.get(pos + 1).map(String::as_str).unwrap_or("on");
+        std::process::exit(run_bind_keys(mode));
+    }
+    // D-Bus activated: answer "Show in folder" from other apps.
+    if args.first().map(String::as_str) == Some("--dbus-service") {
+        std::process::exit(fm1::run());
+    }
+    // Internal: hold a clipboard offer after the window that made it.
+    if args.first().map(String::as_str) == Some("--clip-serve") {
+        std::process::exit(gust_core::clipboard::serve_from_stdin());
+    }
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("gust [PATH]              open a folder");
         println!("gust --default [on|off]  set or restore the default file manager");
+        println!("gust --bind-keys [on|off] make Super+Shift+F open gust (Omarchy)");
         std::process::exit(0);
     }
 
@@ -122,8 +204,33 @@ fn main() {
         std::env::set_var("QT_ASSUME_STDERR_HAS_CONSOLE", "1");
     }
 
-    // Respect the user's existing render settings: Gust sets no global QT_*
-    // rendering variables and changes nothing about the compositor (plan §9).
+    // No GPU (a VM, a server, a machine whose driver is missing): Qt would
+    // emulate OpenGL on the CPU through llvmpipe, which measured 2.5x the
+    // memory and 1.5x the first-window time of Qt's own raster renderer.
+    // Decided from sysfs before Qt starts; only THIS process is affected,
+    // and a user's own QT_QUICK_BACKEND / GUST_RENDERER always wins (plan §9:
+    // nothing global, nothing about the compositor).
+    // The Settings choice applies unless the user already chose in the
+    // environment (GUST_RENDERER / QT_QUICK_BACKEND always win).
+    let setting = gust_core::settings::Settings::default_path()
+        .map(|p| gust_core::settings::Settings::load(&p).renderer)
+        .unwrap_or(gust_core::settings::RendererChoice::Auto);
+    let env_decides = ["GUST_RENDERER", "QT_QUICK_BACKEND", "QSG_RHI_BACKEND"]
+        .iter()
+        .any(|k| std::env::var_os(k).is_some_and(|v| !v.is_empty()));
+    let software = match setting {
+        _ if env_decides => {
+            gust_core::renderer::choose_for_this_machine() == gust_core::renderer::Renderer::Software
+        }
+        gust_core::settings::RendererChoice::Software => true,
+        gust_core::settings::RendererChoice::Gpu => false,
+        gust_core::settings::RendererChoice::Auto => {
+            gust_core::renderer::choose_for_this_machine() == gust_core::renderer::Renderer::Software
+        }
+    };
+    if software {
+        std::env::set_var("QT_QUICK_BACKEND", "software");
+    }
     let mut app = QGuiApplication::new();
     let mut engine = QQmlApplicationEngine::new();
 

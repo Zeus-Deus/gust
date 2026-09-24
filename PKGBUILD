@@ -20,7 +20,7 @@ license=('MIT')
 # "undefined symbol: rust$cxxqtlib1$cxxbridge1$...$qguiapplication_exec".
 # Arch enables LTO by default, so this must be explicit.
 options=(!lto)
-depends=('qt6-base' 'qt6-declarative')
+depends=('qt6-base' 'qt6-declarative' 'dbus')
 makedepends=('rust' 'cargo' 'cmake' 'just')
 optdepends=(
   'bubblewrap: sandboxed thumbnail rendering'
