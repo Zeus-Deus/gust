@@ -403,6 +403,21 @@ else
   bad "files disappeared after a cancelled delete ($files_now left)"
 fi
 
+# A folder's delete confirmation says what is really inside it.
+DT="$FIXTURE/deltotal"
+rm -rf "$DT"; mkdir -p "$DT/bigdir/sub"
+for i in $(seq 1 37); do echo "$i" > "$DT/bigdir/sub/f$i"; done
+goto "$DT"
+wait_for "d['model']['settled']" "True" 20 >/dev/null
+typ "bigdir"
+key Delete
+wait_for "d['deleteTotal'][:8]" "1 folder" 20 >/dev/null
+expect "the confirmation counts the folder's contents" "d['deleteTotal'][:22]" "1 folder with 37 files"
+[[ "$(state "d['confirmBody']")" == *"37 files"* ]] \
+  && ok "and the dialog itself says so" || bad "the total is not in the dialog body"
+key Escape
+[[ "$(find "$DT/bigdir" -type f | wc -l)" == 37 ]] && ok "cancel kept all 37 files" || bad "files missing after cancel"
+
 say "10b · Trash actually moves a file, and Undo restores it"
 printf 'PRECIOUS CONTENT\n' > "$FIXTURE/Documents/trashme.txt"
 goto "$FIXTURE/Documents"
@@ -1458,10 +1473,16 @@ else
   sleep 1.2
   expect "the confirmation opened" "d['confirmOpen']" "True"
 
-  # Cancel is the LEFT button. Clicking it must change nothing.
+  # Cancel is the LEFT button. Clicking it must change nothing. The dialog
+  # reports where its buttons are (window coordinates); a fixed offset from
+  # the window centre broke whenever the dialog grew a line.
   read -r WX WY WW WH <<<"$(win_geo)"
-  CX=$((WX + WW / 2)); CY=$((WY + WH / 2))
-  mouse click $((CX + 53)) $((CY + 35))
+  # Wait for the dialog to settle (its total arrives on a worker), then
+  # take a fresh dump so the positions describe what is on screen now.
+  wait_for "d['deleteTotal'] != ''" "True" 20 >/dev/null
+  sleep 0.5
+  read -r BX BY <<<"$(state "' '.join(map(str, d['confirmButtons']['cancel']))")"
+  mouse click $((WX + BX)) $((WY + BY))
   sleep 1.5
   expect "clicking Cancel closed the dialog" "d['confirmOpen']" "False"
   [[ -d "$MD/doomed" ]] \
@@ -1470,8 +1491,11 @@ else
 
   # Now the confirm button, which must actually trash it.
   key Delete
-  sleep 1.2
-  mouse click $((CX + 143)) $((CY + 35))
+  wait_for "d['confirmOpen']" "True" 20 >/dev/null
+  wait_for "d['deleteTotal'] != ''" "True" 20 >/dev/null
+  sleep 0.5
+  read -r BX BY <<<"$(state "' '.join(map(str, d['confirmButtons']['confirm']))")"
+  mouse click $((WX + BX)) $((WY + BY))
   sleep 2.5
   [[ ! -d "$MD/doomed" ]] \
     && ok "clicking Move to Trash trashed the folder" \
