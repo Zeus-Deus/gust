@@ -42,6 +42,10 @@ Window {
             // Mounts and connections finish on a worker; every tab reports
             // here, so a result still lands if the user switched tabs.
             onPlace_done: (op, name, message) => win.placeDone(op, name, message)
+            onDevices_changed: {
+                win.refreshDevices()
+                win.qaDump("devices-changed")
+            }
             Component.onCompleted: hold_live_updates(win.liveHold)
         }
         onObjectAdded: win.refreshActiveModel()
@@ -2542,6 +2546,7 @@ Window {
             jobSpeed: win.job ? (win.job.speed || "") : "",
             jobEta: win.job ? (win.job.eta || "") : "",
             conflictName: conflictDialog.clash ? conflictDialog.clash.name : "",
+            devices: win.deviceList.map((x) => x.label + "|" + x.state),
             confirmTitle: confirm.title,
             confirmBody: confirm.body,
             confirmButtons: confirm.visible ? confirm.buttonCenters() : null,
@@ -2620,6 +2625,7 @@ Window {
         applyRememberedView()
         // A local read of the kernel's own view: no daemon, no network.
         win.refreshDevices()
+        dirModel.watch_devices()
         win.refreshBookmarks()
         win.applySettings()
         chooserBar.mode = dirModel.chooser_mode()

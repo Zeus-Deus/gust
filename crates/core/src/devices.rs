@@ -57,7 +57,12 @@ impl Device {
     /// enough (plan §2 mockup F).
     pub fn state_text(&self) -> String {
         if self.is_empty_drive() {
-            return "nothing in the drive".into();
+            return match self.kind {
+                DeviceKind::Disc => "nothing in the drive".into(),
+                // A stick is always "in the drive"; what is missing is a
+                // filesystem the kernel can name (blank or wiped).
+                DeviceKind::Removable => "no readable filesystem".into(),
+            };
         }
         match &self.mount_point {
             Some(_) => "connected".into(),
@@ -70,10 +75,20 @@ impl Device {
         self.fstype.is_none() && self.mount_point.is_none()
     }
 
+    /// Is there anything here that mounting could open?
+    pub fn can_mount(&self) -> bool {
+        !self.is_empty_drive()
+    }
+
     pub fn is_mounted(&self) -> bool {
         self.mount_point.is_some()
     }
 }
+
+/// udev keeps these folders of links in step with the kernel's block
+/// devices. Watching them (not `/dev`, where every new terminal is an
+/// event) tells Gust when a device came, went or got a filesystem.
+pub const DEVICE_WATCH_DIRS: [&str; 3] = ["/dev/disk/by-diskseq", "/dev/disk/by-label", "/dev/disk/by-uuid"];
 
 /// One row of `lsblk --json` output, before Gust decides what to do with it.
 #[derive(Debug, Clone)]
@@ -362,6 +377,23 @@ mod tests {
         assert!(d.is_empty_drive());
         assert_eq!(d.state_text(), "nothing in the drive");
         assert_eq!(d.display(), "Disc");
+    }
+
+    #[test]
+    fn a_stick_with_no_filesystem_is_not_called_empty() {
+        // A removable disk the kernel sees but whose filesystem it cannot
+        // name (blank, or wiped) has something in the drive; saying
+        // "nothing in the drive" is false. Found with a real hot-plugged
+        // SCSI disk in the VM.
+        let json = r#"{"blockdevices":[
+            {"name":"sda","path":"/dev/sda","size":"64M","rm":true,
+             "hotplug":false,"type":"disk","fstype":null,"label":null,
+             "mountpoint":null}]}"#;
+        let b = &parse_lsblk(json)[0];
+        assert!(is_offerable(b));
+        let d = to_device(b);
+        assert!(!d.can_mount(), "nothing to mount");
+        assert_eq!(d.state_text(), "no readable filesystem");
     }
 
     #[test]
