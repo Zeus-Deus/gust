@@ -59,8 +59,8 @@ fn times_are_absolute_and_local() {
 
 #[test]
 fn owners_are_names_from_the_local_databases() {
-    let passwd = "root:x:0:0::/root:/bin/bash\nzeus:x:1000:1000::/home/user:/bin/zsh\n";
-    let group = "root:x:0:\nwheel:x:998:user\nzeus:x:1000:\n";
+    let passwd = "root:x:0:0::/root:/bin/bash\nuser:x:1000:1000::/home/user:/bin/zsh\n";
+    let group = "root:x:0:\nwheel:x:998:user\nuser:x:1000:\n";
     assert_eq!(owner_names(1000, 998, passwd, group), "user : wheel");
     assert_eq!(owner_names(4242, 4243, passwd, group), "4242 : 4243");
 }

@@ -4,3 +4,8 @@ target/
 # QA artifacts live in /tmp, never in the repo.
 /tmp-shots/
 *.ocr.png
+
+# Local worktrees and generated Python bytecode are not source.
+/.worktrees/
+__pycache__/
+*.py[cod]
