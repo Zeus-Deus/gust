@@ -259,6 +259,15 @@ FocusScope {
 
         // Sibling of the GridView so it does not scroll with the content.
         ScrollIndicator { target: grid }
+
+        RubberBand {
+            anchors.fill: grid
+            view: grid
+            model: root.model
+            cellWidth: grid.cellWidth
+            cellHeight: grid.cellHeight
+            columns: root.columns()
+        }
     }
 
     Accessible.role: Accessible.List

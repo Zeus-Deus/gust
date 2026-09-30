@@ -117,6 +117,20 @@ impl Selection {
         self.pinned.clear();
     }
 
+    /// Rubber-band select: the selection becomes `base` (what was selected
+    /// when the band started: nothing for a plain drag, the old selection
+    /// for Ctrl+drag) plus `picked` (what the band covers now). Called on
+    /// every pointer move, so shrinking the band unselects again.
+    pub fn set_band(&mut self, base: &[OsString], picked: &[OsString]) {
+        self.names = base.iter().chain(picked.iter()).cloned().collect();
+        self.pinned.clear();
+    }
+
+    /// The selected names, for a band's starting snapshot.
+    pub fn names_vec(&self) -> Vec<OsString> {
+        self.names.iter().cloned().collect()
+    }
+
     /// `select_range` for a caller that already has the names in order.
     pub fn select_range_by_name(&mut self, names: &[OsString], cursor: usize, mode: RangeMode) {
         if names.is_empty() {
@@ -623,5 +637,36 @@ mod invert_tests {
         s.invert_by_name(&vis);
         assert_eq!(s.len(), 1);
         assert!(s.contains(OsStr::new("b")));
+    }
+}
+
+#[cfg(test)]
+mod band_tests {
+    use super::*;
+
+    fn n(v: &[&str]) -> Vec<OsString> {
+        v.iter().map(OsString::from).collect()
+    }
+
+    #[test]
+    fn a_band_replaces_the_selection_and_shrinking_it_unselects() {
+        let mut s = Selection::new();
+        s.select_only(OsStr::new("old"));
+        s.set_band(&[], &n(&["a", "b", "c"]));
+        assert_eq!(s.len(), 3);
+        assert!(!s.contains(OsStr::new("old")));
+        s.set_band(&[], &n(&["a"]));
+        assert_eq!(s.len(), 1);
+    }
+
+    #[test]
+    fn ctrl_band_adds_to_what_was_selected() {
+        let mut s = Selection::new();
+        s.select_only(OsStr::new("keep"));
+        let base = s.names_vec();
+        s.set_band(&base, &n(&["a", "b"]));
+        assert_eq!(s.len(), 3);
+        s.set_band(&base, &[]);
+        assert!(s.contains(OsStr::new("keep")) && s.len() == 1);
     }
 }

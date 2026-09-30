@@ -397,6 +397,19 @@ FocusScope {
         // Sibling of the ListView, not a child: a child would scroll with the
         // content and be clipped.
         ScrollIndicator { target: list }
+
+        // Drag on empty space draws a selection band (Nautilus, Dolphin).
+        RubberBand {
+            id: rowsBand
+            x: list.x; y: header.height
+            width: list.width; height: list.height
+            view: list
+            model: root.model
+            cellWidth: list.width
+            cellHeight: Tokens.rowHeight
+            columns: 1
+            onBandChanged: root.selectionTouched()
+        }
     }
 
     Accessible.role: Accessible.List

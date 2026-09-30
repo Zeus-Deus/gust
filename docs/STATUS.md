@@ -68,7 +68,7 @@ Rust 1.98.1, cxx-qt 0.10.0, Mesa llvmpipe (software rendering, Virtio GPU),
 | **Live folder updates** | **proven by hand** | 13 tests (`dir_watch`); evidence `B-live-updates`: files made, deleted and renamed by another program appear in 160 ms with the scroll position and cursor kept; 50 000 files created outside Gust show in 1.8 s with the window responsive; a burst is 1–3 refreshes, a file being written refreshes once when closed; rows do not move while a rename prompt, menu or dialog is open; a deleted folder says "This folder no longer exists", not "empty". Local folders only — network mounts keep Ctrl+R |
 | Vim preset | proven by hand | selectable in Settings; `j` moves the cursor; persists across restarts |
 | **Per-location view memory** | **proven** | `views::tests` + `just qa` §10r; survives a restart |
-| Tabs | **proven** | per-tab location, history, selection, filter and view; Ctrl+T/W/Tab/1-9; last tab cannot be closed; a tab with a running job asks before closing |
+| Tabs | **proven** | per-tab location, history, selection, filter and view; Ctrl+T/W/Tab/1-9 (1-9 was claimed here before it existed; implemented and qa §20a on 2026-09-30); middle-click a folder opens a background tab (§20g); last tab cannot be closed; a tab with a running job asks before closing |
 | "Send with LocalSend" (mockup C) | **not possible** | LocalSend's desktop entry is `Exec=localsend` with no `%F` and no `MimeType`, it has no CLI, and it registers no D-Bus service. There is no supported way to hand it files. Recorded as unbuildable rather than pending. |
 | **One copy, every format** | **proven** | `clipboard_live` 9/9 (the new check failed on the old code, which offered only the GNOME type): a copy is readable as files by other file managers, as `text/uri-list` by browsers and chat apps, and as plain text by terminals — and it survives closing the Gust window (held by `gust --clip-serve`, which exits when another app copies) |
 | System clipboard interop | **proven** | 12 unit + 8 live tests: a copy in Gust is readable by another file manager, a cut survives as a cut, and what Nautilus leaves is pasteable in Gust. `x-special/gnome-copied-files` with percent-encoded URIs; an http:// URI and ordinary prose are both refused as file lists; no path reaches a command line. Degrades to an internal clipboard, saying so, when wl-copy is absent. |
@@ -180,7 +180,7 @@ Rust 1.98.1, cxx-qt 0.10.0, Mesa llvmpipe (software rendering, Virtio GPU),
 | Capability probing (Unknown ≠ No) | proven | unit tests on rclone fsinfo shapes |
 | Upload state: cached ≠ uploaded | proven | unit tests; confirmation bound to a revision |
 | Actual sshfs/gio/rclone mounting | proven | `sshfs_live`, SMB/NFS live tests, rclone against WebDAV; `just qa` §10aa |
-| Discovery UI, Add a place | proven | `just qa` §10aa: saved computers listed without connecting |
+| Discovery UI, Add a place | **partial** | `just qa` §10aa: saved SSH computers are listed in the palette without connecting. There is **no "Add a place" dialog** and no mDNS/Tailscale discovery yet (this row said "proven" before 2026-09-30; corrected) |
 
 ## M4–M5
 

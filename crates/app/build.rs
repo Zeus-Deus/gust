@@ -28,6 +28,7 @@ fn main() {
         "ui/TrashPanel.qml",
         "ui/RecentPanel.qml",
         "ui/KeyMapPanel.qml",
+        "ui/RubberBand.qml",
     ];
 
     let mut module = QmlModule::new("com.gust.app").qml_files(views);

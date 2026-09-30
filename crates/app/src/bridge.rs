@@ -530,6 +530,14 @@ pub mod qobject {
         /// hides).
         #[qinvokable]
         fn sel_invert(self: Pin<&mut DirModel>);
+        /// Start a rubber band. `additive` (Ctrl held) keeps the current
+        /// selection as the base; otherwise the band starts from nothing.
+        #[qinvokable]
+        fn band_begin(self: Pin<&mut DirModel>, additive: bool);
+        /// The band covers rows r1..=r2 and columns c1..=c2 of a layout with
+        /// `cols` items per row (1 for Rows). Index = row * cols + col.
+        #[qinvokable]
+        fn band_update(self: Pin<&mut DirModel>, r1: i32, r2: i32, c1: i32, c2: i32, cols: i32);
         /// What a key press means under a preset ("standard", "vim", "mac",
         /// "windows"): an action name, "tab-N", or "" when the window's own
         /// handler decides. One table drives this and the `?` key map.
@@ -795,6 +803,8 @@ pub struct DirModelRust {
     find_needle: QString,
     place_busy: bool,
     peek_hash: QString,
+    /// What was selected when the current rubber band started.
+    band_base: Vec<std::ffi::OsString>,
     jump_rev: i32,
     jump_completion: QString,
     jump_cands: Vec<gust_core::jump::Candidate>,
@@ -999,6 +1009,7 @@ impl DirModelRust {
             find_needle: QString::from(""),
             place_busy: false,
             peek_hash: QString::default(),
+            band_base: Vec::new(),
             jump_rev: 0,
             jump_completion: QString::default(),
             jump_cands: Vec::new(),
@@ -5893,6 +5904,43 @@ impl qobject::DirModel {
             .map(|e| e.name.clone())
             .collect();
         self.as_mut().rust_mut().selection.invert_by_name(&names);
+        self.as_mut().refresh_selection_flags();
+    }
+
+    fn band_begin(mut self: Pin<&mut Self>, additive: bool) {
+        let base = if additive {
+            self.as_ref().selection.names_vec()
+        } else {
+            Vec::new()
+        };
+        self.as_mut().rust_mut().band_base = base;
+    }
+
+    fn band_update(mut self: Pin<&mut Self>, r1: i32, r2: i32, c1: i32, c2: i32, cols: i32) {
+        let cols = cols.max(1) as usize;
+        let (r1, r2) = (r1.min(r2).max(0) as usize, r1.max(r2).max(0) as usize);
+        let (c1, c2) = (
+            c1.min(c2).clamp(0, cols as i32 - 1) as usize,
+            c1.max(c2).clamp(0, cols as i32 - 1) as usize,
+        );
+        let picked: Vec<std::ffi::OsString> = {
+            let me = self.as_ref();
+            let vis = me.visible_entries();
+            let mut out = Vec::new();
+            // Bounded by what is on screen plus the drag: never the whole
+            // folder in one go, whatever the pointer does.
+            for r in r1..=r2.min(r1 + 4000) {
+                for c in c1..=c2 {
+                    if let Some(e) = vis.get(r * cols + c) {
+                        out.push(e.name.clone());
+                    }
+                }
+            }
+            out
+        };
+        let base = std::mem::take(&mut self.as_mut().rust_mut().band_base);
+        self.as_mut().rust_mut().selection.set_band(&base, &picked);
+        self.as_mut().rust_mut().band_base = base;
         self.as_mut().refresh_selection_flags();
     }
 
