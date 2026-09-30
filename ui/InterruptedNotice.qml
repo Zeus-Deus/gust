@@ -68,14 +68,17 @@ Rectangle {
                     anchors.verticalCenter: parent.verticalCenter
                     width: openLabel.implicitWidth + Tokens.spaceLg * 2
                     height: Tokens.controlHeight - Tokens.spaceSm
-                    color: openArea.containsMouse ? Tokens.selectedBackground : "transparent"
-                    border.color: Tokens.border
-                    border.width: Tokens.borderWidth
+                    // The primary action: checking what arrived is the one
+                    // thing to do next, so it is the one that stands out.
+                    color: Tokens.withAlpha(Tokens.accent, openArea.containsMouse ? 0.30 : 0.18)
+                    border.color: Tokens.accent
+                    border.width: Math.max(1, Tokens.borderWidth)
                     Text {
                         id: openLabel
                         anchors.centerIn: parent
                         text: qsTr("Open destination")
-                        color: Tokens.foreground
+                        color: Tokens.foregroundBright
+                        font.bold: true
                         font.family: Tokens.fontFamily
                         font.pixelSize: Tokens.fontSmall
                     }
@@ -99,7 +102,9 @@ Rectangle {
                 anchors.left: parent.left
                 anchors.verticalCenter: parent.verticalCenter
                 text: qsTr("Partial files were cleaned up. Check what arrived, then run it again.")
-                color: Tokens.foregroundDim
+                // The instruction is what the user acts on: primary text,
+                // not secondary grey (4.5:1 on every theme, not 3:1).
+                color: Tokens.foreground
                 font.family: Tokens.fontFamily
                 font.pixelSize: Tokens.fontSmall
             }
@@ -108,8 +113,9 @@ Rectangle {
                 anchors.verticalCenter: parent.verticalCenter
                 width: dismissLabel.implicitWidth + Tokens.spaceLg * 2
                 height: Tokens.controlHeight - Tokens.spaceSm
+                // Secondary: no outline until hovered.
                 color: dismissArea.containsMouse ? Tokens.selectedBackground : "transparent"
-                border.color: Tokens.border
+                border.color: dismissArea.containsMouse ? Tokens.border : "transparent"
                 border.width: Tokens.borderWidth
                 Text {
                     id: dismissLabel

@@ -37,6 +37,5 @@ New sections go in `tests/qa.d/`. FAT tests need `tests/fat-fixture.sh start` (s
 1. P0: `just bench-field` + `bench/RESULTS.md` done (FLEA_REPO=~/src/flea). Still: low-end
    profile (2 vCPU/2 GB/software), painted/input-ready, blank-frame trace, scroll frame
    times, menu + Quick Look latency.
-2. P2 audit: screenshot + score every surface; known: banner hint contrast on white,
-   no primary banner button, banner overlaps last row. (breadcrumb "/ /" fixed.)
+2. P2 audit: screenshot + score every remaining surface (banner and breadcrumb done).
 3. P3 rest (list in HANDOFF §6), then P4, P5, P6.
