@@ -9,7 +9,20 @@ marker=/tmp/gust-fixture-RAN
 rm -rf "$d28" "$marker"; mkdir -p "$d28"
 printf '#!/bin/sh\ntouch %s\n' "$marker" > "$d28/hello.sh"; chmod 755 "$d28/hello.sh"
 printf '#!/bin/sh\ntouch %s\n' "$marker" > "$d28/plain.sh"; chmod 644 "$d28/plain.sh"
-before="$(vm hyprctl clients -j | python3 -c 'import json,sys;print(" ".join(c["address"] for c in json.load(sys.stdin)))')"
+# A stand-in terminal launcher: records its argv, runs what follows "--"
+# directly, opens no window. A real terminal would take the keyboard and
+# swallow the next section's keys; the argv Gust builds is what is tested.
+stub="$d28/.bin"; mkdir -p "$stub"
+cat > "$stub/xdg-terminal-exec" <<'STUB'
+#!/bin/sh
+printf '%s\n' "$@" > /tmp/gust-fixture-TERMARGV
+while [ $# -gt 0 ] && [ "$1" != "--" ]; do shift; done
+[ "$1" = "--" ] && shift
+exec "$@"
+STUB
+chmod 755 "$stub/xdg-terminal-exec"
+rm -f /tmp/gust-fixture-TERMARGV
+export QA_PATH_PREPEND="$stub"
 stop_gust; start_gust "$FIXTURE"
 wait_for "d['model']['settled']" "True" 20 >/dev/null
 goto "$d28" || bad "could not open $d28"
@@ -30,14 +43,11 @@ expect "Enter cancels (Cancel has focus)" "d['confirmOpen']" "False"
 palette_run "Run program"; sleep 0.8
 key Tab; key Return; sleep 3.0
 [[ -e "$marker" ]] && ok "confirmed Run started the program" || bad "confirmed Run did not start it"
-# Close the terminal it opened so later cases have a clear desktop.
-vm hyprctl clients -j | python3 -c '
-import json,sys
-before=set(sys.argv[1].split())
-for c in json.load(sys.stdin):
-    if c["address"] not in before and c.get("class")!="gust": print(c["address"])' "$before" |
-  while read -r a; do vm hyprctl dispatch "hl.dsp.window.close({ window = \"address:$a\" })" >/dev/null 2>&1; done
-sleep 0.8
+argv="$(tr '\n' ' ' < /tmp/gust-fixture-TERMARGV 2>/dev/null)"
+[[ "$argv" == "--hold --dir=$d28 -- $d28/hello.sh " ]] \
+  && ok "it went to the terminal launcher as argv: $argv" || bad "terminal launcher got '$argv'"
+[[ "$(vm hyprctl activewindow -j | python3 -c 'import json,sys;print(json.load(sys.stdin).get("class",""))')" == gust ]] \
+  && ok "Gust still has the keyboard" || bad "another window took the keyboard"
 
 say "28b · a file without the x bit is refused, not guessed"
 rm -f "$marker"
@@ -49,4 +59,5 @@ expect "no confirmation for a non-executable" "d['confirmOpen']" "False"
 expect_contains "and it says why" "d['alertText']" "not executable"
 [[ ! -e "$marker" ]] && ok "nothing ran" || bad "a non-executable file was run"
 key Escape
-stop_gust; rm -rf "$d28" "$marker"; start_gust "$FIXTURE"
+unset QA_PATH_PREPEND
+stop_gust; rm -rf "$d28" "$marker" /tmp/gust-fixture-TERMARGV; start_gust "$FIXTURE"

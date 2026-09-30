@@ -145,6 +145,9 @@ export XDG_CONFIG_HOME="$FIXTURE/.config"
 export XDG_STATE_HOME="$FIXTURE/.local/state"
 export GUST_OMARCHY_STATE="$REAL_STATE"
 export GUST_QA_STATE="$STATE"
+# A section may put stand-ins for desktop programs first on PATH (28-run
+# replaces the terminal launcher so no window takes the keyboard).
+${QA_PATH_PREPEND:+export PATH="$QA_PATH_PREPEND:\$PATH"}
 exec "$BIN"
 EOF
   chmod +x /tmp/gust-qa-run.sh
