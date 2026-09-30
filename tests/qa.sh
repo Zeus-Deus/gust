@@ -1369,6 +1369,29 @@ fi
 vm hyprctl dispatch 'hl.dsp.window.resize({ x = 1100, y = 700 })' >/dev/null 2>&1
 sleep 1
 
+# The foreign-window check at the top runs once, but Omarchy's update prompt
+# can open DURING a run and sit over Gust. On 30 Sep it did exactly that and
+# every later mouse case failed with messages that blamed Gust. Re-check right
+# before the pointer is used and name the intruder instead.
+assert_desktop_clear() {
+  local intruders
+  intruders="$(vm hyprctl clients -j 2>/dev/null | python3 -c '
+import json,sys
+try: cs = json.load(sys.stdin)
+except Exception: sys.exit(0)
+for c in cs:
+    if c.get("class") not in ("gust", "", None):
+        print(c.get("class"), "-", (c.get("title") or "")[:40])
+' 2>/dev/null)"
+  if [[ -n "$intruders" ]]; then
+    dismiss_desktop_overlays
+    bad "another window appeared over Gust before the $1 cases: $intruders"
+    return 1
+  fi
+  ok "no other window is competing for the pointer before the $1 cases"
+}
+assert_desktop_clear "mouse" || true
+
 say "10v · The mouse works: the plan requires keyboard AND mouse"
 # Plan §1: "Keyboard and mouse both work. Visible controls expose the same
 # features." §10 lists restoring an interaction runner as an open item —

@@ -24,5 +24,6 @@ Updated after every commit. Read this first after a realm replacement.
 
 ## State
 - Done: bootstrap, baseline, test hygiene (D1–D3), lint green (D4–D5).
-- Next: re-run `just qa` on a clear desktop to separate harness from app
-  failures in the 9 mouse cases; then P0 bench (Flea's field bench + Gust entrant).
+- `just qa` 315/0 on a clear desktop (the 9 baseline mouse failures were the
+  Omarchy update prompt over the window).
+- Next: P0 bench — Flea's own `tools/flea-field-bench` with a Gust entrant.
