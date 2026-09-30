@@ -13,6 +13,19 @@ Rectangle {
     /// something did not happen. Outranks the selection count, which is only
     /// ambient state, and is cleared by the next action.
     property string alert: ""
+    /// A modal dialog is up: its keys, not the list's, are what work now
+    /// (a stale "Enter open" under a Run prompt would mislead).
+    property bool dialog: false
+    readonly property var dialogKeys: [
+        { k: "Tab", d: "switch button" },
+        { k: "Enter", d: "press it" },
+        { k: "Esc", d: "cancel" }
+    ]
+    /// The key labels shown now, for tests.
+    readonly property string shownKeys: {
+        const m = root.dialog ? root.dialogKeys : hintRep.model
+        return m.map(x => x.k + " " + x.d).join(" · ")
+    }
 
     readonly property string displayText:
         root.alert !== "" ? root.alert
@@ -41,7 +54,8 @@ Rectangle {
         clip: true
 
         Repeater {
-            model: root.preset === "vim"
+            id: hintRep
+            model: root.dialog ? root.dialogKeys : root.preset === "vim"
                 ? [
                     { k: "j k", d: "move" },
                     { k: "l", d: "open" },

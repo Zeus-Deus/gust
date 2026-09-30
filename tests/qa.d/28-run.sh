@@ -21,6 +21,9 @@ key Return; sleep 0.8
 palette_run "Run program"; sleep 0.8
 expect "a confirmation opens" "d['confirmOpen']" "True"
 shot 28a-run-confirm
+hk="$(state "d['hintKeys']")"
+[[ "$hk" == *"Esc cancel"* && "$hk" != *"Enter open"* ]] \
+  && ok "the hint strip shows the dialog's keys ($hk)" || bad "the hint strip shows '$hk' under a dialog"
 key Return; sleep 0.8
 expect "Enter cancels (Cancel has focus)" "d['confirmOpen']" "False"
 [[ ! -e "$marker" ]] && ok "cancelled: nothing ran" || bad "a cancelled Run ran the program"

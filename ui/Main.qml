@@ -2027,6 +2027,7 @@ Window {
             // stale behind a message some earlier keystroke left here.
             selection: win.selectionText
             alert: win.alertText !== "" ? win.alertText : dirModel.notice
+            dialog: confirm.visible
             onStatusChanged: win.qaDump("hint")
         }
     }
@@ -2760,6 +2761,7 @@ Window {
             selCount: dirModel.sel_count(),
             selSummary: dirModel.sel_summary(),
             hintShown: hints.displayText,
+            hintKeys: hints.shownKeys,
             alertText: win.alertText,
             jobRunning: dirModel.job_running(),
             jobsRunningAllTabs: win.runningJobModels().length,

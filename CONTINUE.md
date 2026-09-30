@@ -28,6 +28,10 @@ Updated after every commit. Read this first after a realm replacement.
 See `docs/HANDOFF.md` for the full picture (what is built, bench table, what is not done).
 - Gates at the custom-actions commit: test 719/0 (41 named skips), lint green, qa 407/0, theme matrix 22/22.
 - Uncommitted work: none.
+- OPEN (next first step): qa §28 is timing-flaky. The terminal "Run…" opens takes the
+  keyboard, so 28b's keys can land in it. Fix: in 28-run.sh, wait for the new window,
+  close it, re-focus Gust and assert it has the keyboard; then run full `just qa`.
+  The hint-strip commit below has unit tests + lint green, but full qa was NOT re-run.
 
 ## Running a single qa section
 `tests/qa-one.sh tests/qa.d/NN-name.sh /tmp/out` — same setup as the full suite.
