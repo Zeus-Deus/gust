@@ -27,8 +27,9 @@ case "$(cut -d: -f3 /proc/self/cgroup)" in
 esac
 
 # First statement after the re-entry: nothing else may touch stdin before the password is taken.
-read -r -s SUDO_PW || true
-[ -n "${SUDO_PW:-}" ] || { printf 'FAIL: no sudo password arrived on stdin\n' >&2; exit 1; }
+# Gust copy: no password is read or handled. Cache drops use non-interactive
+# sudo, which must be passwordless (true in the disposable bench VM).
+sudo -n true 2>/dev/null || { printf 'FAIL: this copy needs passwordless sudo (sudo -n)\n' >&2; exit 1; }
 
 export PATH="$HOME/.local/bin:$PATH"
 eval "$(omarchy-drive env)"
@@ -152,7 +153,7 @@ now_ms() {
 }
 
 drop_caches() {
-  printf '%s\n' "$SUDO_PW" | sudo -S -k -p "" sh -c "sync; echo 3 > /proc/sys/vm/drop_caches" \
+  sudo -n sh -c "sync; echo 3 > /proc/sys/vm/drop_caches" \
     || fail "could not drop caches"
 }
 

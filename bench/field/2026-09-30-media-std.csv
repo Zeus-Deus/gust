@@ -1,0 +1,22 @@
+id,run,mapped_ms,settled_ms,pss_kb,cpu_s,child_pss_kb,thumbs_n,pss_anon_kb,uss_kb,drm_kb,thumbs_by_dir,cpu_tree_s,thumbs_by_format,ranked,preview_ms,cpu_reaped_s
+flea,1,298,950,232158,0.55,3335,27,122432,218320,0,fail=0;large=27,1.89,heic=0;jpg=0;mkv=5;mp4=18;png=0;txt=0;webm=4;webp=0;unknown=0,yes,-,0.60
+gust,1,240,359,97264,0.23,0,unmeasurable,32176,89680,0,fail=0;large=0,0.25,unmeasurable,unranked: nothing reached the thumbnail cache so its work was not measured,-,0.23
+nautilus,1,505,12843,322117,6.60,0,641,143036,313592,0,fail=0;large=641,54.66,heic=13;jpg=0;mkv=100;mp4=400;png=14;txt=0;webm=100;webp=14;unknown=0,yes,-,9.97
+thunar,1,253,529,42769,0.37,0,unmeasurable,17728,36220,0,fail=0;large=0,0.42,unmeasurable,unranked: nothing reached the thumbnail cache so its work was not measured,-,0.37
+dolphin,1,346,7018,112553,2.55,0,500,35632,95804,0,fail=0;large=500,31.25,heic=0;jpg=50;mkv=75;mp4=300;png=0;txt=0;webm=75;webp=0;unknown=0,yes,-,30.63
+strata,1,386,1277,195659,0.66,0,unmeasurable,94656,186388,0,fail=0;large=23,2.51,unmeasurable,unranked: its watches saw 0 renders for 46 opened fixture files so neither is a count,-,0.76
+flea-tui,1,167,782,1883,0.00,0,n/a,592,936,0,fail=0;large=0,1.38,n/a,n/a: tui in kitty,-1,0.18
+flea,2,312,899,231318,0.55,3410,27,121472,217488,0,fail=0;large=27,1.84,heic=0;jpg=0;mkv=5;mp4=18;png=0;txt=0;webm=4;webp=0;unknown=0,yes,-,0.60
+gust,2,247,449,95158,0.23,0,unmeasurable,33328,87508,0,fail=0;large=0,0.25,unmeasurable,unranked: nothing reached the thumbnail cache so its work was not measured,-,0.23
+nautilus,2,501,13064,324187,6.57,0,641,145096,315700,0,fail=0;large=641,54.35,heic=13;jpg=0;mkv=100;mp4=400;png=14;txt=0;webm=100;webp=14;unknown=0,yes,-,9.93
+thunar,2,243,540,42717,0.36,0,unmeasurable,17592,36200,0,fail=0;large=0,0.41,unmeasurable,unranked: nothing reached the thumbnail cache so its work was not measured,-,0.36
+dolphin,2,346,6710,110186,2.47,0,500,35760,92940,0,fail=0;large=500,29.94,heic=0;jpg=50;mkv=75;mp4=300;png=0;txt=0;webm=75;webp=0;unknown=0,yes,-,29.31
+strata,2,381,1183,195437,0.63,0,unmeasurable,95240,186416,0,fail=0;large=23,2.37,unmeasurable,unranked: its watches saw 0 renders for 46 opened fixture files so neither is a count,-,0.72
+flea-tui,2,144,673,1833,0.00,0,n/a,592,852,0,fail=0;large=0,1.27,n/a,n/a: tui in kitty,-1,0.18
+flea,3,285,941,232068,0.53,3434,27,121108,219912,0,fail=0;large=27,1.88,heic=0;jpg=0;mkv=5;mp4=18;png=0;txt=0;webm=4;webp=0;unknown=0,yes,-,0.58
+gust,3,240,333,96982,0.22,0,unmeasurable,32164,89400,0,fail=0;large=0,0.23,unmeasurable,unranked: nothing reached the thumbnail cache so its work was not measured,-,0.22
+nautilus,3,490,12219,320164,6.24,0,641,140908,311664,0,fail=0;large=641,53.23,heic=13;jpg=0;mkv=100;mp4=400;png=14;txt=0;webm=100;webp=14;unknown=0,yes,-,9.37
+thunar,3,235,558,42503,0.39,0,unmeasurable,17484,35956,0,fail=0;large=0,0.43,unmeasurable,unranked: nothing reached the thumbnail cache so its work was not measured,-,0.39
+dolphin,3,352,6823,111691,2.48,0,500,35600,92816,0,fail=0;large=500,30.20,heic=0;jpg=50;mkv=75;mp4=300;png=0;txt=0;webm=75;webp=0;unknown=0,yes,-,29.57
+strata,3,391,1761,196618,0.68,0,unmeasurable,95980,187616,0,fail=0;large=23,2.56,unmeasurable,unranked: its watches saw 0 renders for 46 opened fixture files so neither is a count,-,0.78
+flea-tui,3,168,690,1847,0.00,0,n/a,592,848,0,fail=0;large=0,1.34,n/a,n/a: tui in kitty,-1,0.18

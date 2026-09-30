@@ -34,8 +34,9 @@ See `docs/HANDOFF.md` for the full picture (what is built, bench table, what is 
 New sections go in `tests/qa.d/`. FAT tests need `tests/fat-fixture.sh start` (sudo).
 
 ## Next (in order)
-1. P0: low-end profile (2 vCPU/2 GB/software), painted/input-ready, blank-frame trace,
-   scroll frame times, menu + Quick Look latency; `just bench-field`; `bench/RESULTS.md`.
+1. P0: `just bench-field` + `bench/RESULTS.md` done (FLEA_REPO=~/src/flea). Still: low-end
+   profile (2 vCPU/2 GB/software), painted/input-ready, blank-frame trace, scroll frame
+   times, menu + Quick Look latency.
 2. P2 audit: screenshot + score every surface; known: banner hint contrast on white,
    no primary banner button, banner overlaps last row, breadcrumb shows "/ /".
 3. P3 rest (list in HANDOFF §6), then P4, P5, P6.

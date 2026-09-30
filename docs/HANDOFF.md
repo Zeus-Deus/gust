@@ -40,7 +40,8 @@ the Realm VM; every commit was exported to the host artifact store as a
 
 - Gust leads every column against Flea on both fixtures.
 - **Open:** Thunar uses less memory on the media fixture (41 vs 90 MiB).
-- **Not measured yet:** low-end profile (2 vCPU / 2 GB / software), painted/input-ready, blank frames, scroll frame times, context-menu and Quick Look latency, SMB 10k listing. No `just bench-field` recipe yet.
+- Reproducible: `FLEA_REPO=~/src/flea just bench-field`. A second full run (2026-09-30, `bench/field/2026-09-30-*-std.csv`) agreed: Gust 212/347 ms, 109 MiB on 100k vs Flea 295/757 ms, 220 MiB; see `bench/RESULTS.md`.
+- **Not measured yet:** low-end profile (2 vCPU / 2 GB / software), painted/input-ready, blank frames, scroll frame times, context-menu and Quick Look latency, SMB 10k listing.
 
 ## 3. Screenshots
 
@@ -57,7 +58,7 @@ Key map, Kind column and theme-matrix captures were reviewed with vision
 
 ## 5. Decisions the owner may want to reverse
 
-All 27 are in `docs/DECISIONS.md` with a revert line. The ones most worth a look:
+All 28 are in `docs/DECISIONS.md` with a revert line. The ones most worth a look:
 
 - **D6** viewport-scoped details (size/date sorts still read all).
 - **D7** Enter on a file whose mode isn't known yet refuses once ("press Enter again").
@@ -72,7 +73,7 @@ All 27 are in `docs/DECISIONS.md` with a revert line. The ones most worth a look
 
 Ran out of session budget, not blocked. Remaining, in suggested order:
 
-1. P0: low-end profile, the extra measurements, `just bench-field`, `bench/RESULTS.md`.
+1. P0: low-end profile and the extra measurements (`just bench-field` and `bench/RESULTS.md` exist).
 2. P2: screenshot and score every surface, fix, `docs/screens/` pairs. Known items: crash banner hint text low on the white theme; banner has no primary button; banner overlaps the last list row; breadcrumb shows `/ /`.
 3. P3: paste image as file, safe run-executable prompt, open as admin (polkit), ownership, "Link here" on drop, per-folder sort, tree expand, Miller column count, preview-column toggle, Markdown/audio/PDF previews, pause/resume + queue, restore tabs, i18n, pain-point regressions, Thunar memory gap.
 4. P4 Add-a-place + discovery, Tailscale, MTP/AFC, udisks + `scsi_debug`, LocalSend.

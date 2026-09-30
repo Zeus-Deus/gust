@@ -9,3 +9,6 @@ target/
 /.worktrees/
 __pycache__/
 *.py[cod]
+
+# Flea field-bench per-run debug traces (large, host-specific)
+bench/field/*.keys/

@@ -1,0 +1,22 @@
+id,run,mapped_ms,settled_ms,pss_kb,cpu_s,child_pss_kb,thumbs_n,pss_anon_kb,uss_kb,drm_kb,thumbs_by_dir,cpu_tree_s,thumbs_by_format,ranked,preview_ms,cpu_reaped_s
+flea,1,299,769,224358,0.38,6956,unmeasurable,112596,215756,0,fail=0;large=0,0.53,unmeasurable,unranked: nothing reached the thumbnail cache so its work was not measured,-,0.45
+gust,1,227,347,115241,0.26,0,unmeasurable,47488,110304,0,fail=0;large=0,0.28,unmeasurable,unranked: nothing reached the thumbnail cache so its work was not measured,-,0.26
+nautilus,1,590,3883,378569,3.85,0,unmeasurable,296928,348928,0,fail=0;large=0,3.86,unmeasurable,unranked: nothing reached the thumbnail cache so its work was not measured,-,3.85
+thunar,1,292,11371,374384,11.35,0,unmeasurable,349264,367820,0,fail=0;large=0,11.40,unmeasurable,unranked: nothing reached the thumbnail cache so its work was not measured,-,11.35
+dolphin,1,431,2713,227132,3.68,0,unmeasurable,145180,210440,0,fail=0;large=0,3.72,unmeasurable,unranked: nothing reached the thumbnail cache so its work was not measured,-,3.68
+strata,1,420,899,244725,0.74,0,0,134700,239884,0,fail=0;large=0,0.84,txt=0;unknown=0,yes,-,0.82
+flea-tui,1,173,439,1829,0.00,0,n/a,580,804,0,fail=0;large=0,0.45,n/a,n/a: tui in kitty,-,0.00
+flea,2,291,757,225748,0.38,7009,unmeasurable,112568,215140,0,fail=0;large=0,0.54,unmeasurable,unranked: nothing reached the thumbnail cache so its work was not measured,-,0.46
+gust,2,212,333,109931,0.26,0,unmeasurable,49096,102436,0,fail=0;large=0,0.28,unmeasurable,unranked: nothing reached the thumbnail cache so its work was not measured,-,0.26
+nautilus,2,506,4017,380007,3.97,0,unmeasurable,298084,350500,0,fail=0;large=0,3.98,unmeasurable,unranked: nothing reached the thumbnail cache so its work was not measured,-,3.97
+thunar,2,251,11320,373513,11.33,0,unmeasurable,348560,366936,0,fail=0;large=0,11.37,unmeasurable,unranked: nothing reached the thumbnail cache so its work was not measured,-,11.33
+dolphin,2,349,2857,223604,3.78,0,unmeasurable,145076,207172,0,fail=0;large=0,3.81,unmeasurable,unranked: nothing reached the thumbnail cache so its work was not measured,-,3.78
+strata,2,392,722,236085,0.64,0,0,126008,231248,0,fail=0;large=0,0.74,txt=0;unknown=0,yes,-,0.71
+flea-tui,2,149,443,1867,0.00,0,n/a,580,920,0,fail=0;large=0,0.44,n/a,n/a: tui in kitty,-,0.00
+flea,3,295,751,225204,0.38,7135,unmeasurable,112560,214620,0,fail=0;large=0,0.53,unmeasurable,unranked: nothing reached the thumbnail cache so its work was not measured,-,0.45
+gust,3,209,381,112006,0.26,0,unmeasurable,47468,104528,0,fail=0;large=0,0.28,unmeasurable,unranked: nothing reached the thumbnail cache so its work was not measured,-,0.26
+nautilus,3,478,3904,374475,3.91,0,unmeasurable,292480,344968,0,fail=0;large=0,3.92,unmeasurable,unranked: nothing reached the thumbnail cache so its work was not measured,-,3.91
+thunar,3,242,11223,373583,11.18,0,unmeasurable,348568,367044,0,fail=0;large=0,11.22,unmeasurable,unranked: nothing reached the thumbnail cache so its work was not measured,-,11.18
+dolphin,3,349,2891,221356,3.80,0,unmeasurable,145012,206400,0,fail=0;large=0,3.83,unmeasurable,unranked: nothing reached the thumbnail cache so its work was not measured,-,3.80
+strata,3,384,844,239341,0.69,0,0,128508,234484,0,fail=0;large=0,0.78,txt=0;unknown=0,yes,-,0.77
+flea-tui,3,142,386,1830,0.00,0,n/a,576,864,0,fail=0;large=0,0.45,n/a,n/a: tui in kitty,-,0.00

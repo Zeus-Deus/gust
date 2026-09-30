@@ -59,6 +59,10 @@ theme-matrix: build
 bench: release
     ./tests/bench.sh
 
+# Flea's field bench with Gust added: 100k + media fixtures, 3 cold runs each.
+bench-field: release
+    ./bench/field-bench.sh
+
 # Rebuild the throwaway fixture the QA suite runs against.
 fixture:
     ./tests/make-fixture.sh /tmp/gust-fixture
