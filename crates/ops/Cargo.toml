@@ -9,3 +9,6 @@ gust-core.workspace = true
 rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+gust-testkit.workspace = true

@@ -145,7 +145,10 @@ mod thumbnail_mime_tests {
     fn images_and_videos_get_a_family() {
         assert_eq!(thumbnail_mime(OsStr::new("a.png")), Some("image/png"));
         // A PDF's first page is rendered in the same sandbox (poppler).
-        assert_eq!(thumbnail_mime(OsStr::new("Invoice.PDF")), Some("application/pdf"));
+        assert_eq!(
+            thumbnail_mime(OsStr::new("Invoice.PDF")),
+            Some("application/pdf")
+        );
         assert_eq!(thumbnail_mime(OsStr::new("A.JPG")), Some("image/jpeg"));
         assert_eq!(thumbnail_mime(OsStr::new("clip.mp4")), Some("video/mp4"));
     }

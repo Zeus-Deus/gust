@@ -119,7 +119,10 @@ fn handle(msg: &Message, kind: &str) -> (u32, PropMap) {
             "gust portal: dir={} multiple={} folder={:?} name={:?}",
             options.directory,
             options.multiple,
-            options.current_folder.as_deref().map(String::from_utf8_lossy),
+            options
+                .current_folder
+                .as_deref()
+                .map(String::from_utf8_lossy),
             options.current_name
         );
     }
@@ -169,12 +172,10 @@ pub fn run() -> i32 {
                         if msg.get_no_reply() {
                             return true;
                         }
-                        let _ = conn.send(
-                            msg.error(
-                                &"org.freedesktop.DBus.Error.UnknownMethod".into(),
-                                &std::ffi::CString::new("not supported").unwrap(),
-                            ),
-                        );
+                        let _ = conn.send(msg.error(
+                            &"org.freedesktop.DBus.Error.UnknownMethod".into(),
+                            &std::ffi::CString::new("not supported").unwrap(),
+                        ));
                         return true;
                     }
                 };

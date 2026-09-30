@@ -208,8 +208,11 @@ pub enum RowEdit {
 /// program changes the folder.
 pub fn row_edits(old: &[std::ffi::OsString], new: &[std::ffi::OsString]) -> Vec<RowEdit> {
     use std::collections::HashMap;
-    let pos_new: HashMap<&std::ffi::OsStr, usize> =
-        new.iter().enumerate().map(|(i, n)| (n.as_os_str(), i)).collect();
+    let pos_new: HashMap<&std::ffi::OsStr, usize> = new
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.as_os_str(), i))
+        .collect();
 
     // For each old row that survives, its position in `new`.
     let common: Vec<(usize, usize)> = old

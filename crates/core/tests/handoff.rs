@@ -50,10 +50,16 @@ fn the_parent_waits_for_ready_and_knows_when_the_child_died() {
     let mut dead = std::process::Command::new("true").spawn().unwrap();
     let w = ReadyWait::new(ready.clone(), Duration::from_secs(5));
     std::thread::sleep(Duration::from_millis(100));
-    assert!(w.poll(&mut dead).is_err(), "a dead child must not count as ready");
+    assert!(
+        w.poll(&mut dead).is_err(),
+        "a dead child must not count as ready"
+    );
 
     // A child that signals ready.
-    let mut live = std::process::Command::new("sleep").arg("5").spawn().unwrap();
+    let mut live = std::process::Command::new("sleep")
+        .arg("5")
+        .spawn()
+        .unwrap();
     let w = ReadyWait::new(ready.clone(), Duration::from_secs(5));
     assert_eq!(w.poll(&mut live), Ok(false), "not ready yet");
     std::fs::write(&ready, b"ok").unwrap();
@@ -63,10 +69,16 @@ fn the_parent_waits_for_ready_and_knows_when_the_child_died() {
 
     // A child that never answers within the deadline.
     let _ = std::fs::remove_file(&ready);
-    let mut slow = std::process::Command::new("sleep").arg("5").spawn().unwrap();
+    let mut slow = std::process::Command::new("sleep")
+        .arg("5")
+        .spawn()
+        .unwrap();
     let w = ReadyWait::new(ready, Duration::from_millis(50));
     std::thread::sleep(Duration::from_millis(80));
-    assert!(w.poll(&mut slow).is_err(), "a window that never appears times out");
+    assert!(
+        w.poll(&mut slow).is_err(),
+        "a window that never appears times out"
+    );
     let _ = slow.kill();
     let _ = slow.wait();
 }

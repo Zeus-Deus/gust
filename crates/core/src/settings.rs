@@ -70,7 +70,11 @@ impl Settings {
         let base = std::env::var_os("XDG_CONFIG_HOME")
             .filter(|v| !v.is_empty())
             .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").filter(|h| !h.is_empty()).map(|h| PathBuf::from(h).join(".config")))?;
+            .or_else(|| {
+                std::env::var_os("HOME")
+                    .filter(|h| !h.is_empty())
+                    .map(|h| PathBuf::from(h).join(".config"))
+            })?;
         Some(base.join("gust/settings.toml"))
     }
 
@@ -122,9 +126,13 @@ impl Settings {
         let probe = Settings::from_text(&format!("{}\n{line}\n", self.to_text()));
         // Accepted iff the same line applied to a DIFFERENT starting value
         // also lands on `value`: from_text ignores what it rejects.
-        let known = matches!(key, "key_preset" | "show_hidden" | "sidebar" | "density" | "renderer");
+        let known = matches!(
+            key,
+            "key_preset" | "show_hidden" | "sidebar" | "density" | "renderer"
+        );
         let echoed = probe.to_text().lines().any(|l| {
-            l.split_once('=').is_some_and(|(k, v)| k.trim() == key && v.trim().trim_matches('"') == value)
+            l.split_once('=')
+                .is_some_and(|(k, v)| k.trim() == key && v.trim().trim_matches('"') == value)
         });
         if !known || !echoed {
             return Err(format!("unknown setting {key} = {value}"));
@@ -173,7 +181,9 @@ impl Settings {
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
         use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
-        let dir = path.parent().ok_or_else(|| std::io::Error::other("no parent folder"))?;
+        let dir = path
+            .parent()
+            .ok_or_else(|| std::io::Error::other("no parent folder"))?;
         std::fs::create_dir_all(dir)?;
         let stage = dir.join(format!(".settings-{}.tmp", std::process::id()));
         let mut f = std::fs::OpenOptions::new()
@@ -182,7 +192,9 @@ impl Settings {
             .truncate(true)
             .mode(0o600)
             .open(&stage)?;
-        let w = f.write_all(self.to_text().as_bytes()).and_then(|_| f.sync_all());
+        let w = f
+            .write_all(self.to_text().as_bytes())
+            .and_then(|_| f.sync_all());
         drop(f);
         if let Err(e) = w.and_then(|_| std::fs::rename(&stage, path)) {
             let _ = std::fs::remove_file(&stage);

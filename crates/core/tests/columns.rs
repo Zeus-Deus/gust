@@ -24,8 +24,14 @@ fn folders_first_then_natural_order() {
     fs::create_dir(d.join("zeta")).unwrap();
     fs::create_dir(d.join("alpha")).unwrap();
     let Bounded { names, more, .. } = list_names_bounded(&d, 100, false, Duration::from_secs(2));
-    let shown: Vec<String> = names.iter().map(|(n, _)| n.to_string_lossy().into_owned()).collect();
-    assert_eq!(shown, vec!["alpha", "zeta", "A.md", "b.txt", "file9", "file10"]);
+    let shown: Vec<String> = names
+        .iter()
+        .map(|(n, _)| n.to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        shown,
+        vec!["alpha", "zeta", "A.md", "b.txt", "file9", "file10"]
+    );
     assert_eq!(more, 0);
 }
 
@@ -45,8 +51,18 @@ fn hidden_entries_follow_the_setting() {
     let d = tmp("hidden");
     fs::write(d.join(".secret"), b"x").unwrap();
     fs::write(d.join("seen"), b"x").unwrap();
-    assert_eq!(list_names_bounded(&d, 10, false, Duration::from_secs(2)).names.len(), 1);
-    assert_eq!(list_names_bounded(&d, 10, true, Duration::from_secs(2)).names.len(), 2);
+    assert_eq!(
+        list_names_bounded(&d, 10, false, Duration::from_secs(2))
+            .names
+            .len(),
+        1
+    );
+    assert_eq!(
+        list_names_bounded(&d, 10, true, Duration::from_secs(2))
+            .names
+            .len(),
+        2
+    );
 }
 
 #[test]
@@ -55,7 +71,10 @@ fn a_symlinked_folder_is_marked_but_not_followed() {
     symlink("/", d.join("root")).unwrap();
     let b = list_names_bounded(&d, 10, false, Duration::from_secs(2));
     assert_eq!(b.names.len(), 1);
-    assert!(!b.names[0].1, "a link to a folder is not listed as a folder to walk into");
+    assert!(
+        !b.names[0].1,
+        "a link to a folder is not listed as a folder to walk into"
+    );
 }
 
 #[test]

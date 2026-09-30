@@ -88,7 +88,11 @@ impl Device {
 /// udev keeps these folders of links in step with the kernel's block
 /// devices. Watching them (not `/dev`, where every new terminal is an
 /// event) tells Gust when a device came, went or got a filesystem.
-pub const DEVICE_WATCH_DIRS: [&str; 3] = ["/dev/disk/by-diskseq", "/dev/disk/by-label", "/dev/disk/by-uuid"];
+pub const DEVICE_WATCH_DIRS: [&str; 3] = [
+    "/dev/disk/by-diskseq",
+    "/dev/disk/by-label",
+    "/dev/disk/by-uuid",
+];
 
 /// One row of `lsblk --json` output, before Gust decides what to do with it.
 #[derive(Debug, Clone)]

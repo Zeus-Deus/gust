@@ -607,7 +607,9 @@ pub fn apply_undo(plan: &UndoPlan) -> UndoOutcome {
                         out.steps_done += 1;
                         // The replaced item was kept in the Trash; once it is
                         // back, its trash record describes nothing.
-                        if let (Some(files), Some(name)) = (preserved.parent(), preserved.file_name()) {
+                        if let (Some(files), Some(name)) =
+                            (preserved.parent(), preserved.file_name())
+                        {
                             if files.file_name().is_some_and(|n| n == "files") {
                                 if let Some(base) = files.parent() {
                                     let mut info = name.to_os_string();
@@ -617,10 +619,12 @@ pub fn apply_undo(plan: &UndoPlan) -> UndoOutcome {
                             }
                         }
                     }
-                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => out.problems.push(format!(
-                        "{} is occupied again — the replaced item stays in the Trash",
-                        to.display()
-                    )),
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                        out.problems.push(format!(
+                            "{} is occupied again — the replaced item stays in the Trash",
+                            to.display()
+                        ))
+                    }
                     Err(e) => out.problems.push(format!("{}: {e}", preserved.display())),
                 }
             }

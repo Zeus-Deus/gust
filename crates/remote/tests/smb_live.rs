@@ -38,22 +38,11 @@ fn fixture_up() -> bool {
 /// missing fixture into a FAILURE, which is what a release gate must use.
 macro_rules! need_fixture {
     () => {
-        if !fixture_up() {
-            let required = std::env::var("GUST_SMB_REQUIRED")
-                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false);
-            if required {
-                panic!(
-                    "SMB FIXTURE REQUIRED BUT NOT RUNNING: start tests/smb-fixture.sh. \
-                     GUST_SMB_REQUIRED=1 forbids skipping this case."
-                );
-            }
-            eprintln!(
-                "SKIP: smb fixture not running (tests/smb-fixture.sh start) — \
-                 this case did NOT run; set GUST_SMB_REQUIRED=1 to make it fail instead"
-            );
-            return;
-        }
+        gust_testkit::skip_unless!(
+            fixture_up(),
+            "SMB",
+            "smb fixture not running (tests/smb-fixture.sh start)"
+        );
     };
 }
 
@@ -310,22 +299,11 @@ fn nfs_fixture_up() -> bool {
 /// and GUST_NFS_REQUIRED=1 makes it a failure for a release gate.
 macro_rules! need_nfs {
     () => {
-        if !nfs_fixture_up() {
-            let required = std::env::var("GUST_NFS_REQUIRED")
-                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false);
-            if required {
-                panic!(
-                    "NFS FIXTURE REQUIRED BUT NOT RUNNING: start tests/nfs-fixture.sh. \
-                     GUST_NFS_REQUIRED=1 forbids skipping this case."
-                );
-            }
-            eprintln!(
-                "SKIP: nfs fixture not running (tests/nfs-fixture.sh start) — \
-                 this case did NOT run; set GUST_NFS_REQUIRED=1 to make it fail instead"
-            );
-            return;
-        }
+        gust_testkit::skip_unless!(
+            nfs_fixture_up(),
+            "NFS",
+            "nfs fixture not running (tests/nfs-fixture.sh start)"
+        );
     };
 }
 

@@ -755,7 +755,10 @@ const NEEDS_ANSWERS: &str = "?conflict";
 /// What a place operation's worker found.
 enum PlaceOutcome {
     /// Browse this folder (unless the user moved on), then report success.
-    Open { path: std::path::PathBuf, status: String },
+    Open {
+        path: std::path::PathBuf,
+        status: String,
+    },
     /// Report success with a status line.
     Done(String),
     /// Report a failure the user must read.
@@ -1052,7 +1055,9 @@ impl qobject::DirModel {
                     match outcome {
                         PlaceOutcome::Open { path, status } => {
                             if model.as_ref().generation == gen {
-                                model.as_mut().navigate(&QString::from(path.to_string_lossy().as_ref()));
+                                model
+                                    .as_mut()
+                                    .navigate(&QString::from(path.to_string_lossy().as_ref()));
                             }
                             if !status.is_empty() {
                                 model.as_mut().set_status(QString::from(&status));
@@ -1327,14 +1332,18 @@ impl qobject::DirModel {
                 out.push(',');
             }
             let mp = gust_remote::mount::mount_point_for(&h.alias);
-            let mounted = mp.as_ref().map(|p| gust_remote::mount::is_mounted(p)).unwrap_or(false);
+            let mounted = mp
+                .as_ref()
+                .map(|p| gust_remote::mount::is_mounted(p))
+                .unwrap_or(false);
             // Mounted is not the same as working: a server that went away
             // leaves the mount in the table, answering every read with an
             // I/O error. Only a mounted place is asked, by a killable child
             // with a short limit, so this never hangs the window.
             let lost = mounted
                 && mp.as_ref().is_some_and(|p| {
-                    !gust_core::stall::probe(p, std::time::Duration::from_millis(500)).is_responsive()
+                    !gust_core::stall::probe(p, std::time::Duration::from_millis(500))
+                        .is_responsive()
                 });
             // Escaped: an alias is arbitrary text from a user's config.
             out.push_str(&format!(
@@ -1505,10 +1514,9 @@ impl qobject::DirModel {
                         mime,
                         gust_thumbs::cache::ThumbSize::Large,
                     ) {
-                        Ok(img) => format!(
-                            "{{\"image\":{}}}",
-                            Self::json_str(&img.to_string_lossy())
-                        ),
+                        Ok(img) => {
+                            format!("{{\"image\":{}}}", Self::json_str(&img.to_string_lossy()))
+                        }
                         Err(e) => format!("{{\"why\":{}}}", Self::json_str(&e.to_string())),
                     }
                 } else if is_archive {
@@ -1518,13 +1526,13 @@ impl qobject::DirModel {
                             let shown: Vec<String> = entries
                                 .iter()
                                 .take(200)
-                                .map(|e| Self::json_str(&gust_core::peek::sanitise_line(e.name.as_bytes())))
+                                .map(|e| {
+                                    Self::json_str(&gust_core::peek::sanitise_line(
+                                        e.name.as_bytes(),
+                                    ))
+                                })
                                 .collect();
-                            format!(
-                                "{{\"archive\":[{}],\"total\":{}}}",
-                                shown.join(","),
-                                total
-                            )
+                            format!("{{\"archive\":[{}],\"total\":{}}}", shown.join(","), total)
                         }
                         Err(e) => format!("{{\"why\":{}}}", Self::json_str(&e.message())),
                     }
@@ -1566,7 +1574,9 @@ impl qobject::DirModel {
                         let s = gust_core::dirsize::dir_size(
                             p,
                             &cancel,
-                            gust_core::dirsize::SizeLimits { max_entries: 500_000 },
+                            gust_core::dirsize::SizeLimits {
+                                max_entries: 500_000,
+                            },
                         );
                         files += s.files;
                         bytes += s.bytes;
@@ -1599,8 +1609,18 @@ impl qobject::DirModel {
                 let exists = gust_core::stall::needs_probe(&r.path) || r.path.exists();
                 format!(
                     "{{\"name\":{},\"folder\":{},\"path\":{},\"when\":{},\"exists\":{}}}",
-                    Self::json_str(&r.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()),
-                    Self::json_str(&r.path.parent().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default()),
+                    Self::json_str(
+                        &r.path
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default()
+                    ),
+                    Self::json_str(
+                        &r.path
+                            .parent()
+                            .map(|p| p.to_string_lossy().into_owned())
+                            .unwrap_or_default()
+                    ),
                     Self::json_str(&r.path.to_string_lossy()),
                     Self::json_str(&when),
                     exists
@@ -1654,7 +1674,12 @@ impl qobject::DirModel {
                             .map(|n| n.to_string_lossy().into_owned())
                             .unwrap_or_default()
                     ),
-                    Self::json_str(&e.original.parent().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default()),
+                    Self::json_str(
+                        &e.original
+                            .parent()
+                            .map(|p| p.to_string_lossy().into_owned())
+                            .unwrap_or_default()
+                    ),
                     Self::json_str(when.get(..16).unwrap_or(&when))
                 )
             })
@@ -1778,7 +1803,9 @@ impl qobject::DirModel {
 
     fn settings_json(&self) -> QString {
         use gust_core::settings::Settings;
-        let st = Settings::default_path().map(|p| Settings::load(&p)).unwrap_or_default();
+        let st = Settings::default_path()
+            .map(|p| Settings::load(&p))
+            .unwrap_or_default();
         let is_default = gust_core::defaults::mimeapps_path()
             .and_then(|p| std::fs::read_to_string(p).ok())
             .map(|t| gust_core::defaults::MimeApps::parse(&t))
@@ -1814,7 +1841,9 @@ impl qobject::DirModel {
             ),
             (
                 "is_omarchy",
-                gust_core::omarchy_keys::bindings_path().is_some_and(|p| p.exists()).to_string(),
+                gust_core::omarchy_keys::bindings_path()
+                    .is_some_and(|p| p.exists())
+                    .to_string(),
             ),
             ("renderer_now", Self::json_str(now)),
         ];
@@ -1877,7 +1906,9 @@ impl qobject::DirModel {
         let picked: Vec<PathBuf> = match mode.as_str() {
             "save" => {
                 let name = save_name.to_string();
-                let bare = std::path::Path::new(&name).file_name().map(|n| n.to_owned());
+                let bare = std::path::Path::new(&name)
+                    .file_name()
+                    .map(|n| n.to_owned());
                 let (Some(dir), Some(bare)) = (here, bare) else {
                     return QString::from("type a file name");
                 };
@@ -2109,8 +2140,17 @@ impl qobject::DirModel {
             location: dir.clone(),
             view: view.to_string(),
             cursor_name: self.entry_at(self.cursor).map(|e| e.name.clone()),
-            selected: self.selection.resolve(&visible).iter().map(|e| e.name.clone()).collect(),
-            back: self.back.iter().filter_map(|k| k.as_path().map(|p| p.to_path_buf())).collect(),
+            selected: self
+                .selection
+                .resolve(&visible)
+                .iter()
+                .map(|e| e.name.clone())
+                .collect(),
+            back: self
+                .back
+                .iter()
+                .filter_map(|k| k.as_path().map(|p| p.to_path_buf()))
+                .collect(),
             show_hidden: self.show_hidden,
         };
         if handoff.write(&handoff_path).is_ok() {
@@ -2130,7 +2170,10 @@ impl qobject::DirModel {
                     }
                     *g = Some((
                         child,
-                        gust_core::handoff::ReadyWait::new(ready_path, std::time::Duration::from_secs(20)),
+                        gust_core::handoff::ReadyWait::new(
+                            ready_path,
+                            std::time::Duration::from_secs(20),
+                        ),
                     ));
                 }
                 QString::default()
@@ -2566,13 +2609,21 @@ impl qobject::DirModel {
         // Moved into the worker and dropped there; never stored.
         let secret = password.to_string();
         let label = format!("{}/{}", share.server, share.share);
-        self.place_op("share", label.clone(), format!("Connecting to {label}…"), move || {
-            // Bounded: a server that never answers fails after the deadline.
-            match mount(&share, secret, &runtime, std::time::Duration::from_secs(25)) {
-                Ok(mp) => PlaceOutcome::Open { path: mp, status: format!("Connected to {label}") },
-                Err(e) => PlaceOutcome::Failed(e.message()),
-            }
-        });
+        self.place_op(
+            "share",
+            label.clone(),
+            format!("Connecting to {label}…"),
+            move || {
+                // Bounded: a server that never answers fails after the deadline.
+                match mount(&share, secret, &runtime, std::time::Duration::from_secs(25)) {
+                    Ok(mp) => PlaceOutcome::Open {
+                        path: mp,
+                        status: format!("Connected to {label}"),
+                    },
+                    Err(e) => PlaceOutcome::Failed(e.message()),
+                }
+            },
+        );
         QString::default()
     }
 
@@ -2637,39 +2688,55 @@ impl qobject::DirModel {
             return QString::from(DeviceError::NoUdisks.message());
         }
         let dev = path.to_string();
-        self.place_op("device-mount", dev.clone(), "Mounting…".into(), move || {
-            // The device must be one the kernel actually reports, so a
-            // crafted path cannot be handed to udisks.
-            if !gust_core::devices::list_devices().iter().any(|d| d.path == dev) {
-                return PlaceOutcome::Failed("That device is no longer there.".into());
-            }
-            let out = std::process::Command::new("udisksctl")
-                .args(mount_args(&dev))
-                .stdin(std::process::Stdio::null())
-                .output();
-            let out = match out {
-                Ok(o) => o,
-                Err(e) => return PlaceOutcome::Failed(format!("Could not mount: {e}")),
-            };
-            if !out.status.success() {
-                let err = String::from_utf8_lossy(&out.stderr);
-                return PlaceOutcome::Failed(format!(
-                    "Could not mount that device: {}",
-                    err.lines().last().unwrap_or("udisks did not say why").trim()
-                ));
-            }
-            // udisksctl prints "Mounted /dev/sdb1 at /run/media/...".
-            let said = String::from_utf8_lossy(&out.stdout);
-            if let Some(at) = said.rsplit_once(" at ") {
-                let mount = at.1.trim().trim_end_matches('.').to_string();
-                if std::path::Path::new(&mount).is_dir() {
-                    return PlaceOutcome::Open { path: mount.into(), status: String::new() };
+        self.place_op(
+            "device-mount",
+            dev.clone(),
+            "Mounting…".into(),
+            move || {
+                // The device must be one the kernel actually reports, so a
+                // crafted path cannot be handed to udisks.
+                if !gust_core::devices::list_devices()
+                    .iter()
+                    .any(|d| d.path == dev)
+                {
+                    return PlaceOutcome::Failed("That device is no longer there.".into());
                 }
-            }
-            // Mounted, but the path could not be read back: say so rather
-            // than claiming to have gone somewhere.
-            PlaceOutcome::Failed("Mounted, but Gust could not tell where. Check the sidebar.".into())
-        });
+                let out = std::process::Command::new("udisksctl")
+                    .args(mount_args(&dev))
+                    .stdin(std::process::Stdio::null())
+                    .output();
+                let out = match out {
+                    Ok(o) => o,
+                    Err(e) => return PlaceOutcome::Failed(format!("Could not mount: {e}")),
+                };
+                if !out.status.success() {
+                    let err = String::from_utf8_lossy(&out.stderr);
+                    return PlaceOutcome::Failed(format!(
+                        "Could not mount that device: {}",
+                        err.lines()
+                            .last()
+                            .unwrap_or("udisks did not say why")
+                            .trim()
+                    ));
+                }
+                // udisksctl prints "Mounted /dev/sdb1 at /run/media/...".
+                let said = String::from_utf8_lossy(&out.stdout);
+                if let Some(at) = said.rsplit_once(" at ") {
+                    let mount = at.1.trim().trim_end_matches('.').to_string();
+                    if std::path::Path::new(&mount).is_dir() {
+                        return PlaceOutcome::Open {
+                            path: mount.into(),
+                            status: String::new(),
+                        };
+                    }
+                }
+                // Mounted, but the path could not be read back: say so rather
+                // than claiming to have gone somewhere.
+                PlaceOutcome::Failed(
+                    "Mounted, but Gust could not tell where. Check the sidebar.".into(),
+                )
+            },
+        );
         QString::default()
     }
 
@@ -2684,36 +2751,51 @@ impl qobject::DirModel {
         if self.as_ref().job.is_some() {
             return QString::from(DeviceError::Busy("A transfer".into()).message());
         }
-        self.place_op("device-eject", dev.clone(), "Ejecting…".into(), move || {
-            let mount = gust_core::devices::list_devices()
-                .into_iter()
-                .find(|d| d.path == dev)
-                .and_then(|d| d.mount_point);
-            // Back on the GUI thread: leave the device if the pane is on it,
-            // then eject on a worker again.
-            PlaceOutcome::Then(Box::new(move |mut model| {
-                if let Some(mp) = &mount {
-                    model.as_mut().leave_if_inside(mp);
-                }
-                model.place_op("device-eject", dev.clone(), "Ejecting…".into(), move || {
-                    let out = std::process::Command::new("udisksctl")
-                        .args(unmount_args(&dev))
-                        .stdin(std::process::Stdio::null())
-                        .output();
-                    match out {
-                        Ok(o) if o.status.success() => PlaceOutcome::Done("Safe to remove".into()),
-                        Ok(o) => {
-                            let err = String::from_utf8_lossy(&o.stderr);
-                            PlaceOutcome::Failed(format!(
-                                "Could not eject: {}",
-                                err.lines().last().unwrap_or("udisks did not say why").trim()
-                            ))
-                        }
-                        Err(e) => PlaceOutcome::Failed(format!("Could not eject: {e}")),
+        self.place_op(
+            "device-eject",
+            dev.clone(),
+            "Ejecting…".into(),
+            move || {
+                let mount = gust_core::devices::list_devices()
+                    .into_iter()
+                    .find(|d| d.path == dev)
+                    .and_then(|d| d.mount_point);
+                // Back on the GUI thread: leave the device if the pane is on it,
+                // then eject on a worker again.
+                PlaceOutcome::Then(Box::new(move |mut model| {
+                    if let Some(mp) = &mount {
+                        model.as_mut().leave_if_inside(mp);
                     }
-                });
-            }))
-        });
+                    model.place_op(
+                        "device-eject",
+                        dev.clone(),
+                        "Ejecting…".into(),
+                        move || {
+                            let out = std::process::Command::new("udisksctl")
+                                .args(unmount_args(&dev))
+                                .stdin(std::process::Stdio::null())
+                                .output();
+                            match out {
+                                Ok(o) if o.status.success() => {
+                                    PlaceOutcome::Done("Safe to remove".into())
+                                }
+                                Ok(o) => {
+                                    let err = String::from_utf8_lossy(&o.stderr);
+                                    PlaceOutcome::Failed(format!(
+                                        "Could not eject: {}",
+                                        err.lines()
+                                            .last()
+                                            .unwrap_or("udisks did not say why")
+                                            .trim()
+                                    ))
+                                }
+                                Err(e) => PlaceOutcome::Failed(format!("Could not eject: {e}")),
+                            }
+                        },
+                    );
+                }))
+            },
+        );
         QString::default()
     }
 
@@ -3016,33 +3098,44 @@ impl qobject::DirModel {
         let Some(mp) = gust_remote::mount::mount_point_for(&alias) else {
             return QString::from("That name cannot be used for a place.");
         };
-        self.place_op("remote-connect", alias.clone(), format!("Connecting to {alias}…"), move || {
-            let hosts = gust_remote::ssh_config::parse_ssh_config(&cfg);
-            let Some(h) = hosts.iter().find(|h| h.alias == alias) else {
-                return PlaceOutcome::Failed(format!("No saved computer called \"{alias}\"."));
-            };
-            if gust_remote::mount::is_mounted(&mp) {
-                return PlaceOutcome::Open { path: mp, status: String::new() };
-            }
-            let mut spec = gust_remote::mount::RemoteSpec::new(
-                &alias,
-                h.hostname.clone().unwrap_or_else(|| alias.clone()),
-            );
-            spec.user = h.user.clone();
-            spec.port = h.port;
-            spec.config_file = Some(cfg);
-            // The alias names a whole Host block: identity, known_hosts,
-            // port, proxy. Use it verbatim, or all of that is dropped.
-            spec.use_alias_as_target = true;
-            // Where the place opens. Without an explicit folder a connection
-            // lands in the login directory, which is that account's home.
-            spec.remote_path = h.remote_path.clone();
-            // Bounded: sshfs is given a connect timeout.
-            match gust_remote::mount::mount(&spec, &mp, std::time::Duration::from_secs(20)) {
-                Ok(()) => PlaceOutcome::Open { path: mp, status: format!("Connected to {alias}") },
-                Err(e) => PlaceOutcome::Failed(e.message()),
-            }
-        });
+        self.place_op(
+            "remote-connect",
+            alias.clone(),
+            format!("Connecting to {alias}…"),
+            move || {
+                let hosts = gust_remote::ssh_config::parse_ssh_config(&cfg);
+                let Some(h) = hosts.iter().find(|h| h.alias == alias) else {
+                    return PlaceOutcome::Failed(format!("No saved computer called \"{alias}\"."));
+                };
+                if gust_remote::mount::is_mounted(&mp) {
+                    return PlaceOutcome::Open {
+                        path: mp,
+                        status: String::new(),
+                    };
+                }
+                let mut spec = gust_remote::mount::RemoteSpec::new(
+                    &alias,
+                    h.hostname.clone().unwrap_or_else(|| alias.clone()),
+                );
+                spec.user = h.user.clone();
+                spec.port = h.port;
+                spec.config_file = Some(cfg);
+                // The alias names a whole Host block: identity, known_hosts,
+                // port, proxy. Use it verbatim, or all of that is dropped.
+                spec.use_alias_as_target = true;
+                // Where the place opens. Without an explicit folder a connection
+                // lands in the login directory, which is that account's home.
+                spec.remote_path = h.remote_path.clone();
+                // Bounded: sshfs is given a connect timeout.
+                match gust_remote::mount::mount(&spec, &mp, std::time::Duration::from_secs(20)) {
+                    Ok(()) => PlaceOutcome::Open {
+                        path: mp,
+                        status: format!("Connected to {alias}"),
+                    },
+                    Err(e) => PlaceOutcome::Failed(e.message()),
+                }
+            },
+        );
         QString::default()
     }
 
@@ -3054,12 +3147,15 @@ impl qobject::DirModel {
         // Leaving the folder first: unmounting what is on screen is how a
         // listing worker ends up reading a filesystem that just vanished.
         self.as_mut().leave_if_inside(&mp);
-        self.place_op("remote-disconnect", alias.clone(), format!("Disconnecting {alias}…"), move || {
-            match gust_remote::mount::unmount(&mp) {
+        self.place_op(
+            "remote-disconnect",
+            alias.clone(),
+            format!("Disconnecting {alias}…"),
+            move || match gust_remote::mount::unmount(&mp) {
                 Ok(()) => PlaceOutcome::Done(format!("Disconnected from {alias}")),
                 Err(e) => PlaceOutcome::Failed(e.message()),
-            }
-        });
+            },
+        );
         QString::default()
     }
 
@@ -3200,11 +3296,18 @@ impl qobject::DirModel {
         // A folder's size is its contents', once measured in the background.
         if let Some(name) = path.file_name() {
             if let Some(d) = self.dir_sizes.get(name) {
-                let n = if d.files == 1 { "1 file".to_string() } else { format!("{} files", d.files) };
+                let n = if d.files == 1 {
+                    "1 file".to_string()
+                } else {
+                    format!("{} files", d.files)
+                };
                 let v = if d.complete {
                     format!("{} ({n})", human_size(d.bytes))
                 } else {
-                    format!("at least {} ({n}; some could not be read)", human_size(d.bytes))
+                    format!(
+                        "at least {} ({n}; some could not be read)",
+                        human_size(d.bytes)
+                    )
                 };
                 facts.insert(0, format!("[\"Contents\",{}]", Self::json_str(&v)));
             }
@@ -3422,7 +3525,10 @@ impl qobject::DirModel {
         if self.as_ref().generation != gen {
             return;
         }
-        self.as_mut().rust_mut().dir_sizes.insert(name.clone(), size);
+        self.as_mut()
+            .rust_mut()
+            .dir_sizes
+            .insert(name.clone(), size);
         let Some(row) = self
             .as_ref()
             .visible
@@ -3544,7 +3650,9 @@ impl qobject::DirModel {
         if let Some(want) = self.as_ref().focus_name.clone() {
             let row = {
                 let r = self.as_ref();
-                r.visible.iter().position(|i| r.all.get(*i).is_some_and(|e| e.name == want))
+                r.visible
+                    .iter()
+                    .position(|i| r.all.get(*i).is_some_and(|e| e.name == want))
             };
             if let Some(row) = row {
                 self.as_mut().rust_mut().focus_name = None;
@@ -3718,10 +3826,17 @@ impl qobject::DirModel {
         }
         // The model may have been reset meanwhile (a filter, a sort): only
         // merge onto what is on screen, never onto a stale idea of it.
-        let cursor_name = self.as_ref().entry_at(self.as_ref().cursor).map(|e| e.name.clone());
+        let cursor_name = self
+            .as_ref()
+            .entry_at(self.as_ref().cursor)
+            .map(|e| e.name.clone());
         let old_names: Vec<std::ffi::OsString> = {
             let r = self.as_ref();
-            r.visible.iter().filter_map(|i| r.all.get(*i)).map(|e| e.name.clone()).collect()
+            r.visible
+                .iter()
+                .filter_map(|i| r.all.get(*i))
+                .map(|e| e.name.clone())
+                .collect()
         };
 
         // The new visible list, by the same rule as recompute_visible.
@@ -3730,8 +3845,10 @@ impl qobject::DirModel {
             &self.as_ref().filter.to_string(),
             self.as_ref().show_hidden,
         );
-        let new_visible_names: Vec<std::ffi::OsString> =
-            new_visible.iter().map(|&i| snap.entries[i].name.clone()).collect();
+        let new_visible_names: Vec<std::ffi::OsString> = new_visible
+            .iter()
+            .map(|&i| snap.entries[i].name.clone())
+            .collect();
 
         let edits = gust_core::watch::row_edits(&old_names, &new_visible_names);
         let root = cxx_qt_lib::QModelIndex::default();
@@ -3765,7 +3882,11 @@ impl qobject::DirModel {
         // new list, then insert the new rows.
         let survivors: Vec<std::ffi::OsString> = {
             let r = self.as_ref();
-            r.visible.iter().filter_map(|i| r.all.get(*i)).map(|e| e.name.clone()).collect()
+            r.visible
+                .iter()
+                .filter_map(|i| r.all.get(*i))
+                .map(|e| e.name.clone())
+                .collect()
         };
         let index_of: std::collections::HashMap<std::ffi::OsString, usize> = snap
             .entries
@@ -3776,7 +3897,10 @@ impl qobject::DirModel {
         {
             let mut r = self.as_mut().rust_mut();
             r.all = snap.entries;
-            r.visible = survivors.iter().filter_map(|n| index_of.get(n).copied()).collect();
+            r.visible = survivors
+                .iter()
+                .filter_map(|n| index_of.get(n).copied())
+                .collect();
         }
         // Inserts, lowest row first; `at` is also the row in the new list,
         // so a run of consecutive `at` values is one contiguous block.
@@ -3796,7 +3920,10 @@ impl qobject::DirModel {
                 last = inserts[k];
             }
             k += 1;
-            unsafe { self.as_mut().begin_insert_rows(&root, first as i32, last as i32) };
+            unsafe {
+                self.as_mut()
+                    .begin_insert_rows(&root, first as i32, last as i32)
+            };
             {
                 let mut r = self.as_mut().rust_mut();
                 let block: Vec<usize> = new_visible[first..=last].to_vec();
@@ -4644,13 +4771,12 @@ impl qobject::DirModel {
         // Also offer it to the rest of the desktop, so a copy here can be
         // pasted in another file manager (DESIGN §6.19). A failure here
         // does not lose the copy: the internal clipboard still works.
-        let shared =
-            gust_core::clipboard::offer_with(
-                gust_core::clipboard::ClipVerb::Copy,
-                &paths,
-                &clip_holder(),
-            )
-            .is_ok();
+        let shared = gust_core::clipboard::offer_with(
+            gust_core::clipboard::ClipVerb::Copy,
+            &paths,
+            &clip_holder(),
+        )
+        .is_ok();
         self.as_mut().rust_mut().clipboard = Some((paths, ClipMode::Copy));
         if shared {
             QString::from(&format!("Copied {label} — paste with Ctrl+V"))
@@ -4667,7 +4793,10 @@ impl qobject::DirModel {
 
     fn copy_path(mut self: Pin<&mut Self>, row: i32) -> QString {
         let paths = if row < 0 {
-            self.key.as_path().map(|p| vec![p.to_path_buf()]).unwrap_or_default()
+            self.key
+                .as_path()
+                .map(|p| vec![p.to_path_buf()])
+                .unwrap_or_default()
         } else {
             self.as_mut().set_cursor_if_no_selection(row);
             self.as_ref().target_paths()
@@ -4690,13 +4819,12 @@ impl qobject::DirModel {
             return QString::from("nothing to cut");
         }
         let label = clip_label(&paths);
-        let shared =
-            gust_core::clipboard::offer_with(
-                gust_core::clipboard::ClipVerb::Cut,
-                &paths,
-                &clip_holder(),
-            )
-            .is_ok();
+        let shared = gust_core::clipboard::offer_with(
+            gust_core::clipboard::ClipVerb::Cut,
+            &paths,
+            &clip_holder(),
+        )
+        .is_ok();
         self.as_mut().rust_mut().clipboard = Some((paths, ClipMode::Cut));
         if shared {
             QString::from(&format!("Cut {label} — paste with Ctrl+V"))
@@ -4769,7 +4897,8 @@ impl qobject::DirModel {
         }) else {
             return QString::from("nothing to paste");
         };
-        let Some(dest) = into.or_else(|| self.as_ref().key.as_path().map(|p| p.to_path_buf())) else {
+        let Some(dest) = into.or_else(|| self.as_ref().key.as_path().map(|p| p.to_path_buf()))
+        else {
             return QString::from("cannot paste here");
         };
         // Drop anything that vanished since it was copied.
@@ -4800,7 +4929,11 @@ impl qobject::DirModel {
     /// The one door every copy and move goes through (paste, drop, send to
     /// the other pane). Name clashes are found BEFORE anything is written;
     /// if there are any, the transfer waits for the user's answers.
-    fn begin_transfer(mut self: Pin<&mut Self>, req: gust_ops::jobs::Request, consumes_cut: bool) -> QString {
+    fn begin_transfer(
+        mut self: Pin<&mut Self>,
+        req: gust_ops::jobs::Request,
+        consumes_cut: bool,
+    ) -> QString {
         if self.as_ref().job.is_some() {
             return QString::from("another operation is still running");
         }
@@ -4846,7 +4979,11 @@ impl qobject::DirModel {
         let Some(p) = self.pending.as_ref() else {
             return QString::default();
         };
-        let Some(i) = p.clashes.iter().position(|c| !p.answers.contains_key(&c.source)) else {
+        let Some(i) = p
+            .clashes
+            .iter()
+            .position(|c| !p.answers.contains_key(&c.source))
+        else {
             return QString::default();
         };
         use std::os::unix::fs::MetadataExt;
@@ -4859,7 +4996,9 @@ impl qobject::DirModel {
         let (old_dir, old_size, old_time) = facts(&c.existing);
         let (_, new_size, new_time) = facts(&c.source);
         let can_replace = gust_ops::trash::TrashDir::home()
-            .map(|t| gust_ops::trash::trash_capability(&c.existing, &t) == gust_core::location::Cap::Yes)
+            .map(|t| {
+                gust_ops::trash::trash_capability(&c.existing, &t) == gust_core::location::Cap::Yes
+            })
             .unwrap_or(false);
         let verb = match p.req {
             gust_ops::jobs::Request::Move { .. } => "move",
@@ -4873,7 +5012,12 @@ impl qobject::DirModel {
             ),
             i,
             p.clashes.len(),
-            Self::json_str(&c.existing.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()),
+            Self::json_str(
+                &c.existing
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            ),
             old_dir,
             Self::json_str(&old_size),
             Self::json_str(&old_time),
@@ -4881,7 +5025,12 @@ impl qobject::DirModel {
             Self::json_str(&new_time),
             can_replace,
             verb,
-            Self::json_str(&c.existing.parent().map(|d| d.display().to_string()).unwrap_or_default()),
+            Self::json_str(
+                &c.existing
+                    .parent()
+                    .map(|d| d.display().to_string())
+                    .unwrap_or_default()
+            ),
         ))
     }
 
@@ -5414,12 +5563,17 @@ impl qobject::DirModel {
 
         let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
         let stopping = snap.state == gust_ops::journal::JobState::Running
-            && self.as_ref().job.as_ref().is_some_and(|j| j.cancel_requested());
+            && self
+                .as_ref()
+                .job
+                .as_ref()
+                .is_some_and(|j| j.cancel_requested());
         // Speed and time left, from the bytes seen on successive polls.
         let (speed, eta) = {
             let mut r = self.as_mut().rust_mut();
             let start = *r.job_clock.get_or_insert_with(std::time::Instant::now);
-            r.job_rate.observe(start.elapsed().as_secs_f64(), snap.bytes_done);
+            r.job_rate
+                .observe(start.elapsed().as_secs_f64(), snap.bytes_done);
             let running = snap.state == gust_ops::journal::JobState::Running && !stopping;
             let speed = r
                 .job_rate
@@ -5450,7 +5604,11 @@ impl qobject::DirModel {
             esc(&snap.message),
             snap.refused.len(),
             if snap.bytes_total > 0 {
-                format!("{} of {}", human_size(snap.bytes_done), human_size(snap.bytes_total))
+                format!(
+                    "{} of {}",
+                    human_size(snap.bytes_done),
+                    human_size(snap.bytes_total)
+                )
             } else {
                 String::new()
             },
@@ -5767,7 +5925,14 @@ fn parse_iso_utc(s: &str) -> Option<i64> {
         return None;
     }
     let n = |r: std::ops::Range<usize>| s.get(r)?.parse::<i64>().ok();
-    let (y, m, d, hh, mm, ss) = (n(0..4)?, n(5..7)?, n(8..10)?, n(11..13)?, n(14..16)?, n(17..19)?);
+    let (y, m, d, hh, mm, ss) = (
+        n(0..4)?,
+        n(5..7)?,
+        n(8..10)?,
+        n(11..13)?,
+        n(14..16)?,
+        n(17..19)?,
+    );
     // days_from_civil (H. Hinnant)
     let y = if m <= 2 { y - 1 } else { y };
     let era = y.div_euclid(400);
@@ -5803,12 +5968,25 @@ fn delete_total_sentence(folders: u64, files: u64, bytes: u64, complete: bool) -
         }
         out
     }
-    let plural = |n: u64, one: &str, many: &str| if n == 1 { one.to_string() } else { format!("{} {many}", grouped(n)) };
+    let plural = |n: u64, one: &str, many: &str| {
+        if n == 1 {
+            one.to_string()
+        } else {
+            format!("{} {many}", grouped(n))
+        }
+    };
     let at_least = if complete { "" } else { "at least " };
-    let files_s = if files == 1 { "1 file".to_string() } else { format!("{} files", grouped(files)) };
+    let files_s = if files == 1 {
+        "1 file".to_string()
+    } else {
+        format!("{} files", grouped(files))
+    };
     let head = match folders {
         0 => format!("{at_least}{files_s}"),
-        f => format!("{} with {at_least}{files_s}", plural(f, "1 folder", "folders")),
+        f => format!(
+            "{} with {at_least}{files_s}",
+            plural(f, "1 folder", "folders")
+        ),
     };
     format!("{head} · {}", human_size(bytes))
 }
@@ -5818,9 +5996,15 @@ mod delete_total_tests {
     use super::delete_total_sentence as s;
     #[test]
     fn says_what_is_really_inside() {
-        assert_eq!(s(1, 1204, 3_435_973_837, true), "1 folder with 1,204 files · 3.2 GB");
+        assert_eq!(
+            s(1, 1204, 3_435_973_837, true),
+            "1 folder with 1,204 files · 3.2 GB"
+        );
         assert_eq!(s(0, 1, 10, true), "1 file · 10 B");
         assert_eq!(s(2, 0, 0, true), "2 folders with 0 files · 0 B");
-        assert_eq!(s(1, 500_000, 1024, false), "1 folder with at least 500,000 files · 1.0 KB");
+        assert_eq!(
+            s(1, 500_000, 1024, false),
+            "1 folder with at least 500,000 files · 1.0 KB"
+        );
     }
 }

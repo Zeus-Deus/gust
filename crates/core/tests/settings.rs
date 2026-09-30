@@ -30,7 +30,8 @@ fn a_round_trip_keeps_every_value() {
 
 #[test]
 fn one_bad_line_only_resets_that_line() {
-    let text = "key_preset = \"vim\"\ndensity = \"gigantic\"\nshow_hidden = maybe\nsidebar = false\n";
+    let text =
+        "key_preset = \"vim\"\ndensity = \"gigantic\"\nshow_hidden = maybe\nsidebar = false\n";
     let s = Settings::from_text(text);
     assert_eq!(s.key_preset, KeyPreset::Vim);
     assert_eq!(s.density, Density::Normal);
@@ -40,7 +41,10 @@ fn one_bad_line_only_resets_that_line() {
 
 #[test]
 fn garbage_is_just_defaults() {
-    assert_eq!(Settings::from_text("\u{0}\u{1}[[[\n=\n==="), Settings::default());
+    assert_eq!(
+        Settings::from_text("\u{0}\u{1}[[[\n=\n==="),
+        Settings::default()
+    );
 }
 
 #[test]
@@ -56,10 +60,16 @@ fn save_is_atomic_private_and_load_refuses_a_symlink() {
     let d = std::env::temp_dir().join(format!("gust-settings-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     let f = d.join("gust/settings.toml");
-    let s = Settings { sidebar: false, ..Settings::default() };
+    let s = Settings {
+        sidebar: false,
+        ..Settings::default()
+    };
     s.save(&f).unwrap();
     assert_eq!(Settings::load(&f), s);
-    assert_eq!(std::fs::metadata(&f).unwrap().permissions().mode() & 0o777, 0o600);
+    assert_eq!(
+        std::fs::metadata(&f).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
     assert_eq!(std::fs::read_dir(f.parent().unwrap()).unwrap().count(), 1);
     // A symlink at the settings path is not followed.
     let other = d.join("elsewhere.toml");
@@ -77,5 +87,9 @@ fn setting_one_value_by_name_validates_it() {
     assert_eq!((s.density, s.sidebar), (Density::Roomy, false));
     assert!(s.set("density", "huge").is_err());
     assert!(s.set("colour", "red").is_err());
-    assert_eq!(s.density, Density::Roomy, "a refused change leaves the value alone");
+    assert_eq!(
+        s.density,
+        Density::Roomy,
+        "a refused change leaves the value alone"
+    );
 }

@@ -8,7 +8,7 @@ use gust_core::dirsize::{dir_size, SizeLimits, Sized};
 use gust_core::lister::CancelToken;
 use std::fs;
 use std::os::unix::fs::symlink;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 fn tmp(tag: &str) -> PathBuf {
@@ -18,7 +18,7 @@ fn tmp(tag: &str) -> PathBuf {
     d
 }
 
-fn size(d: &PathBuf) -> Sized {
+fn size(d: &Path) -> Sized {
     dir_size(d, &CancelToken::new(), SizeLimits::default())
 }
 
@@ -64,7 +64,7 @@ fn another_filesystem_mounted_inside_is_not_entered() {
     let s = dir_size(
         std::path::Path::new("/"),
         &CancelToken::new(),
-        SizeLimits { max_entries: 2_000, ..SizeLimits::default() },
+        SizeLimits { max_entries: 2_000 },
     );
     // Not a size assertion: the walk must simply not wander into /proc,
     // where file sizes are fictional (kcore is terabytes).
@@ -86,7 +86,10 @@ fn an_unreadable_subfolder_makes_the_answer_a_lower_bound() {
         return;
     }
     assert_eq!(s.bytes, 1);
-    assert!(!s.complete, "a size that skipped a folder must not claim to be exact");
+    assert!(
+        !s.complete,
+        "a size that skipped a folder must not claim to be exact"
+    );
 }
 
 #[test]
@@ -95,7 +98,7 @@ fn a_huge_tree_stops_at_the_limit_and_says_so() {
     for i in 0..300 {
         fs::write(d.join(format!("f{i}")), b"x").unwrap();
     }
-    let s = dir_size(&d, &CancelToken::new(), SizeLimits { max_entries: 100, ..SizeLimits::default() });
+    let s = dir_size(&d, &CancelToken::new(), SizeLimits { max_entries: 100 });
     assert!(!s.complete);
     assert!(s.files <= 100);
 }

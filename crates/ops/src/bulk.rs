@@ -276,24 +276,26 @@ pub fn execute(dir: &Path, plan: &RenamePlan) -> RenameOutcome {
 
     // Put everything back to its original name: finished renames first go
     // back to their temporary names, then every temporary name to its origin.
-    let roll_back = |staged: &[(PathBuf, &PlannedRename)], finished: usize, out: &mut RenameOutcome| {
-        for (tmp, r) in staged[..finished].iter().rev() {
-            if let Err(e) = mv(&r.to, tmp) {
-                out.failed.push(format!("{}: could not be put back ({e})", r.new_name));
-            }
-        }
-        for (tmp, r) in staged.iter().rev() {
-            if tmp.symlink_metadata().is_ok() {
-                if let Err(e) = mv(tmp, &r.from) {
-                    out.failed.push(format!(
-                        "{}: left as {} ({e})",
-                        r.old_name,
-                        tmp.file_name().unwrap_or_default().to_string_lossy()
-                    ));
+    let roll_back =
+        |staged: &[(PathBuf, &PlannedRename)], finished: usize, out: &mut RenameOutcome| {
+            for (tmp, r) in staged[..finished].iter().rev() {
+                if let Err(e) = mv(&r.to, tmp) {
+                    out.failed
+                        .push(format!("{}: could not be put back ({e})", r.new_name));
                 }
             }
-        }
-    };
+            for (tmp, r) in staged.iter().rev() {
+                if tmp.symlink_metadata().is_ok() {
+                    if let Err(e) = mv(tmp, &r.from) {
+                        out.failed.push(format!(
+                            "{}: left as {} ({e})",
+                            r.old_name,
+                            tmp.file_name().unwrap_or_default().to_string_lossy()
+                        ));
+                    }
+                }
+            }
+        };
 
     // Phase one: everything to a temporary name.
     let mut staged: Vec<(PathBuf, &PlannedRename)> = Vec::new();
@@ -314,7 +316,10 @@ pub fn execute(dir: &Path, plan: &RenamePlan) -> RenameOutcome {
     for (n, (tmp, r)) in staged.iter().enumerate() {
         if let Err(e) = mv(tmp, &r.to) {
             let why = if e.kind() == std::io::ErrorKind::AlreadyExists {
-                format!("{}: {} appeared meanwhile — nothing was renamed", r.old_name, r.new_name)
+                format!(
+                    "{}: {} appeared meanwhile — nothing was renamed",
+                    r.old_name, r.new_name
+                )
             } else {
                 format!("{}: {e} — nothing was renamed", r.old_name)
             };

@@ -20,6 +20,23 @@ fn fixture_running() -> bool {
         && std::net::TcpStream::connect(("127.0.0.1", PORT)).is_ok()
 }
 
+/// sshfs itself missing is a skip too, not a failure: it is an optional
+/// dependency, and a desktop without it must still get a green `cargo test`.
+macro_rules! need_fixture {
+    () => {
+        gust_testkit::skip_unless!(
+            gust_testkit::have("sshfs"),
+            "SSHFS",
+            "sshfs is not installed"
+        );
+        gust_testkit::skip_unless!(
+            fixture_running(),
+            "SSHFS",
+            "remote fixture not running (tests/remote-fixture.sh start)"
+        );
+    };
+}
+
 fn spec(remote_path: &str) -> RemoteSpec {
     let f = PathBuf::from(FIXTURE);
     let mut s = RemoteSpec::new("gust-test", "127.0.0.1");
@@ -40,10 +57,7 @@ fn mount_dir(name: &str) -> PathBuf {
 /// A place really connects, really lists, and really disconnects.
 #[test]
 fn a_remote_place_connects_lists_and_disconnects() {
-    if !fixture_running() {
-        eprintln!("SKIP: remote fixture not running (tests/remote-fixture.sh start)");
-        return;
-    }
+    need_fixture!();
     let mp = mount_dir("connect");
     let _ = unmount(&mp);
 
@@ -86,10 +100,7 @@ fn a_remote_place_connects_lists_and_disconnects() {
 /// Writing through the mount reaches the real backing file.
 #[test]
 fn a_write_through_a_remote_place_reaches_the_backend() {
-    if !fixture_running() {
-        eprintln!("SKIP: remote fixture not running");
-        return;
-    }
+    need_fixture!();
     let mp = mount_dir("write");
     let _ = unmount(&mp);
     mount(
@@ -114,10 +125,7 @@ fn a_write_through_a_remote_place_reaches_the_backend() {
 /// A changed host key stops the connection. Nothing silently trusts it.
 #[test]
 fn a_changed_host_key_refuses_to_connect() {
-    if !fixture_running() {
-        eprintln!("SKIP: remote fixture not running");
-        return;
-    }
+    need_fixture!();
     let mp = mount_dir("badkey");
     let _ = unmount(&mp);
 
@@ -223,20 +231,20 @@ fn a_failed_connection_leaves_no_debris() {
     assert!(!is_mounted(&mp));
 }
 
-
 /// A place whose server went away must still count as mounted — and must be
 /// disconnectable and reconnectable. m41 asked `stat`, which fails on a dead
 /// FUSE mount, so the place read as "not mounted", unmount did nothing, and
 /// every reconnect failed with "File exists" until a reboot.
 #[test]
 fn a_mount_whose_server_died_is_still_seen_and_can_be_cleared() {
-    if !fixture_running() {
-        eprintln!("SKIP: remote fixture not running (tests/remote-fixture.sh start)");
-        return;
-    }
+    need_fixture!();
     let mp = mount_dir("dead-server");
     let _ = unmount(&mp);
-    let r = mount(&spec(&format!("{FIXTURE}/chroot/shared")), &mp, Duration::from_secs(15));
+    let r = mount(
+        &spec(&format!("{FIXTURE}/chroot/shared")),
+        &mp,
+        Duration::from_secs(15),
+    );
     assert!(r.is_ok(), "mount failed: {:?}", r.err());
 
     // Kill the sshfs process: the FUSE mount stays in the table, dead.
@@ -244,12 +252,23 @@ fn a_mount_whose_server_died_is_still_seen_and_can_be_cleared() {
         .args(["-KILL", "-f", &format!("sshfs .*{}", mp.display())])
         .status();
     std::thread::sleep(Duration::from_millis(400));
-    assert!(std::fs::metadata(&mp).is_err(), "precondition: the mount is dead");
+    assert!(
+        std::fs::metadata(&mp).is_err(),
+        "precondition: the mount is dead"
+    );
 
     assert!(is_mounted(&mp), "a dead mount is still a mount");
     assert!(unmount(&mp).is_ok(), "a dead mount must be clearable");
     assert!(!is_mounted(&mp));
-    let again = mount(&spec(&format!("{FIXTURE}/chroot/shared")), &mp, Duration::from_secs(15));
-    assert!(again.is_ok(), "reconnect after a dead mount failed: {:?}", again.err());
+    let again = mount(
+        &spec(&format!("{FIXTURE}/chroot/shared")),
+        &mp,
+        Duration::from_secs(15),
+    );
+    assert!(
+        again.is_ok(),
+        "reconnect after a dead mount failed: {:?}",
+        again.err()
+    );
     let _ = unmount(&mp);
 }

@@ -3,7 +3,7 @@
 //! `/usr/bin/omarchy-theme-set` (Omarchy 4.0.3): build `current/next-theme`,
 //! then `rm -rf current/theme` and `mv current/next-theme current/theme`.
 
-use gust_core::theme::{theme_watch_dirs, theme_ready};
+use gust_core::theme::{theme_ready, theme_watch_dirs};
 use gust_core::watch::{Change, DirWatch};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -14,7 +14,11 @@ fn state(tag: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!("gust-theme-{tag}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&d);
     fs::create_dir_all(d.join("current/theme")).unwrap();
-    fs::write(d.join("current/theme/colors.toml"), "background = \"#111111\"\n").unwrap();
+    fs::write(
+        d.join("current/theme/colors.toml"),
+        "background = \"#111111\"\n",
+    )
+    .unwrap();
     d
 }
 
@@ -54,7 +58,9 @@ fn a_theme_switch_is_noticed_and_reads_the_new_colours() {
         .collect();
 
     omarchy_theme_set(&s, "#eeeeee");
-    let c = rx.recv_timeout(Duration::from_secs(2)).expect("switch noticed");
+    let c = rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("switch noticed");
     assert_eq!(c, Change::Contents);
     assert!(theme_ready(&s));
     let t = gust_core::theme::load_from_theme_dir(&s.join("current/theme"), "x");

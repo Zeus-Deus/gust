@@ -63,10 +63,11 @@ fn mount_dir(name: &str) -> PathBuf {
 
 #[test]
 fn a_container_peer_connects_lists_and_disconnects() {
-    if !peer_running() {
-        eprintln!("SKIP: container peer not running (tests/docker-peers.sh start)");
-        return;
-    }
+    gust_testkit::skip_unless!(
+        peer_running(),
+        "DOCKER_PEER",
+        "container peer not running (tests/docker-peers.sh start)"
+    );
     let mp = mount_dir("connect");
     let _ = unmount(&mp);
 
@@ -91,10 +92,11 @@ fn a_container_peer_connects_lists_and_disconnects() {
 /// The share is a real boundary: a canary outside it is unreachable.
 #[test]
 fn the_peer_share_cannot_be_escaped() {
-    if !peer_running() {
-        eprintln!("SKIP: container peer not running");
-        return;
-    }
+    gust_testkit::skip_unless!(
+        peer_running(),
+        "DOCKER_PEER",
+        "container peer not running (tests/docker-peers.sh start)"
+    );
     // The canary really is there, on the peer.
     assert!(
         backend_exists("/root/canary-outside-share.txt"),
@@ -124,10 +126,11 @@ fn the_peer_share_cannot_be_escaped() {
 /// on the backend rather than read back through the same cache that wrote it.
 #[test]
 fn a_write_reaches_the_peers_own_storage() {
-    if !peer_running() {
-        eprintln!("SKIP: container peer not running");
-        return;
-    }
+    gust_testkit::skip_unless!(
+        peer_running(),
+        "DOCKER_PEER",
+        "container peer not running (tests/docker-peers.sh start)"
+    );
     let mp = mount_dir("write");
     let _ = unmount(&mp);
     mount(&spec("/srv/share"), &mp, Duration::from_secs(20)).expect("mount failed");
@@ -156,10 +159,11 @@ fn a_write_reaches_the_peers_own_storage() {
 /// This is only testable because the fixture pins a real key.
 #[test]
 fn a_changed_host_key_is_refused() {
-    if !peer_running() {
-        eprintln!("SKIP: container peer not running");
-        return;
-    }
+    gust_testkit::skip_unless!(
+        peer_running(),
+        "DOCKER_PEER",
+        "container peer not running (tests/docker-peers.sh start)"
+    );
     let mp = mount_dir("hostkey");
     let _ = unmount(&mp);
 
@@ -177,8 +181,7 @@ fn a_changed_host_key_is_refused() {
             .map(|s| s.success())
             .unwrap_or(false);
         if !ok {
-            eprintln!("SKIP: ssh-keygen unavailable");
-            return;
+            gust_testkit::skip!("DOCKER_PEER", "ssh-keygen unavailable");
         }
         let pubkey = std::fs::read_to_string(k.with_extension("pub")).unwrap();
         (d, pubkey)
@@ -216,10 +219,11 @@ fn a_changed_host_key_is_refused() {
 /// A failed mount must never leave key material in argv.
 #[test]
 fn no_key_material_or_disabled_checking_in_argv() {
-    if !peer_running() {
-        eprintln!("SKIP: container peer not running");
-        return;
-    }
+    gust_testkit::skip_unless!(
+        peer_running(),
+        "DOCKER_PEER",
+        "container peer not running (tests/docker-peers.sh start)"
+    );
     let mp = mount_dir("argv");
     let _ = unmount(&mp);
     mount(&spec("/srv/share"), &mp, Duration::from_secs(20)).expect("mount failed");

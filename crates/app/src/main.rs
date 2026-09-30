@@ -96,11 +96,14 @@ fn run_file_dialogs(mode: &str) -> i32 {
     };
     let state = std::env::var_os("XDG_STATE_HOME")
         .map(std::path::PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".local/state")))
+        .or_else(|| {
+            std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".local/state"))
+        })
         .map(|b| b.join("gust/file-dialogs.previous"));
     let existed = user.exists();
     let text = std::fs::read_to_string(&user).ok();
-    let sys = std::fs::read_to_string(&system).unwrap_or_else(|_| "[preferred]\ndefault=gtk\n".into());
+    let sys =
+        std::fs::read_to_string(&system).unwrap_or_else(|_| "[preferred]\ndefault=gtk\n".into());
     match mode {
         "on" => {
             if text.as_deref().is_some_and(is_claimed) {
@@ -131,7 +134,10 @@ fn run_file_dialogs(mode: &str) -> i32 {
                 println!("gust was not answering Open/Save dialogs; nothing to undo");
                 return 0;
             };
-            let rec = state.as_ref().and_then(|s| std::fs::read_to_string(s).ok()).unwrap_or_default();
+            let rec = state
+                .as_ref()
+                .and_then(|s| std::fs::read_to_string(s).ok())
+                .unwrap_or_default();
             if rec == "created" && is_claimed(&text) && same_config(&release(&text, None), &sys) {
                 let _ = std::fs::remove_file(&user);
             } else {
@@ -221,7 +227,10 @@ fn run_bind_keys(mode: &str) -> i32 {
 /// activation file, which never touches another package's files and is
 /// removed again by `--default off`.
 fn claim_show_in_folder() {
-    let (Some(dir), Ok(exe)) = (gust_core::filemanager1::user_service_dir(), std::env::current_exe()) else {
+    let (Some(dir), Ok(exe)) = (
+        gust_core::filemanager1::user_service_dir(),
+        std::env::current_exe(),
+    ) else {
         return;
     };
     match gust_core::filemanager1::claim_service(&dir, &exe) {
@@ -313,12 +322,14 @@ fn main() {
         .any(|k| std::env::var_os(k).is_some_and(|v| !v.is_empty()));
     let software = match setting {
         _ if env_decides => {
-            gust_core::renderer::choose_for_this_machine() == gust_core::renderer::Renderer::Software
+            gust_core::renderer::choose_for_this_machine()
+                == gust_core::renderer::Renderer::Software
         }
         gust_core::settings::RendererChoice::Software => true,
         gust_core::settings::RendererChoice::Gpu => false,
         gust_core::settings::RendererChoice::Auto => {
-            gust_core::renderer::choose_for_this_machine() == gust_core::renderer::Renderer::Software
+            gust_core::renderer::choose_for_this_machine()
+                == gust_core::renderer::Renderer::Software
         }
     };
     if software {

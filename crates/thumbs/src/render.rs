@@ -363,7 +363,10 @@ mod tests {
     fn a_helper_never_receives_the_real_path_as_an_argument() {
         // The input is bound at a fixed in-sandbox path, so a filename can
         // never be interpreted as an option by the helper.
-        for h in helpers_for("image/png").into_iter().chain(helpers_for("application/pdf")) {
+        for h in helpers_for("image/png")
+            .into_iter()
+            .chain(helpers_for("application/pdf"))
+        {
             for a in h.args {
                 assert!(
                     !a.contains("{in}") && !a.contains("{out}"),

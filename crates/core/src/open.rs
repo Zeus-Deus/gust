@@ -270,8 +270,14 @@ mod tests {
         let c = terminal_command(d, |p| p == "xdg-terminal-exec").expect("uses xdg-terminal-exec");
         assert_eq!(c.get_program(), "xdg-terminal-exec");
         let args: Vec<_> = c.get_args().collect();
-        assert_eq!(args, vec![std::ffi::OsStr::new("--dir=/home/u/My Projects")]);
-        assert!(terminal_command(d, |_| false).is_none(), "falls back when absent");
+        assert_eq!(
+            args,
+            vec![std::ffi::OsStr::new("--dir=/home/u/My Projects")]
+        );
+        assert!(
+            terminal_command(d, |_| false).is_none(),
+            "falls back when absent"
+        );
     }
 
     #[test]

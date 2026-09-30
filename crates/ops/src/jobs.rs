@@ -199,7 +199,10 @@ pub fn conflicts(req: &Request) -> Vec<Clash> {
                 (Ok(a), Ok(b)) => a.dev == b.dev && a.ino == b.ino,
                 _ => false,
             };
-            (!same).then_some(Clash { source: src, existing: dst })
+            (!same).then_some(Clash {
+                source: src,
+                existing: dst,
+            })
         })
         .collect()
 }
@@ -233,7 +236,14 @@ pub fn start_with(
     journal: Option<crate::journal::Journal>,
     trash: Option<crate::trash::TrashDir>,
 ) -> JobHandle {
-    start_full(id, req, policy, std::collections::HashMap::new(), journal, trash)
+    start_full(
+        id,
+        req,
+        policy,
+        std::collections::HashMap::new(),
+        journal,
+        trash,
+    )
 }
 
 fn start_full(
@@ -293,6 +303,9 @@ fn set<F: FnOnce(&mut JobProgress)>(p: &Arc<Mutex<JobProgress>>, f: F) {
     }
 }
 
+// Every argument is one piece of per-job state the worker owns; bundling them
+// into a struct only to satisfy the lint would hide which ones move together.
+#[allow(clippy::too_many_arguments)]
 fn run(
     req: Request,
     policy: ConflictPolicy,
@@ -726,12 +739,18 @@ mod tests {
         fs::create_dir_all(d.join("dest")).unwrap();
         let mut job = start(
             "j-stop",
-            Request::Copy { sources: vec![d.join("src")], dest_dir: d.join("dest") },
+            Request::Copy {
+                sources: vec![d.join("src")],
+                dest_dir: d.join("dest"),
+            },
             ConflictPolicy::Ask,
         );
         assert!(!job.cancel_requested());
         job.cancel();
-        assert!(job.cancel_requested(), "the UI must be able to say Stopping at once");
+        assert!(
+            job.cancel_requested(),
+            "the UI must be able to say Stopping at once"
+        );
         job.wait();
         fs::remove_dir_all(&d).ok();
     }

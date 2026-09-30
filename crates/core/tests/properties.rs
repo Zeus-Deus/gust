@@ -6,7 +6,10 @@ use std::fs;
 use std::os::unix::fs::symlink;
 
 fn get<'a>(facts: &'a [Fact], label: &str) -> Option<&'a str> {
-    facts.iter().find(|f| f.label == label).map(|f| f.value.as_str())
+    facts
+        .iter()
+        .find(|f| f.label == label)
+        .map(|f| f.value.as_str())
 }
 
 #[test]
@@ -72,7 +75,10 @@ fn non_english_names_are_shown_as_written() {
     fs::create_dir_all(&d).unwrap();
     fs::write(d.join("x"), b"1").unwrap();
     let f = describe(&d.join("x"));
-    assert!(get(&f, "Location").unwrap().ends_with("/Música 写真"), "{f:?}");
+    assert!(
+        get(&f, "Location").unwrap().ends_with("/Música 写真"),
+        "{f:?}"
+    );
 }
 
 #[test]

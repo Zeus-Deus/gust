@@ -58,7 +58,13 @@ impl Handoff {
         let mut out = MAGIC.to_vec();
         put(&mut out, self.location.as_os_str().as_bytes());
         put(&mut out, self.view.as_bytes());
-        put(&mut out, self.cursor_name.as_deref().map(|c| c.as_bytes()).unwrap_or(b""));
+        put(
+            &mut out,
+            self.cursor_name
+                .as_deref()
+                .map(|c| c.as_bytes())
+                .unwrap_or(b""),
+        );
         put(&mut out, &[self.cursor_name.is_some() as u8]);
         put(&mut out, &[self.show_hidden as u8]);
         put(&mut out, &(self.selected.len() as u32).to_le_bytes());
@@ -131,7 +137,10 @@ pub struct ReadyWait {
 
 impl ReadyWait {
     pub fn new(ready: PathBuf, timeout: Duration) -> ReadyWait {
-        ReadyWait { ready, deadline: Instant::now() + timeout }
+        ReadyWait {
+            ready,
+            deadline: Instant::now() + timeout,
+        }
     }
 
     /// Ok(true): the new window is up. Ok(false): not yet, ask again.

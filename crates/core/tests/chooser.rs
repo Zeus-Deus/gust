@@ -7,9 +7,18 @@ use std::path::PathBuf;
 
 #[test]
 fn an_open_request_with_a_folder_and_multiple() {
-    let r = Request::new("open", false, true, Some(b"/home/u/Downloads\0".to_vec()), None);
+    let r = Request::new(
+        "open",
+        false,
+        true,
+        Some(b"/home/u/Downloads\0".to_vec()),
+        None,
+    );
     assert_eq!(r.mode, Mode::OpenMany);
-    assert_eq!(r.folder.as_deref(), Some(std::path::Path::new("/home/u/Downloads")));
+    assert_eq!(
+        r.folder.as_deref(),
+        Some(std::path::Path::new("/home/u/Downloads"))
+    );
 }
 
 #[test]
@@ -49,7 +58,10 @@ fn the_result_round_trips_any_bytes() {
     assert_eq!(parse_result(&out), picked);
     assert_eq!(
         answer_uris(&picked),
-        vec!["file:///tmp/a%20b.txt".to_string(), "file:///tmp/caf%E9%0Anewline".to_string()]
+        vec![
+            "file:///tmp/a%20b.txt".to_string(),
+            "file:///tmp/caf%E9%0Anewline".to_string()
+        ]
     );
 }
 

@@ -18,7 +18,12 @@ pub struct Bounded {
     pub error: Option<String>,
 }
 
-pub fn list_names_bounded(dir: &Path, cap: usize, show_hidden: bool, deadline: Duration) -> Bounded {
+pub fn list_names_bounded(
+    dir: &Path,
+    cap: usize,
+    show_hidden: bool,
+    deadline: Duration,
+) -> Bounded {
     let mut out = Bounded::default();
     if crate::stall::needs_probe(dir) {
         let r = crate::stall::probe_if_risky(dir, deadline);
@@ -55,7 +60,8 @@ pub fn list_names_bounded(dir: &Path, cap: usize, show_hidden: bool, deadline: D
         }
     }
     all.sort_by(|a, b| {
-        b.1.cmp(&a.1).then_with(|| crate::entry::natural_cmp(&a.0, &b.0))
+        b.1.cmp(&a.1)
+            .then_with(|| crate::entry::natural_cmp(&a.0, &b.0))
     });
     all.truncate(cap);
     out.more = total.saturating_sub(all.len());

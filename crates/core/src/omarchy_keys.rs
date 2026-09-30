@@ -77,7 +77,9 @@ pub fn bindings_path() -> Option<PathBuf> {
 
 /// Rewrite the file atomically, keeping its permissions.
 pub fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
-    let dir = path.parent().ok_or_else(|| std::io::Error::other("no parent folder"))?;
+    let dir = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("no parent folder"))?;
     let tmp = dir.join(format!(".bindings.lua.gust-{}", std::process::id()));
     std::fs::write(&tmp, text)?;
     if let Ok(md) = std::fs::metadata(path) {

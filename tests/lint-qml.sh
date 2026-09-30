@@ -60,11 +60,11 @@ for f in "$UI"/*.qml; do
   python3 - "$f" <<'PY' || FAIL=1
 import re, sys
 src = open(sys.argv[1]).read()
-# Ignore braces inside strings and comments.
-src = re.sub(r'//[^\n]*', '', src)
-src = re.sub(r'/\*.*?\*/', '', src, flags=re.S)
-src = re.sub(r'"(?:[^"\\]|\\.)*"', '""', src)
-src = re.sub(r"'(?:[^'\\]|\\.)*'", "''", src)
+# Ignore braces inside strings and comments, in ONE left-to-right pass.
+# Stripping comments first with a regex ate everything after the `//` in
+# "file://" and reported four phantom unclosed braces in QuickLook.qml.
+src = re.sub(r'"(?:[^"\\\n]|\\.)*"|\'(?:[^\'\\\n]|\\.)*\'|`(?:[^`\\]|\\.)*`|//[^\n]*|/\*.*?\*/',
+             lambda m: '""' if m.group()[0] in '"\'`' else '', src, flags=re.S)
 depth = 0
 for ch in src:
     if ch == '{':
@@ -102,7 +102,10 @@ import re, sys
 SAFE = re.compile(r':\s*(Qt|Math|JSON|String|Number|Boolean|parseInt|parseFloat|qsTr)\b')
 # Component-scoped helpers that the window refreshes explicitly, and geometry
 # helpers Qt itself re-evaluates on layout.
-ALLOW = re.compile(r'\b(columns|pageStep|currentView|withAlpha|color|metric|scaled)\s*\(')
+# indexOf/includes are Array methods on a notifying property (the binding is
+# re-run when the array is reassigned); valueOf (SettingsPanel) only reads
+# root.s, a QObject whose properties notify, so QML records the dependency.
+ALLOW = re.compile(r'\b(columns|pageStep|currentView|withAlpha|color|metric|scaled|indexOf|includes|valueOf)\s*\(')
 BIND = re.compile(r'^\s*(readonly\s+)?(property\s+[\w<>.]+\s+)?(?!on[A-Z])[a-z][\w.]*\s*:\s+[A-Za-z_][\w.]*\s*\(')
 
 bad = []

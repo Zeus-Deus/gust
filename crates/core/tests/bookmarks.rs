@@ -8,7 +8,11 @@ use gust_core::bookmarks::{add, parse, remove, render, Bookmark};
 use std::path::PathBuf;
 
 fn bm(path: &str, label: Option<&str>) -> Bookmark {
-    Bookmark { path: PathBuf::from(path), label: label.map(String::from), uri: None }
+    Bookmark {
+        path: PathBuf::from(path),
+        label: label.map(String::from),
+        uri: None,
+    }
 }
 
 #[test]
@@ -31,7 +35,11 @@ fn other_apps_entries_survive_a_round_trip_untouched() {
     let text = "sftp://nas/share Backups\nfile:///home/u/Docs\nsmb://srv/x\n";
     let list = parse(text);
     assert_eq!(render(&list), text);
-    let names: Vec<_> = list.iter().filter(|b| b.uri.is_none()).map(|b| &b.path).collect();
+    let names: Vec<_> = list
+        .iter()
+        .filter(|b| b.uri.is_none())
+        .map(|b| &b.path)
+        .collect();
     assert_eq!(names, vec![&PathBuf::from("/home/u/Docs")]);
 }
 

@@ -35,7 +35,10 @@ fn entries_written_by_other_file_managers_are_listed() {
     fs::write(t.root().join("files/café.txt"), b"x").unwrap();
     fs::write(
         t.root().join("info/café.txt.trashinfo"),
-        format!("[Trash Info]\nPath={}/work/caf%C3%A9.txt\nDeletionDate=2026-09-01T10:00:00\n", d.display()),
+        format!(
+            "[Trash Info]\nPath={}/work/caf%C3%A9.txt\nDeletionDate=2026-09-01T10:00:00\n",
+            d.display()
+        ),
     )
     .unwrap();
     let items = list(&t);
@@ -49,7 +52,11 @@ fn a_record_without_its_file_or_a_file_without_a_record_is_not_listed_as_restora
     let (_d, t) = setup("orphans");
     fs::create_dir_all(t.root().join("files")).unwrap();
     fs::create_dir_all(t.root().join("info")).unwrap();
-    fs::write(t.root().join("info/gone.trashinfo"), "[Trash Info]\nPath=/x/gone\nDeletionDate=2026-01-01T00:00:00\n").unwrap();
+    fs::write(
+        t.root().join("info/gone.trashinfo"),
+        "[Trash Info]\nPath=/x/gone\nDeletionDate=2026-01-01T00:00:00\n",
+    )
+    .unwrap();
     fs::write(t.root().join("files/stray"), b"x").unwrap();
     assert!(list(&t).is_empty());
 }
@@ -93,7 +100,11 @@ fn a_hostile_record_cannot_restore_into_a_relative_path() {
     fs::create_dir_all(t.root().join("files")).unwrap();
     fs::create_dir_all(t.root().join("info")).unwrap();
     fs::write(t.root().join("files/evil"), b"x").unwrap();
-    fs::write(t.root().join("info/evil.trashinfo"), "[Trash Info]\nPath=../../.bashrc\nDeletionDate=2026-01-01T00:00:00\n").unwrap();
+    fs::write(
+        t.root().join("info/evil.trashinfo"),
+        "[Trash Info]\nPath=../../.bashrc\nDeletionDate=2026-01-01T00:00:00\n",
+    )
+    .unwrap();
     assert!(list(&t).is_empty());
     assert!(restore_named(&t, "evil".as_ref()).is_err());
 }

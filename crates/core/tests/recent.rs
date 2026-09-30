@@ -38,7 +38,10 @@ fn web_addresses_are_not_files() {
 #[test]
 fn a_damaged_or_empty_file_gives_nothing_rather_than_failing() {
     assert!(parse("").is_empty());
-    assert!(parse("<xbel><bookmark href=\"file:///x\"").is_empty() || parse("<xbel><bookmark href=\"file:///x\"").len() <= 1);
+    assert!(
+        parse("<xbel><bookmark href=\"file:///x\"").is_empty()
+            || parse("<xbel><bookmark href=\"file:///x\"").len() <= 1
+    );
     assert!(parse("\u{0}\u{1}garbage").is_empty());
 }
 

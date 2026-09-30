@@ -27,10 +27,20 @@ fn the_sandboxed_command_never_names_the_archive_or_a_home_path() {
     let d = fixture("argv");
     let c = list_command(&d.join("x.tar.gz"), true).unwrap();
     assert_eq!(c.get_program(), "bwrap");
-    let args: Vec<String> = c.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
-    assert!(args.iter().all(|a| !a.contains("gust-arcsb")), "the path must not reach argv: {args:?}");
+    let args: Vec<String> = c
+        .get_args()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        args.iter().all(|a| !a.contains("gust-arcsb")),
+        "the path must not reach argv: {args:?}"
+    );
     assert!(args.contains(&"--unshare-all".to_string()));
-    assert_eq!(args.last().map(String::as_str), Some("-"), "the archive arrives on stdin");
+    assert_eq!(
+        args.last().map(String::as_str),
+        Some("-"),
+        "the archive arrives on stdin"
+    );
     assert!(!args.iter().any(|a| a == "--bind"), "nothing is writable");
 }
 
@@ -38,12 +48,17 @@ fn the_sandboxed_command_never_names_the_archive_or_a_home_path() {
 fn listing_through_the_sandbox_gives_the_same_entries() {
     let d = fixture("same");
     let have_sandbox = ["bwrap", "prlimit"].iter().all(|b| {
-        std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|x| x.join(b).is_file()))
+        std::env::var_os("PATH")
+            .is_some_and(|p| std::env::split_paths(&p).any(|x| x.join(b).is_file()))
     });
     let entries = list(&d.join("x.tar.gz")).unwrap();
     let mut names: Vec<String> = entries.iter().map(|e| e.name.clone()).collect();
     names.sort();
-    assert_eq!(names, vec!["a", "a/one.txt", "two.txt"], "sandbox available: {have_sandbox}");
+    assert_eq!(
+        names,
+        vec!["a", "a/one.txt", "two.txt"],
+        "sandbox available: {have_sandbox}"
+    );
 }
 
 #[test]
@@ -53,7 +68,11 @@ fn a_hostile_archive_listed_in_the_sandbox_cannot_reach_the_home_folder() {
     let d = std::env::temp_dir().join(format!("gust-arcsb-bad-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
-    std::fs::write(d.join("evil.tar.gz"), vec![0x1f, 0x8b, 0x08, 0, 0xff, 0xff, 0xff]).unwrap();
+    std::fs::write(
+        d.join("evil.tar.gz"),
+        vec![0x1f, 0x8b, 0x08, 0, 0xff, 0xff, 0xff],
+    )
+    .unwrap();
     let t = std::time::Instant::now();
     assert!(list(&d.join("evil.tar.gz")).is_err());
     assert!(t.elapsed() < std::time::Duration::from_secs(20));

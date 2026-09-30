@@ -44,9 +44,19 @@ fn a_large_file_reports_bytes_while_it_copies() {
     )
     .unwrap();
 
-    let mid: Vec<u64> = seen.iter().copied().filter(|b| *b > 0 && *b < size).collect();
-    assert!(mid.len() >= 4, "expected progress inside the file, got {seen:?}");
-    assert!(seen.windows(2).all(|w| w[0] <= w[1]), "bytes must never go backwards: {seen:?}");
+    let mid: Vec<u64> = seen
+        .iter()
+        .copied()
+        .filter(|b| *b > 0 && *b < size)
+        .collect();
+    assert!(
+        mid.len() >= 4,
+        "expected progress inside the file, got {seen:?}"
+    );
+    assert!(
+        seen.windows(2).all(|w| w[0] <= w[1]),
+        "bytes must never go backwards: {seen:?}"
+    );
     assert_eq!(*seen.last().unwrap(), size);
     fs::remove_dir_all(&d).ok();
 }
@@ -62,10 +72,19 @@ fn a_folder_copy_reports_bytes_inside_each_file() {
 
     let mut seen: Vec<u64> = Vec::new();
     let mut cb = |_: usize, _: usize, bytes: u64, _: u64| seen.push(bytes);
-    recursive::copy_tree(&d.join("src"), &d.join("dst"), ConflictPolicy::Ask, &CancelToken::new(), &mut cb)
-        .unwrap();
+    recursive::copy_tree(
+        &d.join("src"),
+        &d.join("dst"),
+        ConflictPolicy::Ask,
+        &CancelToken::new(),
+        &mut cb,
+    )
+    .unwrap();
     let distinct: std::collections::BTreeSet<u64> = seen.iter().copied().collect();
-    assert!(distinct.len() >= 6, "expected several byte counts, got {distinct:?}");
+    assert!(
+        distinct.len() >= 6,
+        "expected several byte counts, got {distinct:?}"
+    );
     assert!(seen.windows(2).all(|w| w[0] <= w[1]), "{seen:?}");
     assert_eq!(*seen.last().unwrap(), total);
     fs::remove_dir_all(&d).ok();
@@ -92,7 +111,11 @@ fn an_old_burst_does_not_hold_the_speed_up() {
         m.observe(t as f64, 100_000_000);
     }
     assert_eq!(m.bytes_per_sec(), Some(0.0));
-    assert_eq!(m.eta_secs(1_000), None, "a stalled transfer has no honest ETA");
+    assert_eq!(
+        m.eta_secs(1_000),
+        None,
+        "a stalled transfer has no honest ETA"
+    );
 }
 
 #[test]

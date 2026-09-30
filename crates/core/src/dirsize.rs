@@ -22,7 +22,9 @@ pub struct SizeLimits {
 
 impl Default for SizeLimits {
     fn default() -> Self {
-        SizeLimits { max_entries: 2_000_000 }
+        SizeLimits {
+            max_entries: 2_000_000,
+        }
     }
 }
 
@@ -36,7 +38,10 @@ pub struct Sized {
 }
 
 pub fn dir_size(root: &Path, cancel: &CancelToken, limits: SizeLimits) -> Sized {
-    let mut out = Sized { complete: true, ..Sized::default() };
+    let mut out = Sized {
+        complete: true,
+        ..Sized::default()
+    };
     let Ok(root_md) = std::fs::symlink_metadata(root) else {
         out.complete = false;
         return out;
@@ -69,7 +74,7 @@ pub fn dir_size(root: &Path, cancel: &CancelToken, limits: SizeLimits) -> Sized 
                 out.complete = false;
                 return out;
             }
-            if entries % 1024 == 0 && cancel.is_cancelled() {
+            if entries.is_multiple_of(1024) && cancel.is_cancelled() {
                 out.complete = false;
                 return out;
             }

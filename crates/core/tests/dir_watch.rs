@@ -6,7 +6,7 @@
 use gust_core::watch::{row_edits, Change, DirWatch, RowEdit};
 use std::ffi::OsString;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -17,7 +17,7 @@ fn tmp(tag: &str) -> PathBuf {
     d
 }
 
-fn start(dir: &PathBuf) -> (DirWatch, mpsc::Receiver<Change>) {
+fn start(dir: &Path) -> (DirWatch, mpsc::Receiver<Change>) {
     let (tx, rx) = mpsc::channel();
     let w = DirWatch::start(dir, move |c| {
         let _ = tx.send(c);
@@ -45,9 +45,15 @@ fn a_file_created_by_another_program_is_noticed_quickly() {
     let (_w, rx) = start(&d);
     let t = Instant::now();
     fs::write(d.join("report.pdf"), b"x").unwrap();
-    let c = rx.recv_timeout(Duration::from_secs(2)).expect("change reported");
+    let c = rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("change reported");
     assert_eq!(c, Change::Contents);
-    assert!(t.elapsed() < Duration::from_millis(800), "took {:?}", t.elapsed());
+    assert!(
+        t.elapsed() < Duration::from_millis(800),
+        "took {:?}",
+        t.elapsed()
+    );
     fs::remove_dir_all(&d).ok();
 }
 
@@ -58,10 +64,16 @@ fn delete_and_rename_are_noticed() {
     fs::write(d.join("b"), b"2").unwrap();
     let (_w, rx) = start(&d);
     fs::remove_file(d.join("a")).unwrap();
-    assert_eq!(rx.recv_timeout(Duration::from_secs(2)).unwrap(), Change::Contents);
+    assert_eq!(
+        rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+        Change::Contents
+    );
     drain(&rx, Duration::from_millis(400));
     fs::rename(d.join("b"), d.join("c")).unwrap();
-    assert_eq!(rx.recv_timeout(Duration::from_secs(2)).unwrap(), Change::Contents);
+    assert_eq!(
+        rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+        Change::Contents
+    );
     fs::remove_dir_all(&d).ok();
 }
 
@@ -76,7 +88,11 @@ fn a_burst_of_changes_is_one_or_two_refreshes_not_thousands() {
     }
     let got = drain(&rx, Duration::from_millis(1500));
     assert!(!got.is_empty(), "the burst was noticed");
-    assert!(got.len() <= 4, "burst coalesced, got {} notifications", got.len());
+    assert!(
+        got.len() <= 4,
+        "burst coalesced, got {} notifications",
+        got.len()
+    );
     fs::remove_dir_all(&d).ok();
 }
 
@@ -94,9 +110,15 @@ fn a_file_being_written_does_not_refresh_on_every_chunk() {
         std::thread::sleep(Duration::from_millis(5));
     }
     let during = drain(&rx, Duration::from_millis(300));
-    assert!(during.is_empty(), "chunk writes caused {} refreshes", during.len());
+    assert!(
+        during.is_empty(),
+        "chunk writes caused {} refreshes",
+        during.len()
+    );
     drop(f); // close after writing: the size is final now
-    let c = rx.recv_timeout(Duration::from_secs(2)).expect("completion noticed");
+    let c = rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("completion noticed");
     assert_eq!(c, Change::Contents);
     fs::remove_dir_all(&d).ok();
 }
@@ -128,7 +150,11 @@ fn stopping_the_watch_ends_its_thread_and_silences_it() {
     let (w, rx) = start(&d);
     let t = Instant::now();
     drop(w);
-    assert!(t.elapsed() < Duration::from_millis(500), "stop took {:?}", t.elapsed());
+    assert!(
+        t.elapsed() < Duration::from_millis(500),
+        "stop took {:?}",
+        t.elapsed()
+    );
     fs::write(d.join("after"), b"x").unwrap();
     assert!(drain(&rx, Duration::from_millis(600)).is_empty());
     fs::remove_dir_all(&d).ok();
@@ -171,10 +197,10 @@ fn row_edits_turn_the_old_rows_into_the_new_ones() {
     let cases: &[(&[&str], &[&str])] = &[
         (&[], &[]),
         (&["a", "b", "c"], &["a", "b", "c"]),
-        (&["a", "c"], &["a", "b", "c"]),          // created
-        (&["a", "b", "c"], &["a", "c"]),          // deleted
-        (&["a", "b", "c"], &["a", "c", "d"]),     // renamed b -> d
-        (&["b", "c", "a"], &["a", "b", "c"]),     // re-sorted (mtime changed)
+        (&["a", "c"], &["a", "b", "c"]),      // created
+        (&["a", "b", "c"], &["a", "c"]),      // deleted
+        (&["a", "b", "c"], &["a", "c", "d"]), // renamed b -> d
+        (&["b", "c", "a"], &["a", "b", "c"]), // re-sorted (mtime changed)
         (&["a", "b", "c", "d"], &["d", "c", "b", "a"]),
         (&[], &["x", "y"]),
         (&["x", "y"], &[]),
@@ -183,7 +209,11 @@ fn row_edits_turn_the_old_rows_into_the_new_ones() {
     for (old, new) in cases {
         let (old, new) = (names(old), names(new));
         let edits = row_edits(&old, &new);
-        assert_eq!(replay(&old, &new, &edits), new, "{old:?} -> {new:?} via {edits:?}");
+        assert_eq!(
+            replay(&old, &new, &edits),
+            new,
+            "{old:?} -> {new:?} via {edits:?}"
+        );
     }
 }
 
@@ -197,7 +227,10 @@ fn an_unchanged_folder_needs_no_edits() {
 fn one_new_file_is_one_insert_and_nothing_else_moves() {
     let old = names(&["a", "b", "d", "e"]);
     let new = names(&["a", "b", "c", "d", "e"]);
-    assert_eq!(row_edits(&old, &new), vec![RowEdit::Insert { at: 2, from_new: 2 }]);
+    assert_eq!(
+        row_edits(&old, &new),
+        vec![RowEdit::Insert { at: 2, from_new: 2 }]
+    );
 }
 
 #[test]

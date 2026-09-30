@@ -345,6 +345,7 @@ dependencies = [
 name = "gust-core"
 version = "0.1.0"
 dependencies = [
+ "gust-testkit",
  "rustix",
  "serde",
  "serde_json",
@@ -357,6 +358,7 @@ name = "gust-ops"
 version = "0.1.0"
 dependencies = [
  "gust-core",
+ "gust-testkit",
  "rustix",
  "serde",
  "serde_json",
@@ -367,15 +369,21 @@ name = "gust-remote"
 version = "0.1.0"
 dependencies = [
  "gust-core",
+ "gust-testkit",
  "serde",
  "serde_json",
 ]
+
+[[package]]
+name = "gust-testkit"
+version = "0.1.0"
 
 [[package]]
 name = "gust-thumbs"
 version = "0.1.0"
 dependencies = [
  "gust-core",
+ "gust-testkit",
  "rustix",
  "serde",
  "serde_json",

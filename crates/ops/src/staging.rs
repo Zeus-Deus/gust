@@ -284,7 +284,9 @@ mod tests {
 
     #[test]
     fn a_claim_records_the_exact_object_it_owns() {
-        let _g = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let d = isolated("exact");
         let staged = d.join(".gust-staging-1-x");
         let cf = claim(&staged).unwrap();
@@ -306,7 +308,9 @@ mod tests {
 
     #[test]
     fn a_claim_from_another_boot_is_never_treated_as_live() {
-        let _g = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let d = isolated("boot");
         let c = StagingClaim {
             path: d.join("x"),
@@ -328,7 +332,9 @@ mod tests {
 
     #[test]
     fn our_own_live_process_is_recognised_as_the_owner() {
-        let _g = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let d = isolated("live");
         let c = StagingClaim {
             path: d.join("x"),

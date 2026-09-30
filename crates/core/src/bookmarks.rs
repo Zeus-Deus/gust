@@ -49,8 +49,16 @@ pub fn parse(text: &str) -> Vec<Bookmark> {
                 _ => (line, None),
             };
             match uri_to_path(uri) {
-                Some(path) => Bookmark { path, label, uri: None },
-                None => Bookmark { path: PathBuf::new(), label: None, uri: Some(line.to_string()) },
+                Some(path) => Bookmark {
+                    path,
+                    label,
+                    uri: None,
+                },
+                None => Bookmark {
+                    path: PathBuf::new(),
+                    label: None,
+                    uri: Some(line.to_string()),
+                },
             }
         })
         .collect()
@@ -78,7 +86,11 @@ pub fn add(list: &mut Vec<Bookmark>, path: PathBuf) {
     if list.iter().any(|b| b.uri.is_none() && b.path == path) {
         return;
     }
-    list.push(Bookmark { path, label: None, uri: None });
+    list.push(Bookmark {
+        path,
+        label: None,
+        uri: None,
+    });
 }
 
 pub fn remove(list: &mut Vec<Bookmark>, path: &Path) {
@@ -86,12 +98,16 @@ pub fn remove(list: &mut Vec<Bookmark>, path: &Path) {
 }
 
 pub fn load(file: &Path) -> Vec<Bookmark> {
-    std::fs::read_to_string(file).map(|t| parse(&t)).unwrap_or_default()
+    std::fs::read_to_string(file)
+        .map(|t| parse(&t))
+        .unwrap_or_default()
 }
 
 /// Write via a temporary file in the same folder and rename it into place.
 pub fn save(file: &Path, list: &[Bookmark]) -> std::io::Result<()> {
-    let dir = file.parent().ok_or_else(|| std::io::Error::other("no parent folder"))?;
+    let dir = file
+        .parent()
+        .ok_or_else(|| std::io::Error::other("no parent folder"))?;
     std::fs::create_dir_all(dir)?;
     let tmp = dir.join(format!(".bookmarks.gust-{}", std::process::id()));
     std::fs::write(&tmp, render(list))?;

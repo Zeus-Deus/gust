@@ -43,15 +43,21 @@ fn fixture_up() -> bool {
 
 macro_rules! need_fixture {
     () => {
-        if !fixture_up() {
-            eprintln!("rclone fixture not running — start tests/rclone-fixture.sh");
-            return;
-        }
+        gust_testkit::skip_unless!(
+            fixture_up(),
+            "RCLONE",
+            "rclone fixture not running (tests/rclone-fixture.sh start)"
+        );
     };
 }
 
 #[test]
 fn rclone_is_here() {
+    gust_testkit::skip_unless!(
+        gust_testkit::have("rclone"),
+        "RCLONE",
+        "rclone is not installed"
+    );
     assert!(
         rclone_available(),
         "these tests require the pinned rclone to be installed"

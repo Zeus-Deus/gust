@@ -16,7 +16,10 @@ pub struct Fact {
 }
 
 fn fact(label: &'static str, value: impl Into<String>) -> Fact {
-    Fact { label, value: value.into() }
+    Fact {
+        label,
+        value: value.into(),
+    }
 }
 
 /// A filesystem string made safe to display: valid text is kept as
@@ -63,7 +66,10 @@ pub fn describe(path: &Path) -> Vec<Fact> {
     out.push(fact("Accessed", full_time(md.atime(), offset)));
     let passwd = std::fs::read_to_string("/etc/passwd").unwrap_or_default();
     let group = std::fs::read_to_string("/etc/group").unwrap_or_default();
-    out.push(fact("Owner", owner_names(md.uid(), md.gid(), &passwd, &group)));
+    out.push(fact(
+        "Owner",
+        owner_names(md.uid(), md.gid(), &passwd, &group),
+    ));
     let mode = md.permissions().mode();
     out.push(fact(
         "Permissions",
@@ -85,7 +91,11 @@ pub fn full_time(unix: i64, offset: i64) -> String {
     let days = t.div_euclid(86_400);
     let secs = t.rem_euclid(86_400);
     let (y, m, d) = civil_from_days(days);
-    format!("{y:04}-{m:02}-{d:02} {:02}:{:02}", secs / 3600, secs % 3600 / 60)
+    format!(
+        "{y:04}-{m:02}-{d:02} {:02}:{:02}",
+        secs / 3600,
+        secs % 3600 / 60
+    )
 }
 
 /// Days since 1970-01-01 to a proleptic Gregorian date (H. Hinnant).

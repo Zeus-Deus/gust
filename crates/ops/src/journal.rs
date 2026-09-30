@@ -267,9 +267,8 @@ impl Journal {
             // be known. Never guess a crash from it.
             .filter(|j| j.pid != 0 && !j.boot.is_empty())
             .filter(|j| {
-                let alive = j.boot == boot
-                    && j.pid != 0
-                    && Path::new(&format!("/proc/{}", j.pid)).exists();
+                let alive =
+                    j.boot == boot && j.pid != 0 && Path::new(&format!("/proc/{}", j.pid)).exists();
                 !alive
             })
             .map(|j| {
@@ -285,14 +284,21 @@ impl Journal {
                     .first()
                     .or_else(|| j.entries.first().map(|e| &e.source))
                     .cloned();
-                Interrupted { id: j.id, kind: j.kind, first, finished, total, dest_dir }
+                Interrupted {
+                    id: j.id,
+                    kind: j.kind,
+                    first,
+                    finished,
+                    total,
+                    dest_dir,
+                }
             })
             .collect()
     }
 
     /// Mark an interrupted job as seen, durably, so the notice is shown once.
     pub fn acknowledge(&self, id: &str) -> std::io::Result<()> {
-        let Some(mut j) = self.load().into_iter().filter(|j| j.id == id).last() else {
+        let Some(mut j) = self.load().into_iter().rfind(|j| j.id == id) else {
             return Ok(());
         };
         j.acknowledged = true;
@@ -343,7 +349,11 @@ impl Interrupted {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "an item".into());
         let more = self.total.saturating_sub(1);
-        let what = if more > 0 { format!("{name} and {more} more") } else { name };
+        let what = if more > 0 {
+            format!("{name} and {more} more")
+        } else {
+            name
+        };
         let dest = self
             .dest_dir
             .as_ref()

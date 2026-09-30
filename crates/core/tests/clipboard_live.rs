@@ -8,16 +8,28 @@ use gust_core::clipboard::*;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
-fn have_wayland() -> bool {
-    std::env::var_os("WAYLAND_DISPLAY").is_some() && system_clipboard_available()
+/// These tests REPLACE the real clipboard of whoever runs them, so they only
+/// run when asked to: `GUST_LIVE_CLIPBOARD=1` (the QA VM sets it). A normal
+/// `cargo test` on a desktop must never eat what somebody just copied.
+fn live_clipboard_opted_in() -> bool {
+    std::env::var("GUST_LIVE_CLIPBOARD")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+        || gust_testkit::required("CLIPBOARD")
 }
 
 macro_rules! need_wayland {
     () => {
-        if !have_wayland() {
-            eprintln!("no Wayland session — skipping");
-            return;
-        }
+        gust_testkit::skip_unless!(
+            live_clipboard_opted_in(),
+            "CLIPBOARD",
+            "writes the real clipboard; set GUST_LIVE_CLIPBOARD=1 to run"
+        );
+        gust_testkit::skip_unless!(
+            std::env::var_os("WAYLAND_DISPLAY").is_some() && system_clipboard_available(),
+            "CLIPBOARD",
+            "no Wayland session or wl-clipboard"
+        );
     };
 }
 
@@ -38,10 +50,11 @@ fn paste(ty: &str) -> Option<String> {
 
 #[test]
 fn wl_clipboard_is_available() {
-    if std::env::var_os("WAYLAND_DISPLAY").is_none() {
-        eprintln!("not in a Wayland session");
-        return;
-    }
+    gust_testkit::skip_unless!(
+        std::env::var_os("WAYLAND_DISPLAY").is_some(),
+        "CLIPBOARD",
+        "not in a Wayland session"
+    );
     assert!(
         system_clipboard_available(),
         "wl-copy is needed for system clipboard interop"
@@ -231,15 +244,28 @@ fn one_copy_is_readable_as_files_uris_and_plain_text() {
     offer(ClipVerb::Copy, &paths).expect("offering should succeed");
     std::thread::sleep(std::time::Duration::from_millis(600));
 
-    let types = Command::new("wl-paste").arg("--list-types").output().unwrap();
+    let types = Command::new("wl-paste")
+        .arg("--list-types")
+        .output()
+        .unwrap();
     let types = String::from_utf8_lossy(&types.stdout).to_string();
-    for want in ["x-special/gnome-copied-files", "text/uri-list", "text/plain"] {
-        assert!(types.lines().any(|t| t == want), "{want} missing from {types:?}");
+    for want in [
+        "x-special/gnome-copied-files",
+        "text/uri-list",
+        "text/plain",
+    ] {
+        assert!(
+            types.lines().any(|t| t == want),
+            "{want} missing from {types:?}"
+        );
     }
     let gnome = paste("x-special/gnome-copied-files").unwrap();
     assert!(gnome.starts_with("copy\n"), "{gnome:?}");
     let uris = paste("text/uri-list").unwrap();
-    assert_eq!(uris, "file:///tmp/gust%20clip/one.txt\r\nfile:///tmp/gust-clip-two.txt\r\n");
+    assert_eq!(
+        uris,
+        "file:///tmp/gust%20clip/one.txt\r\nfile:///tmp/gust-clip-two.txt\r\n"
+    );
     let text = paste("text/plain").unwrap();
     assert_eq!(text, "/tmp/gust clip/one.txt\n/tmp/gust-clip-two.txt");
     // And Gust still reads its own offer back as a file list.

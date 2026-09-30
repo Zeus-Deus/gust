@@ -29,7 +29,10 @@ fn set_key(text: &str, value: Option<&str>) -> String {
             out.push(line.to_string());
             continue;
         }
-        if in_pref && t.split_once('=').is_some_and(|(k, _)| k.trim() == CHOOSER_KEY) {
+        if in_pref
+            && t.split_once('=')
+                .is_some_and(|(k, _)| k.trim() == CHOOSER_KEY)
+        {
             if let Some(v) = value {
                 out.push(format!("{CHOOSER_KEY}={v}"));
             }
@@ -114,7 +117,10 @@ pub fn paths() -> Option<(PathBuf, PathBuf)> {
 /// test for "this file still says only what Gust started it from".
 pub fn same_config(a: &str, b: &str) -> bool {
     fn norm(s: &str) -> Vec<&str> {
-        s.lines().map(str::trim_end).filter(|l| !l.is_empty()).collect()
+        s.lines()
+            .map(str::trim_end)
+            .filter(|l| !l.is_empty())
+            .collect()
     }
     norm(a) == norm(b)
 }

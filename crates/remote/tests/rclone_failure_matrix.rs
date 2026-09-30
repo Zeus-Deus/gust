@@ -75,10 +75,11 @@ fn wait_until<F: Fn() -> bool>(limit: Duration, f: F) -> bool {
 /// While bytes sit in the cache unuploaded, a disconnect must not be silent.
 #[test]
 fn a_dirty_cache_blocks_a_silent_disconnect() {
-    if !fixture_up() {
-        eprintln!("SKIP: rclone fixture not mounted (tests/rclone-fixture.sh start)");
-        return;
-    }
+    gust_testkit::skip_unless!(
+        fixture_up(),
+        "RCLONE",
+        "rclone fixture not mounted (tests/rclone-fixture.sh start)"
+    );
     let name = format!("dirty-{}.bin", std::process::id());
     let local = mount().join(&name);
     // Big enough that the upload cannot complete instantly.
@@ -130,10 +131,11 @@ fn a_dirty_cache_blocks_a_silent_disconnect() {
 /// the cache is on disk and the file must still be recoverable.
 #[test]
 fn bytes_survive_a_mount_process_death_with_dirty_cache() {
-    if !fixture_up() {
-        eprintln!("SKIP: rclone fixture not mounted");
-        return;
-    }
+    gust_testkit::skip_unless!(
+        fixture_up(),
+        "RCLONE",
+        "rclone fixture not mounted (tests/rclone-fixture.sh start)"
+    );
     let name = format!("survive-{}.bin", std::process::id());
     let local = mount().join(&name);
     let payload = vec![b'S'; 4 * 1024 * 1024];
@@ -174,10 +176,11 @@ fn bytes_survive_a_mount_process_death_with_dirty_cache() {
 /// disconnect must be REFUSED rather than asked: saying yes loses the file.
 #[test]
 fn a_read_only_backend_never_reports_a_successful_upload() {
-    if !fixture_up() {
-        eprintln!("SKIP: rclone fixture not mounted");
-        return;
-    }
+    gust_testkit::skip_unless!(
+        fixture_up(),
+        "RCLONE",
+        "rclone fixture not mounted (tests/rclone-fixture.sh start)"
+    );
     let b = backend();
     let name = format!("refused-{}.bin", std::process::id());
     let local = mount().join(&name);
@@ -264,10 +267,11 @@ fn an_unreachable_rc_endpoint_is_unknown_not_empty() {
 /// that is the ONLY thing that may be shown as uploaded.
 #[test]
 fn only_a_backend_copy_at_the_right_size_confirms() {
-    if !fixture_up() {
-        eprintln!("SKIP: rclone fixture not mounted");
-        return;
-    }
+    gust_testkit::skip_unless!(
+        fixture_up(),
+        "RCLONE",
+        "rclone fixture not mounted (tests/rclone-fixture.sh start)"
+    );
     let name = format!("confirm-{}.txt", std::process::id());
     let body = b"confirmed content";
     std::fs::write(mount().join(&name), body).expect("write failed");

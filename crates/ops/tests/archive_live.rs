@@ -76,8 +76,10 @@ fn bsdtar_is_available() {
 fn listing_finds_every_hazard() {
     let d = tmp("list");
     let Some(archive) = hostile_archive(&d) else {
-        eprintln!("could not build the hostile archive; skipping");
-        return;
+        gust_testkit::skip!(
+            "ARCHIVE",
+            "could not build the hostile archive (mkfifo/bsdtar missing?)"
+        );
     };
     let entries = list(&archive).expect("listing should succeed");
 

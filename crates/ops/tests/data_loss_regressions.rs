@@ -175,8 +175,10 @@ fn the_staging_sweep_never_deletes_a_file_it_did_not_create() {
 fn a_cross_filesystem_move_never_discards_a_child_edited_after_it_was_copied() {
     let src_root = fixture("xdev-src");
     let Some(dst_root) = other_fs_fixture("xdev-dst") else {
-        eprintln!("SKIP: /dev/shm unavailable, cannot force the cross-device path");
-        return;
+        gust_testkit::skip!(
+            "SHM",
+            "/dev/shm unavailable, cannot force the cross-device path"
+        );
     };
     assert_ne!(
         dev_of(&src_root),
@@ -232,8 +234,7 @@ fn a_cross_filesystem_move_never_discards_a_child_edited_after_it_was_copied() {
 fn move_tree_cross_device_keeps_the_source_when_a_child_changed_mid_move() {
     let src_root = fixture("xdev2-src");
     let Some(dst_root) = other_fs_fixture("xdev2-dst") else {
-        eprintln!("SKIP: /dev/shm unavailable");
-        return;
+        gust_testkit::skip!("SHM", "/dev/shm unavailable");
     };
     let tree = src_root.join("work");
     fs::create_dir_all(&tree).unwrap();
@@ -407,7 +408,6 @@ fn a_same_folder_symlink_copy_then_undo_leaves_the_original_link_alone() {
     fs::remove_dir_all(&root).ok();
 }
 
-
 // ---------------------------------------------------------------------------
 // Phase A: overwrite paths the m41 audit found outside the copy engine.
 // ---------------------------------------------------------------------------
@@ -427,8 +427,15 @@ fn bulk_rename_never_replaces_a_file_that_appeared_after_planning() {
     let out = bulk::execute(&d, &plan);
 
     assert_eq!(fs::read(d.join("b.txt")).unwrap(), b"BYSTANDER");
-    assert_eq!(fs::read(d.join("a.txt")).unwrap(), b"source", "source must be put back");
-    assert!(!out.failed.is_empty(), "the refusal must be reported: {out:?}");
+    assert_eq!(
+        fs::read(d.join("a.txt")).unwrap(),
+        b"source",
+        "source must be put back"
+    );
+    assert!(
+        !out.failed.is_empty(),
+        "the refusal must be reported: {out:?}"
+    );
     let debris: Vec<_> = fs::read_dir(&d)
         .unwrap()
         .flatten()
@@ -453,8 +460,15 @@ fn extraction_never_replaces_an_existing_file() {
     fs::write(src.join("notes.txt"), b"from the archive").unwrap();
     let archive = d.join("a.tar");
     let ok = std::process::Command::new("bsdtar")
-        .arg("-cf").arg(&archive).arg("-C").arg(&src).arg("--").arg("notes.txt")
-        .status().unwrap().success();
+        .arg("-cf")
+        .arg(&archive)
+        .arg("-C")
+        .arg(&src)
+        .arg("--")
+        .arg("notes.txt")
+        .status()
+        .unwrap()
+        .success();
     assert!(ok);
     let dest = d.join("dest");
     fs::create_dir_all(&dest).unwrap();
@@ -470,8 +484,15 @@ fn extraction_never_replaces_an_existing_file() {
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .filter(|n| n != "notes.txt")
         .collect();
-    assert_eq!(landed.len(), 1, "the archive copy must land beside: {landed:?}");
-    assert_eq!(fs::read(dest.join(&landed[0])).unwrap(), b"from the archive");
+    assert_eq!(
+        landed.len(),
+        1,
+        "the archive copy must land beside: {landed:?}"
+    );
+    assert_eq!(
+        fs::read(dest.join(&landed[0])).unwrap(),
+        b"from the archive"
+    );
     assert!(done.summary().contains("renamed"), "{}", done.summary());
     fs::remove_dir_all(&d).ok();
 }
@@ -487,13 +508,19 @@ fn keep_both_keeps_both() {
 
     let mut job = jobs::start(
         "kb",
-        jobs::Request::Copy { sources: vec![d.join("src/notes.txt")], dest_dir: d.join("dest") },
+        jobs::Request::Copy {
+            sources: vec![d.join("src/notes.txt")],
+            dest_dir: d.join("dest"),
+        },
         ConflictPolicy::KeepBoth,
     );
     let s = job.wait();
     assert_eq!(s.state, JobState::Confirmed, "{s:?}");
     assert_eq!(fs::read(d.join("dest/notes.txt")).unwrap(), b"ORIGINAL");
-    assert_eq!(fs::read(d.join("dest/notes (copy).txt")).unwrap(), b"incoming");
+    assert_eq!(
+        fs::read(d.join("dest/notes (copy).txt")).unwrap(),
+        b"incoming"
+    );
     fs::remove_dir_all(&d).ok();
 }
 
@@ -507,7 +534,13 @@ fn the_engine_never_overwrites_under_keep_both() {
     fs::write(d.join("dest/f"), b"ORIGINAL").unwrap();
     let cancel = CancelToken::new();
     let mut noop = |_: usize, _: usize, _: u64, _: u64| {};
-    let r = recursive::copy_tree(&d.join("f"), &d.join("dest/f"), ConflictPolicy::KeepBoth, &cancel, &mut noop);
+    let r = recursive::copy_tree(
+        &d.join("f"),
+        &d.join("dest/f"),
+        ConflictPolicy::KeepBoth,
+        &cancel,
+        &mut noop,
+    );
     assert!(r.is_err(), "KeepBoth at the engine must refuse, got {r:?}");
     assert_eq!(fs::read(d.join("dest/f")).unwrap(), b"ORIGINAL");
     fs::remove_dir_all(&d).ok();
@@ -526,13 +559,20 @@ fn skip_leaves_the_existing_item_and_finishes_the_rest() {
 
     let mut job = jobs::start(
         "sk",
-        jobs::Request::Move { sources: vec![d.join("src/a"), d.join("src/b")], dest_dir: d.join("dest") },
+        jobs::Request::Move {
+            sources: vec![d.join("src/a"), d.join("src/b")],
+            dest_dir: d.join("dest"),
+        },
         ConflictPolicy::Skip,
     );
     let s = job.wait();
     assert_eq!(s.state, JobState::Confirmed, "{s:?}");
     assert_eq!(fs::read(d.join("dest/a")).unwrap(), b"OLD A");
-    assert_eq!(fs::read(d.join("src/a")).unwrap(), b"new a", "a skipped source stays put");
+    assert_eq!(
+        fs::read(d.join("src/a")).unwrap(),
+        b"new a",
+        "a skipped source stays put"
+    );
     assert_eq!(fs::read(d.join("dest/b")).unwrap(), b"new b");
     assert!(s.message.contains("skipped"), "{}", s.message);
     fs::remove_dir_all(&d).ok();
@@ -551,7 +591,10 @@ fn replace_trashes_the_old_item_and_undo_restores_it() {
 
     let mut job = jobs::start_with(
         "rp",
-        jobs::Request::Copy { sources: vec![d.join("src/notes.txt")], dest_dir: d.join("dest") },
+        jobs::Request::Copy {
+            sources: vec![d.join("src/notes.txt")],
+            dest_dir: d.join("dest"),
+        },
         ConflictPolicy::Replace,
         None,
         Some(trash.clone()),
@@ -559,14 +602,23 @@ fn replace_trashes_the_old_item_and_undo_restores_it() {
     let s = job.wait();
     assert_eq!(s.state, JobState::Confirmed, "{s:?}");
     assert_eq!(fs::read(d.join("dest/notes.txt")).unwrap(), b"incoming");
-    assert_eq!(fs::read(trash.files.join("notes.txt")).unwrap(), b"ORIGINAL");
+    assert_eq!(
+        fs::read(trash.files.join("notes.txt")).unwrap(),
+        b"ORIGINAL"
+    );
 
     let plan = undo::plan_undo(&job.record());
-    assert!(matches!(plan, undo::UndoPlan::Safe { .. }), "replace must be undoable: {plan:?}");
+    assert!(
+        matches!(plan, undo::UndoPlan::Safe { .. }),
+        "replace must be undoable: {plan:?}"
+    );
     let out = undo::apply_undo(&plan);
     assert!(out.problems.is_empty(), "{out:?}");
     assert_eq!(fs::read(d.join("dest/notes.txt")).unwrap(), b"ORIGINAL");
-    assert!(!trash.info.join("notes.txt.trashinfo").exists(), "stale trash record left");
+    assert!(
+        !trash.info.join("notes.txt.trashinfo").exists(),
+        "stale trash record left"
+    );
     fs::remove_dir_all(&d).ok();
 }
 
@@ -581,20 +633,32 @@ fn per_item_conflict_answers_are_honoured_in_one_job() {
     let d = fixture("per-item");
     fs::create_dir_all(d.join("src")).unwrap();
     fs::create_dir_all(d.join("dest")).unwrap();
-    for (n, b) in [("r.txt", "new r"), ("k.txt", "new k"), ("s.txt", "new s"), ("fresh.txt", "fresh")] {
+    for (n, b) in [
+        ("r.txt", "new r"),
+        ("k.txt", "new k"),
+        ("s.txt", "new s"),
+        ("fresh.txt", "fresh"),
+    ] {
         fs::write(d.join("src").join(n), b).unwrap();
     }
     for (n, b) in [("r.txt", "OLD R"), ("k.txt", "OLD K"), ("s.txt", "OLD S")] {
         fs::write(d.join("dest").join(n), b).unwrap();
     }
     let sources: Vec<PathBuf> = ["r.txt", "k.txt", "s.txt", "fresh.txt"]
-        .iter().map(|n| d.join("src").join(n)).collect();
-    let req = jobs::Request::Copy { sources: sources.clone(), dest_dir: d.join("dest") };
+        .iter()
+        .map(|n| d.join("src").join(n))
+        .collect();
+    let req = jobs::Request::Copy {
+        sources: sources.clone(),
+        dest_dir: d.join("dest"),
+    };
 
     // Pre-flight finds exactly the three clashes, in source order.
     let clashes = jobs::conflicts(&req);
-    let names: Vec<String> = clashes.iter()
-        .map(|c| c.source.file_name().unwrap().to_string_lossy().into_owned()).collect();
+    let names: Vec<String> = clashes
+        .iter()
+        .map(|c| c.source.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
     assert_eq!(names, ["r.txt", "k.txt", "s.txt"]);
     assert_eq!(clashes[0].existing, d.join("dest/r.txt"));
 
@@ -608,7 +672,11 @@ fn per_item_conflict_answers_are_honoured_in_one_job() {
     assert_eq!(s.state, JobState::Confirmed, "{s:?}");
 
     assert_eq!(fs::read(d.join("dest/r.txt")).unwrap(), b"new r");
-    assert_eq!(fs::read(trash.files.join("r.txt")).unwrap(), b"OLD R", "replaced item must be in the Trash");
+    assert_eq!(
+        fs::read(trash.files.join("r.txt")).unwrap(),
+        b"OLD R",
+        "replaced item must be in the Trash"
+    );
     assert_eq!(fs::read(d.join("dest/k.txt")).unwrap(), b"OLD K");
     assert_eq!(fs::read(d.join("dest/k (copy).txt")).unwrap(), b"new k");
     assert_eq!(fs::read(d.join("dest/s.txt")).unwrap(), b"OLD S");
@@ -632,7 +700,10 @@ fn an_unanswered_clash_is_never_overwritten() {
     answers.insert(d.join("src/a"), ConflictPolicy::KeepBoth);
     let mut job = jobs::start_resolved(
         "ua",
-        jobs::Request::Copy { sources: vec![d.join("src/a"), d.join("src/b")], dest_dir: d.join("dest") },
+        jobs::Request::Copy {
+            sources: vec![d.join("src/a"), d.join("src/b")],
+            dest_dir: d.join("dest"),
+        },
         answers,
         None,
         None,

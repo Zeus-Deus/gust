@@ -198,7 +198,10 @@ impl VfsPending {
 /// all of them the mount. A Unix socket inside `$XDG_RUNTIME_DIR` (mode 0700,
 /// owned by the user) needs no secret at all: nobody else can open it.
 pub fn rc_socket_path(runtime_dir: &std::path::Path, mount_leaf: &str) -> std::path::PathBuf {
-    runtime_dir.join("gust").join("rc").join(format!("{mount_leaf}.sock"))
+    runtime_dir
+        .join("gust")
+        .join("rc")
+        .join(format!("{mount_leaf}.sock"))
 }
 
 /// The `--rc-addr` value that binds a socket at `path`.
@@ -403,14 +406,20 @@ mod tests {
     #[test]
     fn the_rc_is_a_user_only_socket_not_a_port() {
         let p = rc_socket_path(std::path::Path::new("/run/user/1000"), "drive");
-        assert_eq!(p, std::path::PathBuf::from("/run/user/1000/gust/rc/drive.sock"));
+        assert_eq!(
+            p,
+            std::path::PathBuf::from("/run/user/1000/gust/rc/drive.sock")
+        );
         assert_eq!(rc_bind_arg(&p), "unix:///run/user/1000/gust/rc/drive.sock");
         assert_eq!(
             rc_client_args(&rc_bind_arg(&p)),
             vec!["--unix-socket", "/run/user/1000/gust/rc/drive.sock"]
         );
         // URLs keep working for fixtures.
-        assert_eq!(rc_client_args("http://127.0.0.1:9"), vec!["--url", "http://127.0.0.1:9"]);
+        assert_eq!(
+            rc_client_args("http://127.0.0.1:9"),
+            vec!["--url", "http://127.0.0.1:9"]
+        );
     }
 
     #[test]

@@ -193,9 +193,15 @@ pub fn system_clipboard_available() -> bool {
 /// only a single type, and running it once per type left just the last.
 pub fn offer_types(verb: ClipVerb, paths: &[PathBuf]) -> Vec<(String, Vec<u8>)> {
     vec![
-        ("x-special/gnome-copied-files".into(), gnome_payload(verb, paths).into_bytes()),
+        (
+            "x-special/gnome-copied-files".into(),
+            gnome_payload(verb, paths).into_bytes(),
+        ),
         ("text/uri-list".into(), uri_list_payload(paths).into_bytes()),
-        ("text/plain;charset=utf-8".into(), text_payload(paths).into_bytes()),
+        (
+            "text/plain;charset=utf-8".into(),
+            text_payload(paths).into_bytes(),
+        ),
         ("text/plain".into(), text_payload(paths).into_bytes()),
         ("UTF8_STRING".into(), text_payload(paths).into_bytes()),
     ]
@@ -238,7 +244,9 @@ pub fn offer_with(verb: ClipVerb, paths: &[PathBuf], holder: &Holder) -> Result<
                 .spawn()
                 .map_err(|e| e.to_string())?;
             if let Some(mut stdin) = child.stdin.take() {
-                stdin.write_all(&encode_types(&types)).map_err(|e| e.to_string())?;
+                stdin
+                    .write_all(&encode_types(&types))
+                    .map_err(|e| e.to_string())?;
             }
             // Wait for "ready" so the offer exists when this returns: a
             // paste straight after Ctrl+C must not find the OLD clipboard.
@@ -306,7 +314,9 @@ fn serve_types(types: Vec<(String, Vec<u8>)>, foreground: bool) -> Result<(), St
     if foreground {
         // Report readiness only once the offer is live, then serve until
         // another application replaces the clipboard.
-        let prepared = opts.prepare_copy_multi(sources).map_err(|e| e.to_string())?;
+        let prepared = opts
+            .prepare_copy_multi(sources)
+            .map_err(|e| e.to_string())?;
         let mut out = std::io::stdout();
         let _ = out.write_all(b"ok");
         let _ = out.flush();
@@ -358,7 +368,9 @@ pub fn offer_text(text: &str) -> Result<(), String> {
         .spawn()
         .map_err(|e| e.to_string())?;
     if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(text.as_bytes()).map_err(|e| e.to_string())?;
+        stdin
+            .write_all(text.as_bytes())
+            .map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -424,7 +436,10 @@ mod codec_tests {
     fn the_helper_protocol_carries_any_bytes() {
         let types = vec![
             ("text/uri-list".to_string(), b"file:///a\r\n".to_vec()),
-            ("text/plain".to_string(), "x\n9\ny\u{202e}".as_bytes().to_vec()),
+            (
+                "text/plain".to_string(),
+                "x\n9\ny\u{202e}".as_bytes().to_vec(),
+            ),
             ("empty".to_string(), Vec::new()),
         ];
         assert_eq!(decode_types(&encode_types(&types)), Some(types));
@@ -557,7 +572,9 @@ mod tests {
     fn only_file_types_count_as_files_on_the_clipboard() {
         assert!(types_include_files("text/plain\ntext/uri-list\n"));
         assert!(types_include_files("x-special/gnome-copied-files"));
-        assert!(!types_include_files("text/plain;charset=utf-8\nUTF8_STRING\n"));
+        assert!(!types_include_files(
+            "text/plain;charset=utf-8\nUTF8_STRING\n"
+        ));
         assert!(!types_include_files(""));
     }
 }

@@ -112,7 +112,12 @@ pub fn rename_noreplace(
             if to_dir.stat_child(to).is_ok() {
                 return Err(io::Error::from(io::ErrorKind::AlreadyExists));
             }
-            Ok(rustix::fs::renameat(from_dir.as_fd(), from, to_dir.as_fd(), to)?)
+            Ok(rustix::fs::renameat(
+                from_dir.as_fd(),
+                from,
+                to_dir.as_fd(),
+                to,
+            )?)
         }
         Err(e) => Err(e.into()),
     }

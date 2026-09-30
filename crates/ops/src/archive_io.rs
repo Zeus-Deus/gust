@@ -205,7 +205,8 @@ pub fn list_command(path: &Path, sandbox: bool) -> std::io::Result<Command> {
 
 fn sandbox_tools() -> bool {
     let on_path = |b: &str| {
-        std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(b).is_file()))
+        std::env::var_os("PATH")
+            .is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(b).is_file()))
     };
     on_path("bwrap") && on_path("prlimit")
 }
@@ -436,8 +437,14 @@ pub fn extract(
         // Never onto an existing name: a same-named file already in the
         // folder is the user's. The archive's copy takes a free name beside
         // it, chosen and taken atomically so a race cannot clobber either.
-        let wanted = to.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        let parent = to.parent().map(Path::to_path_buf).unwrap_or_else(|| dest.to_path_buf());
+        let wanted = to
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let parent = to
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| dest.to_path_buf());
         let mut target = to.clone();
         for _ in 0..16 {
             match crate::anchor::rename_noreplace_paths(&from, &target) {
@@ -446,7 +453,11 @@ pub fn extract(
                     if target != to {
                         done.renamed.push((
                             rel.to_string_lossy().into_owned(),
-                            target.file_name().unwrap_or_default().to_string_lossy().into_owned(),
+                            target
+                                .file_name()
+                                .unwrap_or_default()
+                                .to_string_lossy()
+                                .into_owned(),
                         ));
                     }
                     break;

@@ -253,9 +253,11 @@ fn read_info(path: &Path) -> Option<(PathBuf, String)> {
     let mut date = String::new();
     for line in text.lines() {
         if let Some(v) = line.strip_prefix("Path=") {
-            orig = Some(PathBuf::from(<std::ffi::OsString as std::os::unix::ffi::OsStringExt>::from_vec(
-                percent_decode(v.trim()),
-            )));
+            orig = Some(PathBuf::from(
+                <std::ffi::OsString as std::os::unix::ffi::OsStringExt>::from_vec(percent_decode(
+                    v.trim(),
+                )),
+            ));
         } else if let Some(v) = line.strip_prefix("DeletionDate=") {
             date = v.trim().to_string();
         }
@@ -279,10 +281,18 @@ pub fn list(trash: &TrashDir) -> Vec<TrashEntry> {
             // The data must be there (lstat: a trashed symlink counts).
             std::fs::symlink_metadata(trash.files.join(&name)).ok()?;
             let (original, deleted) = read_info(&e.path())?;
-            Some(TrashEntry { trashed_name: name, original, deleted })
+            Some(TrashEntry {
+                trashed_name: name,
+                original,
+                deleted,
+            })
         })
         .collect();
-    out.sort_by(|a, b| b.deleted.cmp(&a.deleted).then_with(|| a.trashed_name.cmp(&b.trashed_name)));
+    out.sort_by(|a, b| {
+        b.deleted
+            .cmp(&a.deleted)
+            .then_with(|| a.trashed_name.cmp(&b.trashed_name))
+    });
     out
 }
 
@@ -290,15 +300,27 @@ pub fn list(trash: &TrashDir) -> Vec<TrashEntry> {
 /// anything now at the original path; recreates missing parent folders.
 pub fn restore_named(trash: &TrashDir, trashed_name: &std::ffi::OsStr) -> io::Result<()> {
     // A name, never a path: nothing outside files/ can be addressed.
-    if Path::new(trashed_name).components().count() != 1 || trashed_name.as_bytes().contains(&b'/') {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "not a Trash item name"));
+    if Path::new(trashed_name).components().count() != 1 || trashed_name.as_bytes().contains(&b'/')
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "not a Trash item name",
+        ));
     }
     let mut info_name = trashed_name.to_os_string();
     info_name.push(".trashinfo");
     let info_file = trash.info.join(&info_name);
-    let (original, _) = read_info(&info_file)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "the Trash record is missing or damaged"))?;
-    let item = TrashedItem { original, trashed_name: trashed_name.to_os_string(), info_file };
+    let (original, _) = read_info(&info_file).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "the Trash record is missing or damaged",
+        )
+    })?;
+    let item = TrashedItem {
+        original,
+        trashed_name: trashed_name.to_os_string(),
+        info_file,
+    };
     restore(&item, trash)
 }
 

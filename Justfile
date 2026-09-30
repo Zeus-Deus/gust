@@ -10,8 +10,15 @@ release:
     cargo build --workspace --release
 
 # Library tests. These need no display and are the fast inner loop.
+# Fixture tests that cannot run are reported as SKIP, never counted as passed.
 test:
-    cargo test -p gust-core -p gust-ops -p gust-remote -p gust-thumbs
+    ./tests/run-tests.sh
+
+# Release gate: every fixture must be present. A skip is a failure here.
+# Start the fixtures first (tests/remote-fixture.sh, smb-, nfs-, rclone-,
+# docker-peers.sh) and run inside the desktop session for the clipboard.
+test-required:
+    GUST_ALL_REQUIRED=1 GUST_LIVE_CLIPBOARD=1 ./tests/run-tests.sh
 
 # Every test including the app crate (needs Qt).
 test-all:

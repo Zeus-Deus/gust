@@ -274,7 +274,9 @@ fn listed_in_mountinfo(path: &Path) -> Option<bool> {
     Some(table.lines().any(|l| {
         // Field 5 is the mount point, with space, tab, newline and
         // backslash octal-escaped.
-        l.split(' ').nth(4).is_some_and(|mp| unescape_mountinfo(mp) == want)
+        l.split(' ')
+            .nth(4)
+            .is_some_and(|mp| unescape_mountinfo(mp) == want)
     }))
 }
 
@@ -283,7 +285,10 @@ fn unescape_mountinfo(s: &str) -> String {
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;
     while i < b.len() {
-        if b[i] == b'\\' && i + 4 <= b.len() && b[i + 1..i + 4].iter().all(|c| (b'0'..=b'7').contains(c)) {
+        if b[i] == b'\\'
+            && i + 4 <= b.len()
+            && b[i + 1..i + 4].iter().all(|c| (b'0'..=b'7').contains(c))
+        {
             let v = (b[i + 1] - b'0') * 64 + (b[i + 2] - b'0') * 8 + (b[i + 3] - b'0');
             out.push(v);
             i += 4;
@@ -778,7 +783,10 @@ mod tests {
 
     #[test]
     fn mountinfo_escapes_are_decoded() {
-        assert_eq!(unescape_mountinfo(r"/run/media/me/My\040Disk"), "/run/media/me/My Disk");
+        assert_eq!(
+            unescape_mountinfo(r"/run/media/me/My\040Disk"),
+            "/run/media/me/My Disk"
+        );
         assert_eq!(unescape_mountinfo(r"/a\134b"), r"/a\b");
         assert_eq!(unescape_mountinfo(r"/trailing\04"), r"/trailing\04");
     }

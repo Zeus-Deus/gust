@@ -6,6 +6,7 @@ members = [
     "crates/remote",
     "crates/thumbs",
     "crates/app",
+    "crates/testkit",
 ]
 
 [workspace.package]
@@ -19,6 +20,7 @@ gust-core = { path = "crates/core" }
 gust-ops = { path = "crates/ops" }
 gust-remote = { path = "crates/remote" }
 gust-thumbs = { path = "crates/thumbs" }
+gust-testkit = { path = "crates/testkit" }
 
 rustix = { version = "1.0", features = ["event", "fs", "process", "thread"] }
 serde = { version = "1", features = ["derive"] }

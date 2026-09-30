@@ -62,7 +62,11 @@ impl Request {
             p.is_absolute().then_some(p)
         });
         let name = current_name
-            .and_then(|n| Path::new(&n).file_name().map(|f| f.to_string_lossy().into_owned()))
+            .and_then(|n| {
+                Path::new(&n)
+                    .file_name()
+                    .map(|f| f.to_string_lossy().into_owned())
+            })
             .filter(|n| !n.is_empty() && n != "." && n != "..");
         Request { mode, folder, name }
     }
@@ -99,5 +103,8 @@ pub fn parse_result(out: &Path) -> Vec<PathBuf> {
 
 /// The portal's `uris` answer.
 pub fn answer_uris(picked: &[PathBuf]) -> Vec<String> {
-    picked.iter().map(|p| crate::clipboard::path_to_uri(p)).collect()
+    picked
+        .iter()
+        .map(|p| crate::clipboard::path_to_uri(p))
+        .collect()
 }

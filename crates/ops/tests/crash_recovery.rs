@@ -58,7 +58,8 @@ fn a_job_still_running_in_a_live_window_is_not_reported() {
     // Another Gust window is copying right now. Calling that "interrupted"
     // would be false, and acting on it would fight a live copy.
     let jr = journal("live");
-    jr.record(&running_copy("b", std::process::id(), 1)).unwrap();
+    jr.record(&running_copy("b", std::process::id(), 1))
+        .unwrap();
     assert!(jr.interrupted().is_empty());
 }
 
@@ -86,7 +87,10 @@ fn the_report_says_what_how_far_and_where() {
     assert_eq!(i.kind, JobKind::Copy);
     assert_eq!(i.finished, 1);
     assert_eq!(i.total, 3);
-    assert_eq!(i.dest_dir.as_deref(), Some(std::path::Path::new("/media/usb")));
+    assert_eq!(
+        i.dest_dir.as_deref(),
+        Some(std::path::Path::new("/media/usb"))
+    );
     assert_eq!(
         i.sentence(),
         "Copying holiday.mkv and 2 more to usb was interrupted: 1 of 3 finished."
@@ -99,7 +103,10 @@ fn a_job_that_crashed_before_its_first_item_still_knows_where_it_was_going() {
     jr.record(&running_copy("a", dead_pid(), 0)).unwrap();
     let i = &jr.interrupted()[0];
     assert_eq!(i.finished, 0);
-    assert_eq!(i.dest_dir.as_deref(), Some(std::path::Path::new("/media/usb")));
+    assert_eq!(
+        i.dest_dir.as_deref(),
+        Some(std::path::Path::new("/media/usb"))
+    );
     assert_eq!(
         i.sentence(),
         "Copying holiday.mkv and 2 more to usb was interrupted: nothing had finished."

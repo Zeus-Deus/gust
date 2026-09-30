@@ -50,10 +50,16 @@ pub fn plan(uris: &[String], items: bool) -> Vec<Open> {
                     folder: parent.to_path_buf(),
                     select: Some(PathBuf::from(name)),
                 },
-                _ => Open { folder: path, select: None },
+                _ => Open {
+                    folder: path,
+                    select: None,
+                },
             }
         } else {
-            Open { folder: path, select: None }
+            Open {
+                folder: path,
+                select: None,
+            }
         };
         // Several items in one folder: one window (first item selected).
         if out.iter().any(|o| o.folder == open.folder) {
@@ -84,8 +90,14 @@ pub fn user_service_dir() -> Option<PathBuf> {
 
 pub fn service_text(exe: &Path) -> String {
     let e = exe.to_string_lossy();
-    let exec = if e.contains(' ') { format!("\"{e}\"") } else { e.into_owned() };
-    format!("{OURS}\n[D-BUS Service]\nName=org.freedesktop.FileManager1\nExec={exec} --dbus-service\n")
+    let exec = if e.contains(' ') {
+        format!("\"{e}\"")
+    } else {
+        e.into_owned()
+    };
+    format!(
+        "{OURS}\n[D-BUS Service]\nName=org.freedesktop.FileManager1\nExec={exec} --dbus-service\n"
+    )
 }
 
 fn is_ours(file: &Path) -> bool {

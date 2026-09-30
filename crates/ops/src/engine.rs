@@ -70,7 +70,10 @@ pub fn plain_io_message_at(e: &io::Error, dest: &Path) -> String {
 /// passed in so it can be tested without a real mount.
 pub fn plain_io_message_on(e: &io::Error, dest: &Path, fstype: Option<&str>) -> String {
     // EIO, ENOTCONN, ECONNABORTED, ECONNRESET, ETIMEDOUT.
-    let lost = matches!(e.raw_os_error(), Some(5) | Some(107) | Some(103) | Some(104) | Some(110));
+    let lost = matches!(
+        e.raw_os_error(),
+        Some(5) | Some(107) | Some(103) | Some(104) | Some(110)
+    );
     if lost && fstype.is_some_and(gust_core::stall::can_stall) {
         return format!(
             "The connection to {} was lost. Nothing was replaced; reconnect and copy again.",
@@ -156,7 +159,15 @@ pub fn copy_regular_file(
     policy: ConflictPolicy,
     cancel: &CancelToken,
 ) -> OpResult<u64> {
-    copy_regular_file_with(src_dir, src_name, dst_dir, dst_name, policy, cancel, &mut |_| {})
+    copy_regular_file_with(
+        src_dir,
+        src_name,
+        dst_dir,
+        dst_name,
+        policy,
+        cancel,
+        &mut |_| {},
+    )
 }
 
 /// How often a copy reports bytes from inside one file.
@@ -509,7 +520,9 @@ mod tests {
         // was released anyway — leaving 231 MB on the server that no later
         // sweep could ever prove was Gust's. A failed removal must keep
         // the claim so the next visit, with the server back, cleans it up.
-        let _g = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         use std::os::unix::fs::PermissionsExt;
         let d = tmp("unremovable");
         std::env::set_var("XDG_STATE_HOME", d.join("state"));
@@ -521,16 +534,28 @@ mod tests {
         let cancel = CancelToken::new();
         let dst = d.join("dst");
         let mut once = false;
-        let r = copy_regular_file_with(&sd, &sn, &dd, &dn, ConflictPolicy::Ask, &cancel, &mut |_| {
-            if !once {
-                once = true;
-                // The destination stops accepting removals, then the copy fails.
-                fs::set_permissions(&dst, fs::Permissions::from_mode(0o555)).unwrap();
-                cancel.cancel();
-            }
-        });
+        let r = copy_regular_file_with(
+            &sd,
+            &sn,
+            &dd,
+            &dn,
+            ConflictPolicy::Ask,
+            &cancel,
+            &mut |_| {
+                if !once {
+                    once = true;
+                    // The destination stops accepting removals, then the copy fails.
+                    fs::set_permissions(&dst, fs::Permissions::from_mode(0o555)).unwrap();
+                    cancel.cancel();
+                }
+            },
+        );
         assert!(r.is_err());
-        let left: Vec<_> = fs::read_dir(&dst).unwrap().flatten().map(|e| e.path()).collect();
+        let left: Vec<_> = fs::read_dir(&dst)
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .collect();
         fs::set_permissions(&dst, fs::Permissions::from_mode(0o755)).unwrap();
         if left.is_empty() {
             // Running as root: the removal succeeded, nothing to prove.
@@ -538,20 +563,30 @@ mod tests {
             return;
         }
         assert!(
-            crate::staging::load_all().iter().any(|c| left.contains(&c.path)),
+            crate::staging::load_all()
+                .iter()
+                .any(|c| left.contains(&c.path)),
             "the staging file that could not be removed lost its ownership record: {left:?}"
         );
         // With the destination reachable again, the next visit reclaims it
         // even though its owner — this process — is still running.
-        assert_eq!(sweep_stale_staging(&dst), 1, "the failed copy's debris is reclaimed");
-        assert!(fs::read_dir(&dst).unwrap().next().is_none(), "nothing is left behind");
+        assert_eq!(
+            sweep_stale_staging(&dst),
+            1,
+            "the failed copy's debris is reclaimed"
+        );
         assert!(
-            !crate::staging::load_all().iter().any(|c| left.contains(&c.path)),
+            fs::read_dir(&dst).unwrap().next().is_none(),
+            "nothing is left behind"
+        );
+        assert!(
+            !crate::staging::load_all()
+                .iter()
+                .any(|c| left.contains(&c.path)),
             "the claim went with the file"
         );
         fs::remove_dir_all(&d).ok();
     }
-
 
     #[test]
     fn copies_a_regular_file_with_contents_and_mode() {
@@ -767,7 +802,6 @@ mod tests {
 /// belonging to a RUNNING process is another copy in flight, and taking it
 /// would corrupt that copy.
 pub fn sweep_stale_staging(dir: &Path) -> usize {
-    use std::os::unix::fs::MetadataExt;
     let mut removed = 0usize;
 
     // Ownership comes from the claim store, never from the filename. A file
@@ -865,7 +899,9 @@ mod sweep_tests {
 
     #[test]
     fn debris_from_a_dead_process_is_removed() {
-        let _g = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let d = tmp("dead");
         // Isolate the claim store so this test owns it.
         std::env::set_var("XDG_STATE_HOME", d.join("state"));
@@ -910,7 +946,9 @@ mod sweep_tests {
         // Found live: after the SFTP server came back, sshfs numbered the
         // same file inode 2 instead of 5, so a dev+inode check could never
         // match and 232 MB stayed on the server for good.
-        let _g = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         use std::os::unix::fs::MetadataExt;
         let d = tmp("netdebris");
         std::env::set_var("XDG_STATE_HOME", d.join("state"));
@@ -933,7 +971,11 @@ mod sweep_tests {
         };
         // The inode changed, on a LOCAL disk: never removed on weaker proof.
         write_claim(0, 4096, md.ino() + 1000);
-        assert_eq!(sweep_stale_staging(&d), 0, "a local file needs its exact identity");
+        assert_eq!(
+            sweep_stale_staging(&d),
+            0,
+            "a local file needs its exact identity"
+        );
         // A network place, but the file holds MORE than Gust ever wrote:
         // somebody else wrote to it. Not ours.
         write_claim(1, 1024, md.ino() + 1000);
@@ -948,7 +990,9 @@ mod sweep_tests {
 
     #[test]
     fn a_staging_shaped_file_with_no_claim_is_never_removed() {
-        let _g = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let d = tmp("unclaimed");
         std::env::set_var("XDG_STATE_HOME", d.join("state"));
 

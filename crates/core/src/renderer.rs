@@ -29,9 +29,26 @@ pub enum Renderer {
 
 /// DRM drivers that mean a real GPU with 3D acceleration.
 const HARDWARE_DRIVERS: &[&str] = &[
-    "i915", "xe", "amdgpu", "radeon", "nouveau", "nvidia", "nvidia-drm", "msm", "panfrost",
-    "panthor", "lima", "v3d", "vc4", "etnaviv", "asahi", "powervr", "imagination", "mali",
-    "tegra", "vmwgfx",
+    "i915",
+    "xe",
+    "amdgpu",
+    "radeon",
+    "nouveau",
+    "nvidia",
+    "nvidia-drm",
+    "msm",
+    "panfrost",
+    "panthor",
+    "lima",
+    "v3d",
+    "vc4",
+    "etnaviv",
+    "asahi",
+    "powervr",
+    "imagination",
+    "mali",
+    "tegra",
+    "vmwgfx",
 ];
 
 /// Decide from an environment lookup and a sysfs root (normally `/sys`).
@@ -120,8 +137,19 @@ fn gpu_kind(dev: &Path) -> Kind {
     // Display-only drivers that never have 3D.
     if matches!(
         driver.as_str(),
-        "simpledrm" | "simple-framebuffer" | "efifb" | "bochs-drm" | "bochs" | "cirrus"
-            | "cirrus-qemu" | "qxl" | "vboxvideo" | "hyperv_drm" | "udl" | "gm12u320" | "vkms"
+        "simpledrm"
+            | "simple-framebuffer"
+            | "efifb"
+            | "bochs-drm"
+            | "bochs"
+            | "cirrus"
+            | "cirrus-qemu"
+            | "qxl"
+            | "vboxvideo"
+            | "hyperv_drm"
+            | "udl"
+            | "gm12u320"
+            | "vkms"
     ) {
         return Kind::NoAcceleration;
     }
@@ -170,7 +198,11 @@ mod tests {
         // The exact shape of this development VM.
         let s = sys("virtio2d");
         let dev = node(&s, "renderD128", "virtio-pci");
-        virtio_child(&s, &dev, "0100000000000000000000000000110010000000100000000000");
+        virtio_child(
+            &s,
+            &dev,
+            "0100000000000000000000000000110010000000100000000000",
+        );
         assert_eq!(choose(no_env, &s), Renderer::Software);
     }
 
@@ -178,7 +210,11 @@ mod tests {
     fn a_vm_with_virgl_3d_keeps_the_gpu() {
         let s = sys("virgl");
         let dev = node(&s, "renderD128", "virtio-pci");
-        virtio_child(&s, &dev, "1100000000000000000000000000110010000000100000000000");
+        virtio_child(
+            &s,
+            &dev,
+            "1100000000000000000000000000110010000000100000000000",
+        );
         assert_eq!(choose(no_env, &s), Renderer::Default);
     }
 
