@@ -75,7 +75,7 @@ Ran out of session budget, not blocked. Remaining, in suggested order:
 
 1. P0: low-end profile and the extra measurements (`just bench-field` and `bench/RESULTS.md` exist).
 2. P2: screenshot and score every surface, fix, `docs/screens/` pairs. Fixed so far: breadcrumb `/ /` (qa §27); crash banner hint text raised to primary contrast (measured 11.2:1 on white, was ~2.8:1) and "Open destination" made the accent primary button. The "banner covers the last row" finding is a normal half-visible last row at the scroll edge: the list height already subtracts the banner.
-3. P3: paste image as file, safe run-executable prompt, open as admin (polkit), ownership, "Link here" on drop, per-folder sort, tree expand, Miller column count, preview-column toggle, Markdown/audio/PDF previews, pause/resume + queue, restore tabs, i18n, pain-point regressions, Thunar memory gap.
+3. P3 (Run… behind a safe prompt done, qa §28): paste image as file, open as admin (polkit), ownership, "Link here" on drop, per-folder sort, tree expand, Miller column count, preview-column toggle, Markdown/audio/PDF previews, pause/resume + queue, restore tabs, i18n, pain-point regressions, Thunar memory gap.
 4. P4 Add-a-place + discovery, Tailscale, MTP/AFC, udisks + `scsi_debug`, LocalSend.
 5. P5 soak, stall matrix, IME, fractional scaling, AT-SPI.
 6. P6 README, release drafts, clips, Omarchy PR text, launch posts.

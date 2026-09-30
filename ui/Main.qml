@@ -1109,6 +1109,21 @@ Window {
         win.qaDump("prompt")
     }
 
+    /// The safe prompt before running a program: names the file; Cancel has
+    /// the focus, so Enter cancels.
+    property int pendingRunRow: -1
+    function askRun(row) {
+        const why = dirModel.run_check(row)
+        if (why !== "") { win.alertText = why; win.qaDump("run-refused"); return }
+        win.pendingRunRow = row
+        confirm.purpose = "run"
+        confirm.open(qsTr("Run ") + dirModel.entry_name(row) + qsTr("?"),
+                     qsTr("This starts the program in a terminal, in the folder it is in. ")
+                     + qsTr("Only run programs you trust: it can do anything your account can."),
+                     qsTr("Run"), true)
+        win.qaDump("run-confirm-open")
+    }
+
     function askNewFile() {
         prompt.mode = "newfile"
         prompt.openWith(qsTr("New file"), qsTr("untitled.txt"), qsTr("An empty file, created in this folder."), -1)
@@ -1186,6 +1201,7 @@ Window {
         else if (a === "paste") win.doPaste()
         else if (a === "terminal") hints.status = dirModel.open_terminal()
         else if (a === "keys") win.showKeyMap()
+        else if (a === "run") win.askRun(dirModel.cursor)
         else if (a.startsWith("custom:")) {
             const err = dirModel.run_custom_action(a.substring(7))
             if (err !== "") win.alertText = err
@@ -1325,6 +1341,9 @@ Window {
                 : { label: qsTr("Add to Bookmarks"), hint: "Ctrl+B", action: "pin-row" })
         }
         if (!many && !dir) list.push({ label: qsTr("Open with…"), hint: win.keyPreset === "vim" ? "o" : "", action: "open-with" })
+        // Programs start only from here or the palette, after a prompt.
+        if (!many && !dir && dirModel.run_check(row) === "")
+            list.push({ label: qsTr("Run…"), hint: "", action: "run" })
         list.push({ label: qsTr("Quick Look"), hint: "Space", action: "quicklook" })
         if (!many) list.push({ label: qsTr("Properties"), hint: "Alt+Enter", action: "quicklook" })
         list.push(sep)
@@ -2558,6 +2577,15 @@ Window {
         onVisibleChanged: win.qaDump("confirm")
         onClosed: win.focusList()
         onAccepted: {
+            if (confirm.purpose === "run") {
+                const r = win.pendingRunRow
+                win.pendingRunRow = -1
+                if (r < 0) return
+                const err = dirModel.run_row(r)
+                if (err !== "") win.alertText = err
+                win.qaDump("run")
+                return
+            }
             if (confirm.purpose === "bulk") {
                 win.bulkApply()
                 return

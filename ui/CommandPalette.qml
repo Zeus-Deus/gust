@@ -95,6 +95,7 @@ Rectangle {
         { id: "new-folder",   label: "New folder",            hint: "Ctrl+N" },
         { id: "new-file",     label: "New file",              hint: "Ctrl+Shift+N" },
         { id: "make-link",    label: "Make link",             hint: "" },
+        { id: "run",          label: "Run program…",          hint: "" },
         { id: "permissions",  label: "Permissions…",          hint: "" },
         { id: "invert-selection", label: "Invert selection",  hint: "Ctrl+I" },
         { id: "deselect-all", label: "Select nothing",        hint: "Ctrl+Shift+A" },

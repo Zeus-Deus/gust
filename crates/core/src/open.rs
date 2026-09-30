@@ -151,6 +151,36 @@ pub fn which(program: &str) -> Option<PathBuf> {
 /// the chosen terminal there — its Super+Return uses it — so it comes
 /// first. `--dir` is a separate argument: the path is never parsed by a
 /// shell.
+/// The argv that runs an executable file deliberately (the "Run…" action,
+/// always behind a confirmation). It runs in the user's default terminal,
+/// held open so its output can be read, with its own folder as the working
+/// directory. Every part is a separate argv entry: no shell ever parses the
+/// path, and the path is absolute, so it can never be read as an option.
+///
+/// Refused unless the file is a regular file with an executable bit: a
+/// script without +x is not "run" by guessing an interpreter.
+pub fn run_argv(path: &Path, mode: u32, is_regular: bool) -> Result<Vec<String>, String> {
+    if !path.is_absolute() {
+        return Err("only a full path can be run".into());
+    }
+    if !is_regular {
+        return Err("only an ordinary file can be run".into());
+    }
+    if mode & 0o111 == 0 {
+        return Err(
+            "this file is not executable — give it the x permission first (Permissions…)".into(),
+        );
+    }
+    let dir = path.parent().unwrap_or(Path::new("/"));
+    Ok(vec![
+        "xdg-terminal-exec".into(),
+        "--hold".into(),
+        format!("--dir={}", dir.display()),
+        "--".into(),
+        path.to_string_lossy().into_owned(),
+    ])
+}
+
 pub fn terminal_command(dir: &Path, have: impl Fn(&str) -> bool) -> Option<Command> {
     if have("xdg-terminal-exec") {
         let mut c = Command::new("xdg-terminal-exec");
@@ -419,5 +449,27 @@ mod tests {
             assert!(!s.contains("Errno"), "{s}");
             assert!(!s.contains("OpenRefusal"), "{s}");
         }
+    }
+
+    #[test]
+    fn run_argv_is_argv_only_and_absolute() {
+        let p = Path::new("/tmp/a $(touch PWNED); b.sh");
+        let v = run_argv(p, 0o755, true).unwrap();
+        assert_eq!(v[0], "xdg-terminal-exec");
+        assert_eq!(v[3], "--", "everything after -- is the program");
+        assert_eq!(
+            v[4], "/tmp/a $(touch PWNED); b.sh",
+            "the path is ONE argument"
+        );
+        assert_eq!(v[2], "--dir=/tmp");
+    }
+
+    #[test]
+    fn run_argv_refuses_what_is_not_an_executable_file() {
+        assert!(run_argv(Path::new("/tmp/x.sh"), 0o644, true)
+            .unwrap_err()
+            .contains("not executable"));
+        assert!(run_argv(Path::new("/tmp/d"), 0o755, false).is_err());
+        assert!(run_argv(Path::new("rel.sh"), 0o755, true).is_err());
     }
 }

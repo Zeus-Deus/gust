@@ -26,7 +26,7 @@ Updated after every commit. Read this first after a realm replacement.
 
 ## State
 See `docs/HANDOFF.md` for the full picture (what is built, bench table, what is not done).
-- Gates at the custom-actions commit: test 717/0 (41 named skips), lint green, qa 397/0, theme matrix 22/22.
+- Gates at the custom-actions commit: test 719/0 (41 named skips), lint green, qa 407/0, theme matrix 22/22.
 - Uncommitted work: none.
 
 ## Running a single qa section

@@ -409,6 +409,13 @@ pub mod qobject {
         /// "" or why not.
         #[qinvokable]
         fn run_custom_action(self: Pin<&mut DirModel>, id: &QString) -> QString;
+        /// Can the row be run? "" when yes, otherwise why not.
+        #[qinvokable]
+        fn run_check(self: &DirModel, row: i32) -> QString;
+        /// Run the row's executable in the default terminal. Only ever called
+        /// after the user confirmed a dialog naming the file. "" or why not.
+        #[qinvokable]
+        fn run_row(self: Pin<&mut DirModel>, row: i32) -> QString;
         #[qinvokable]
         fn make_link(self: Pin<&mut DirModel>) -> QString;
         /// Change permissions of the targets ("644", "u+x", "go-w").
@@ -4685,7 +4692,9 @@ impl qobject::DirModel {
         }
         // Executables never launch from a plain activation.
         if gust_core::mime::needs_trusted_launch(&name, mode) {
-            return QString::from("blocked:executable needs a deliberate Run action");
+            return QString::from(
+                "blocked:this is a program — use Run… (right-click or the : palette) to start it",
+            );
         }
 
         // Hand the file to the desktop's own opener. Gust does not decide
@@ -6202,6 +6211,52 @@ impl qobject::DirModel {
         )));
         let _ = started;
         QString::default()
+    }
+
+    fn run_argv_for(&self, row: i32) -> Result<Vec<String>, String> {
+        use std::os::unix::fs::MetadataExt;
+        let path = self
+            .path_of_row(row)
+            .ok_or_else(|| "nothing to run here".to_string())?;
+        let md = path
+            .symlink_metadata()
+            .map_err(|_| "that file is gone".to_string())?;
+        gust_core::open::run_argv(&path, md.mode(), md.is_file())
+    }
+
+    fn run_check(&self, row: i32) -> QString {
+        match self.run_argv_for(row) {
+            Ok(_) => QString::default(),
+            Err(e) => QString::from(&e),
+        }
+    }
+
+    fn run_row(mut self: Pin<&mut Self>, row: i32) -> QString {
+        let argv = match self.as_ref().run_argv_for(row) {
+            Ok(v) => v,
+            Err(e) => return QString::from(&e),
+        };
+        if gust_core::open::which(&argv[0]).is_none() {
+            return QString::from("no terminal launcher (xdg-terminal-exec) is installed");
+        }
+        match std::process::Command::new(&argv[0])
+            .args(&argv[1..])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(mut child) => {
+                std::thread::spawn(move || {
+                    let _ = child.wait();
+                });
+                let name = self.as_ref().entry_name(row).to_string();
+                self.as_mut()
+                    .set_status(QString::from(&format!("Running {name} in a terminal")));
+                QString::default()
+            }
+            Err(e) => QString::from(&format!("could not start the terminal: {e}")),
+        }
     }
 
     fn make_link(mut self: Pin<&mut Self>) -> QString {
