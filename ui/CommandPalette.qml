@@ -54,6 +54,8 @@ Rectangle {
         { id: "toggle-hidden",label: "Toggle hidden files",   hint: "Ctrl+H" },
         { id: "new-folder",   label: "New folder",            hint: "Ctrl+N" },
         { id: "new-file",     label: "New file",              hint: "Ctrl+Shift+N" },
+        { id: "make-link",    label: "Make link",             hint: "" },
+        { id: "permissions",  label: "Permissions…",          hint: "" },
         { id: "invert-selection", label: "Invert selection",  hint: "Ctrl+I" },
         { id: "deselect-all", label: "Select nothing",        hint: "Ctrl+Shift+A" },
         { id: "rename",       label: "Rename",                hint: "F2" },

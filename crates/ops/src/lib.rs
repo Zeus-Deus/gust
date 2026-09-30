@@ -5,6 +5,7 @@
 
 pub mod anchor;
 pub mod archive;
+pub mod attrs;
 pub mod bulk;
 pub mod create;
 pub mod engine;

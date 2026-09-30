@@ -195,7 +195,9 @@ FocusScope {
                             Text {
                                 anchors.verticalCenter: parent.verticalCenter
                                 text: name
-                                color: isDir ? Tokens.foregroundBright : Tokens.foreground
+                                // Hidden files dimmed, as in Rows and Grid.
+                                color: isHidden ? Tokens.foregroundDim
+                                                : (isDir ? Tokens.foregroundBright : Tokens.foreground)
                                 font.family: Tokens.fontFamily
                                 font.pixelSize: Tokens.fontBody
                                 elide: Text.ElideMiddle

@@ -381,6 +381,18 @@ pub mod qobject {
         fn hash_row(self: Pin<&mut DirModel>, row: i32);
         #[qinvokable]
         fn hash_cancel(self: Pin<&mut DirModel>);
+        /// Make a link to the cursor row (or the one selected item) in this
+        /// folder, named "name (link)". Ctrl+Z removes it if it is still
+        /// that link. "" or why not.
+        #[qinvokable]
+        fn make_link(self: Pin<&mut DirModel>) -> QString;
+        /// Change permissions of the targets ("644", "u+x", "go-w").
+        /// Ctrl+Z puts every mode back where the file is unchanged since.
+        #[qinvokable]
+        fn set_mode(self: Pin<&mut DirModel>, spec: &QString) -> QString;
+        /// The cursor row's rwx and octal, e.g. "rw-r--r--  644".
+        #[qinvokable]
+        fn mode_text(self: &DirModel) -> QString;
         /// Quick Look's visual: render a large preview for the row on a
         /// worker (sandboxed helpers only) and publish it in `peek_visual`
         /// as JSON — an image path, or an archive's entry list.
@@ -716,6 +728,10 @@ pub struct DirModelRust {
     /// Every (from, to) of the last bulk rename, so one Ctrl+Z puts them
     /// all back — one user action, one undo entry (DESIGN §6.16).
     last_bulk_rename: Vec<(std::path::PathBuf, std::path::PathBuf)>,
+    /// The newest link Gust made, for Ctrl+Z.
+    last_link: Option<gust_ops::attrs::LinkMade>,
+    /// The newest permissions change, for Ctrl+Z.
+    last_modes: Vec<gust_ops::attrs::ModeChanged>,
     /// What Ctrl+C / Ctrl+X marked, waiting for a paste.
     clipboard: Option<(Vec<std::path::PathBuf>, ClipMode)>,
     /// The job currently running, if any. Only one at a time in M2.
@@ -933,6 +949,8 @@ impl DirModelRust {
             type_ahead: gust_core::search::TypeAhead::default(),
             last_trashed_batch: Vec::new(),
             last_bulk_rename: Vec::new(),
+            last_link: None,
+            last_modes: Vec::new(),
             clipboard: None,
             pending: None,
             job_rate: gust_ops::rate::RateMeter::new(),
@@ -4865,6 +4883,8 @@ impl qobject::DirModel {
             r.last_trashed_batch = done;
             // One level of undo: the newest action owns it.
             r.last_job = None;
+            r.last_link = None;
+            r.last_modes.clear();
         }
         self.as_mut().rust_mut().selection.clear();
         self.as_mut().reload();
@@ -4880,6 +4900,38 @@ impl qobject::DirModel {
     }
 
     fn undo_last(mut self: Pin<&mut Self>) -> QString {
+        if let Some(made) = self.as_ref().last_link.clone() {
+            self.as_mut().rust_mut().last_link = None;
+            let r = gust_ops::attrs::undo_link(&made);
+            self.as_mut().reload();
+            return match r {
+                Ok(()) => {
+                    self.as_mut()
+                        .set_status(QString::from("Removed the link it made"));
+                    QString::default()
+                }
+                Err(e) => QString::from(&e),
+            };
+        }
+        let modes = std::mem::take(&mut self.as_mut().rust_mut().last_modes);
+        if !modes.is_empty() {
+            let (back, refused) = gust_ops::attrs::undo_modes(&modes);
+            self.as_mut().reload();
+            let msg = if refused.is_empty() {
+                format!(
+                    "Permissions put back on {back} item{}",
+                    if back == 1 { "" } else { "s" }
+                )
+            } else {
+                format!(
+                    "Put back {back}; {} left as they are: {}",
+                    refused.len(),
+                    refused.join("; ")
+                )
+            };
+            self.as_mut().set_status(QString::from(&msg));
+            return QString::default();
+        }
         // A bulk rename is one user action, so one Ctrl+Z puts every name
         // back — not forty separate undos (DESIGN §6.16).
         let renames = self.as_ref().last_bulk_rename.clone();
@@ -5013,6 +5065,12 @@ impl qobject::DirModel {
     }
 
     fn undo_label(&self) -> QString {
+        if self.last_link.is_some() {
+            return QString::from("Undo: remove the link");
+        }
+        if !self.last_modes.is_empty() {
+            return QString::from("Undo: put permissions back");
+        }
         let n = self.last_bulk_rename.len();
         if n > 0 {
             return QString::from(&format!(
@@ -5623,6 +5681,8 @@ impl qobject::DirModel {
         // One journal entry, not forty: one Ctrl+Z undoes one user action.
         if !outcome.done.is_empty() {
             self.as_mut().rust_mut().last_bulk_rename = outcome.done.clone();
+            self.as_mut().rust_mut().last_link = None;
+            self.as_mut().rust_mut().last_modes.clear();
         }
         self.as_mut().rust_mut().selection.clear();
         self.as_mut().reload();
@@ -5872,6 +5932,98 @@ impl qobject::DirModel {
     ///
     /// The selection when there is one, otherwise the cursor row. Resolved
     /// ONCE, when the command is issued (DESIGN.md §4.1).
+    fn make_link(mut self: Pin<&mut Self>) -> QString {
+        let targets = self.as_ref().target_paths();
+        let [target] = targets.as_slice() else {
+            return QString::from("choose one item to link to");
+        };
+        let Some(dir) = self.as_ref().key.as_path().map(|p| p.to_path_buf()) else {
+            return QString::from("cannot make a link here");
+        };
+        let name = gust_ops::attrs::link_name_for(&dir, target);
+        match gust_ops::attrs::create_link(target, &dir, &name) {
+            Ok(made) => {
+                {
+                    let mut r = self.as_mut().rust_mut();
+                    r.last_link = Some(made);
+                    r.last_modes.clear();
+                    r.last_job = None;
+                    r.last_bulk_rename.clear();
+                    r.last_trashed_batch.clear();
+                }
+                self.as_mut().relist_focusing(name.clone());
+                self.as_mut().set_status(QString::from(&format!(
+                    "Made a link: {}  ·  Ctrl+Z removes it",
+                    name.to_string_lossy()
+                )));
+                QString::default()
+            }
+            Err(e) => QString::from(&e),
+        }
+    }
+
+    fn set_mode(mut self: Pin<&mut Self>, spec: &QString) -> QString {
+        let spec = match gust_ops::attrs::ModeSpec::parse(&spec.to_string()) {
+            Ok(s) => s,
+            Err(e) => return QString::from(&e),
+        };
+        let targets = self.as_ref().target_paths();
+        if targets.is_empty() {
+            return QString::from("nothing to change");
+        }
+        let out = gust_ops::attrs::set_modes(&targets, spec);
+        let n = out.changed.len();
+        if n > 0 {
+            let mut r = self.as_mut().rust_mut();
+            r.last_modes = out.changed;
+            r.last_link = None;
+            r.last_job = None;
+            r.last_bulk_rename.clear();
+            r.last_trashed_batch.clear();
+        }
+        self.as_mut().reload();
+        if !out.failed.is_empty() && n == 0 {
+            return QString::from(&out.failed.join("; "));
+        }
+        let mut msg = format!(
+            "Permissions changed on {n} item{}",
+            if n == 1 { "" } else { "s" }
+        );
+        if out.unchanged > 0 {
+            msg.push_str(&format!(", {} already had them", out.unchanged));
+        }
+        if !out.failed.is_empty() {
+            msg.push_str(&format!(
+                "; {} not changed: {}",
+                out.failed.len(),
+                out.failed.join("; ")
+            ));
+        }
+        if n > 0 {
+            msg.push_str("  ·  Ctrl+Z puts them back");
+        }
+        self.as_mut().set_status(QString::from(&msg));
+        QString::default()
+    }
+
+    fn mode_text(&self) -> QString {
+        use std::os::unix::fs::MetadataExt;
+        let Some(p) = self.path_of_row(self.cursor) else {
+            return QString::default();
+        };
+        match p.symlink_metadata() {
+            Ok(m) => {
+                let mode = m.mode() & 0o777;
+                QString::from(&format!(
+                    "{}  {:03o}",
+                    gust_ops::attrs::rwx_string(mode),
+                    mode
+                ))
+            }
+            Err(_) => QString::default(),
+        }
+    }
+
     fn target_paths(&self) -> Vec<PathBuf> {
         if self.selection.is_empty() {
             return self.path_of_row(self.cursor).into_iter().collect();
@@ -5971,6 +6123,10 @@ impl qobject::DirModel {
                     Some(rec) if rec.offers_undo() => Some(rec),
                     _ => None,
                 };
+                if r.last_job.is_some() {
+                    r.last_link = None;
+                    r.last_modes.clear();
+                }
             }
             self.as_mut().reload();
         }

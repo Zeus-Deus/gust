@@ -1099,6 +1099,16 @@ Window {
         win.qaDump("keymap")
     }
 
+    function askPermissions() {
+        const n = dirModel.sel_count()
+        prompt.mode = "permissions"
+        prompt.openWith(n > 1 ? qsTr("Permissions for ") + n + qsTr(" items") : qsTr("Permissions"),
+                        n > 1 ? "" : dirModel.mode_text().split("  ")[1],
+                        qsTr("Now: ") + dirModel.mode_text()
+                            + qsTr("  ·  a number (644, 755) or a change (u+x, go-w, +x).  Ctrl+Z undoes it."), -1)
+        win.qaDump("prompt")
+    }
+
     function askNewFile() {
         prompt.mode = "newfile"
         prompt.openWith(qsTr("New file"), qsTr("untitled.txt"), qsTr("An empty file, created in this folder."), -1)
@@ -1176,6 +1186,12 @@ Window {
         else if (a === "paste") win.doPaste()
         else if (a === "terminal") hints.status = dirModel.open_terminal()
         else if (a === "keys") win.showKeyMap()
+        else if (a === "make-link") {
+            const err = dirModel.make_link()
+            if (err !== "") win.alertText = err
+            win.qaDump("make-link")
+        }
+        else if (a === "permissions") win.askPermissions()
         else if (a === "new-file") win.askNewFile()
         else if (a === "invert-selection") { dirModel.sel_invert(); win.qaDump("select") }
         else if (a === "deselect-all") { dirModel.sel_clear(); win.qaDump("select") }
@@ -1317,6 +1333,8 @@ Window {
         if (many) list.push({ label: qsTr("Rename ") + dirModel.sel_count() + qsTr(" items…"), hint: "", action: "bulk" })
         else list.push({ label: qsTr("Rename…"), hint: "F2", action: "rename" })
         list.push({ label: qsTr("Duplicate"), hint: "Ctrl+D", action: "duplicate" })
+        if (!many) list.push({ label: qsTr("Make link"), hint: "", action: "make-link" })
+        list.push({ label: qsTr("Permissions…"), hint: "", action: "permissions" })
         list.push({ label: qsTr("Compress"), hint: "", action: "compress" })
         if (!many && dirModel.row_is_archive(row)) list.push({ label: qsTr("Extract here"), hint: "", action: "extract" })
         list.push(sep)
@@ -2220,7 +2238,9 @@ Window {
                     const err = dirModel.undo_last()
                     if (err === "") {
                         win.alertText = ""
-                        hints.status = label.startsWith("Undo: remove") ? "Copies removed"
+                        hints.status = label === "Undo: remove the link" ? qsTr("Removed the link")
+                                     : label === "Undo: put permissions back" ? qsTr("Permissions put back")
+                                     : label.startsWith("Undo: remove") ? "Copies removed"
                                      : label.startsWith("Undo: move") ? "Moved back"
                                      : "Restored from Trash"
                     } else {
@@ -2376,6 +2396,10 @@ Window {
                 err = dirModel.new_folder(text)
             else if (prompt.mode === "newfile")
                 err = dirModel.new_file(text)
+            else if (prompt.mode === "permissions") {
+                err = dirModel.set_mode(text)
+                if (err === "") { prompt.close(); win.qaDump("prompt-ok"); return }
+            }
 
             if (err === "") {
                 hints.status = prompt.mode === "rename"
