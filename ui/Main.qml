@@ -1051,7 +1051,7 @@ Window {
         }
         if (a === "new-file") { win.askNewFile(); return true }
         if (a === "new-folder") { win.askNewFolder(); return true }
-        if (a === "jump") { palette.open(); return true }
+        if (a === "jump") { palette.openJump(); return true }
         if (a === "eject") {
             const dev = dirModel.device_here()
             if (dev === "") hints.status = qsTr("This folder is not on a removable drive")
@@ -2210,7 +2210,7 @@ Window {
                     event.accepted = true; return
                 }
                 if (event.key === Qt.Key_H) { dirModel.toggle_hidden(); event.accepted = true; return }
-                if (event.key === Qt.Key_L) { palette.open(); event.accepted = true; return }
+                if (event.key === Qt.Key_L) { palette.openJump(); event.accepted = true; return }
                 // Tabs (plan §2). Ctrl+T opens beside this one, Ctrl+W closes
                 // it, Tab / Shift+Tab cycle.
                 if (event.key === Qt.Key_T) { win.newTab(""); event.accepted = true; return }
@@ -2423,6 +2423,7 @@ Window {
         // opens and closes: a test that reads the state file after typing
         // was seeing the snapshot from before anything was typed.
         onResultsChanged: win.qaDump("palette-results")
+        onJumpFirstChanged: win.qaDump("palette-results")
         onClosed: win.focusList()
         onNavigateRequested: (p) => { dirModel.navigate(p); win.focusList() }
         onActionRequested: (a) => win.runAction(a)
@@ -2707,6 +2708,7 @@ Window {
             tabDropZone: win.tabDropZone,
             paletteOpen: palette.visible,
             paletteResults: palette.visible ? palette.resultLabels() : [],
+            paletteText: palette.visible ? palette.inputText() : "",
             promptOpen: prompt.visible,
             promptMode: prompt.mode,
             promptError: prompt.errorText,

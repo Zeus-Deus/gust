@@ -18,11 +18,47 @@ Rectangle {
     visible: false
     z: 90
 
+    /// True when opened with Ctrl+L: folders come before actions.
+    property bool jumpFirst: false
+
     function open() {
+        jumpFirst = false
         visible = true
         input.text = ""
         input.forceActiveFocus()
+        if (root.model) root.model.jump_prepare()
         rebuildAndAnnounce("")
+    }
+    /// Ctrl+L: jump to a folder by a few letters, or type a path (Tab
+    /// completes it).
+    function openJump() {
+        open()
+        jumpFirst = true
+        rebuildAndAnnounce("")
+    }
+
+    Connections {
+        target: root.model
+        function onJump_revChanged() { if (root.visible) root.rebuildAndAnnounce(input.text) }
+        function onJump_completionChanged() {
+            const s = root.model.jump_completion
+            const nl = s.indexOf("\n")
+            if (nl < 0) return
+            // Only if the box still holds what was asked about.
+            if (s.substring(0, nl) === input.text && s.length > nl + 1) {
+                input.text = s.substring(nl + 1)
+                input.cursorPosition = input.text.length
+            }
+        }
+    }
+
+    /// Folders matching `t`, best first, as palette rows.
+    function jumpRows(t, limit) {
+        if (!root.model || t.length === 0) return []
+        let hits = []
+        try { hits = JSON.parse(root.model.jump_query(t, limit)) } catch (e) { hits = [] }
+        return hits.map(h => ({ kind: "path", label: "Go to " + h.shown, payload: h.path,
+                                hint: h.source }))
     }
     /// Open with a query already typed, for a key that means one section of
     /// the palette — "o" for open-with, say.
@@ -83,6 +119,7 @@ Rectangle {
     /// What the palette is offering, for tests and for the QA state dump.
     /// Reading the app's own answer beats reading pixels: the row below is
     /// low-contrast by design and OCR misses it.
+    function inputText() { return input.text }
     function resultLabels() {
         const out = []
         for (let i = 0; i < results.count; i++) out.push(results.get(i).label)
@@ -247,12 +284,15 @@ Rectangle {
             return
         }
         const lower = t.toLowerCase()
+        const folders = jumpRows(t, root.jumpFirst ? 6 : 3)
+        if (root.jumpFirst) for (const f of folders) results.append(f)
         for (var i = 0; i < allActions.length; i++) {
             const a = allActions[i]
             if (lower === "" || a.label.toLowerCase().indexOf(lower) !== -1)
                 results.append({ kind: "action", label: a.label, payload: a.id,
                                  hint: a.hint })
         }
+        if (!root.jumpFirst) for (const f of folders) results.append(f)
         // Scope is stated explicitly — never an implicit recursive crawl.
         if (t.length > 0) {
             results.append({
@@ -309,6 +349,23 @@ Rectangle {
                     // while typing here (plan §8).
                     onTextChanged: root.rebuildAndAnnounce(text)
                     Keys.onEscapePressed: root.close()
+                    // Tab: complete a typed path like a shell; on a folder
+                    // row, put its path in the box to keep going deeper.
+                    Keys.onTabPressed: (event) => {
+                        event.accepted = true
+                        const t = input.text
+                        if (t.startsWith("/") || t.startsWith("~")) {
+                            root.model.jump_complete(t)
+                            return
+                        }
+                        if (results.count > 0) {
+                            const it = results.get(Math.max(0, list.currentIndex))
+                            if (it.kind === "path") {
+                                input.text = it.label.substring(6) + "/"
+                                input.cursorPosition = input.text.length
+                            }
+                        }
+                    }
                     Keys.onReturnPressed: root.accept()
                     Keys.onDownPressed: list.currentIndex = Math.min(list.currentIndex + 1, results.count - 1)
                     Keys.onUpPressed: list.currentIndex = Math.max(list.currentIndex - 1, 0)

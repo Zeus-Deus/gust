@@ -76,6 +76,10 @@ pub mod qobject {
         /// SHA-256 of the file Quick Look shows: "" before asking,
         /// "…" while reading, the hex digest, or why not.
         #[qproperty(QString, peek_hash)]
+        /// Bumped when folder-jump candidates have been gathered.
+        #[qproperty(i32, jump_rev)]
+        /// Tab completion result: "<request>\n<completed text>", or "" .
+        #[qproperty(QString, jump_completion)]
         type DirModel = super::DirModelRust;
 
         /// A place operation finished on its worker. `message` is "" on
@@ -384,6 +388,18 @@ pub mod qobject {
         /// Make a link to the cursor row (or the one selected item) in this
         /// folder, named "name (link)". Ctrl+Z removes it if it is still
         /// that link. "" or why not.
+        /// Gather folder-jump candidates (bookmarks, zoxide, recent) on a
+        /// worker; jump_rev bumps when they are ready.
+        #[qinvokable]
+        fn jump_prepare(self: Pin<&mut DirModel>);
+        /// The best folders for a query, as JSON [{path, shown, source}].
+        /// Pure ranking over the gathered list: no filesystem access.
+        #[qinvokable]
+        fn jump_query(self: &DirModel, query: &QString, limit: i32) -> QString;
+        /// Tab-complete a typed path on a worker; the answer lands in
+        /// jump_completion as "<typed>\n<completed>".
+        #[qinvokable]
+        fn jump_complete(self: Pin<&mut DirModel>, typed: &QString);
         #[qinvokable]
         fn make_link(self: Pin<&mut DirModel>) -> QString;
         /// Change permissions of the targets ("644", "u+x", "go-w").
@@ -778,6 +794,9 @@ pub struct DirModelRust {
     find_needle: QString,
     place_busy: bool,
     peek_hash: QString,
+    jump_rev: i32,
+    jump_completion: QString,
+    jump_cands: Vec<gust_core::jump::Candidate>,
     /// Cancels a running hash (Quick Look closed, another file asked).
     hash_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Cancels a running find. Escape, a new find, or navigating away.
@@ -979,6 +998,9 @@ impl DirModelRust {
             find_needle: QString::from(""),
             place_busy: false,
             peek_hash: QString::default(),
+            jump_rev: 0,
+            jump_completion: QString::default(),
+            jump_cands: Vec::new(),
             hash_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             find_cancel: CancelToken::new(),
             find_origin: None,
@@ -4335,7 +4357,19 @@ impl qobject::DirModel {
     }
 
     fn navigate(mut self: Pin<&mut Self>, path: &QString) {
-        let p = PathBuf::from(path.to_string());
+        // A typed "~/…" (palette, Ctrl+L) means the home folder, as in every
+        // shell; it used to be taken literally and refused.
+        let typed = path.to_string();
+        let p = match std::env::var_os("HOME").filter(|h| !h.is_empty()) {
+            Some(h) if typed == "~" || typed.starts_with("~/") => {
+                gust_core::jump::expand(&typed, std::path::Path::new(&h))
+            }
+            _ => PathBuf::from(typed),
+        };
+        // "/x/" and "/x" are one folder: rebuilding from components drops a
+        // trailing slash (and doubled ones), so history and breadcrumbs see
+        // one location, not two. "/" stays "/".
+        let p: PathBuf = p.components().collect();
         // `is_dir()` is a stat, and a stat on a stalled mount blocks the UI
         // thread with no way back. A killable child answers first.
         {
@@ -5932,6 +5966,91 @@ impl qobject::DirModel {
     ///
     /// The selection when there is one, otherwise the cursor row. Resolved
     /// ONCE, when the command is issued (DESIGN.md §4.1).
+    fn jump_prepare(self: Pin<&mut Self>) {
+        let Some(thread) = self.as_ref().qt_thread_handle() else {
+            return;
+        };
+        std::thread::Builder::new()
+            .name("gust-jump".into())
+            .spawn(move || {
+                let bookmarks: Vec<PathBuf> = gust_core::bookmarks::default_path()
+                    .map(|f| gust_core::bookmarks::load(&f))
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|b| b.uri.is_none())
+                    .map(|b| b.path)
+                    .filter(|p| !gust_core::stall::needs_probe(p))
+                    .collect();
+                let cands = gust_core::jump::gather(&bookmarks);
+                let _ = thread.queue(move |mut model| {
+                    model.as_mut().rust_mut().jump_cands = cands;
+                    let r = model.as_ref().jump_rev + 1;
+                    model.as_mut().set_jump_rev(r);
+                });
+            })
+            .ok();
+    }
+
+    fn jump_query(&self, query: &QString, limit: i32) -> QString {
+        let q = query.to_string();
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let rows: Vec<String> = gust_core::jump::rank(&q, &self.jump_cands, limit.max(0) as usize)
+            .into_iter()
+            .map(|c| {
+                let full = c.path.to_string_lossy().into_owned();
+                let shown = match home.as_ref().and_then(|h| c.path.strip_prefix(h).ok()) {
+                    Some(rest) if rest.as_os_str().is_empty() => "~".to_string(),
+                    Some(rest) => format!("~/{}", rest.to_string_lossy()),
+                    None => full.clone(),
+                };
+                format!(
+                    "{{\"path\":{},\"shown\":{},\"source\":{}}}",
+                    Self::json_str(&full),
+                    Self::json_str(&shown),
+                    Self::json_str(c.source.label())
+                )
+            })
+            .collect();
+        QString::from(&format!("[{}]", rows.join(",")))
+    }
+
+    fn jump_complete(self: Pin<&mut Self>, typed: &QString) {
+        let typed = typed.to_string();
+        let Some(thread) = self.as_ref().qt_thread_handle() else {
+            return;
+        };
+        std::thread::Builder::new()
+            .name("gust-complete".into())
+            .spawn(move || {
+                let home = std::env::var_os("HOME")
+                    .map(PathBuf::from)
+                    .unwrap_or_default();
+                let Some(dir) = gust_core::jump::completion_dir(&typed, &home) else {
+                    return;
+                };
+                // A stalled network mount must not be listed from here.
+                if gust_core::stall::needs_probe(&dir) {
+                    return;
+                }
+                let kids: Vec<String> = std::fs::read_dir(&dir)
+                    .map(|rd| {
+                        rd.flatten()
+                            .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+                            .map(|e| e.file_name().to_string_lossy().into_owned())
+                            .take(5000)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let done = gust_core::jump::complete(&typed, &kids).unwrap_or_default();
+                let _ = thread.queue(move |mut model| {
+                    model
+                        .as_mut()
+                        .set_jump_completion(QString::from(&format!("{typed}\n{done}")));
+                });
+            })
+            .ok();
+    }
+
     fn make_link(mut self: Pin<&mut Self>) -> QString {
         let targets = self.as_ref().target_paths();
         let [target] = targets.as_slice() else {
