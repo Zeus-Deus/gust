@@ -2701,6 +2701,7 @@ Window {
             quickLookOpen: quickLook.open,
             quickLookHash: quickLook.hash,
             keyMapOpen: keyMapPanel.open,
+            breadcrumbText: crumbs.shownText(),
             rowHeight: Tokens.rowHeight,
             // Centre of the cursor row in window coordinates, so a mouse
             // case can click a row without guessing pixel offsets.

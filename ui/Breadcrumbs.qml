@@ -13,6 +13,19 @@ Item {
     implicitHeight: Tokens.controlHeight
     implicitWidth: crumbRow.implicitWidth
 
+    /// What the path bar shows, as text, for tests: visible separators and
+    /// crumb labels in order, space-separated.
+    function shownText() {
+        const out = []
+        for (let i = 0; i < crumbRow.children.length; i++) {
+            const d = crumbRow.children[i]
+            if (!d.crumbLabel) continue
+            if (d.sepShown) out.push("/")
+            out.push(d.crumbLabel)
+        }
+        return out.join(" ")
+    }
+
     Row {
         id: crumbRow
         anchors.left: parent.left
@@ -27,9 +40,13 @@ Item {
 
             delegate: Row {
                 spacing: 0
+                readonly property bool sepShown: sep.visible
+                readonly property string crumbLabel: crumbText.text
                 Text {
                     id: sep
-                    visible: index > 0
+                    // The root crumb is itself "/", so the crumb after it
+                    // needs no separator ("/ tmp", not "/ / tmp").
+                    visible: index > 1
                     text: "/"
                     color: Tokens.foregroundDim
                     font.family: Tokens.fontFamily

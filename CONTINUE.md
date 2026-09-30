@@ -26,7 +26,7 @@ Updated after every commit. Read this first after a realm replacement.
 
 ## State
 See `docs/HANDOFF.md` for the full picture (what is built, bench table, what is not done).
-- Gates at the custom-actions commit: test 717/0 (41 named skips), lint green, qa 395/0, theme matrix 22/22.
+- Gates at the custom-actions commit: test 717/0 (41 named skips), lint green, qa 397/0, theme matrix 22/22.
 - Uncommitted work: none.
 
 ## Running a single qa section
@@ -38,5 +38,5 @@ New sections go in `tests/qa.d/`. FAT tests need `tests/fat-fixture.sh start` (s
    profile (2 vCPU/2 GB/software), painted/input-ready, blank-frame trace, scroll frame
    times, menu + Quick Look latency.
 2. P2 audit: screenshot + score every surface; known: banner hint contrast on white,
-   no primary banner button, banner overlaps last row, breadcrumb shows "/ /".
+   no primary banner button, banner overlaps last row. (breadcrumb "/ /" fixed.)
 3. P3 rest (list in HANDOFF §6), then P4, P5, P6.
