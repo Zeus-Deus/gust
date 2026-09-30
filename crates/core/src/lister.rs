@@ -316,7 +316,10 @@ mod tests {
         }
         // Sizes are real, not defaults.
         let e = &snap.entries[7];
-        assert_eq!(e.meta.unwrap().size as usize, fs::metadata(d.join(&e.name)).unwrap().len() as usize);
+        assert_eq!(
+            e.meta.unwrap().size as usize,
+            fs::metadata(d.join(&e.name)).unwrap().len() as usize
+        );
         fs::remove_dir_all(&d).ok();
     }
 

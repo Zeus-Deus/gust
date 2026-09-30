@@ -93,3 +93,19 @@ fn setting_one_value_by_name_validates_it() {
         "a refused change leaves the value alone"
     );
 }
+
+#[test]
+fn all_four_key_presets_survive_a_save_and_load() {
+    for name in ["standard", "vim", "mac", "windows"] {
+        let mut s = Settings::default();
+        s.set("key_preset", name).expect(name);
+        let back = Settings::from_text(&s.to_text());
+        assert_eq!(back.key_preset_name(), name);
+    }
+    let mut s = Settings::default();
+    assert!(
+        s.set("key_preset", "emacs").is_err(),
+        "an unknown preset is refused"
+    );
+    assert_eq!(s.key_preset_name(), "standard");
+}

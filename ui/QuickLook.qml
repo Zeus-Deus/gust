@@ -18,8 +18,12 @@ Item {
     property bool open: false
     /// The parsed peek, as the bridge reported it.
     property var info: null
+    /// SHA-256 state from the model (peek_hash).
+    readonly property string hash: root.model && root.open ? root.model.peek_hash : ""
 
     signal closed()
+    /// The row shown, so h can hash it.
+    property int row: -1
 
     /// The model, so the panel can ask for and receive its visual preview.
     property var model: null
@@ -37,9 +41,11 @@ Item {
             root.info = null
         }
         root.open = root.info !== null && root.info.ok
+        root.row = row === undefined ? -1 : row
         if (root.open && root.model && row !== undefined) root.model.request_peek_visual(row)
     }
     function hide() {
+        if (root.model) root.model.hash_cancel()
         root.open = false
         root.info = null
         root.closed()
@@ -130,6 +136,22 @@ Item {
                         elide: Text.ElideMiddle
                     }
                 }
+            }
+
+            // SHA-256 on request (h): reading a big file is not free, so it
+            // is never started just because Quick Look opened.
+            Text {
+                objectName: "quickLookHash"
+                width: parent.width
+                visible: root.info && root.info.kind !== "folder"
+                text: root.hash === "" ? qsTr("SHA-256  ·  press h to compute")
+                    : root.hash === "…" ? qsTr("SHA-256  ·  reading…  (Esc stops)")
+                    : qsTr("SHA-256  ") + root.hash
+                color: root.hash.length === 64 ? Tokens.foreground : Tokens.foregroundDim
+                font.family: Tokens.fontFamily
+                font.pixelSize: Tokens.fontSmall
+                wrapMode: Text.WrapAnywhere
+                textFormat: Text.PlainText
             }
 
             Rectangle {

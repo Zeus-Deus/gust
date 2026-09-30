@@ -607,7 +607,10 @@ mod invert_tests {
         let mut s = Selection::new();
         s.toggle(OsStr::new("hidden-by-filter"));
         s.invert_by_name(&names(&["x", "y"]));
-        assert!(!s.contains(OsStr::new("hidden-by-filter")), "an invisible target must not survive");
+        assert!(
+            !s.contains(OsStr::new("hidden-by-filter")),
+            "an invisible target must not survive"
+        );
         assert_eq!(s.len(), 2);
     }
 

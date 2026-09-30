@@ -40,7 +40,9 @@ QtObject {
     readonly property color selectedText: root.col("selected_text")
 
     // --- metrics -----------------------------------------------------------
-    readonly property real fontBase: root.met("font_base")
+    // Ctrl+= / Ctrl+- (Omarchy's zoom keys) scale type, and rows with it.
+    property real zoom: 1.0
+    readonly property real fontBase: root.met("font_base") * zoom
     // Density from Settings multiplies the theme's own spacing.
     property real density: 1.0
     readonly property real spacingScale: root.met("spacing_scale") * density

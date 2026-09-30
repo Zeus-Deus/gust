@@ -24,8 +24,9 @@ Item {
 
     readonly property var rows: [
         { key: "key_preset", title: qsTr("Keys"),
-          options: [["standard", qsTr("Standard")], ["vim", qsTr("Vim")]],
-          note: qsTr("Vim: h j k l, y d p, / and :") },
+          options: [["standard", qsTr("Standard")], ["vim", qsTr("Vim")],
+                    ["mac", qsTr("Mac")], ["windows", qsTr("Windows")]],
+          note: qsTr("Press ? for every key in the preset you pick") },
         { key: "density", title: qsTr("Density"),
           options: [["compact", qsTr("Compact")], ["normal", qsTr("Normal")], ["roomy", qsTr("Roomy")]],
           note: qsTr("Row height and spacing") },

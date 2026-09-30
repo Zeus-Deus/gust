@@ -22,6 +22,8 @@ FocusScope {
     property bool dragActive: false
     property int dropRow: -1
     signal contextRequested(int row, real x, real y)
+    /// Middle-click on a row: open it in a new tab (Main decides).
+    signal middleClicked(int row)
 
     // Rows on screen, so details are read for what is visible (RowsView).
     function reportRows() {
@@ -211,7 +213,7 @@ FocusScope {
 
                         MouseArea {
                             anchors.fill: parent
-                            acceptedButtons: Qt.LeftButton | Qt.RightButton
+                            acceptedButtons: Qt.LeftButton | Qt.RightButton | Qt.MiddleButton
                             preventStealing: true
                             property point pressPos: Qt.point(0, 0)
                             property bool armed: false
@@ -243,6 +245,7 @@ FocusScope {
                                 root.dragMovedTo(vp.x, vp.y)
                             }
                             onClicked: (mouse) => {
+                                if (mouse.button === Qt.MiddleButton) { root.middleClicked(index); return }
                                 if (mouse.button === Qt.RightButton) {
                                     if (!root.model.sel_contains(index))
                                         root.model.sel_only(index)

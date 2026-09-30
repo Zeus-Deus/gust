@@ -10,6 +10,11 @@ use std::path::{Path, PathBuf};
 pub enum KeyPreset {
     Standard,
     Vim,
+    /// Finder habits: Enter renames, Ctrl+↓ opens (Cmd is Ctrl here: Omarchy
+    /// gives Super to the window manager).
+    Mac,
+    /// Explorer habits: Backspace goes back, Alt+↑ goes up.
+    Windows,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,6 +94,8 @@ impl Settings {
                 "key_preset" => match v {
                     "standard" => s.key_preset = KeyPreset::Standard,
                     "vim" => s.key_preset = KeyPreset::Vim,
+                    "mac" => s.key_preset = KeyPreset::Mac,
+                    "windows" => s.key_preset = KeyPreset::Windows,
                     _ => {}
                 },
                 "show_hidden" => {
@@ -148,6 +155,8 @@ impl Settings {
             match self.key_preset {
                 KeyPreset::Standard => "standard",
                 KeyPreset::Vim => "vim",
+                KeyPreset::Mac => "mac",
+                KeyPreset::Windows => "windows",
             },
             self.show_hidden,
             self.sidebar,
@@ -210,6 +219,8 @@ impl Settings {
         match self.key_preset {
             KeyPreset::Standard => "standard",
             KeyPreset::Vim => "vim",
+            KeyPreset::Mac => "mac",
+            KeyPreset::Windows => "windows",
         }
     }
     pub fn density_name(&self) -> &'static str {

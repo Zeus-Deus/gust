@@ -28,6 +28,7 @@ Item {
     /// Right-click or Menu key: row -1 means the folder itself. x/y are in
     /// window coordinates.
     signal contextRequested(int row, real x, real y)
+    signal openInNewTab(int row)
 
     /// The view the user is looking at, for focus and page-step maths.
     function currentView() {
@@ -63,6 +64,7 @@ Item {
         onDropReleased: (r) => pane.finishDrop(r)
         onDragMovedTo: (x, y) => pane.maybeHandOff(rowsView, x, y)
         onContextRequested: (r, x, y) => pane.contextRequested(r, x, y)
+        onMiddleClicked: (r) => pane.openInNewTab(r)
     }
 
     IconGridView {
@@ -84,6 +86,7 @@ Item {
         onDropReleased: (r) => pane.finishDrop(r)
         onDragMovedTo: (x, y) => pane.maybeHandOff(gridView, x, y)
         onContextRequested: (r, x, y) => pane.contextRequested(r, x, y)
+        onMiddleClicked: (r) => pane.openInNewTab(r)
     }
 
     ColumnsView {
@@ -105,6 +108,7 @@ Item {
         onDropReleased: (r) => pane.finishDrop(r)
         onDragMovedTo: (x, y) => pane.maybeHandOff(columnsView, x, y)
         onContextRequested: (r, x, y) => pane.contextRequested(r, x, y)
+        onMiddleClicked: (r) => pane.openInNewTab(r)
     }
 
     /// A drop is an ordinary copy or move through the same engine as any

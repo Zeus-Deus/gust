@@ -24,6 +24,8 @@ FocusScope {
     // Pixels the pointer must travel before a click becomes a drag.
     readonly property int dragThreshold: 8
     signal contextRequested(int row, real x, real y)
+    /// Middle-click on a row: open it in a new tab (Main decides).
+    signal middleClicked(int row)
 
     function ensureCursorVisible() { list.positionViewAtIndex(model.cursor, ListView.Contain) }
 
@@ -279,7 +281,7 @@ FocusScope {
                     MouseArea {
                         id: rowMouse
                         anchors.fill: parent
-                        acceptedButtons: Qt.LeftButton | Qt.RightButton
+                        acceptedButtons: Qt.LeftButton | Qt.RightButton | Qt.MiddleButton
                         // Without this, onPositionChanged does not fire while
                         // a button is held, so a drag is never detected.
                         preventStealing: true
@@ -317,6 +319,7 @@ FocusScope {
                             root.dragMovedTo(vp.x, vp.y)
                         }
                         onClicked: (mouse) => {
+                            if (mouse.button === Qt.MiddleButton) { root.middleClicked(index); return }
                             if (mouse.button === Qt.RightButton) {
                                 // Right-clicking outside the selection acts on
                                 // the clicked row instead of a stale set.

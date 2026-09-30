@@ -24,6 +24,8 @@ FocusScope {
     property int dropRow: -1
     readonly property int dragThreshold: 8
     signal contextRequested(int row, real x, real y)
+    /// Middle-click on a row: open it in a new tab (Main decides).
+    signal middleClicked(int row)
 
     function cursorAnchor() {
         const it = grid.itemAtIndex(root.model ? root.model.cursor : -1)
@@ -33,6 +35,7 @@ FocusScope {
 
     function zoomIn() { tileSize = Math.min(tileSize + 16, 240) }
     function zoomOut() { tileSize = Math.max(tileSize - 16, 48) }
+    function zoomReset() { tileSize = Math.round(96 * Tokens.spacingScale) }
     // Columns per row, so Up/Down move a full row rather than one tile.
     function columns() { return Math.max(1, Math.floor(grid.width / grid.cellWidth)) }
 
@@ -180,7 +183,7 @@ FocusScope {
 
                     MouseArea {
                         anchors.fill: parent
-                        acceptedButtons: Qt.LeftButton | Qt.RightButton
+                        acceptedButtons: Qt.LeftButton | Qt.RightButton | Qt.MiddleButton
                         // Same drag gesture as Rows: nothing happens until the
                         // pointer has really moved, so a click stays a click.
                         preventStealing: true
@@ -214,6 +217,7 @@ FocusScope {
                             root.dragMovedTo(vp.x, vp.y)
                         }
                         onClicked: (mouse) => {
+                            if (mouse.button === Qt.MiddleButton) { root.middleClicked(index); return }
                             if (mouse.button === Qt.RightButton) {
                                 if (!root.model.sel_contains(index))
                                     root.model.sel_only(index)

@@ -73,6 +73,9 @@ pub mod qobject {
         /// scrolled into view, so anything showing the cursor row's details
         /// (status line, Properties, the QA probe) can refresh.
         #[qproperty(i32, meta_rev)]
+        /// SHA-256 of the file Quick Look shows: "" before asking,
+        /// "…" while reading, the hex digest, or why not.
+        #[qproperty(QString, peek_hash)]
         type DirModel = super::DirModelRust;
 
         /// A place operation finished on its worker. `message` is "" on
@@ -372,6 +375,12 @@ pub mod qobject {
         /// (DESIGN §6.9).
         #[qinvokable]
         fn peek_row(self: &DirModel, row: i32) -> QString;
+        /// Hash a row's file on a worker; the answer lands in peek_hash.
+        /// A second call (or hash_cancel) stops the first.
+        #[qinvokable]
+        fn hash_row(self: Pin<&mut DirModel>, row: i32);
+        #[qinvokable]
+        fn hash_cancel(self: Pin<&mut DirModel>);
         /// Quick Look's visual: render a large preview for the row on a
         /// worker (sandboxed helpers only) and publish it in `peek_visual`
         /// as JSON — an image path, or an archive's entry list.
@@ -489,6 +498,25 @@ pub mod qobject {
         fn sel_all(self: Pin<&mut DirModel>);
         #[qinvokable]
         fn sel_clear(self: Pin<&mut DirModel>);
+        /// Invert the selection over the rows shown (never what the filter
+        /// hides).
+        #[qinvokable]
+        fn sel_invert(self: Pin<&mut DirModel>);
+        /// What a key press means under a preset ("standard", "vim", "mac",
+        /// "windows"): an action name, "tab-N", or "" when the window's own
+        /// handler decides. One table drives this and the `?` key map.
+        #[qinvokable]
+        fn key_action(self: &DirModel, preset: &QString, key: i32, mods: i32) -> QString;
+        /// The `?` key map for a preset, as JSON rows {group, keys, does}.
+        #[qinvokable]
+        fn keymap_json(self: &DirModel, preset: &QString) -> QString;
+        /// Create an empty file here, never replacing one. "" or why not.
+        #[qinvokable]
+        fn new_file(self: Pin<&mut DirModel>, name: &QString) -> QString;
+        /// The removable drive this folder is on, as its device path, or ""
+        /// (Ctrl+E ejects it).
+        #[qinvokable]
+        fn device_here(self: &DirModel) -> QString;
         #[qinvokable]
         fn sel_contains(self: &DirModel, row: i32) -> bool;
         #[qinvokable]
@@ -733,6 +761,9 @@ pub struct DirModelRust {
     finding: bool,
     find_needle: QString,
     place_busy: bool,
+    peek_hash: QString,
+    /// Cancels a running hash (Quick Look closed, another file asked).
+    hash_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Cancels a running find. Escape, a new find, or navigating away.
     find_cancel: CancelToken,
     /// The folder the user was browsing before the find. Results are a
@@ -929,6 +960,8 @@ impl DirModelRust {
             finding: false,
             find_needle: QString::from(""),
             place_busy: false,
+            peek_hash: QString::default(),
+            hash_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             find_cancel: CancelToken::new(),
             find_origin: None,
             thumbs_wanted: false,
@@ -3325,6 +3358,42 @@ impl qobject::DirModel {
             .ok();
     }
 
+    fn hash_cancel(mut self: Pin<&mut Self>) {
+        self.as_ref()
+            .hash_cancel
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        self.as_mut().set_peek_hash(QString::default());
+    }
+
+    fn hash_row(mut self: Pin<&mut Self>, row: i32) {
+        self.as_mut().hash_cancel();
+        let Some(path) = self.as_ref().path_of_row(row) else {
+            return;
+        };
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.as_mut().rust_mut().hash_cancel = cancel.clone();
+        self.as_mut().set_peek_hash(QString::from("…"));
+        let Some(thread) = self.as_ref().qt_thread_handle() else {
+            return;
+        };
+        std::thread::Builder::new()
+            .name("gust-hash".into())
+            .spawn(move || {
+                let r = gust_core::hash::sha256_file(&path, &cancel);
+                let text = match r {
+                    Ok(Some(h)) => h,
+                    Ok(None) => return,
+                    Err(e) => format!("no hash: {e}"),
+                };
+                let _ = thread.queue(move |mut model| {
+                    if !cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                        model.as_mut().set_peek_hash(QString::from(&text));
+                    }
+                });
+            })
+            .ok();
+    }
+
     /// What Quick Look shows for a row.
     ///
     /// Bytes and metadata only. Nothing is executed, no preview script runs,
@@ -4138,7 +4207,11 @@ impl qobject::DirModel {
         gen: u64,
         lo: usize,
         hi: usize,
-        got: Vec<(usize, std::ffi::OsString, Option<gust_core::entry::Metadata>)>,
+        got: Vec<(
+            usize,
+            std::ffi::OsString,
+            Option<gust_core::entry::Metadata>,
+        )>,
     ) {
         self.as_mut().rust_mut().meta_busy = false;
         if gen != self.as_ref().generation {
@@ -5715,6 +5788,58 @@ impl qobject::DirModel {
     fn sel_clear(mut self: Pin<&mut Self>) {
         self.as_mut().rust_mut().selection.clear();
         self.as_mut().refresh_selection_flags();
+    }
+
+    fn sel_invert(mut self: Pin<&mut Self>) {
+        let names: Vec<std::ffi::OsString> = self
+            .as_ref()
+            .visible_entries()
+            .iter()
+            .map(|e| e.name.clone())
+            .collect();
+        self.as_mut().rust_mut().selection.invert_by_name(&names);
+        self.as_mut().refresh_selection_flags();
+    }
+
+    fn key_action(&self, preset: &QString, key: i32, mods: i32) -> QString {
+        use gust_core::keymap::{action_for, Preset};
+        let p = Preset::parse(&preset.to_string()).unwrap_or(Preset::Standard);
+        QString::from(&action_for(p, key as u32, mods as u32).unwrap_or_default())
+    }
+
+    fn keymap_json(&self, preset: &QString) -> QString {
+        use gust_core::keymap::{keymap_json, Preset};
+        let p = Preset::parse(&preset.to_string()).unwrap_or(Preset::Standard);
+        QString::from(&keymap_json(p))
+    }
+
+    fn new_file(mut self: Pin<&mut Self>, name: &QString) -> QString {
+        let Some(dir) = self.as_ref().key.as_path().map(|p| p.to_path_buf()) else {
+            return QString::from("cannot create a file here");
+        };
+        let raw = std::ffi::OsString::from(name.to_string());
+        if let Err(e) = gust_ops::recursive::validate_name(&raw) {
+            return QString::from(&format!("{e}"));
+        }
+        match gust_ops::create::new_empty_file(&dir, &raw) {
+            Ok(()) => {
+                self.as_mut().relist_focusing(raw);
+                QString::default()
+            }
+            Err(e) => QString::from(&e),
+        }
+    }
+
+    fn device_here(&self) -> QString {
+        let Some(here) = self.key.as_path() else {
+            return QString::default();
+        };
+        let dev = gust_core::devices::list_devices().into_iter().find(|d| {
+            d.mount_point
+                .as_ref()
+                .is_some_and(|mp| here.starts_with(mp))
+        });
+        QString::from(&dev.map(|d| d.path).unwrap_or_default())
     }
 
     fn sel_contains(&self, row: i32) -> bool {

@@ -14,6 +14,8 @@ pub mod entry;
 pub mod filemanager1;
 pub mod grep;
 pub mod handoff;
+pub mod hash;
+pub mod keymap;
 pub mod lister;
 pub mod location;
 pub mod mime;

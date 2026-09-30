@@ -150,7 +150,7 @@ Window {
     function applySettings() {
         let s = {}
         try { s = JSON.parse(dirModel.settings_json()) } catch (e) { return }
-        win.keyPreset = s.key_preset === "vim" ? "vim" : "standard"
+        win.keyPreset = ["vim", "mac", "windows"].includes(s.key_preset) ? s.key_preset : "standard"
         win.sidebarVisible = s.sidebar !== false
         Tokens.density = s.spacing > 0 ? s.spacing : 1.0
         win.defaultShowHidden = s.show_hidden === true
@@ -1022,6 +1022,101 @@ Window {
         win.qaDump("activate")
     }
 
+    /// Run an action from the key table. Returns false when the action does
+    /// not apply right now, so the key falls through to the usual handling.
+    function runKeyAction(a) {
+        if (a.startsWith("tab-")) {
+            const n = parseInt(a.substring(4))
+            const mine = win.paneTabs(win.activePane)
+            if (n >= 1 && n <= mine.length) activateTab(mine[n - 1])
+            else hints.status = qsTr("There is no tab ") + n
+            win.qaDump("tab-number")
+            return true
+        }
+        if (a === "invert-selection") {
+            dirModel.sel_invert()
+            win.qaDump("select")
+            return true
+        }
+        if (a === "deselect-all") { dirModel.sel_clear(); win.qaDump("select"); return true }
+        if (a === "keymap") { win.showKeyMap(); return true }
+        if (a === "toggle-split") {
+            if (win.paneCount > 1) win.closePane(win.activePane)
+            else win.splitPane()
+            return true
+        }
+        if (a === "zoom-in" || a === "zoom-out" || a === "zoom-reset") {
+            win.zoom(a)
+            return true
+        }
+        if (a === "new-file") { win.askNewFile(); return true }
+        if (a === "new-folder") { win.askNewFolder(); return true }
+        if (a === "jump") { palette.open(); return true }
+        if (a === "eject") {
+            const dev = dirModel.device_here()
+            if (dev === "") hints.status = qsTr("This folder is not on a removable drive")
+            else {
+                const err = dirModel.device_unmount(dev)
+                if (err !== "") win.alertText = err
+            }
+            win.qaDump("eject")
+            return true
+        }
+        if (a === "back") { dirModel.go_back(); return true }
+        if (a === "forward") { dirModel.go_forward(); return true }
+        if (a === "up") { dirModel.navigate_up(); return true }
+        if (a === "open") { win.activateRow(dirModel.cursor); return true }
+        if (a === "rename") { win.askRename(); return true }
+        if (a === "trash") { win.askTrash(); return true }
+        return false
+    }
+
+    /// Ctrl+= / Ctrl+- / Ctrl+0, as in the rest of Omarchy. In Grid the
+    /// tiles grow and shrink (what a user zooming a photo folder wants);
+    /// elsewhere text and rows do. Not saved: a zoom is for now.
+    function zoom(a) {
+        if (win.viewMode === "grid") {
+            const g = win.activePaneItem().currentView()
+            if (a === "zoom-in") g.zoomIn()
+            else if (a === "zoom-out") g.zoomOut()
+            else g.zoomReset()
+            hints.status = qsTr("Tile size ") + g.tileSize
+        } else {
+            const steps = [0.8, 0.9, 1.0, 1.1, 1.25, 1.4, 1.6]
+            let i = steps.indexOf(Tokens.zoom)
+            if (i < 0) i = 2
+            if (a === "zoom-in") i = Math.min(steps.length - 1, i + 1)
+            else if (a === "zoom-out") i = Math.max(0, i - 1)
+            else i = 2
+            Tokens.zoom = steps[i]
+            hints.status = qsTr("Zoom ") + Math.round(Tokens.zoom * 100) + "%"
+        }
+        win.qaDump("zoom")
+    }
+
+    function showKeyMap() {
+        keyMapPanel.show(dirModel.keymap_json(win.keyPreset), win.keyPreset)
+        win.qaDump("keymap")
+    }
+
+    function askNewFile() {
+        prompt.mode = "newfile"
+        prompt.openWith(qsTr("New file"), qsTr("untitled.txt"), qsTr("An empty file, created in this folder."), -1)
+        win.qaDump("prompt")
+    }
+
+    /// Middle-click on a folder: open it in a new tab behind this one, as a
+    /// browser does (Flea #219). Appended, so no other tab index moves.
+    function openRowInBackgroundTab(model, row) {
+        if (!model || !model.is_dir(row)) return
+        tabList.append({ startPath: model.entry_path(row), label: model.entry_name(row),
+                         pane: win.activePane })
+        tabViews.push("rows")
+        win.refreshPaneTabCount()
+        hints.status = qsTr("Opened in a new tab: ") + model.entry_name(row) + qsTr("  ·  Ctrl+Tab to go there")
+        win.qaDump("tab-new-background")
+    }
+
     /// Every command the palette and the right-click menu can run. One
     /// dispatcher, so a menu entry and its palette twin can never drift.
     function runAction(a) {
@@ -1080,9 +1175,10 @@ Window {
         else if (a === "cut") hints.status = dirModel.clip_cut(dirModel.cursor)
         else if (a === "paste") win.doPaste()
         else if (a === "terminal") hints.status = dirModel.open_terminal()
-        else if (a === "keys") hints.status = win.keyPreset === "vim"
-            ? "vim: h/j/k/l move, l open, r rename, y/d/p copy/cut/paste"
-            : "arrows move, Enter open, F2 rename, Ctrl+C/X/V, Ctrl+N new folder"
+        else if (a === "keys") win.showKeyMap()
+        else if (a === "new-file") win.askNewFile()
+        else if (a === "invert-selection") { dirModel.sel_invert(); win.qaDump("select") }
+        else if (a === "deselect-all") { dirModel.sel_clear(); win.qaDump("select") }
         else if (a === "noop") { /* nothing to do */ }
         else if (a.startsWith("openwith:")) {
             const msg = dirModel.open_with_id(dirModel.cursor, a.substring(9))
@@ -1179,6 +1275,7 @@ Window {
         if (row < 0) {
             return [
                 { label: qsTr("New folder"), hint: "Ctrl+N", action: "new-folder" },
+                { label: qsTr("New file"), hint: "Ctrl+Shift+N", action: "new-file" },
                 { label: qsTr("Paste"), hint: "Ctrl+V", action: "paste", enabled: canPaste },
                 sep,
                 { label: qsTr("Open terminal here"), hint: "", action: "terminal" },
@@ -1694,6 +1791,7 @@ Window {
                     viewMode: win.paneAView
                     dropAsMove: win.dropAsMove
                     onActivated: (r) => { win.focusPane(0); win.activateRow(r) }
+                    onOpenInNewTab: (r) => win.openRowInBackgroundTab(win.paneAModel, r)
                     // A click in the list gives the list the keyboard, even
                     // when this pane was already active (e.g. from a text
                     // field such as the Save name).
@@ -1731,6 +1829,7 @@ Window {
                         viewMode: win.paneBView
                         dropAsMove: win.dropAsMove
                         onActivated: (r) => { win.focusPane(1); win.activateRow(r) }
+                    onOpenInNewTab: (r) => win.openRowInBackgroundTab(win.paneBModel, r)
                         onSelectionTouched: { win.focusPane(1); win.focusList(); win.qaDump("select") }
                         onDragBegan: { win.focusPane(1); win.qaDump("drag-begin") }
                         onDropPreview: (t) => { hints.status = t }
@@ -1897,6 +1996,23 @@ Window {
             if (win.alertText !== "" && event.key !== Qt.Key_Z)
                 win.alertText = ""
 
+            // h in Quick Look computes the file's SHA-256 (on a worker;
+            // Escape or closing stops it). Checked before the key table so
+            // Vim's h does not go up a folder under an open preview.
+            if (quickLook.open && event.key === Qt.Key_H && event.modifiers === Qt.NoModifier) {
+                dirModel.hash_row(quickLook.row)
+                win.qaDump("hash")
+                event.accepted = true; return
+            }
+
+            // Preset-aware chords from the shared key table (gust-core
+            // keymap.rs), which also renders the ? key map: a shortcut and
+            // its documentation cannot drift apart.
+            const mapped = dirModel.key_action(win.keyPreset, event.key, event.modifiers)
+            if (mapped !== "" && win.runKeyAction(mapped)) {
+                event.accepted = true; return
+            }
+
             // Filter and palette are shared by both presets.
             if (event.text === "/") {
                 filterBar.filterActive = true
@@ -2058,9 +2174,7 @@ Window {
                 }
                 break
             case Qt.Key_F1:
-                hints.status = win.keyPreset === "vim"
-                    ? "vim: h/j/k/l move, l open, / filter, : command"
-                    : "arrows move, Enter open, Space quick look, Backspace up, Alt+← back, / filter, : command"
+                win.showKeyMap()
                 event.accepted = true; return
             }
 
@@ -2260,6 +2374,8 @@ Window {
                 err = dirModel.rename_row(prompt.targetRow, text)
             else if (prompt.mode === "newfolder")
                 err = dirModel.new_folder(text)
+            else if (prompt.mode === "newfile")
+                err = dirModel.new_file(text)
 
             if (err === "") {
                 hints.status = prompt.mode === "rename"
@@ -2316,6 +2432,11 @@ Window {
         onClosed: { win.focusList(); win.qaDump("trash-closed") }
     }
 
+    KeyMapPanel {
+        id: keyMapPanel
+        onClosed: { win.focusList(); win.qaDump("keymap-closed") }
+    }
+
     SettingsPanel {
         id: settingsPanel
         onChanged: (key, value) => {
@@ -2354,6 +2475,7 @@ Window {
         id: quickLook
         model: dirModel
         onVisualChanged: win.qaDump("quicklook-visual")
+        onHashChanged: win.qaDump("hash")
         onClosed: win.focusList()
     }
 
@@ -2496,8 +2618,14 @@ Window {
     property string qaStatePath: ""
     property int qaTick: 0
 
+    // Geometry in the probe (cursorPoint) is read when the dump is written;
+    // a cursor move scrolls the list AFTER that. One settle dump shortly
+    // after the last one reports where the row really ended up. QA only.
+    Timer { id: qaSettle; interval: 300; onTriggered: win.qaDump("settle") }
+
     function qaDump(tag) {
         if (qaStatePath === "") return
+        if (tag !== "settle") qaSettle.restart()
         const payload = {
             tag: tag,
             view: win.viewMode,
@@ -2532,6 +2660,19 @@ Window {
                 return out
             })(),
             quickLookOpen: quickLook.open,
+            quickLookHash: quickLook.hash,
+            keyMapOpen: keyMapPanel.open,
+            // Centre of the cursor row in window coordinates, so a mouse
+            // case can click a row without guessing pixel offsets.
+            cursorPoint: (function () {
+                const it = win.activePaneItem()
+                if (!it || !it.cursorAnchor) return null
+                const p = it.cursorAnchor()
+                return [Math.round(p.x + Tokens.rowPaddingX * 4), Math.round(p.y - Tokens.rowHeight / 2)]
+            })(),
+            keyMapRows: keyMapPanel.open ? keyMapPanel.rows.length : 0,
+            zoom: Tokens.zoom,
+            activeTabPath: win.dirModel ? win.dirModel.location : "",
             quickLookName: quickLook.info ? quickLook.info.name : "",
             quickLookKind: quickLook.info ? quickLook.info.kindWords : "",
             quickLookLines: quickLook.info && quickLook.info.lines
