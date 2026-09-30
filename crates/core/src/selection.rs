@@ -103,6 +103,20 @@ impl Selection {
         self.pinned.clear();
     }
 
+    /// Invert the selection over what is visible (Nautilus, cosmic-files,
+    /// Flea #164). Only `visible` is considered: a name the filter hides
+    /// never becomes selected, and a hidden selected name is dropped rather
+    /// than kept out of sight where the next command would act on it.
+    pub fn invert_by_name(&mut self, visible: &[OsString]) {
+        let now: HashSet<OsString> = visible
+            .iter()
+            .filter(|n| !self.names.contains(n.as_os_str()))
+            .cloned()
+            .collect();
+        self.names = now;
+        self.pinned.clear();
+    }
+
     /// `select_range` for a caller that already has the names in order.
     pub fn select_range_by_name(&mut self, names: &[OsString], cursor: usize, mode: RangeMode) {
         if names.is_empty() {
@@ -548,6 +562,13 @@ mod by_name_tests {
 
 impl Selection {
     /// `retain_existing` for a caller that already has the names.
+    /// True when there is nothing a reload could prune: no selected name,
+    /// no pinned name, no anchor. Lets callers skip building a set of 100k
+    /// names on every listing of an untouched folder.
+    pub fn is_untouched(&self) -> bool {
+        self.names.is_empty() && self.pinned.is_empty() && self.anchor.is_none()
+    }
+
     pub fn retain_names(&mut self, names: &[OsString]) {
         let present: HashSet<&OsStr> = names.iter().map(|n| n.as_os_str()).collect();
         self.names.retain(|n| present.contains(n.as_os_str()));
@@ -557,5 +578,47 @@ impl Selection {
                 self.anchor = None;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod invert_tests {
+    use super::*;
+
+    fn names(v: &[&str]) -> Vec<OsString> {
+        v.iter().map(OsString::from).collect()
+    }
+
+    #[test]
+    fn invert_swaps_what_is_visible() {
+        let mut s = Selection::new();
+        s.toggle(OsStr::new("a"));
+        s.toggle(OsStr::new("c"));
+        s.invert_by_name(&names(&["a", "b", "c", "d"]));
+        assert!(!s.contains(OsStr::new("a")));
+        assert!(s.contains(OsStr::new("b")));
+        assert!(!s.contains(OsStr::new("c")));
+        assert!(s.contains(OsStr::new("d")));
+        assert_eq!(s.len(), 2);
+    }
+
+    #[test]
+    fn invert_never_selects_or_keeps_what_the_filter_hides() {
+        let mut s = Selection::new();
+        s.toggle(OsStr::new("hidden-by-filter"));
+        s.invert_by_name(&names(&["x", "y"]));
+        assert!(!s.contains(OsStr::new("hidden-by-filter")), "an invisible target must not survive");
+        assert_eq!(s.len(), 2);
+    }
+
+    #[test]
+    fn invert_twice_is_the_original_visible_selection() {
+        let mut s = Selection::new();
+        s.toggle(OsStr::new("b"));
+        let vis = names(&["a", "b", "c"]);
+        s.invert_by_name(&vis);
+        s.invert_by_name(&vis);
+        assert_eq!(s.len(), 1);
+        assert!(s.contains(OsStr::new("b")));
     }
 }

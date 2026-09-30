@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Minimal stand-in for Flea's private `omarchy-drive env` (not packaged on
+# Omarchy). Prints the guest session's own variables, read from the running
+# compositor; implements nothing else, so any other subcommand fails loudly.
+set -euo pipefail
+[ "${1:-}" = env ] || { echo "omarchy-drive shim: only 'env' is implemented" >&2; exit 2; }
+rt="/run/user/$(id -u)"
+sig=$(basename "$(ls -d "$rt"/hypr/*/ | head -1)")
+wl=$(cd "$rt" && ls | grep -E '^wayland-[0-9]+$' | head -1)
+printf 'export XDG_RUNTIME_DIR=%s\nexport WAYLAND_DISPLAY=%s\nexport HYPRLAND_INSTANCE_SIGNATURE=%s\n' "$rt" "$wl" "$sig"
+printf 'export YDOTOOL_SOCKET=%s/.ydotool_socket\nexport OMARCHY_PATH=/usr/share/omarchy\nexport QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1\n' "$rt"

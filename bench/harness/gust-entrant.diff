@@ -1,0 +1,13 @@
+57a58
+> GUST_BIN=${GUST_BIN:-$HOME/Projects/gust/target/release/gust}
+605a607
+>   "gust|"
+1068a1071,1072
+>   # Added for the Gust head-to-head: the release build, launched like any packaged entrant.
+>   "gust|gui|gust|gust||||setsid nohup $GUST_BIN $FIXTURE"
+1143c1147,1149
+<     if [ "$id" = strata ]; then
+---
+>     if [ "$id" = gust ]; then
+>       [ -x "$GUST_BIN" ] || { printf 'SKIP: gust is not built at %s\n' "$GUST_BIN" >&2; continue; }
+>     elif [ "$id" = strata ]; then

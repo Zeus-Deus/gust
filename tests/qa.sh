@@ -1925,6 +1925,39 @@ key Down; key Down
 expect_contains "cursor still responds in a big folder" "d['model']['cursor_name']" "entry-"
 shot 11-big-dir
 
+say "12w · details are read for the rows on screen, not for the whole folder"
+# P1: a folder sorted by name is final on names alone; reading size/date for
+# all 5000 rows before settling is what made 100k folders settle slowly.
+known="$(state "d['model']['meta_known']")"
+if [[ "$known" =~ ^[0-9]+$ && "$known" -le 400 ]]; then
+  ok "only the first screenful's details were read on listing ($known of 5000)"
+else
+  bad "details were read for $known of 5000 rows before settling (want <= 400)"
+fi
+# Scrolling to the end reads the rows that come into view.
+key End
+sleep 1.2
+expect "the row the cursor lands on has its details after scrolling" "d['model']['cursor_meta']" "True"
+# An executable whose details were not known yet must never be opened on a
+# guess: the mode is what says it is runnable.
+stop_gust
+printf '#!/bin/sh\ntouch /tmp/gust-fixture-EXECUTED\n' > "$FIXTURE/big/zzzz-trap"
+chmod +x "$FIXTURE/big/zzzz-trap"
+start_gust "$FIXTURE"
+goto "$FIXTURE/big"
+wait_for "d['model']['settled']" "True" 30 >/dev/null
+key End
+# First Enter may only ask for the row's details; the second must refuse.
+key Return
+sleep 1.0
+key Return
+sleep 1.0
+[[ ! -e /tmp/gust-fixture-EXECUTED ]] \
+  && ok "Enter on an executable at the far end of a big folder ran nothing" \
+  || bad "an executable was RUN from a big folder"
+expect_contains "and said why" "d['hintShown']" "Run"
+rm -f "$FIXTURE/big/zzzz-trap"
+
 say "12t · tabs: independent locations, selections and views"
 stop_gust
 start_gust "$FIXTURE"

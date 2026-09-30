@@ -2657,6 +2657,7 @@ Window {
         function onFilterChanged()   { win.qaDump("filter") }
         function onStatusChanged()   { win.qaDump("status") }
         function onSettledChanged()  { win.qaDump("settled") }
+        function onMeta_revChanged() { win.qaDump("row-details") }
         function onShow_hiddenChanged() { win.qaDump("hidden") }
     }
 

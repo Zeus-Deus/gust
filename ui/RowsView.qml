@@ -27,6 +27,18 @@ FocusScope {
 
     function ensureCursorVisible() { list.positionViewAtIndex(model.cursor, ListView.Contain) }
 
+    // Tell the model which rows are on screen, so details (size, date) are
+    // read for what the user can see rather than for the whole folder.
+    // Debounced: a fling reports once it slows, not on every frame.
+    function reportRows() {
+        if (!root.model || list.count === 0) return
+        // Arithmetic, not indexAt(): at the very bottom indexAt() can miss
+        // and answer -1, which read as "row 0" and fetched nothing.
+        const first = Math.max(0, Math.floor((list.contentY - list.originY) / Tokens.rowHeight))
+        root.model.want_rows(first, Math.ceil(list.height / Tokens.rowHeight) + 1)
+    }
+    Timer { id: rowsReport; interval: 40; onTriggered: root.reportRows() }
+
     /// Where a keyboard-opened menu should appear: under the cursor row,
     /// in window coordinates.
     function cursorAnchor() {
@@ -157,6 +169,10 @@ FocusScope {
                 cacheBuffer: Math.round(Tokens.rowHeight * 12)
                 boundsBehavior: Flickable.StopAtBounds
                 objectName: "rowsList"
+                onContentYChanged: rowsReport.restart()
+                onHeightChanged: rowsReport.restart()
+                onCountChanged: rowsReport.restart()
+                onCurrentIndexChanged: rowsReport.restart()
 
                 delegate: Rectangle {
                     id: rowItem

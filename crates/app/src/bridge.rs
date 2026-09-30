@@ -69,6 +69,10 @@ pub mod qobject {
         /// True while a mount, connect, eject or disconnect is running on a
         /// worker. The window stays responsive; this only drives a spinner.
         #[qproperty(bool, place_busy)]
+        /// Bumped whenever details (size, date, mode) arrive for rows that
+        /// scrolled into view, so anything showing the cursor row's details
+        /// (status line, Properties, the QA probe) can refresh.
+        #[qproperty(i32, meta_rev)]
         type DirModel = super::DirModelRust;
 
         /// A place operation finished on its worker. `message` is "" on
@@ -108,6 +112,11 @@ pub mod qobject {
         /// to a row by its index; releasing it applies anything that waited.
         #[qinvokable]
         fn hold_live_updates(self: Pin<&mut DirModel>, hold: bool);
+        /// The view shows rows `first .. first + count`. Details (size,
+        /// date, mode) are read for those rows on a worker if they are not
+        /// known yet: a listing reads only the first screenful up front.
+        #[qinvokable]
+        fn want_rows(self: Pin<&mut DirModel>, first: i32, count: i32);
         /// Whether this folder updates by itself (false for network mounts,
         /// where Ctrl+R is the only way to see changes made elsewhere).
         #[qinvokable]
@@ -621,7 +630,10 @@ use core::pin::Pin;
 use cxx_qt::CxxQtType;
 use cxx_qt_lib::{QByteArray, QHash, QHashPair_i32_QByteArray, QString, QStringList, QVariant};
 use gust_core::entry::{Entry, EntryKind, SortField};
-use gust_core::lister::{fill_metadata, list_names, CancelToken};
+use gust_core::lister::{
+    fill_metadata, fill_metadata_for, first_window, list_names, stat_entry, CancelToken,
+    FIRST_WINDOW,
+};
 use gust_core::location::LocationKey;
 use gust_core::search::{filter_entries, type_ahead_index};
 use gust_core::theme::Tokens;
@@ -736,6 +748,13 @@ pub struct DirModelRust {
     /// The last completed copy/move, kept so Ctrl+Z can ask for its inverse.
     /// Cleared once undone, or superseded by the next job.
     last_job: Option<gust_ops::journal::Job>,
+    /// A worker is reading details for rows that scrolled into view.
+    meta_busy: bool,
+    meta_rev: i32,
+    /// The newest request that arrived while it was busy (first, count).
+    meta_again: Option<(i32, i32)>,
+    /// The rows the view last reported as on screen (first, count).
+    view_rows: (i32, i32),
 }
 
 /// A copy or move held back until every name clash has an answer.
@@ -918,6 +937,10 @@ impl DirModelRust {
                 .unwrap_or_default(),
             selection: gust_core::selection::Selection::new(),
             last_job: None,
+            meta_busy: false,
+            meta_rev: 0,
+            meta_again: None,
+            view_rows: (0, 0),
         }
     }
 
@@ -1125,6 +1148,11 @@ impl qobject::DirModel {
             self.as_mut().rust_mut().dir_sizes.clear();
         }
 
+        // What the worker needs to know which rows land on screen first.
+        let filter_now = self.as_ref().filter.to_string();
+        let hidden_now = self.as_ref().show_hidden;
+        let focus_now = self.as_ref().focus_name.clone();
+
         let display = key.display_path();
         self.as_mut().set_location(QString::from(&display));
         self.as_mut().set_location_display(QString::from(&display));
@@ -1180,18 +1208,45 @@ impl qobject::DirModel {
                 snap.sort = sort;
                 snap.sort_entries();
 
-                // Publish names first: the window is usable at this point.
-                let names = snap.clone();
-                let _ = thread.queue(move |model| {
-                    Self::apply_snapshot(model, names, false);
-                });
-
-                fill_metadata(&mut snap, &cancel);
-                if cancel.is_cancelled() {
+                if snap.sort_needs_metadata() {
+                    // Size or date order needs every entry's details. Show
+                    // names at once, then the settled order.
+                    let names = snap.clone();
+                    let _ = thread.queue(move |model| {
+                        Self::apply_snapshot(model, names, false);
+                    });
+                    fill_metadata(&mut snap, &cancel);
+                    if cancel.is_cancelled() {
+                        return;
+                    }
+                    snap.sort_entries();
+                    let _ = thread.queue(move |model| {
+                        Self::apply_snapshot(model, snap, true);
+                    });
                     return;
                 }
-                // Metadata can change sort order (size, modified).
-                snap.sort_entries();
+
+                // Name or kind order is final on names alone. Read details
+                // only for the first screenful (and a row the cursor must
+                // land on); rows further down are read when they scroll into
+                // view (`want_rows`). A 100k folder then settles on 256
+                // stats instead of 100 000.
+                let slow = key.as_path().is_some_and(gust_core::stall::needs_probe);
+                if slow {
+                    // One stat per row is a network round trip: names first.
+                    let names = snap.clone();
+                    let _ = thread.queue(move |model| {
+                        Self::apply_snapshot(model, names, false);
+                    });
+                }
+                let shown = visible_indices(&snap.entries, &filter_now, hidden_now);
+                let focus_row = focus_now
+                    .as_ref()
+                    .and_then(|f| shown.iter().position(|&i| snap.entries[i].name == *f));
+                let window = first_window(&shown, focus_row, FIRST_WINDOW);
+                if !fill_metadata_for(&mut snap, &window, &cancel) {
+                    return;
+                }
                 let _ = thread.queue(move |model| {
                     Self::apply_snapshot(model, snap, true);
                 });
@@ -3611,9 +3666,10 @@ impl qobject::DirModel {
             r.settled = settled && snap.settled;
         }
         self.as_mut().rust_mut().recompute_visible();
-        {
-            // A file deleted by another program must not stay selected and
-            // become the silent target of the next command.
+        // A file deleted by another program must not stay selected and
+        // become the silent target of the next command. Nothing selected
+        // means nothing to prune: skip hashing every name in the folder.
+        if !self.as_ref().selection.is_untouched() {
             let mut r = self.as_mut().rust_mut();
             let names: Vec<std::ffi::OsString> = r
                 .visible
@@ -3759,6 +3815,9 @@ impl qobject::DirModel {
         let gen = self.as_ref().generation;
         let sort = self.as_ref().sort_spec();
         let cancel = self.as_ref().load_cancel.clone();
+        let filter_now = self.as_ref().filter.to_string();
+        let hidden_now = self.as_ref().show_hidden;
+        let (view_first, view_count) = self.as_ref().view_rows;
         let mut r = self.as_mut().rust_mut();
         r.live_busy = true;
         r.live_dirty = false;
@@ -3766,11 +3825,30 @@ impl qobject::DirModel {
             .name("gust-live".into())
             .spawn(move || {
                 let mut snap = list_names(&key, gen, &cancel, |_| {});
-                if !cancel.is_cancelled() {
-                    fill_metadata(&mut snap, &cancel);
-                }
                 snap.sort = sort;
                 snap.sort_entries();
+                if !cancel.is_cancelled() {
+                    if snap.sort_needs_metadata() {
+                        fill_metadata(&mut snap, &cancel);
+                    } else {
+                        // The rows on screen, the first screenful, and every
+                        // folder: their dates decide which cached folder
+                        // sizes are stale.
+                        let shown = visible_indices(&snap.entries, &filter_now, hidden_now);
+                        let count = (view_count.max(0) as usize).max(FIRST_WINDOW / 2);
+                        let centre = view_first.max(0) as usize + count / 2;
+                        let mut window = first_window(&shown, Some(centre), count * 2);
+                        window.extend(
+                            snap.entries
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, e)| e.kind == EntryKind::Dir)
+                                .map(|(i, _)| i)
+                                .take(2000),
+                        );
+                        fill_metadata_for(&mut snap, &window, &cancel);
+                    }
+                }
                 let _ = thread.queue(move |model| Self::apply_live(model, snap, cancel));
             })
             .ok();
@@ -3993,6 +4071,116 @@ impl qobject::DirModel {
         }
     }
 
+    fn want_rows(mut self: Pin<&mut Self>, first: i32, count: i32) {
+        self.as_mut().rust_mut().view_rows = (first, count);
+        let n = self.as_ref().visible.len();
+        if n == 0 || count <= 0 {
+            return;
+        }
+        let first = (first.max(0) as usize).min(n - 1);
+        let count = count as usize;
+        // Half a screen of margin each way, so a normal scroll finds the
+        // next rows already read.
+        let lo = first.saturating_sub(count / 2);
+        let hi = (first + count + count / 2).min(n);
+        let missing: Vec<(usize, std::ffi::OsString, EntryKind)> = {
+            let r = self.as_ref();
+            // The cursor's row too: Enter, Properties and the status line
+            // act on it even when the view has not caught up yet.
+            let cursor_row = usize::try_from(r.cursor).ok().filter(|c| *c < n);
+            r.visible[lo..hi]
+                .iter()
+                .chain(cursor_row.and_then(|c| r.visible.get(c)))
+                .filter_map(|&i| {
+                    r.all
+                        .get(i)
+                        .filter(|e| e.meta.is_none())
+                        .map(|e| (i, e.name.clone(), e.kind))
+                })
+                .collect()
+        };
+        if missing.is_empty() {
+            return;
+        }
+        if self.as_ref().meta_busy {
+            // One reader at a time; the newest request wins.
+            self.as_mut().rust_mut().meta_again = Some((first as i32, count as i32));
+            return;
+        }
+        let Some(dir) = self.as_ref().key.as_path().map(|p| p.to_path_buf()) else {
+            return;
+        };
+        let Some(thread) = self.as_ref().qt_thread_handle() else {
+            return;
+        };
+        let gen = self.as_ref().generation;
+        let cancel = self.as_ref().load_cancel.clone();
+        self.as_mut().rust_mut().meta_busy = true;
+        std::thread::Builder::new()
+            .name("gust-meta".into())
+            .spawn(move || {
+                let mut got = Vec::with_capacity(missing.len());
+                for (i, name, kind) in missing {
+                    if cancel.is_cancelled() {
+                        break;
+                    }
+                    let meta = stat_entry(&dir, &name, kind);
+                    got.push((i, name, meta));
+                }
+                let _ = thread.queue(move |model| Self::apply_row_meta(model, gen, lo, hi, got));
+            })
+            .ok();
+    }
+
+    /// Install details read for rows that scrolled into view. GUI thread.
+    fn apply_row_meta(
+        mut self: Pin<&mut Self>,
+        gen: u64,
+        lo: usize,
+        hi: usize,
+        got: Vec<(usize, std::ffi::OsString, Option<gust_core::entry::Metadata>)>,
+    ) {
+        self.as_mut().rust_mut().meta_busy = false;
+        if gen != self.as_ref().generation {
+            // The folder changed; that request described rows that are gone.
+            self.as_mut().rust_mut().meta_again = None;
+            return;
+        }
+        {
+            let mut r = self.as_mut().rust_mut();
+            for (i, name, meta) in got {
+                if let Some(e) = r.all.get_mut(i) {
+                    // Identity by name: the listing may have been merged in
+                    // place meanwhile, and an index alone could now name a
+                    // different file.
+                    if e.name == name && e.meta.is_none() {
+                        e.meta = meta;
+                    }
+                }
+            }
+        }
+        let n = self.as_ref().visible.len();
+        if n > 0 && lo < n {
+            let hi = hi.min(n) - 1;
+            let root = cxx_qt_lib::QModelIndex::default();
+            let mut roles = cxx_qt_lib::QVector::<i32>::default();
+            roles.append(ROLE_SIZE);
+            roles.append(ROLE_MODIFIED);
+            roles.append(ROLE_LINK_OK);
+            // Safety: GUI thread, inside a queued model callback.
+            unsafe {
+                let top = self.as_ref().index(lo as i32, 0, &root);
+                let bottom = self.as_ref().index(hi as i32, 0, &root);
+                self.as_mut().data_changed(&top, &bottom, &roles);
+            }
+        }
+        let rev = self.as_ref().meta_rev.wrapping_add(1);
+        self.as_mut().set_meta_rev(rev);
+        if let Some((f, c)) = self.as_mut().rust_mut().meta_again.take() {
+            self.as_mut().want_rows(f, c);
+        }
+    }
+
     fn hold_live_updates(mut self: Pin<&mut Self>, hold: bool) {
         self.as_mut().rust_mut().live_hold = hold;
         if !hold && self.as_ref().live_dirty && !self.as_ref().live_busy {
@@ -4212,6 +4400,13 @@ impl qobject::DirModel {
             self.as_mut().set_sort_ascending(true);
         }
         let spec = self.as_ref().sort_spec();
+        // Sorting by size or date on rows whose details were never read
+        // would order them as zero. Read everything first.
+        let needs_meta = matches!(spec.field, SortField::Size | SortField::Modified);
+        if needs_meta && self.as_ref().all.iter().any(|e| e.meta.is_none()) {
+            self.as_mut().load_current();
+            return;
+        }
         unsafe { self.as_mut().begin_reset_model() };
         {
             let mut r = self.as_mut().rust_mut();
@@ -4335,6 +4530,12 @@ impl qobject::DirModel {
                     return QString::from("dir");
                 }
             }
+        }
+        // A row whose details were not read yet has an unknown mode, and an
+        // unknown mode could hide an executable bit. Never guess: read it.
+        if kind == EntryKind::File && mode.is_none() {
+            self.as_mut().want_rows(row, 1);
+            return QString::from("blocked:reading this file's details — press Enter again");
         }
         // Executables never launch from a plain activation.
         if gust_core::mime::needs_trusted_launch(&name, mode) {
@@ -4535,7 +4736,7 @@ impl qobject::DirModel {
                 "{{\"location\":\"{}\",\"count\":{},\"cursor\":{},",
                 "\"cursor_name\":\"{}\",\"filter\":\"{}\",\"show_hidden\":{},",
                 "\"sort_field\":\"{}\",\"sort_ascending\":{},\"settled\":{},",
-                "\"status\":\"{}\",\"visible\":[{}]}}"
+                "\"status\":\"{}\",\"meta_known\":{},\"cursor_meta\":{},\"visible\":[{}]}}"
             ),
             esc(&self.location.to_string()),
             self.count,
@@ -4547,6 +4748,8 @@ impl qobject::DirModel {
             self.sort_ascending,
             self.settled,
             esc(&self.status.to_string()),
+            self.all.iter().filter(|e| e.meta.is_some()).count(),
+            self.entry_at(self.cursor).is_some_and(|e| e.meta.is_some()),
             list
         ))
     }
@@ -5525,12 +5728,18 @@ impl qobject::DirModel {
     }
 
     fn sel_summary(&self) -> QString {
-        let bytes: u64 = self
+        let chosen: Vec<&Entry> = self
             .visible_entries()
-            .iter()
+            .into_iter()
             .filter(|e| self.selection.contains(&e.name))
-            .filter_map(|e| e.meta.map(|m| m.size))
-            .sum();
+            .collect();
+        // A total over rows whose sizes were never read would be a wrong
+        // number stated with confidence; leave it out until all are known.
+        let bytes: u64 = if chosen.iter().any(|e| e.meta.is_none()) {
+            0
+        } else {
+            chosen.iter().filter_map(|e| e.meta.map(|m| m.size)).sum()
+        };
         QString::from(&self.selection.summary(bytes))
     }
 

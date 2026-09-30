@@ -36,6 +36,15 @@ FocusScope {
     // Columns per row, so Up/Down move a full row rather than one tile.
     function columns() { return Math.max(1, Math.floor(grid.width / grid.cellWidth)) }
 
+    // Rows on screen, so details are read for what is visible (RowsView).
+    function reportRows() {
+        if (!root.model || grid.count === 0) return
+        const first = Math.max(0, Math.floor((grid.contentY - grid.originY) / grid.cellHeight) * root.columns())
+        const perScreen = root.columns() * (Math.ceil(grid.height / grid.cellHeight) + 1)
+        root.model.want_rows(first, perScreen)
+    }
+    Timer { id: gridReport; interval: 40; onTriggered: root.reportRows() }
+
     Rectangle {
         anchors.fill: parent
         color: Tokens.background
@@ -64,6 +73,10 @@ FocusScope {
             reuseItems: true
             cacheBuffer: Math.round((root.tileSize + Tokens.spaceXxl) * 4)
             boundsBehavior: Flickable.StopAtBounds
+            onContentYChanged: gridReport.restart()
+            onHeightChanged: gridReport.restart()
+            onCountChanged: gridReport.restart()
+            onCurrentIndexChanged: gridReport.restart()
 
             // Fixed cell geometry for every tile. Deriving the label height
             // from the font rather than leaving it implicit keeps rows aligned

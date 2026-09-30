@@ -5,9 +5,10 @@
 
 use crate::entry::{Completeness, DirectorySnapshot, Entry, EntryKind, Metadata};
 use crate::location::LocationKey;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::MetadataExt;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -92,10 +93,12 @@ pub fn list_names(
         snap.entries.push(Entry::new(name, kind));
 
         if snap.entries.len().is_multiple_of(CHUNK) {
+            // Partial chunks arrive in directory order. Sorting each one
+            // re-sorted the whole growing list 50 times for a 100k folder,
+            // and no caller used the partial order.
             snap.complete = Completeness::Partial {
                 seen: snap.entries.len(),
             };
-            snap.sort_entries();
             on_chunk(&snap);
         }
     }
@@ -108,40 +111,85 @@ pub fn list_names(
     snap
 }
 
+/// Read one entry's metadata. Symlinks are lstat'ed (never followed) and
+/// separately probed for whether their target exists.
+pub fn stat_entry(dir: &Path, name: &OsStr, kind: EntryKind) -> Option<Metadata> {
+    let p = dir.join(name);
+    let md = std::fs::symlink_metadata(&p).ok()?;
+    let link_ok = if kind == EntryKind::Symlink {
+        Some(std::fs::metadata(&p).is_ok())
+    } else {
+        None
+    };
+    Some(Metadata {
+        size: md.size(),
+        mtime: md.mtime(),
+        mode: md.mode(),
+        uid: md.uid(),
+        gid: md.gid(),
+        dev: md.dev(),
+        ino: md.ino(),
+        link_ok,
+    })
+}
+
 /// Fill metadata for a snapshot's entries. Symlinks are lstat'ed (never
 /// followed) and separately probed for target existence.
+///
+/// Every entry is read. Use [`fill_metadata_for`] when only some rows are
+/// on screen: a 100k folder whose sort does not depend on metadata settles
+/// on the first screenful instead of on 100k `stat` calls.
 pub fn fill_metadata(snap: &mut DirectorySnapshot, cancel: &CancelToken) {
-    let Some(dir) = snap.key.as_path().map(|p| p.to_path_buf()) else {
-        return;
-    };
-    for e in snap.entries.iter_mut() {
-        if cancel.is_cancelled() {
-            return;
-        }
-        let p = dir.join(&e.name);
-        let Ok(md) = std::fs::symlink_metadata(&p) else {
-            continue;
-        };
-        let link_ok = if e.kind == EntryKind::Symlink {
-            Some(std::fs::metadata(&p).is_ok())
-        } else {
-            None
-        };
-        e.meta = Some(Metadata {
-            size: md.size(),
-            mtime: md.mtime(),
-            mode: md.mode(),
-            uid: md.uid(),
-            gid: md.gid(),
-            dev: md.dev(),
-            ino: md.ino(),
-            link_ok,
-        });
-    }
-    if !cancel.is_cancelled() {
+    let all: Vec<usize> = (0..snap.entries.len()).collect();
+    if fill_metadata_for(snap, &all, cancel) {
         snap.sort_entries();
         snap.settled = true;
     }
+}
+
+/// Fill metadata for the entries at `indices` only, leaving the rest `None`.
+/// Returns false if cancelled part-way (what was read is kept).
+pub fn fill_metadata_for(
+    snap: &mut DirectorySnapshot,
+    indices: &[usize],
+    cancel: &CancelToken,
+) -> bool {
+    let Some(dir) = snap.key.as_path().map(|p| p.to_path_buf()) else {
+        return false;
+    };
+    for &i in indices {
+        if cancel.is_cancelled() {
+            return false;
+        }
+        let Some(e) = snap.entries.get_mut(i) else {
+            continue;
+        };
+        if e.meta.is_none() {
+            e.meta = stat_entry(&dir, &e.name, e.kind);
+        }
+    }
+    !cancel.is_cancelled()
+}
+
+/// How many rows count as "the first screen". Generous: a 4K portrait
+/// monitor at compact density shows about 110 rows.
+pub const FIRST_WINDOW: usize = 256;
+
+/// Which rows of a listing to read metadata for before calling it settled:
+/// the first `size` shown rows, plus `size` rows centred on `focus` (a file
+/// the cursor is about to land on, e.g. "Show in folder"). `shown` is the
+/// on-screen order as indices into the entries. Returns entry indices,
+/// deduplicated, in on-screen order.
+pub fn first_window(shown: &[usize], focus: Option<usize>, size: usize) -> Vec<usize> {
+    let mut rows: Vec<usize> = (0..shown.len().min(size)).collect();
+    if let Some(f) = focus.filter(|f| *f < shown.len()) {
+        let lo = f.saturating_sub(size / 2);
+        let hi = (lo + size).min(shown.len());
+        rows.extend(lo..hi);
+    }
+    rows.sort_unstable();
+    rows.dedup();
+    rows.into_iter().map(|r| shown[r]).collect()
 }
 
 #[cfg(test)]
@@ -235,6 +283,73 @@ mod tests {
         assert!(snap.settled);
         let names: Vec<_> = snap.entries.iter().map(|e| e.display_name()).collect();
         assert_eq!(names, vec!["small", "big"]);
+        fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn first_window_is_the_top_of_the_screen_plus_the_focus() {
+        let shown: Vec<usize> = (0..1000).rev().collect(); // on-screen order != entry order
+        let w = first_window(&shown, None, 10);
+        assert_eq!(w, (990..1000).rev().collect::<Vec<_>>());
+        let w = first_window(&shown, Some(500), 10);
+        assert_eq!(w.len(), 20, "top 10 plus 10 around the focus: {w:?}");
+        assert!(w.contains(&shown[500]));
+        // A focus near the top overlaps and is not counted twice.
+        assert_eq!(first_window(&shown, Some(3), 10).len(), 10);
+        // Small folders: everything.
+        assert_eq!(first_window(&[4, 2, 0], None, 256), vec![4, 2, 0]);
+        assert!(first_window(&[], Some(9), 256).is_empty());
+    }
+
+    #[test]
+    fn metadata_for_a_window_reads_only_those_rows() {
+        let d = tmpdir("window");
+        for i in 0..50 {
+            fs::write(d.join(format!("f{i:02}")), vec![b'x'; i]).unwrap();
+        }
+        let key = LocationKey::local(&d);
+        let mut snap = list_names(&key, 1, &CancelToken::new(), |_| {});
+        let want = [0usize, 7, 49];
+        assert!(fill_metadata_for(&mut snap, &want, &CancelToken::new()));
+        for (i, e) in snap.entries.iter().enumerate() {
+            assert_eq!(e.meta.is_some(), want.contains(&i), "row {i}");
+        }
+        // Sizes are real, not defaults.
+        let e = &snap.entries[7];
+        assert_eq!(e.meta.unwrap().size as usize, fs::metadata(d.join(&e.name)).unwrap().len() as usize);
+        fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn a_cancelled_window_fill_says_so() {
+        let d = tmpdir("window-cancel");
+        fs::write(d.join("a"), b"a").unwrap();
+        let key = LocationKey::local(&d);
+        let mut snap = list_names(&key, 1, &CancelToken::new(), |_| {});
+        let tok = CancelToken::new();
+        tok.cancel();
+        assert!(!fill_metadata_for(&mut snap, &[0], &tok));
+        assert!(snap.entries[0].meta.is_none());
+        fs::remove_dir_all(&d).ok();
+    }
+
+    /// The point of the window: a 100k folder must not cost 100k stats
+    /// before it can settle. Guarded by count, not by wall time, so it
+    /// cannot flake on a slow CI box.
+    #[test]
+    fn settling_a_big_name_sorted_folder_stats_one_screenful() {
+        let d = tmpdir("window-big");
+        for i in 0..3000 {
+            fs::File::create(d.join(format!("n{i}"))).unwrap();
+        }
+        let key = LocationKey::local(&d);
+        let mut snap = list_names(&key, 1, &CancelToken::new(), |_| {});
+        assert!(snap.settled, "a name sort settles on names alone");
+        let shown: Vec<usize> = (0..snap.entries.len()).collect();
+        let w = first_window(&shown, None, FIRST_WINDOW);
+        fill_metadata_for(&mut snap, &w, &CancelToken::new());
+        let read = snap.entries.iter().filter(|e| e.meta.is_some()).count();
+        assert_eq!(read, FIRST_WINDOW);
         fs::remove_dir_all(&d).ok();
     }
 }

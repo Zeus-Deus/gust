@@ -23,6 +23,16 @@ FocusScope {
     property int dropRow: -1
     signal contextRequested(int row, real x, real y)
 
+    // Rows on screen, so details are read for what is visible (RowsView).
+    function reportRows() {
+        if (!root.model || list.count === 0) return
+        // Arithmetic, not indexAt(): at the very bottom indexAt() can miss
+        // and answer -1, which read as "row 0" and fetched nothing.
+        const first = Math.max(0, Math.floor((list.contentY - list.originY) / Tokens.rowHeight))
+        root.model.want_rows(first, Math.ceil(list.height / Tokens.rowHeight) + 1)
+    }
+    Timer { id: colsReport; interval: 40; onTriggered: root.reportRows() }
+
     // Parent and preview columns, filled on a worker (see request_columns).
     readonly property var side: {
         const s = root.model ? root.model.columns_side : ""
@@ -162,6 +172,10 @@ FocusScope {
                     currentIndex: root.model ? root.model.cursor : 0
                     highlightMoveDuration: 0
                     boundsBehavior: Flickable.StopAtBounds
+                    onContentYChanged: colsReport.restart()
+                    onHeightChanged: colsReport.restart()
+                    onCountChanged: colsReport.restart()
+                    onCurrentIndexChanged: colsReport.restart()
 
                     delegate: Rectangle {
                         width: list.width
