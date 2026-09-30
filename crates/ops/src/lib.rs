@@ -9,6 +9,7 @@ pub mod attrs;
 pub mod bulk;
 pub mod create;
 pub mod engine;
+pub mod fat;
 pub mod jobs;
 pub mod journal;
 pub mod permanent;

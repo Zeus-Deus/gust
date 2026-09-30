@@ -358,7 +358,134 @@ pub fn load_from_theme_dir(theme_dir: &Path, name: &str) -> Tokens {
     if t.metric("font_base") < 6.0 {
         t.metrics.insert("font_base".into(), 12.0);
     }
+    enforce_contrast(&mut t);
     t
+}
+
+/// WCAG 2 minimums Gust holds every theme to, against `background`.
+pub const MIN_PRIMARY_CONTRAST: f64 = 4.5;
+pub const MIN_SECONDARY_CONTRAST: f64 = 3.0;
+
+/// Tokens used for secondary text (dates, sizes, hints, dimmed hidden
+/// files). Omarchy's `dark_foreground` is a terminal colour, not a text
+/// colour: in 15 of the 22 stock themes it is under 3:1 on the background.
+pub const SECONDARY_TEXT_TOKENS: &[&str] = &["dark_foreground"];
+pub const PRIMARY_TEXT_TOKENS: &[&str] = &["foreground", "bright_foreground"];
+/// Every surface text is drawn on: the list, the sidebar and hint strip,
+/// menus / banners / dialogs, and the bar. Text must pass on the WORST of
+/// them, not only on `background` (the white theme's banner hint line was
+/// 1.9:1 on its menu surface while passing on the list).
+pub const TEXT_SURFACES: &[&str] = &[
+    "background",
+    "dark_background",
+    "menu_background",
+    "bar_background",
+];
+
+/// The lowest contrast of `c` over every text surface.
+pub fn worst_contrast(t: &Tokens, c: &str) -> f64 {
+    TEXT_SURFACES
+        .iter()
+        .map(|s| contrast_ratio(c, t.color(s)))
+        .fold(f64::INFINITY, f64::min)
+}
+
+fn rgb(s: &str) -> Option<(f64, f64, f64)> {
+    let hex = s.strip_prefix('#')?;
+    let full: String = match hex.len() {
+        3 => hex
+            .chars()
+            .flat_map(|c| std::iter::repeat_n(c, 2))
+            .collect(),
+        6 | 8 => hex[..6].to_string(),
+        _ => return None,
+    };
+    let p = |i: usize| {
+        u8::from_str_radix(&full[i..i + 2], 16)
+            .ok()
+            .map(|v| v as f64)
+    };
+    Some((p(0)?, p(2)?, p(4)?))
+}
+
+fn luminance((r, g, b): (f64, f64, f64)) -> f64 {
+    let f = |c: f64| {
+        let c = c / 255.0;
+        if c <= 0.03928 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b)
+}
+
+/// WCAG contrast ratio of two colours, 1.0 … 21.0. Unparseable → 1.0.
+pub fn contrast_ratio(a: &str, b: &str) -> f64 {
+    match (rgb(a), rgb(b)) {
+        (Some(x), Some(y)) => {
+            let (la, lb) = (luminance(x), luminance(y));
+            (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
+        }
+        _ => 1.0,
+    }
+}
+
+fn hex_of((r, g, b): (f64, f64, f64)) -> String {
+    format!(
+        "#{:02x}{:02x}{:02x}",
+        r.round().clamp(0.0, 255.0) as u8,
+        g.round().clamp(0.0, 255.0) as u8,
+        b.round().clamp(0.0, 255.0) as u8
+    )
+}
+
+/// Move `c` toward `toward` in small steps until it reaches `min` contrast
+/// on `bg`. Keeps the theme's hue as long as possible: the smallest change
+/// that passes, not a jump to the foreground.
+fn lift(t: &Tokens, c: &str, toward: &str, min: f64) -> Option<String> {
+    if worst_contrast(t, c) >= min {
+        return None;
+    }
+    let (a, b) = (rgb(c)?, rgb(toward)?);
+    for step in 1..=20 {
+        let f = step as f64 / 20.0;
+        let m = (
+            a.0 + (b.0 - a.0) * f,
+            a.1 + (b.1 - a.1) * f,
+            a.2 + (b.2 - a.2) * f,
+        );
+        let h = hex_of(m);
+        if worst_contrast(t, &h) >= min {
+            return Some(h);
+        }
+    }
+    Some(toward.to_string())
+}
+
+/// Hold text tokens to the WCAG minimums against the background. Secondary
+/// text is lifted toward the foreground; primary text (already ≥ 6.6:1 in
+/// every stock theme) toward black or white only if a custom theme needs it.
+pub fn enforce_contrast(t: &mut Tokens) {
+    let bg = t.color("background").to_string();
+    let extreme = if is_light_color(&bg) {
+        "#000000"
+    } else {
+        "#ffffff"
+    };
+    for k in PRIMARY_TEXT_TOKENS {
+        let c = t.color(k).to_string();
+        if let Some(new) = lift(t, &c, extreme, MIN_PRIMARY_CONTRAST) {
+            t.colors.insert((*k).into(), new);
+        }
+    }
+    let fg = t.color("foreground").to_string();
+    for k in SECONDARY_TEXT_TOKENS {
+        let c = t.color(k).to_string();
+        if let Some(new) = lift(t, &c, &fg, MIN_SECONDARY_CONTRAST) {
+            t.colors.insert((*k).into(), new);
+        }
+    }
 }
 
 /// Load the currently active Omarchy theme, or the fallback off-Omarchy.
@@ -708,5 +835,33 @@ mod tests {
         );
         assert_eq!(load_from_theme_dir(&d, "x").metric("spacing_scale"), 2.0);
         fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn contrast_ratio_matches_wcag_reference_values() {
+        assert!((contrast_ratio("#000000", "#ffffff") - 21.0).abs() < 0.01);
+        assert!((contrast_ratio("#777777", "#ffffff") - 4.48).abs() < 0.01);
+        assert!((contrast_ratio("#abc", "#abc") - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn secondary_text_is_lifted_just_enough() {
+        let mut t = Tokens::fallback();
+        t.colors.insert("background".into(), "#2d353b".into());
+        t.colors.insert("foreground".into(), "#d3c6aa".into());
+        // everforest's dark_foreground: 1.72:1 on its background.
+        t.colors.insert("dark_foreground".into(), "#475258".into());
+        enforce_contrast(&mut t);
+        let r = worst_contrast(&t, t.color("dark_foreground"));
+        assert!(r >= MIN_SECONDARY_CONTRAST, "{r}");
+        assert!(r < 4.5, "lifted to {r}: secondary text must stay secondary");
+    }
+
+    #[test]
+    fn a_passing_colour_is_left_exactly_as_the_theme_set_it() {
+        let mut t = Tokens::fallback();
+        let before = t.color("dark_foreground").to_string();
+        enforce_contrast(&mut t);
+        assert_eq!(t.color("dark_foreground"), before);
     }
 }

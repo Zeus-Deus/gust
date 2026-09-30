@@ -25,15 +25,27 @@ Updated after every commit. Read this first after a realm replacement.
 - `cargo fmt --all` touches many files on this toolchain; keep it in its own commit.
 
 ## State
-- Done: bootstrap, baseline, test hygiene (D1–D3), lint green (D4–D5).
-- `just qa` 315/0 on a clear desktop (the 9 baseline mouse failures were the
-  Omarchy update prompt over the window).
-- P0 bench harness works: `~/bench-harness/field-bench` (copy of Flea's, diff in
-  `bench/harness/`), fixtures under `/home/flea-sandbox/` (btrfs, outside $HOME),
-  Flea built from source at `~/src/flea` (98404bc), `~/.local/bin/omarchy-drive` shim.
-  Run: `printf 'x\n' | FLEA_REPO=$HOME/src/flea STRATA_BIN=/usr/bin/strata GUST_BIN=… bash field-bench out.csv`
-  (passwordless sudo in the guest; the line is only a placeholder). `~/bin/agg.py out.csv` = medians.
-- P1: viewport-scoped details (D6–D8). 100k fixture, std profile: Gust leads every
-  column of Flea's table (see bench/field/2026-09-30-scale-std-viewport.csv).
-- Next: media fixture run, low-end profile, then P3 keyboard gaps (Ctrl+1–9 is
-  claimed in STATUS but absent from the code; invert selection lib is done, not wired).
+- Done: bootstrap, baseline, test hygiene (D1–D3), lint green (D4–D5), qa intruder check.
+- P0/P1: Flea's own field bench with a Gust entrant (D9). Gust leads every column of
+  Flea's table on the 100k fixture; on the media fixture it leads first window,
+  settled and CPU, but **Thunar uses less PSS (41 vs 90 MiB)** — open item.
+  CSVs + manifests in `bench/field/`.
+- P3 done so far (each with unit tests + a qa.d section):
+  keys table + `?` key map + 4 presets + Ctrl+1–9 + invert/deselect + zoom + F3 split
+  + middle-click tab (20-keys), New file / templates lib (20-keys, create.rs),
+  SHA-256 in Quick Look (21-hash), Make link + Permissions with verified undo
+  (22-attrs), hidden files dimmed in every view.
+- P2 in progress: text contrast held to WCAG (4.5:1 primary, 3:1 secondary) for all
+  22 themes (`theme_contrast` test fails on 12 themes without the fix).
+- Gates at b52926d: test 685/0 (39 named skips), lint green, qa 375/0.
+
+## Running a single qa section
+`tests/qa-one.sh tests/qa.d/20-keys.sh /tmp/out` — same setup and helpers as the
+full suite (qa-lib.sh). New sections go in `tests/qa.d/NN-name.sh`.
+
+## Next (in order)
+1. Commit contrast; re-run the 22-theme matrix and vision-score a sample.
+2. P3 remaining: sort-by-kind qa check, rubber-band select, Ctrl+L folder jump
+   (zoxide/recent/bookmarks), paste image as file, FAT32 4 GiB refusal,
+   custom actions, Miller column count.
+3. Low-end bench profile; P4 Add-a-place dialog; P5 soak; P6 docs.

@@ -7,7 +7,7 @@
 use crate::journal::{ConflictPolicy, JobKind, JobState};
 use crate::recursive;
 use gust_core::lister::CancelToken;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 /// A point-in-time view of a running job, safe to read from the GUI thread.
@@ -24,6 +24,9 @@ pub struct JobProgress {
     pub message: String,
     /// Entries refused by policy, reported rather than hidden.
     pub refused: Vec<String>,
+    /// Things done differently from what was asked, said once at the end
+    /// ("Renamed 2 items for this drive…"). Never an error.
+    pub notes: Vec<String>,
 }
 
 impl JobProgress {
@@ -38,6 +41,7 @@ impl JobProgress {
             bytes_total: 0,
             message: String::new(),
             refused: Vec::new(),
+            notes: Vec::new(),
         }
     }
 
@@ -339,6 +343,20 @@ fn run(
         p.message = "Preparing…".into();
     });
 
+    // FAT destinations (USB sticks, SD cards): what the drive cannot hold
+    // is found here, before a byte is written.
+    let dest_fstype = req
+        .dest_dir()
+        .cloned()
+        .or_else(|| match &req {
+            Request::CopyAs { dest_path, .. } => dest_path.parent().map(|p| p.to_path_buf()),
+            _ => None,
+        })
+        .and_then(|d| gust_core::stall::fstype_for(&d))
+        .unwrap_or_default();
+    let fat_names = crate::fat::is_fat(&dest_fstype);
+    let mut fat_check = crate::fat::Preflight::default();
+
     // Plan first so the total is known before anything is written.
     let mut total_entries = 0usize;
     let mut total_bytes = 0u64;
@@ -359,6 +377,41 @@ fn run(
                 total_entries += plan.entry_count().max(1);
                 total_bytes += plan.total_bytes;
                 source_bytes.push(plan.total_bytes);
+                if fat_names {
+                    // Paths as they will appear under the destination: a
+                    // single file's plan holds its own name; a folder's plan
+                    // is relative to the folder, so prefix its name.
+                    let top = src.file_name().map(PathBuf::from).unwrap_or_default();
+                    let is_dir_plan = !(plan.dirs.is_empty()
+                        && plan.files.len() + plan.symlinks.len() == 1
+                        && plan
+                            .files
+                            .first()
+                            .map(|f| f.0.as_path() == top.as_path())
+                            .or_else(|| plan.symlinks.first().map(|s| s.as_path() == top.as_path()))
+                            .unwrap_or(false));
+                    let full = |rel: &Path| -> PathBuf {
+                        if is_dir_plan {
+                            top.join(rel)
+                        } else {
+                            rel.to_path_buf()
+                        }
+                    };
+                    let files: Vec<(PathBuf, u64)> =
+                        plan.files.iter().map(|(r, s)| (full(r), *s)).collect();
+                    let mut others: Vec<PathBuf> = plan.dirs.iter().map(|r| full(r)).collect();
+                    others.extend(plan.symlinks.iter().map(|r| full(r)));
+                    if is_dir_plan {
+                        others.push(top.clone());
+                    }
+                    let p = crate::fat::preflight(
+                        &dest_fstype,
+                        files.iter().map(|(r, s)| (r.as_path(), *s)),
+                        others.iter().map(|r| r.as_path()),
+                    );
+                    fat_check.too_large.extend(p.too_large);
+                    fat_check.renamed.extend(p.renamed);
+                }
             }
             Err(e) => {
                 set_rec(&|r| r.state = crate::journal::JobState::Failed);
@@ -369,6 +422,14 @@ fn run(
                 return;
             }
         }
+    }
+    if let Some(why) = fat_check.refusal() {
+        set_rec(&|r| r.state = crate::journal::JobState::Failed);
+        set(&progress, |p| {
+            p.state = JobState::Failed;
+            p.message = why.clone();
+        });
+        return;
     }
     set(&progress, |p| {
         p.entries_total = total_entries;
@@ -401,6 +462,11 @@ fn run(
             _ => {
                 let Some(name) = src.file_name() else {
                     continue;
+                };
+                let name = if fat_names {
+                    crate::fat::safe_name(name).unwrap_or_else(|| name.to_os_string())
+                } else {
+                    name.to_os_string()
                 };
                 match req.dest_dir() {
                     Some(d) => d.join(name),
@@ -513,10 +579,12 @@ fn run(
 
         let outcome = match req {
             Request::Copy { .. } | Request::CopyAs { .. } => {
-                recursive::copy_tree(&src, &dst, policy, &cancel, &mut on_progress).map(Some)
+                recursive::copy_tree_opts(&src, &dst, policy, &cancel, &mut on_progress, fat_names)
+                    .map(Some)
             }
             Request::Move { .. } => {
-                recursive::move_tree(&src, &dst, policy, &cancel, &mut on_progress).map(|_| None)
+                recursive::move_tree_opts(&src, &dst, policy, &cancel, &mut on_progress, fat_names)
+                    .map(|_| None)
             }
         };
 
@@ -611,8 +679,12 @@ fn run(
             crate::journal::JobState::Failed
         };
     });
+    let renamed_note = fat_check.renamed_note();
     set(&progress, |p| {
         p.refused = refused_all.clone();
+        if let Some(n) = renamed_note.clone() {
+            p.notes.push(n);
+        }
         // A job that refused entries is NOT a clean success.
         if refused_all.is_empty() {
             p.state = JobState::Confirmed;
@@ -628,6 +700,12 @@ fn run(
                 }
                 if skipped > 0 {
                     m.push_str(&format!(" · skipped {skipped}"));
+                }
+                // Said on the card, not buried: the names on the drive
+                // differ from the ones the user copied.
+                for n in &p.notes {
+                    m.push_str(" · ");
+                    m.push_str(n);
                 }
                 m
             };

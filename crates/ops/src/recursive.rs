@@ -148,7 +148,27 @@ pub fn copy_tree(
     cancel: &CancelToken,
     progress: ProgressFn<'_>,
 ) -> OpResult<Plan> {
+    copy_tree_opts(src_root, dst_root, policy, cancel, progress, false)
+}
+
+/// [`copy_tree`], optionally writing every name inside the tree under its
+/// FAT-safe spelling (`fat::safe_rel`), for a FAT destination.
+pub fn copy_tree_opts(
+    src_root: &Path,
+    dst_root: &Path,
+    policy: ConflictPolicy,
+    cancel: &CancelToken,
+    progress: ProgressFn<'_>,
+    fat_names: bool,
+) -> OpResult<Plan> {
     let plan = plan_tree(src_root, cancel)?;
+    let out = |rel: &Path| -> PathBuf {
+        if fat_names {
+            dst_root.join(crate::fat::safe_rel(rel))
+        } else {
+            dst_root.join(rel)
+        }
+    };
 
     let src_is_dir = {
         let (p, n) = resolve_parent(src_root)?;
@@ -176,7 +196,7 @@ pub fn copy_tree(
             if cancel.is_cancelled() {
                 return Err(OpError::Cancelled);
             }
-            create_dir_anchored(&dst_root.join(rel))?;
+            create_dir_anchored(&out(rel))?;
             done += 1;
             progress(done, total, bytes_done, plan.total_bytes);
         }
@@ -185,7 +205,7 @@ pub fn copy_tree(
                 return Err(OpError::Cancelled);
             }
             let (sd, sn) = resolve_parent(&src_root.join(rel))?;
-            let (dd, dn) = resolve_parent(&dst_root.join(rel))?;
+            let (dd, dn) = resolve_parent(&out(rel))?;
             let before = bytes_done;
             copy_regular_file_with(&sd, &sn, &dd, &dn, policy, cancel, &mut |w| {
                 progress(done, total, before.saturating_add(w), plan.total_bytes)
@@ -199,7 +219,7 @@ pub fn copy_tree(
                 return Err(OpError::Cancelled);
             }
             let (sd, sn) = resolve_parent(&src_root.join(rel))?;
-            let (dd, dn) = resolve_parent(&dst_root.join(rel))?;
+            let (dd, dn) = resolve_parent(&out(rel))?;
             copy_symlink(&sd, &sn, &dd, &dn)?;
             done += 1;
             progress(done, total, bytes_done, plan.total_bytes);
@@ -256,6 +276,18 @@ pub fn move_tree(
     cancel: &CancelToken,
     progress: ProgressFn<'_>,
 ) -> OpResult<()> {
+    move_tree_opts(src_root, dst_root, policy, cancel, progress, false)
+}
+
+/// [`move_tree`] with FAT-safe names inside the copied tree.
+pub fn move_tree_opts(
+    src_root: &Path,
+    dst_root: &Path,
+    policy: ConflictPolicy,
+    cancel: &CancelToken,
+    progress: ProgressFn<'_>,
+    fat_names: bool,
+) -> OpResult<()> {
     let (sd, sn) = resolve_parent(src_root)?;
     let (dd, dn) = resolve_parent(dst_root)?;
 
@@ -294,7 +326,7 @@ pub fn move_tree(
     // child was copied. Every descendant must be proven unchanged.
     let before = FileIdentity::from_stat(&sd.stat_child(&sn)?);
     let before_tree = crate::undo::snapshot_subtree(src_root);
-    let plan = copy_tree(src_root, dst_root, policy, cancel, progress)?;
+    let plan = copy_tree_opts(src_root, dst_root, policy, cancel, progress, fat_names)?;
 
     let after = FileIdentity::from_stat(&sd.stat_child(&sn)?);
     if !before.matches(&after) {
