@@ -400,6 +400,15 @@ pub mod qobject {
         /// jump_completion as "<typed>\n<completed>".
         #[qinvokable]
         fn jump_complete(self: Pin<&mut DirModel>, typed: &QString);
+        /// The user's custom actions that fit the current targets, as JSON
+        /// {"actions":[{id,name}], "problems":[...]}. Reads the user's own
+        /// config folder only.
+        #[qinvokable]
+        fn custom_actions_json(self: &DirModel) -> QString;
+        /// Run a custom action on the targets. argv only, never a shell.
+        /// "" or why not.
+        #[qinvokable]
+        fn run_custom_action(self: Pin<&mut DirModel>, id: &QString) -> QString;
         #[qinvokable]
         fn make_link(self: Pin<&mut DirModel>) -> QString;
         /// Change permissions of the targets ("644", "u+x", "go-w").
@@ -6098,6 +6107,101 @@ impl qobject::DirModel {
                 });
             })
             .ok();
+    }
+
+    fn custom_targets(&self) -> Vec<gust_core::actions::Target> {
+        self.target_paths()
+            .into_iter()
+            .map(|p| {
+                let is_dir = p.symlink_metadata().map(|m| m.is_dir()).unwrap_or(false);
+                gust_core::actions::Target { path: p, is_dir }
+            })
+            .collect()
+    }
+
+    fn custom_actions_json(&self) -> QString {
+        let Some(dir) = gust_core::actions::actions_dir() else {
+            return QString::from(r#"{"actions":[],"problems":[]}"#);
+        };
+        let (acts, problems) = gust_core::actions::load(&dir);
+        let targets = self.custom_targets();
+        let rows: Vec<String> = acts
+            .iter()
+            .filter(|a| a.applies_to(&targets))
+            .map(|a| {
+                format!(
+                    "{{\"id\":{},\"name\":{}}}",
+                    Self::json_str(&a.id),
+                    Self::json_str(&a.name)
+                )
+            })
+            .collect();
+        let probs: Vec<String> = problems
+            .iter()
+            .map(|p| Self::json_str(p).to_string())
+            .collect();
+        QString::from(&format!(
+            "{{\"actions\":[{}],\"problems\":[{}]}}",
+            rows.join(","),
+            probs.join(",")
+        ))
+    }
+
+    fn run_custom_action(mut self: Pin<&mut Self>, id: &QString) -> QString {
+        let Some(dir) = gust_core::actions::actions_dir() else {
+            return QString::from("no actions folder");
+        };
+        let id = id.to_string();
+        let (acts, _) = gust_core::actions::load(&dir);
+        let Some(act) = acts.into_iter().find(|a| a.id == id) else {
+            return QString::from("that action no longer exists");
+        };
+        let targets = self.as_ref().custom_targets();
+        if !act.applies_to(&targets) {
+            return QString::from(&format!("{} does not apply to this selection", act.name));
+        }
+        let runs = act.argvs(&targets);
+        if runs.len() > gust_core::open::with::MAX_OPEN_AT_ONCE {
+            return QString::from(&format!(
+                "{} would run {} times; select at most {}",
+                act.name,
+                runs.len(),
+                gust_core::open::with::MAX_OPEN_AT_ONCE
+            ));
+        }
+        if gust_core::open::which(&runs[0][0]).is_none() {
+            return QString::from(&format!("{} is not installed", runs[0][0]));
+        }
+        let cwd = self.as_ref().key.as_path().map(|p| p.to_path_buf());
+        let mut started = 0usize;
+        for argv in &runs {
+            let mut cmd = std::process::Command::new(&argv[0]);
+            cmd.args(&argv[1..])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            if let Some(d) = &cwd {
+                cmd.current_dir(d);
+            }
+            match cmd.spawn() {
+                Ok(mut child) => {
+                    started += 1;
+                    // Reap it: a finished action must not linger as a zombie.
+                    std::thread::spawn(move || {
+                        let _ = child.wait();
+                    });
+                }
+                Err(e) => return QString::from(&format!("{}: {e}", act.name)),
+            }
+        }
+        self.as_mut().set_status(QString::from(&format!(
+            "Ran {} on {} item{}",
+            act.name,
+            targets.len(),
+            if targets.len() == 1 { "" } else { "s" }
+        )));
+        let _ = started;
+        QString::default()
     }
 
     fn make_link(mut self: Pin<&mut Self>) -> QString {

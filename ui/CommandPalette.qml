@@ -296,6 +296,12 @@ Rectangle {
                 results.append({ kind: "action", label: a.label, payload: a.id,
                                  hint: a.hint })
         }
+        // The user's own actions that fit the selection.
+        let custom = []
+        try { custom = JSON.parse(root.model.custom_actions_json()).actions } catch (e) { custom = [] }
+        for (const c of custom)
+            if (lower === "" || c.name.toLowerCase().indexOf(lower) !== -1)
+                results.append({ kind: "action", label: c.name, payload: "custom:" + c.id, hint: "action" })
         if (!root.jumpFirst) for (const f of folders) results.append(f)
         // Scope is stated explicitly — never an implicit recursive crawl.
         if (t.length > 0) {

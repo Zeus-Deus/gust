@@ -1186,6 +1186,11 @@ Window {
         else if (a === "paste") win.doPaste()
         else if (a === "terminal") hints.status = dirModel.open_terminal()
         else if (a === "keys") win.showKeyMap()
+        else if (a.startsWith("custom:")) {
+            const err = dirModel.run_custom_action(a.substring(7))
+            if (err !== "") win.alertText = err
+            win.qaDump("custom-action")
+        }
         else if (a.startsWith("sort-")) { dirModel.set_sort(a.substring(5)); win.qaDump("sort") }
         else if (a === "make-link") {
             const err = dirModel.make_link()
@@ -1335,6 +1340,14 @@ Window {
         else list.push({ label: qsTr("Rename…"), hint: "F2", action: "rename" })
         list.push({ label: qsTr("Duplicate"), hint: "Ctrl+D", action: "duplicate" })
         if (!many) list.push({ label: qsTr("Make link"), hint: "", action: "make-link" })
+        // The user's own actions (~/.config/gust/actions/*.toml) that fit
+        // this selection.
+        let custom = []
+        try { custom = JSON.parse(dirModel.custom_actions_json()).actions } catch (e) { custom = [] }
+        if (custom.length > 0) {
+            list.push(sep)
+            for (const c of custom) list.push({ label: c.name, hint: "", action: "custom:" + c.id })
+        }
         list.push({ label: qsTr("Permissions…"), hint: "", action: "permissions" })
         list.push({ label: qsTr("Compress"), hint: "", action: "compress" })
         if (!many && dirModel.row_is_archive(row)) list.push({ label: qsTr("Extract here"), hint: "", action: "extract" })
