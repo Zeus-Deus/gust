@@ -707,6 +707,7 @@ const ROLE_LINK_OK: i32 = 0x0107;
 const ROLE_PATH: i32 = 0x0108;
 const ROLE_SELECTED: i32 = 0x0109;
 const ROLE_THUMB: i32 = 0x010A;
+const ROLE_TYPE_TEXT: i32 = 0x010B;
 
 pub struct DirModelRust {
     empty_reason: QString,
@@ -6259,6 +6260,7 @@ impl qobject::DirModel {
         match role {
             ROLE_NAME => QVariant::from(&QString::from(&e.display_name())),
             ROLE_KIND => QVariant::from(&QString::from(e.kind.as_str())),
+            ROLE_TYPE_TEXT => QVariant::from(&QString::from(&gust_core::entry::kind_text(e))),
             ROLE_SIZE => {
                 let s = match e.meta {
                     Some(m) if e.kind != EntryKind::Dir => human_size(m.size),
@@ -6318,6 +6320,7 @@ impl qobject::DirModel {
         h.insert(ROLE_PATH, QByteArray::from("fullPath"));
         h.insert(ROLE_SELECTED, QByteArray::from("isSelected"));
         h.insert(ROLE_THUMB, QByteArray::from("thumbUrl"));
+        h.insert(ROLE_TYPE_TEXT, QByteArray::from("typeText"));
         h
     }
 }

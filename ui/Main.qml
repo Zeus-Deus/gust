@@ -1186,6 +1186,7 @@ Window {
         else if (a === "paste") win.doPaste()
         else if (a === "terminal") hints.status = dirModel.open_terminal()
         else if (a === "keys") win.showKeyMap()
+        else if (a.startsWith("sort-")) { dirModel.set_sort(a.substring(5)); win.qaDump("sort") }
         else if (a === "make-link") {
             const err = dirModel.make_link()
             if (err !== "") win.alertText = err

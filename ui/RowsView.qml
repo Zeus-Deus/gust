@@ -87,7 +87,7 @@ FocusScope {
                     anchors.rightMargin: Tokens.rowPaddingX
 
                     Item {
-                        width: parent.width - sizeCol.width - modCol.width
+                        width: parent.width - kindCol.width - sizeCol.width - modCol.width
                         height: parent.height
                         Text {
                             anchors.verticalCenter: parent.verticalCenter
@@ -106,8 +106,29 @@ FocusScope {
                         Accessible.name: "Sort by name"
                     }
                     Item {
+                        id: kindCol
+                        width: Math.round(list.width * 0.10)
+                        height: parent.height
+                        Text {
+                            anchors.left: parent.left
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: "Kind" + ((root.model ? root.model.sort_field : "") === "kind"
+                                            ? ((root.model ? root.model.sort_ascending : true) ? " ↓" : " ↑") : "")
+                            color: (root.model ? root.model.sort_field : "") === "kind" ? Tokens.foregroundBright : Tokens.foregroundDim
+                            font.family: Tokens.fontFamily
+                            font.pixelSize: Tokens.fontSmall
+                        }
+                        MouseArea {
+                            anchors.fill: parent
+                            onClicked: root.model.set_sort("kind")
+                            cursorShape: Qt.PointingHandCursor
+                        }
+                        Accessible.role: Accessible.Button
+                        Accessible.name: "Sort by kind"
+                    }
+                    Item {
                         id: sizeCol
-                        width: Math.round(parent.width * 0.16)
+                        width: Math.round(list.width * 0.16)
                         height: parent.height
                         Text {
                             anchors.right: parent.right
@@ -129,7 +150,7 @@ FocusScope {
                     }
                     Item {
                         id: modCol
-                        width: Math.round(parent.width * 0.22)
+                        width: Math.round(list.width * 0.22)
                         height: parent.height
                         Text {
                             anchors.right: parent.right
@@ -207,7 +228,7 @@ FocusScope {
                         spacing: 0
 
                         Item {
-                            width: parent.width - sizeText.width - modText.width
+                            width: parent.width - kindText.width - sizeText.width - modText.width
                             height: parent.height
                             Row {
                                 anchors.verticalCenter: parent.verticalCenter
@@ -239,6 +260,16 @@ FocusScope {
                                     font.pixelSize: Tokens.fontCaption
                                 }
                             }
+                        }
+                        Text {
+                            id: kindText
+                            width: Math.round(list.width * 0.10)
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: typeText
+                            color: Tokens.foregroundDim
+                            font.family: Tokens.fontFamily
+                            font.pixelSize: Tokens.fontSmall
+                            elide: Text.ElideRight
                         }
                         Text {
                             id: sizeText

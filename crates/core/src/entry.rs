@@ -252,6 +252,25 @@ pub fn sort_entries(entries: &mut [Entry], spec: SortSpec) {
     });
 }
 
+/// What the Kind column shows: "folder", "link", the extension in lower
+/// case ("pdf"), or "" for a file without one. Sort by kind orders by the
+/// same extension (Flea #190), so the column and the order agree.
+pub fn kind_text(e: &Entry) -> String {
+    match e.kind {
+        EntryKind::Dir => "folder".into(),
+        EntryKind::Symlink => "link".into(),
+        _ => {
+            let ext = extension_of(&e.name).to_string_lossy().to_lowercase();
+            // A blank cell reads as a rendering glitch; say what it is.
+            if ext.is_empty() {
+                "file".into()
+            } else {
+                ext
+            }
+        }
+    }
+}
+
 fn extension_of(name: &OsStr) -> &OsStr {
     let b = name.as_bytes();
     // A leading dot is a hidden-file marker, not an extension separator.
