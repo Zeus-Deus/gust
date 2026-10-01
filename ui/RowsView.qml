@@ -43,6 +43,11 @@ FocusScope {
 
     /// Where a keyboard-opened menu should appear: under the cursor row,
     /// in window coordinates.
+    /// Centre of the Name column header in window coordinates (qa clicks it).
+    function nameHeaderPoint() {
+        return header.mapToItem(null, Tokens.rowPaddingX * 3, header.height / 2)
+    }
+
     function cursorAnchor() {
         const it = list.itemAtIndex(root.model ? root.model.cursor : -1)
         if (it) return it.mapToItem(null, Tokens.rowPaddingX * 3, it.height)

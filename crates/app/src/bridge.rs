@@ -836,6 +836,8 @@ pub struct DirModelRust {
     thumbs_wanted: bool,
     /// Remembered explicit view choices, persisted between runs.
     views: gust_core::views::ViewMemory,
+    /// Remembered per-folder sort choices, persisted between runs.
+    sorts: gust_core::sorts::SortMemory,
     /// Selected entry NAMES (DESIGN.md §4.1) — never row indices.
     selection: gust_core::selection::Selection,
     /// The last completed copy/move, kept so Ctrl+Z can ask for its inverse.
@@ -1036,6 +1038,9 @@ impl DirModelRust {
             views: gust_core::views::ViewMemory::default_path()
                 .map(|p| gust_core::views::ViewMemory::load(&p))
                 .unwrap_or_default(),
+            sorts: gust_core::sorts::SortMemory::default_path()
+                .map(|p| gust_core::sorts::SortMemory::load(&p))
+                .unwrap_or_default(),
             selection: gust_core::selection::Selection::new(),
             last_job: None,
             meta_busy: false,
@@ -1231,6 +1236,20 @@ impl qobject::DirModel {
     fn load_current(mut self: Pin<&mut Self>) {
         let key = self.as_ref().key.clone();
         let gen = self.as_ref().generation + 1;
+        // Per-folder sort: this folder's remembered choice, or by name.
+        // set_sort records every choice before it reloads, so for the
+        // current folder this always agrees with what the user picked.
+        {
+            let spec = gust_core::sorts::spec_for(&self.as_ref().sorts, &key);
+            let f = gust_core::sorts::sort_text(spec.field, true);
+            let f = f.trim_end_matches("-asc").to_string();
+            if self.as_ref().sort_field.to_string() != f {
+                self.as_mut().set_sort_field(QString::from(&f));
+            }
+            if self.as_ref().sort_ascending != spec.ascending {
+                self.as_mut().set_sort_ascending(spec.ascending);
+            }
+        }
         let sort = self.as_ref().sort_spec();
         self.as_mut().rust_mut().generation = gen;
 
@@ -4553,6 +4572,17 @@ impl qobject::DirModel {
             self.as_mut().set_sort_ascending(true);
         }
         let spec = self.as_ref().sort_spec();
+        // Remembered for THIS folder only (per-folder sort, D31).
+        {
+            let key = self.as_ref().key.clone();
+            self.as_mut()
+                .rust_mut()
+                .sorts
+                .remember(&key, spec.field, spec.ascending);
+            if let Some(path) = gust_core::sorts::SortMemory::default_path() {
+                let _ = self.as_ref().sorts.save(&path);
+            }
+        }
         // Sorting by size or date on rows whose details were never read
         // would order them as zero. Read everything first.
         let needs_meta = matches!(spec.field, SortField::Size | SortField::Modified);

@@ -42,6 +42,10 @@ Item {
     }
     function focusList() { currentView().forceActiveFocus() }
     function cursorAnchor() { return currentView().cursorAnchor() }
+    function nameHeaderPoint() {
+        const v = currentView()
+        return v.nameHeaderPoint ? v.nameHeaderPoint() : null
+    }
 
     RowsView {
         id: rowsView

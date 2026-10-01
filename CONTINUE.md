@@ -28,7 +28,15 @@ Updated after every commit. Read this first after a realm replacement.
 See `docs/HANDOFF.md` for the full picture (what is built, bench table, what is not done).
 - Gates at the custom-actions commit: test 719/0 (41 named skips), lint green, qa 410/0, theme matrix 22/22.
 - Uncommitted work: none.
-- qa §28 no longer opens a real terminal (stand-in launcher, D30); full qa 410/0.
+- qa §28 no longer opens a real terminal (stand-in launcher, D30); full qa 410/0 at 3a95fe5.
+- HEAD = per-folder sort (D31). Verified: app build, core tests 283/0, QML lint, fmt;
+  qa §29 passed 13/0 run alone. Still to run on HEAD: full `just test`, `just lint`
+  (clippy) and full `just qa`.
+- Known bug to fix first: the sort arrow in `ui/RowsView.qml` header shows "↑" for a
+  DESCENDING sort (vision review of 29c). Make ascending ▲/descending ▼ or flip the glyphs,
+  and assert the header text in §29.
+- Flea 0.3.7 shipped 2026-10-01: rebuild it in `~/src/flea` and re-run `just bench-field`
+  before claiming any lead (bench/RESULTS.md is against 0.3.6).
 
 ## Running a single qa section
 `tests/qa-one.sh tests/qa.d/NN-name.sh /tmp/out` — same setup as the full suite.
@@ -40,3 +48,8 @@ New sections go in `tests/qa.d/`. FAT tests need `tests/fat-fixture.sh start` (s
    times, menu + Quick Look latency.
 2. P2 audit: screenshot + score every remaining surface (banner and breadcrumb done).
 3. P3 rest (list in HANDOFF §6), then P4, P5, P6.
+4. Flea 0.3.7 gaps to close: hidden-files-last option, copied/cut rows marked, tight row
+   density, Huge/Largest grid sizes, tint-today option, Columns count from window width;
+   check-alikes: folder sizes only where drawn, arrows regain list focus after sidebar,
+   drives with no filesystem leave no dead sidebar row, clicking the current folder does
+   not reload.

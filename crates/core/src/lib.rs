@@ -31,6 +31,7 @@ pub mod renderer;
 pub mod search;
 pub mod selection;
 pub mod settings;
+pub mod sorts;
 pub mod stall;
 pub mod theme;
 pub mod views;

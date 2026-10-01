@@ -2740,6 +2740,12 @@ Window {
                 const p = it.cursorAnchor()
                 return [Math.round(p.x + Tokens.rowPaddingX * 4), Math.round(p.y - Tokens.rowHeight / 2)]
             })(),
+            nameHeaderPoint: (function () {
+                const it = win.activePaneItem()
+                if (!it || !it.nameHeaderPoint) return null
+                const p = it.nameHeaderPoint()
+                return p ? [Math.round(p.x), Math.round(p.y)] : null
+            })(),
             keyMapRows: keyMapPanel.open ? keyMapPanel.rows.length : 0,
             zoom: Tokens.zoom,
             activeTabPath: win.dirModel ? win.dirModel.location : "",
