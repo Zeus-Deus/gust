@@ -155,9 +155,9 @@ Rectangle {
                 id: pauseButton
                 objectName: "jobPause"
                 anchors.right: cancelButton.left
-                anchors.rightMargin: Tokens.spaceSm
+                anchors.rightMargin: Tokens.spaceMd
                 anchors.verticalCenter: parent.verticalCenter
-                width: pauseText.implicitWidth + Tokens.spaceLg
+                width: pauseText.implicitWidth + Tokens.spaceXxl
                 height: Tokens.controlHeight
                 visible: cancelButton.visible
                 color: pauseArea.containsMouse ? Tokens.withAlpha(Tokens.accent, 0.18) : "transparent"
@@ -186,8 +186,9 @@ Rectangle {
                 id: cancelButton
                 objectName: "jobCancel"
                 anchors.right: parent.right
+                anchors.rightMargin: Tokens.spaceSm
                 anchors.verticalCenter: parent.verticalCenter
-                width: cancelText.implicitWidth + Tokens.spaceLg
+                width: cancelText.implicitWidth + Tokens.spaceXxl
                 height: Tokens.controlHeight
                 visible: root.active && root.job.state === "Running" && !root.job.stopping
                 color: cancelArea.containsMouse ? Tokens.danger : "transparent"

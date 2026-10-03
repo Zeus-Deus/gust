@@ -133,8 +133,8 @@ FocusScope {
                     // second place it lives.
                     persistentSelection: !root.secret
                     color: Tokens.foreground
-                    selectionColor: Tokens.selectedBackground
-                    selectedTextColor: Tokens.selectedText
+                    selectionColor: Tokens.accent
+                    selectedTextColor: Tokens.background
                     font.family: Tokens.fontFamily
                     font.pixelSize: Tokens.fontBody
                     clip: true
@@ -168,7 +168,7 @@ FocusScope {
                 anchors.right: parent.right
 
                 Rectangle {
-                    width: cancelLabel.implicitWidth + Tokens.spaceLg
+                    width: cancelLabel.implicitWidth + Tokens.spaceXxl
                     height: Tokens.controlHeight
                     color: cancelArea.containsMouse ? Tokens.backgroundLighter : "transparent"
                     border.color: Tokens.border
@@ -191,7 +191,7 @@ FocusScope {
                 }
 
                 Rectangle {
-                    width: okLabel.implicitWidth + Tokens.spaceLg
+                    width: okLabel.implicitWidth + Tokens.spaceXxl
                     height: Tokens.controlHeight
                     color: okArea.containsMouse ? Tokens.withAlpha(Tokens.accent, 0.22)
                                                 : "transparent"

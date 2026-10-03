@@ -243,6 +243,27 @@ stop_gust; rm -f "$FIXTURE/.local/state/gust/tabs.toml"; start_gust "$FIXTURE"
 wait_for "d['model']['settled']" "True" 20 >/dev/null
 expect "with Fresh, a start opens one tab" "d['tabCount']" "1"
 
+say "30i · a dialog names what it will act on, not the row the cursor wandered to"
+d30i="$FIXTURE/target30"; rm -rf "$d30i"; mkdir -p "$d30i/keep"; printf 'abc' > "$d30i/notes.txt"; chmod 600 "$d30i/notes.txt"
+goto "$d30i" || bad "could not open $d30i"
+wait_for "d['model']['count']" "2" 10 >/dev/null
+key Home; ctrl space
+expect "keep is selected" "d['selCount']" "1"
+typ "notes"; sleep 1.2
+expect "the cursor wandered to notes.txt" "d['model']['cursor_name']" "notes.txt"
+key Delete; wait_for "d['confirmOpen']" "True" 10 >/dev/null
+expect_contains "the Trash question names the selected folder" "d['confirmBody']" "\"keep\""
+[[ "$(state "'notes.txt' in d['confirmBody']")" == False ]] && ok "and not the cursor row" || bad "it names notes.txt: $(state "d['confirmBody']")"
+shot 30i-trash-names-selection
+key Escape; sleep 0.5
+[[ -d "$d30i/keep" && -f "$d30i/notes.txt" ]] && ok "Cancel changed nothing" || bad "something moved"
+palette_run "Permissions…"; sleep 0.8
+expect_contains "Permissions shows the selected folder's mode" "d['promptHint']" "Now: rwxr-xr-x"
+key Escape; sleep 0.4
+# Leave the folder before removing it: the next step acts on the folder shown.
+goto "$FIXTURE" || bad "could not return to $FIXTURE"
+rm -rf "$d30i"
+
 say "30h · open as administrator: a separate, clearly marked window"
 printf 'x\n' > "$FIXTURE/admin-note.txt"
 ADMIN_STATE="${STATE%.json}-admin.json"; rm -f "$ADMIN_STATE"

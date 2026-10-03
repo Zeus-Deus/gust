@@ -138,7 +138,15 @@ Item {
                     required property int index
                     width: col.width
                     height: Tokens.controlHeight + (modelData.note !== "" ? Tokens.fontCaption + Tokens.spaceXs : 0)
-                    color: root.current === index ? Tokens.withAlpha(Tokens.foreground, 0.05) : "transparent"
+                    color: root.current === index
+                           ? Tokens.withAlpha(Tokens.selectedBackground, Math.max(Tokens.selectedAlpha, 0.14))
+                           : "transparent"
+                    Rectangle {
+                        visible: root.current === rowItem.index
+                        width: Math.max(2, Tokens.borderWidth * 2)
+                        height: parent.height
+                        color: Tokens.accent
+                    }
 
                     Text {
                         id: title

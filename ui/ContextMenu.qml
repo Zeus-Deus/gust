@@ -171,6 +171,14 @@ Item {
                         color: index === root.current && root.isPickable(index)
                                ? Tokens.withAlpha(Tokens.selectedBackground, Math.max(Tokens.selectedAlpha, 0.16))
                                : "transparent"
+                        // The current entry also gets the list's accent bar:
+                        // a pale fill alone vanished on light themes.
+                        Rectangle {
+                            visible: index === root.current && root.isPickable(index)
+                            width: Math.max(2, Tokens.borderWidth * 2)
+                            height: parent.height
+                            color: Tokens.accent
+                        }
                     }
 
                     Text {

@@ -44,6 +44,12 @@ Item {
         root.row = row === undefined ? -1 : row
         if (root.open && root.model && row !== undefined) root.model.request_peek_visual(row)
     }
+    /// Is the close hint inside the panel? (qa)
+    function closeInside() {
+        if (!root.open) return true
+        const b = qlClose.mapToItem(panel, 0, qlClose.height)
+        return b.y <= panel.height
+    }
     function hide() {
         if (root.model) root.model.hash_cancel()
         root.open = false
@@ -88,6 +94,7 @@ Item {
             spacing: Tokens.spaceLg
 
             Text {
+                id: qlName
                 width: parent.width
                 text: root.info ? root.info.name : ""
                 color: Tokens.foregroundBright
@@ -99,6 +106,7 @@ Item {
             // Kind, size and mode on one honest line. The kind is words
             // ("PNG image"), never a MIME type.
             Text {
+                id: qlKind
                 width: parent.width
                 text: root.info
                       ? (root.info.kindWords
@@ -141,6 +149,7 @@ Item {
             // SHA-256 on request (h): reading a big file is not free, so it
             // is never started just because Quick Look opened.
             Text {
+                id: qlHash
                 objectName: "quickLookHash"
                 width: parent.width
                 visible: root.info && root.info.kind !== "folder"
@@ -166,9 +175,13 @@ Item {
             Item {
                 visible: panel.hasPreview
                 width: parent.width
+                // Everything else in the column, plus one spacing per gap.
                 height: panel.height - Tokens.spaceXl * 2
-                        - Tokens.rowHeight * 3 - Tokens.spaceLg * 4
-                        - (factsGrid.visible ? factsGrid.height : 0)
+                        - qlName.height - qlKind.height - qlClose.height
+                        - (factsGrid.visible ? factsGrid.height + parent.spacing : 0)
+                        - (qlHash.visible ? qlHash.height + parent.spacing : 0)
+                        - (qlTrunc.visible ? qlTrunc.height + parent.spacing : 0)
+                        - Math.max(1, Tokens.borderWidth) - parent.spacing * 4
 
                 // Image, PDF first page or video frame: a PNG the sandboxed
                 // helper made. Only this PNG is decoded here, never the file.
@@ -258,6 +271,8 @@ Item {
             }
 
             Text {
+                id: qlTrunc
+                visible: text !== ""
                 width: parent.width
                 text: root.info && root.info.truncated
                       ? qsTr("Showing the beginning of the file")
@@ -268,6 +283,7 @@ Item {
             }
 
             Text {
+                id: qlClose
                 width: parent.width
                 horizontalAlignment: Text.AlignRight
                 text: qsTr("Space or Escape to close")

@@ -1,0 +1,92 @@
+# Maintainer: <owner name> <owner email>
+#
+# DRAFT for v0.1.0, not published. Corrections against the repo's PKGBUILD
+# are listed in docs/release/PKGBUILD-changes.md.
+#
+# - Nothing here changes a user's defaults. `gust --default on` is an
+#   explicit, per-user, reversible action; a package install must never take
+#   over the file manager association.
+# - Every optional dependency is optional: Gust starts without all of them
+#   and says what is missing when a feature needs it.
+
+pkgname=gust
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="A fast, calm file manager for Omarchy"
+arch=('x86_64' 'aarch64')
+url="https://github.com/<owner>/gust"   # set when the repository is public
+license=('MIT')
+# LTO breaks the cxx-qt bridge (the generated C++ becomes LLVM bitcode and the
+# linker drops symbols the Rust side needs). Arch enables LTO by default.
+options=(!lto)
+# Linked libraries, checked with ldd on the built binary: Qt6 Core, Gui,
+# Qml, Network, DBus — all from these two packages.
+depends=('qt6-base' 'qt6-declarative' 'gcc-libs' 'glibc')
+# cxx-qt builds its C++ with the cc crate (no cmake), and just is not used by
+# build()/check()/package().
+makedepends=('rust' 'cargo')
+# Every external program Gust runs (checked against each Command::new and
+# which() in crates/), and what is missing without it.
+optdepends=(
+  'wl-clipboard: copy and paste with other applications, paste image as file'
+  'polkit: Open as administrator (pkexec)'
+  'xdg-terminal-exec: Run… for programs, Open terminal here'
+  'xdg-utils: open files with their default application'
+  'zoxide: frequent folders in Ctrl+L folder jump'
+  'bubblewrap: sandboxed thumbnail and preview helpers'
+  'util-linux: resource limits for helpers (prlimit), device list (lsblk)'
+  'imagemagick: image thumbnails'
+  'ffmpegthumbnailer: video thumbnails'
+  'libarchive: browse, extract and compress archives (bsdtar)'
+  'udisks2: mount and eject USB drives and discs'
+  'openssh: other computers over SSH (ssh, ssh-keygen)'
+  'sshfs: browse other computers over SSH'
+  'fuse3: disconnect SSH and cloud places cleanly (fusermount3)'
+  'rclone: cloud storage accounts'
+  'gvfs: network shares (SMB, NFS)'
+  'gvfs-smb: Windows and Samba shares'
+  'gvfs-nfs: NFS shares'
+  'xdg-desktop-portal: let other apps use Gust for Open and Save dialogs'
+)
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')   # replace with the real sum when the tag exists
+
+prepare() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  # No private paths in the binary: without this the build machine's home
+  # directory ends up in panic messages from dependencies.
+  export RUSTFLAGS="$RUSTFLAGS --remap-path-prefix=$srcdir=/usr/src \
+    --remap-path-prefix=$HOME/.cargo/registry=/usr/src/cargo-registry"
+  cargo build --frozen --release
+}
+
+check() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  # Library tests only: the desktop qa suite needs a Wayland session.
+  cargo test --frozen --release --workspace --lib
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+  install -Dm755 "target/release/gust" "$pkgdir/usr/bin/gust"
+  install -Dm644 "packaging/gust.desktop" \
+    "$pkgdir/usr/share/applications/gust.desktop"
+  # No FileManager1 activation file: that name belongs to whichever file
+  # manager the user chose. `gust --default on` writes a per-user one.
+  # The file-chooser backend is inert until `gust --file-dialogs on`.
+  install -Dm644 "packaging/gust.portal" \
+    "$pkgdir/usr/share/xdg-desktop-portal/portals/gust.portal"
+  install -Dm644 "packaging/org.freedesktop.impl.portal.desktop.gust.service" \
+    "$pkgdir/usr/share/dbus-1/services/org.freedesktop.impl.portal.desktop.gust.service"
+  install -Dm644 "LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 "README.md" "$pkgdir/usr/share/doc/$pkgname/README.md"
+}

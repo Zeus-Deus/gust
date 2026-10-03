@@ -71,8 +71,8 @@ Rectangle {
                 anchors.rightMargin: Tokens.spaceMd
                 verticalAlignment: TextInput.AlignVCenter
                 color: Tokens.foreground
-                selectionColor: Tokens.selectedBackground
-                selectedTextColor: Tokens.selectedText
+                selectionColor: Tokens.accent
+                selectedTextColor: Tokens.background
                 font.family: Tokens.fontFamily
                 font.pixelSize: Tokens.fontBody
                 clip: true

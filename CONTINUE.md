@@ -43,6 +43,10 @@ See `docs/HANDOFF.md` for the full picture (what is built, bench table, what is 
 - The seven everyday features and the four Flea 0.3.7 bug checks are done (D35–D45,
   qa §30, 64 asserts). Gates: `just test` 749/0 (41 named skips), `just lint` green,
   `just qa` 489/0. Next: visual pass → release drafts → HANDOFF.
+- **v1 is done** (handoff §4 complete). Final gates: `just test` 750/0 (41 named
+  skips), `just lint` green, `just theme-matrix` 22/22, `just qa` 495/0, visual
+  pass 25/0 in tokyo-night and white. See `docs/HANDOFF.md`; anything further is
+  its "After v1" list, not v1 work.
 
 ## Running a single qa section
 `tests/qa-one.sh tests/qa.d/NN-name.sh /tmp/out` — same setup as the full suite.

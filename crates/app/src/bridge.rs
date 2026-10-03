@@ -432,6 +432,11 @@ pub mod qobject {
         /// The cursor row's owner, "alice : alice".
         #[qinvokable]
         fn owner_text(self: &DirModel) -> QString;
+        /// The name of what an action will act on: the one selected item,
+        /// or the cursor row when nothing is selected. Dialogs name this,
+        /// never the cursor row behind a selection.
+        #[qinvokable]
+        fn target_name(self: &DirModel) -> QString;
         /// Paste an image from the clipboard as a new file here. Runs on a
         /// worker; the result arrives as place_done("paste-image", ...).
         #[qinvokable]
@@ -6573,9 +6578,17 @@ impl qobject::DirModel {
         QString::default()
     }
 
+    fn target_name(&self) -> QString {
+        self.target_paths()
+            .into_iter()
+            .next()
+            .map(|p| QString::from(&display_file_name(&p)))
+            .unwrap_or_default()
+    }
+
     fn owner_text(&self) -> QString {
         use std::os::unix::fs::MetadataExt;
-        let Some(p) = self.path_of_row(self.cursor) else {
+        let Some(p) = self.target_paths().into_iter().next() else {
             return QString::default();
         };
         let Ok(md) = p.symlink_metadata() else {
@@ -6761,6 +6774,13 @@ impl qobject::DirModel {
         let Some(folder) = folder else {
             return QString::from("Only a local folder can be opened as administrator.");
         };
+        // The root side refuses a folder that is gone; say so here instead
+        // of asking for a password that leads nowhere.
+        if !folder.is_dir() {
+            return QString::from(
+                "This folder no longer exists, so it cannot be opened as administrator.",
+            );
+        }
         let Ok(exe) = std::env::current_exe() else {
             return QString::from("Gust could not find its own program file.");
         };
@@ -6983,7 +7003,7 @@ impl qobject::DirModel {
 
     fn mode_text(&self) -> QString {
         use std::os::unix::fs::MetadataExt;
-        let Some(p) = self.path_of_row(self.cursor) else {
+        let Some(p) = self.target_paths().into_iter().next() else {
             return QString::default();
         };
         match p.symlink_metadata() {

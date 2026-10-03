@@ -1427,6 +1427,7 @@ Window {
             dirModel.sel_only(row)
         const p = row >= 0 ? win.activePaneItem().cursorAnchor() : Qt.point(win.width / 3, win.height / 3)
         win.openContextMenu(row, p.x, p.y)
+        contextMenu.current = contextMenu.step(-1, 1)
     }
 
     property int pendingTrashRow: -1
@@ -1585,7 +1586,7 @@ Window {
         const n = dirModel.sel_count()
         const subject = n > 1
             ? n + " selected items"
-            : "\"" + dirModel.entry_name(dirModel.cursor) + "\""
+            : "\"" + dirModel.target_name() + "\""
 
         // What is really inside, measured on a worker; the dialog's body
         // gains the total when it arrives (see onDelete_totalChanged).
@@ -1864,7 +1865,7 @@ Window {
 
                 Repeater {
                     model: [
-                        { m: "rows",    glyph: "≡", nm: "Rows view" },
+                        { m: "rows",    glyph: "▤", nm: "Rows view" },
                         { m: "grid",    glyph: "▦", nm: "Grid view" },
                         { m: "columns", glyph: "⫼", nm: "Columns view" }
                     ]
@@ -1910,7 +1911,7 @@ Window {
                     HoverHandler { id: setHover }
                     Text {
                         anchors.centerIn: parent
-                        text: "⚙"
+                        text: "⛭"
                         color: Tokens.foreground
                         font.family: Tokens.fontFamily
                         font.pixelSize: Tokens.fontBody
@@ -2914,6 +2915,7 @@ Window {
             zoom: Tokens.zoom,
             adminMode: win.adminMode,
             hintsCut: hints.cutHints(),
+            quickLookCloseInside: quickLook.closeInside(),
             // How far the hint strip's bottom edge sits past the window's
             // (0 when it is fully inside; > 0 means it was pushed off).
             hintsOverflow: Math.round(hints.mapToItem(null, 0, hints.height).y - win.height),
@@ -2940,6 +2942,8 @@ Window {
             promptOpen: prompt.visible,
             promptMode: prompt.mode,
             promptError: prompt.errorText,
+            promptHint: prompt.hint,
+            promptTitle: prompt.title,
             clip: dirModel.clip_summary(),
             selCount: dirModel.sel_count(),
             selSummary: dirModel.sel_summary(),
@@ -3040,6 +3044,8 @@ Window {
     Connections {
         target: dirModel
         function onLocationChanged() {
+            if (hints.status.startsWith("Selected ") || hints.status.startsWith("No file starting"))
+                hints.status = ""
             win.refreshTabLabels()
             // A tab's view follows the location it is showing.
             if (win.activeTab >= 0) win.tabViews[win.activeTab] = win.viewMode

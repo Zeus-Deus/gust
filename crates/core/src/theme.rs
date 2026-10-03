@@ -310,8 +310,11 @@ pub fn load_from_theme_dir(theme_dir: &Path, name: &str) -> Tokens {
         let want_light = t.mode == "light";
         let surfaces = [
             ("bar_background", "dark_background", &bg),
-            ("menu_background", "lighter_background", &bg),
-            ("tooltip_background", "lighter_background", &bg),
+            // Omarchy's template (default/themed/shell.toml.tpl) makes menus
+            // and tooltips the theme background; lighter_background can be a
+            // mid grey (white: #c0c0c0) that reads as an unthemed panel.
+            ("menu_background", "background", &bg),
+            ("tooltip_background", "background", &bg),
         ];
         for (key, preferred, fallback) in surfaces {
             let current = t.color(key).to_string();
@@ -680,6 +683,27 @@ mod tests {
             is_light_color(t.color("menu_background")),
             "light theme got a dark menu surface"
         );
+        fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn a_stale_shell_gives_menus_the_theme_background_like_omarchy_does() {
+        let d = tmp("whitemenu");
+        fs::create_dir_all(&d).unwrap();
+        fs::write(
+            d.join("colors.toml"),
+            "mode = \"light\"\nbackground = \"#ffffff\"\nforeground = \"#000000\"\n\
+             lighter_background = \"#c0c0c0\"\naccent = \"#6e6e6e\"\n",
+        )
+        .unwrap();
+        fs::write(
+            d.join("shell.toml"),
+            "[menu]\nbackground = \"#1a1b26\"\ntext = \"#a9b1d6\"\n",
+        )
+        .unwrap();
+        let t = load_from_theme_dir(&d, "white");
+        assert_eq!(t.color("menu_background"), "#ffffff");
+        assert_eq!(t.color("tooltip_background"), "#ffffff");
         fs::remove_dir_all(&d).ok();
     }
 

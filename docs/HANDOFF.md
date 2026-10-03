@@ -1,99 +1,167 @@
-# HANDOFF — Gust toward v1 (interim)
+# HANDOFF — Gust v1
 
-**Status: not v1.** P0 (partly), P1 (standard profile), a large slice of P3 and the
-contrast part of P2 are done and proven. P2's screen audit, the rest of P3, and
-P4–P6 are not started. This file is the honest state at the last commit; the
-next builder continues from `CONTINUE.md`.
+**Status: v1 is done.** Every item in the frozen v1 scope (handoff §4) is built,
+tested, driven in the real window, and checked by screenshot with vision. The
+gates are green at the final commit. Nothing was pushed, tagged or published.
+All commits are local on `master` in the Realm VM. Each commit was exported to
+the host artifact store as a `git bundle` plus a `git archive` tarball with
+SHA-256 sums, and verified with `sha256sum -c` and `git bundle list-heads`.
 
-Nothing was pushed, tagged or published. All commits are local on `master` in
-the Realm VM; every commit was exported to the host artifact store as a
-`git bundle` + `git archive` tarball with SHA-256 (verified with `sha256sum -c`).
+## 1. What was built, by commit
 
-## 1. What was built, by phase
+The v1 scope, in order:
 
-| Commit | Phase | What |
+| Commit | Scope item | What |
 |---|---|---|
-| `101c891` | Bootstrap | Honest test counts (skips counted as SKIP via `gust-testkit`), live clipboard test opt-in, `just test-required`, lint green on Rust 1.98 |
-| `8a48cc6` | Bootstrap | qa names any window covering Gust before the mouse cases (the 9 baseline "failures" were an Omarchy update prompt) |
-| `a4541a1` | P0/P1 | Flea's field bench with a Gust entrant; listing reads details for the visible rows only (100k settle 2098 → 476 ms) |
-| `add03b6` | P3 | One key table for shortcuts + `?` key map; Ctrl+1–9; invert / select nothing; zoom; F3 split; 4 presets; middle-click tab; New file; SHA-256 in Quick Look; media bench |
-| `b52926d` | P3 | Make link and Permissions, both undoable with dev+inode+mtime checks; hidden files dimmed in Columns |
-| `900b37f` | P2/P3 | WCAG contrast on every surface in all 22 themes; FAT32 ≥4 GiB refusal and FAT-safe names (real FAT32 mount test) |
-| `37911be` | P3 | Ctrl+L folder jump (bookmarks, zoxide, recent) + Tab completion; `~` and trailing `/` fixed |
-| `2f415cd` | P3 | Kind column, sort by kind (Flea #190) |
-| `82fdea2` | P3 | Rubber-band select (real-pointer qa); STATUS over-claims corrected |
-| `156c2fd` | P3 | Custom actions (`~/.config/gust/actions/*.toml`, argv only, untrusted files ignored) |
+| `ac7b8c4` | Gates + sort arrow | Gates on 7a30eaa (test 724/0, lint green, qa 425/0); sort headers now read ▲ ascending / ▼ descending, test-first (qa §29 failed 3 asserts on the old glyphs) — D32 |
+| `ec4f638` | Re-bench vs Flea 0.3.7 | Standard and low-end profiles; the low-end limits are applied to the run and checked on the live process (D33, D34). Results are in §2 |
+| `a2c9a91` | Seven everyday features + four bug checks | Pause/Resume (D35), Owner… (D36), paste image as file (D37), Link here (D38), Open as administrator (D39), copied/cut marks (D40), Tabs at start (D41). Bug checks: folder sizes only where drawn (D42), no dead drive row and no reload on re-click (D43), arrows after the sidebar (already worked, now in qa). Two older layout bugs found by vision (D44, D45). qa §30 |
+| final commit (`git log -1`) | Visual pass + release drafts + this handoff | Visual pass in tokyo-night and white with before/after pairs (`docs/screens/`, D46–D50), including a safety fix: the Trash dialog named the cursor row while the selection was what it would trash. Release drafts in `docs/release/`. STATUS updated |
 
-## 2. Bench — Flea's own field bench, same VM, standard profile (medians of 3 cold runs)
+Earlier work (before v1 scope, from the interim handoff): `101c891` honest test
+counts · `a4541a1` viewport-scoped listing · `add03b6` keys, presets, key map ·
+`b52926d` make link, permissions · `900b37f` WCAG contrast in all themes, FAT32
+rules · `37911be` Ctrl+L folder jump · `2f415cd` Kind column · `82fdea2`
+rubber-band select · `156c2fd` custom actions · `0643386` field bench ·
+`3e4aa18` Run… behind a prompt · `7a30eaa` per-folder sort.
 
-| Fixture | Entrant | First window | Settled | PSS | CPU |
+## 2. Bench: Flea's own field bench, same VM, cold cache, medians of 3
+
+Flea 0.3.7 (ae9419c), Strata 0.20.1, Nautilus 50.3.1, Dolphin 26.08.0, Thunar
+4.20.9. KVM, 8 vCPU, 3 GiB, llvmpipe. Full ranges and CSVs:
+`bench/RESULTS.md`, `bench/field/2026-10-03-*`.
+
+**Standard profile**
+
+| Fixture | Entrant | First window ms | Settled ms | PSS MiB | CPU s |
 |---|---|---|---|---|---|
-| 100k files | **Gust** | **269 ms** | **476 ms** | **107 MiB** | **0.34 s** |
-| 100k files | Flea 0.3.6 | 360 ms | 816 ms | 223 MiB | 0.61 s |
-| 100k files | Strata / Dolphin / Nautilus | see `bench/field/2026-09-30-scale-std-*.csv` | | | |
-| 2000 media | **Gust** | 289 ms | **445 ms** | 90 MiB | **0.27 s** |
-| 2000 media | Thunar | 319 ms | 634 ms | **41 MiB** | 0.45 s |
-| 2000 media | Flea 0.3.6 | 364 ms | 1132 ms | 224 MiB | 0.66 s |
-| 2000 media | Strata | 530 ms | 1818 ms | 192 MiB | 0.80 s |
-| 2000 media | Dolphin | 454 ms | 9609 ms | 108 MiB | 3.13 s |
-| 2000 media | Nautilus | 640 ms | 16639 ms | 313 MiB | 8.54 s |
+| 100k | **Gust** | **240** | **410** | **93** | **0.24** |
+| 100k | Flea 0.3.7 | 297 | 756 | 177 | 0.36 |
+| 100k | Strata | 363 | 762 | 198 | 0.67 |
+| 100k | Dolphin | 350 | 2876 | 208 | 3.97 |
+| 100k | Nautilus | 475 | 4051 | 347 | 4.01 |
+| media | **Gust** | **228** | **277** | 80 | **0.19** |
+| media | Flea 0.3.7 | 310 | 848 | 186 | 0.47 |
+| media | Thunar | 267 | 567 | **39** | 0.38 |
+| media | Strata | 361 | 1282 | 160 | 0.67 |
+| media | Dolphin | 367 | 7788 | 97 | 2.71 |
+| media | Nautilus | 493 | 14205 | 279 | 7.79 |
 
-- Gust leads every column against Flea on both fixtures.
-- **Open:** Thunar uses less memory on the media fixture (41 vs 90 MiB).
-- Reproducible: `FLEA_REPO=~/src/flea just bench-field`. A second full run (2026-09-30, `bench/field/2026-09-30-*-std.csv`) agreed: Gust 212/347 ms, 109 MiB on 100k vs Flea 295/757 ms, 220 MiB; see `bench/RESULTS.md`.
-- **Not measured yet:** low-end profile (2 vCPU / 2 GB / software), painted/input-ready, blank frames, scroll frame times, context-menu and Quick Look latency, SMB 10k listing.
+Gust leads every column of Flea's table on both fixtures.
+
+**Low-end profile** (2 CPUs, 2 GiB, swap off, software rendering)
+
+| Fixture | Entrant | First window ms | Settled ms | PSS MiB | CPU s |
+|---|---|---|---|---|---|
+| 100k | Gust | 217 | **352** | 93 | 0.22 |
+| 100k | Flea 0.3.7 | **211** | 434 | **75** | **0.18** |
+| media | Gust | 242 | **321** | 76 | **0.19** |
+| media | Flea 0.3.7 | **204** | 983 | **74** | 0.20 |
+
+Gust settles first on both fixtures. On the low-end profile Flea's first window
+comes up 6 ms (100k, the ranges overlap) and 38 ms (media) sooner, and its
+window uses less memory on 100k. The reason is measured, not guessed: software
+rendering removed Flea's llvmpipe GL cost, and about 23 MiB of Gust's 100k
+figure is the listing, which Gust keeps in the window process while Flea keeps
+it in a backend. `bench/RESULTS.md` has the full explanation. Moving the
+listing out of the window process is on the After-v1 list.
 
 ## 3. Screenshots
 
-Key map, Kind column and theme-matrix captures were reviewed with vision
-(session artifacts). `docs/screens/` showcase set: **not built**. Clips: **not recorded**.
+- `docs/screens/after/{tokyo-night,white}/`: 19 shots each of the main window
+  (rows, grid, columns), the context menu, every dialog (trash, rename, owner,
+  permissions, name clash), the command palette, key map, Trash, Recent, Quick
+  Look (text and image), Settings, and the transfer card (running and done).
+  Every surface was asserted open before its shot was taken.
+- `docs/screens/before/`: the first-pass shots of the surfaces that changed.
+- `docs/screens/SCORES.md`: the §5 rubric findings, the fixes, and the criteria
+  left at 1 and why.
+- The v1 feature shots (paste image, owner prompt, drop menu, paused card, row
+  marks, sidebar checks, restored tabs, administrator window) come from qa §30,
+  which writes them to the qa output folder on every run.
+- Clips: not recorded (P6 launch material, outside the v1 scope).
 
-## 4. Test counts (at `156c2fd`)
+## 4. Test counts at the final commit
 
-- Unit/library: 717 passed, 0 failed, 41 skipped (each named in the ledger).
-- `just qa`: 395 passed, 0 failed (real keyboard + uinput mouse, guest Hyprland).
-- Theme matrix: 22 / 22.
-- Contrast test: 22 themes; fails on 12 without the fix.
-- Soak: **not run**.
+- `just test`: 750 passed, 0 failed, 41 skipped. Each skip is named with its
+  reason in `target/test-skips.log` (live fixtures: SMB/NFS/docker peers,
+  FAT mount, live clipboard).
+- `just lint`: green (rustfmt, clippy `-D warnings` on the four library
+  crates, QML token and syntax rules).
+- `just qa`: 495 passed, 0 failed. It drives the real window with real key
+  events and a uinput pointer inside the guest's Hyprland session. Section 30
+  covers the v1 features.
+- `just theme-matrix`: 22 / 22 themes render with their own colours.
+- Visual pass (`tests/visual-pass-run.sh`): 25 / 0 in tokyo-night and in white.
+- Soak: not run (P5, outside the v1 scope).
 
-## 5. Decisions the owner may want to reverse
+## 5. Decisions you may want to reverse
 
-All 28 are in `docs/DECISIONS.md` with a revert line. The ones most worth a look:
+All 50 are in `docs/DECISIONS.md`, each with a revert line. The ones worth a
+look:
 
-- **D6** viewport-scoped details (size/date sorts still read all).
-- **D7** Enter on a file whose mode isn't known yet refuses once ("press Enter again").
-- **D11** Mac preset maps Cmd to Ctrl (Super belongs to Hyprland).
-- **D12** zoom is not saved across sessions.
-- **D19** Permissions never touch setuid/setgid/sticky.
-- **D20** secondary text colours are lifted (minimally) where a theme falls under 3:1.
-- **D21** any ≥4 GiB file refuses the whole copy to FAT32.
-- **D22** Ctrl+L opens jump mode rather than a plain path box.
+- **D39** Open as administrator relaunches Gust as root through pkexec in a
+  separate window. That window never opens, runs or previews files. The gvfs
+  `admin://` route never mounted on Omarchy.
+- **D41** Tabs at start defaults to *Fresh*. Nothing is written until you
+  choose *Reopen last*.
+- **D38** Link here sits behind a right-button drag. The plain drag is
+  unchanged.
+- **D37** Paste image takes PNG, JPEG, WebP and GIF only (never SVG), up to
+  128 MiB.
+- **D48** In light themes with a stale shell.toml, menus use the theme
+  background rather than `lighter_background`.
+- **D49** Secondary text is held to 3:1 contrast, not 4.5:1.
+- From before v1: **D6** viewport-scoped details, **D7** Enter refuses once on
+  an unread mode, **D19** Permissions never touches setuid/setgid/sticky,
+  **D21** any file of 4 GiB or more refuses the whole copy to FAT32, **D22**
+  Ctrl+L is jump mode.
 
 ## 6. Not done, and why
 
-Ran out of session budget, not blocked. Remaining, in suggested order:
+Everything below is outside the frozen v1 scope and was not built (scope rule).
+It is listed under "After v1" below. Two things inside the scope can only be
+partly proven in a VM:
 
-1. P0: low-end profile and the extra measurements (`just bench-field` and `bench/RESULTS.md` exist).
-2. P2: screenshot and score every surface, fix, `docs/screens/` pairs. Fixed so far: breadcrumb `/ /` (qa §27); crash banner hint text raised to primary contrast (measured 11.2:1 on white, was ~2.8:1) and "Open destination" made the accent primary button. The "banner covers the last row" finding is a normal half-visible last row at the scroll edge: the list height already subtracts the banner.
-3. P3 (Run… behind a safe prompt done, qa §28): paste image as file, open as admin (polkit), ownership, "Link here" on drop, per-folder sort (done in code + qa §29, D31; full gates pending in a VM), tree expand, Miller column count, preview-column toggle, Markdown/audio/PDF previews, pause/resume + queue, restore tabs, i18n, pain-point regressions, Thunar memory gap.
-4. P4 Add-a-place + discovery, Tailscale, MTP/AFC, udisks + `scsi_debug`, LocalSend.
-5. P5 soak, stall matrix, IME, fractional scaling, AT-SPI.
-6. P6 README, release drafts, clips, Omarchy PR text, launch posts.
+- **Open as administrator on a real desktop.** In the VM, qa uses a narrow
+  polkit rule (`tests/admin-fixture.sh`) instead of a password prompt. The real
+  prompt from Omarchy's polkit agent is on your list.
+- **The PKGBUILD draft** passes `bash -n` and `makepkg --printsrcinfo`. A real
+  `makepkg` needs a published tag.
 
-## 7. Owner's to-do list (§8)
+## 7. Owner's to-do list (§8), in order
 
-1. **Physical checks** (none possible in the VM):
-   - USB stick: copy a folder to it, eject from the sidebar, confirm "safe to unplug".
-   - Android phone (MTP) and iPhone (AFC): browse and copy both ways.
-   - GPU matrix (Intel incl. Haswell, AMD, NVIDIA, hybrid). Bench on your own machine, never inside a shared session:
+1. **Take the work.** The newest export is the folder named after the final
+   commit in the host artifact store, `…/session-artifacts/<coding session>/exports/<sha>/`:
+   ```
+   cd <that folder> && sha256sum -c SHA256SUMS
+   cd ~/Projects/gust && git fetch <that folder>/gust-<sha>.bundle master:v1-review
+   git log --oneline master..v1-review    # review, then: git merge --ff-only v1-review
+   ```
+2. **Open as administrator, by hand.** On your desktop, open Gust, press `:`
+   and run *Open as administrator*. Approve the polkit prompt and check that a
+   red-edged "Administrator —" window opens on the same folder.
+3. **Physical checks** (not possible in the VM):
+   - USB stick: copy a folder to it, eject it from the sidebar, check it says
+     "safe to unplug".
+   - Android phone (MTP) and iPhone (AFC): browse, and copy both ways.
+   - GPU matrix (Intel including Haswell-class, AMD, NVIDIA, hybrid). Run the
+     bench on your own machine, never inside a shared session:
      ```
-     cd ~/Projects/gust && git pull <bundle>   # or fetch the exported bundle
-     just build && cargo build --release -p gust-app
-     cd bench/harness && FLEA_REPO=~/src/flea STRATA_BIN=/usr/bin/strata \
-       GUST_BIN=~/Projects/gust/target/release/gust bash ./flea-field-bench-with-gust out.csv
+     cd ~/Projects/gust && cargo build --release -p gust-app
+     FLEA_REPO=~/src/flea just bench-field
+     PROFILE=lowend FLEA_REPO=~/src/flea just bench-field
      ```
-2. **Test tailnet auth key** and **real cloud accounts** (only needed once P4 lands).
-3. **Shipping:** pull the latest bundle from the host exports into `~/Projects/gust`, review, then push, tag, make public, publish AUR, send the Omarchy PR (#10542), post — all yours.
+4. **Accounts** (only once P4 lands): a test-tailnet auth key and real cloud
+   accounts.
+5. **Shipping, all yours:**
+   - set the real repository URL in `docs/release/PKGBUILD`;
+   - push, tag `v0.1.0`, and make the repository public;
+   - fill in `sha256sums` and run `makepkg` in a clean chroot;
+   - publish to the AUR;
+   - send the Omarchy #10542 PR (text in `docs/release/omarchy-pr-10542.md`);
+   - replace the repo README with `docs/release/README.md`;
+   - post the launch.
 
 ## After v1 (recorded, deliberately not built)
 
@@ -107,6 +175,11 @@ New ideas and newer-Flea features go here instead of into v1.
 - Paste image: offer a name before saving; paste into a remote folder.
 - Drop menu: "Link here" for remote targets (refused today, as copy rules).
 - Restore tabs: remember selection, scroll and history per tab.
+- From the visual pass (scored 1, not 0; see docs/screens/SCORES.md): file-type
+  icons in place of the ▸ / · markers; a filled primary-button style; the
+  transfer card naming what it copies ("3 items → dest") and Replace tinted as
+  destructive in the conflict dialog; a shadow under menus; Quick Look sized to
+  short files; rendered Markdown in Quick Look.
 
 - Tree expand in the list view, Miller column count, preview-column toggle.
 - Markdown, audio and PDF previews; a transfer queue; i18n.

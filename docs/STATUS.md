@@ -188,6 +188,24 @@ Filter, scoped find, palette actions, archives, packaging and `--default` are
 proven (see the tables above), as are the Omarchy hooks: Super+Shift+F,
 "Show in folder" and other apps' Open/Save dialogs.
 
+## v1 · everyday features and Flea 0.3.7 bug checks
+
+| Feature | State | Evidence |
+|---|---|---|
+| Pause / Resume a transfer (transfer card) | proven | unit `pause_holds_a_copy_and_resume_finishes_it`; `just qa` §30d: real pointer clicks Pause, no file arrives while paused, Resume finishes all 2000 files, no staging debris |
+| Owner… for one or many items, undoable | proven | unit tests in `crates/ops/src/attrs.rs`; `just qa` §30b: group changed on two files by mouse, Ctrl+Z restores, a new owner without root is refused in words |
+| Paste image from the clipboard as a file | proven | unit tests in `create.rs`/`clipboard.rs`; `just qa` §30a: Ctrl+V writes the exact bytes, Ctrl+Z removes it, palette entry, empty clipboard writes nothing |
+| Link here (right-button drag menu) | proven | unit test in `drop.rs`; `just qa` §30c: real right-drag, menu, link lands, Ctrl+Z removes only the link, Esc changes nothing, left drag still copies |
+| Open as administrator (pkexec, marked window) | proven in the VM | `just qa` §30h: root window opens on the folder shown, says it is the administrator window, refuses to open a file; needs `tests/admin-fixture.sh start` (QA-only polkit rule). On a real desktop the polkit prompt is the owner's check |
+| Restore tabs on start (Settings → Tabs at start) | proven | unit tests in `session.rs` and `settings.rs`; `just qa` §30g: two tabs, active tab, folder and view restored after a restart; tabs.toml 0600; Fresh opens one tab |
+| Copied / cut rows marked | proven | `just qa` §30e |
+| Folder sizes only where drawn | proven | unit `rows_in_view`; `just qa` §30f: 90 of 400 measured, more after End |
+| No dead sidebar row for an empty drive | proven | unit `a_drive_with_nothing_to_open_gets_no_sidebar_row`; `just qa` §30f on this VM's empty DVD drive |
+| Re-click on the folder shown does not reload | proven | unit `same_place`; `just qa` §30f: listing generation and cursor unchanged |
+| Arrows reach the list after a sidebar click | proven | `just qa` §30f |
+| Dialogs name the selection, not the cursor row | proven | `just qa` §30i |
+| Visual pass, default + white theme | proven | `tests/visual-pass.sh`, 25/0 per theme; `docs/screens/` |
+
 ## Known gaps worth stating plainly
 
 This list is rewritten whenever something ships. Items 1, 2 and 4 of the

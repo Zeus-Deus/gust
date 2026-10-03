@@ -318,7 +318,8 @@ FocusScope {
                               : p.kind === "dir"
                                 ? (p.error !== "" ? p.error
                                    : (p.names.length + p.more) === 0 ? qsTr("Empty folder")
-                                   : qsTr("Folder · %1 items").arg(p.names.length + p.more))
+                                   : (p.names.length + p.more === 1 ? qsTr("Folder · 1 item")
+                                                      : qsTr("Folder · %1 items").arg(p.names.length + p.more)))
                               : [p.kindWords, p.sizeText, p.mode].filter(x => x).join("  ·  ")
                         color: Tokens.foregroundDim
                         font.family: Tokens.fontFamily
