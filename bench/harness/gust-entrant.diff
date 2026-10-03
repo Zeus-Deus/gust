@@ -1,4 +1,4 @@
---- /home/zeus/src/flea/tools/flea-field-bench	2026-09-30 14:51:18.801208265 +0200
+--- ~/src/flea/tools/flea-field-bench	2026-09-30 14:51:18.801208265 +0200
 +++ bench/harness/flea-field-bench-with-gust	2026-09-30 20:41:46.250820810 +0200
 @@ -27,8 +27,9 @@
  esac

@@ -10,7 +10,7 @@ Written by tools/flea-bench-manifest. Every line below is read off the installed
 - fixture kind: btrfs
 - fixture payload: 2000 visible entries, filesystem btrfs
 - TUI terminal: kitty absent
-- flea launch line: FLEA_BIN=/home/zeus/src/flea/target/release/flea FLEA_UI=/home/zeus/src/flea/ui XDG_STATE_HOME=/tmp/flea-bench-state.JbmAcu setsid nohup /home/zeus/src/flea/target/release/flea --gui /home/flea-sandbox/flea-media-btrfs
+- flea launch line: FLEA_BIN=~/src/flea/target/release/flea FLEA_UI=~/src/flea/ui XDG_STATE_HOME=/tmp/flea-bench-state.JbmAcu setsid nohup ~/src/flea/target/release/flea --gui /home/flea-sandbox/flea-media-btrfs
 - load average at start: 0.43 1.35 1.23
 - waited 100 seconds for the box to go idle before starting
 - settle gap: 500 ms of quiet ticks
