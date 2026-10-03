@@ -37,8 +37,7 @@ See `docs/HANDOFF.md` for the full picture (what is built, bench table, what is 
   bench vs Flea 0.3.7 → paste image → ownership → Link here → open as admin →
   pause/resume → restore tabs → copied/cut marks → Flea bug checks → visual pass →
   release drafts → HANDOFF. Anything else goes to HANDOFF's "After v1" list.
-- Flea 0.3.7 shipped 2026-10-01: rebuild it in `~/src/flea` and re-run `just bench-field`
-  before claiming any lead (bench/RESULTS.md is against 0.3.6).
+- Re-bench vs Flea 0.3.7 done (2026-10-03), standard + low-end: bench/RESULTS.md.
 
 ## Running a single qa section
 `tests/qa-one.sh tests/qa.d/NN-name.sh /tmp/out` — same setup as the full suite.

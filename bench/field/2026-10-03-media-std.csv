@@ -1,0 +1,19 @@
+id,run,mapped_ms,settled_ms,pss_kb,cpu_s,child_pss_kb,thumbs_n,pss_anon_kb,uss_kb,drm_kb,thumbs_by_dir,cpu_tree_s,thumbs_by_format,ranked,preview_ms,cpu_reaped_s
+flea,1,310,1120,190718,0.51,3415,27,119872,162740,0,fail=0;large=27,1.88,heic=0;jpg=0;mkv=5;mp4=18;png=0;txt=0;webm=4;webp=0;unknown=0,yes,-,0.57
+gust,1,228,277,81934,0.19,0,unmeasurable,30432,73456,0,fail=0;large=0,0.21,unmeasurable,unranked: nothing reached the thumbnail cache so its work was not measured,-,0.19
+nautilus,1,482,14340,283675,7.90,0,641,141264,256212,0,fail=0;large=641,61.13,heic=13;jpg=0;mkv=100;mp4=400;png=14;txt=0;webm=100;webp=14;unknown=0,yes,-,12.11
+thunar,1,267,567,40347,0.38,0,unmeasurable,17580,34868,0,fail=0;large=0,0.44,unmeasurable,unranked: nothing reached the thumbnail cache so its work was not measured,-,0.38
+dolphin,1,372,7788,99117,2.71,0,500,34340,84492,0,fail=0;large=500,33.77,heic=0;jpg=50;mkv=75;mp4=300;png=0;txt=0;webm=75;webp=0;unknown=0,yes,-,33.10
+strata,1,354,1282,163819,0.68,0,unmeasurable,97520,136256,0,fail=0;large=23,2.58,unmeasurable,unranked: its watches saw 0 renders for 46 opened fixture files so neither is a count,-,0.76
+flea,2,295,812,190565,0.47,3498,27,121160,160560,0,fail=0;large=27,1.79,heic=0;jpg=0;mkv=5;mp4=18;png=0;txt=0;webm=4;webp=0;unknown=0,yes,-,0.53
+gust,2,266,291,81894,0.20,0,unmeasurable,30392,73476,0,fail=0;large=0,0.23,unmeasurable,unranked: nothing reached the thumbnail cache so its work was not measured,-,0.20
+nautilus,2,493,13968,290080,7.79,0,641,147664,262600,0,fail=0;large=641,59.89,heic=13;jpg=0;mkv=100;mp4=400;png=14;txt=0;webm=100;webp=14;unknown=0,yes,-,12.04
+thunar,2,283,584,40400,0.40,0,unmeasurable,17536,34964,0,fail=0;large=0,0.45,unmeasurable,unranked: nothing reached the thumbnail cache so its work was not measured,-,0.40
+dolphin,2,352,7627,99447,2.66,0,500,34304,84572,0,fail=0;large=500,33.27,heic=0;jpg=50;mkv=75;mp4=300;png=0;txt=0;webm=75;webp=0;unknown=0,yes,-,32.54
+strata,2,361,1266,167781,0.66,0,unmeasurable,101040,140460,0,fail=0;large=23,2.60,unmeasurable,unranked: its watches saw 0 renders for 46 opened fixture files so neither is a count,-,0.76
+flea,3,315,848,189380,0.45,3449,27,120132,159420,0,fail=0;large=27,1.81,heic=0;jpg=0;mkv=5;mp4=18;png=0;txt=0;webm=4;webp=0;unknown=0,yes,-,0.51
+gust,3,227,276,81799,0.19,0,unmeasurable,30420,73340,0,fail=0;large=0,0.21,unmeasurable,unranked: nothing reached the thumbnail cache so its work was not measured,-,0.19
+nautilus,3,497,14205,285699,7.71,0,641,143568,258408,0,fail=0;large=641,60.56,heic=13;jpg=0;mkv=100;mp4=400;png=14;txt=0;webm=100;webp=14;unknown=0,yes,-,11.99
+thunar,3,233,549,40318,0.35,0,unmeasurable,17436,34876,0,fail=0;large=0,0.40,unmeasurable,unranked: nothing reached the thumbnail cache so its work was not measured,-,0.35
+dolphin,3,367,7872,102126,2.71,0,500,33924,86016,0,fail=0;large=500,34.28,heic=0;jpg=50;mkv=75;mp4=300;png=0;txt=0;webm=75;webp=0;unknown=0,yes,-,33.59
+strata,3,400,1965,161355,0.67,0,unmeasurable,95564,133860,0,fail=0;large=23,2.58,unmeasurable,unranked: its watches saw 0 renders for 46 opened fixture files so neither is a count,-,0.76

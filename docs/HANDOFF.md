@@ -94,3 +94,16 @@ Ran out of session budget, not blocked. Remaining, in suggested order:
      ```
 2. **Test tailnet auth key** and **real cloud accounts** (only needed once P4 lands).
 3. **Shipping:** pull the latest bundle from the host exports into `~/Projects/gust`, review, then push, tag, make public, publish AUR, send the Omarchy PR (#10542), post — all yours.
+
+## After v1 (recorded, deliberately not built)
+
+New ideas and newer-Flea features go here instead of into v1.
+
+- Tree expand in the list view, Miller column count, preview-column toggle.
+- Markdown, audio and PDF previews; a transfer queue; i18n.
+- Flea 0.3.7 settings: hidden files last, tight row density, Huge/Largest grid sizes, tint today's dates, columns sized from the window.
+- P4: add-a-place discovery, Tailscale, MTP/AFC, udisks, LocalSend.
+- P5: soak, stall matrix, IME, fractional scaling, AT-SPI.
+- Extra P0 measurements: blank-frame trace, scroll frame times, menu and Quick Look latency, SMB 10k listing, whole-tree PSS.
+- Launch posts, the AUR gust-bin package, the clean-install CI job.
+- Move the listing out of the window process (a backend like Flea's) — the only way to close the low-end 100k window-PSS gap (93 vs 75 MiB, bench/RESULTS.md).

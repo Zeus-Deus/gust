@@ -15,7 +15,88 @@ three cold runs per entrant, medians with [min–max].
   Thunar from the Arch repos at run time. Full manifests sit next to each CSV.
 - Reproduce: `FLEA_REPO=~/src/flea just bench-field` (see `bench/field-bench.sh`).
 
-## Latest reproducible run (`just bench-field`, 2026-09-30, at 319fc4b)
+## v1 re-bench against Flea 0.3.7 (`just bench-field`, 2026-10-03, at ac7b8c4)
+
+Flea 0.3.7 from source (ae9419c, release build), Strata 0.20.1, Nautilus
+50.3.1, Dolphin 26.08.0, Thunar 4.20.9. Same VM as above (KVM, 8 vCPU,
+3 GiB, llvmpipe, no GPU). CSVs and manifests: `bench/field/2026-10-03-*`.
+
+**Low-end profile** (`PROFILE=lowend just bench-field`): the whole run is
+pinned to 2 CPUs (`taskset -c 0,1`, inherited by every entrant), placed in a
+user scope with `MemoryMax=2G` and swap off, and every Qt entrant gets
+`QT_QUICK_BACKEND=software`. Caches are dropped before every run on both
+profiles (cold cache). The machine itself was not resized: a Realm guest
+cannot change its own vCPU count, so the limits are applied to the run.
+Checked on the live harness process: affinity `0,1`, `memory.max`
+2147483648, `QT_QUICK_BACKEND=software` in its environment.
+
+### Standard profile (medians of 3 cold runs, [min–max])
+
+| Fixture | Entrant | First window ms | Settled ms | PSS MiB | CPU s |
+|---|---|---|---|---|---|
+| 100k | **Gust** | **240** [234–258] | **410** [340–411] | **93** | **0.24** |
+| 100k | Flea 0.3.7 | 297 [295–313] | 756 [748–769] | 177 (+6.9) | 0.36 |
+| 100k | Strata | 363 | 762 | 198 | 0.67 |
+| 100k | Dolphin | 350 | 2876 | 208 | 3.97 |
+| 100k | Nautilus | 475 | 4051 | 347 | 4.01 |
+| 100k | Thunar | 275 | 11726 | 363 | 11.67 |
+| media | **Gust** | **228** [227–266] | **277** [276–291] | 80 | **0.19** |
+| media | Flea 0.3.7 | 310 [295–315] | 848 [812–1120] | 186 (+3.4) | 0.47 |
+| media | Thunar | 267 | 567 | **39** | 0.38 |
+| media | Strata | 361 | 1282 | 160 | 0.67 |
+| media | Dolphin | 367 | 7788 | 97 | 2.71 |
+| media | Nautilus | 493 | 14205 | 279 | 7.79 |
+
+Gust leads every column of Flea's table on both fixtures.
+
+### Low-end profile (2 CPUs, 2 GiB, software rendering, cold cache)
+
+| Fixture | Entrant | First window ms | Settled ms | PSS MiB | CPU s |
+|---|---|---|---|---|---|
+| 100k | Gust | 217 [205–232] | **352** [348–365] | 93 | 0.22 |
+| 100k | Flea 0.3.7 | **211** [205–219] | 434 [354–741] | **75** (+6.9) | **0.18** |
+| 100k | Strata | 362 | 785 | 195 | 0.62 |
+| 100k | Dolphin | 357 | 2748 | 209 | 2.87 |
+| 100k | Nautilus | 490 | 3976 | 348 | 3.74 |
+| 100k | Thunar | 251 | 11309 | 363 | 11.26 |
+| media | Gust | 242 [228–273] | **321** [319–425] | 76 | **0.19** |
+| media | Flea 0.3.7 | **204** [201–217] | 983 [975–988] | **74** (+3.4) | 0.20 |
+| media | Thunar | 251 | 551 | **39** | 0.35 |
+| media | Strata | 362 | 2045 | 162 | 0.56 |
+| media | Dolphin | 359 | 15788 | 94 | 2.23 |
+| media | Nautilus | 464 | 28171 | 280 | 5.46 |
+
+**Where Gust does not lead on the low-end profile, and why (data, not a fix):**
+
+- *Why Flea moved and Gust did not.* Software rendering is what changed
+  Flea's numbers: first window 297 → 211 ms and PSS 177 → 75 MiB on 100k
+  (media 310 → 204 ms, 186 → 74 MiB). That is consistent with Flea's
+  Quickshell window otherwise rendering through llvmpipe GL on this
+  GPU-less machine (inferred from the numbers, not traced). Gust already
+  picks Qt's software renderer when it finds no GPU (renderer
+  auto-selection, STATUS), so the profile takes nothing away from it:
+  240 → 217 ms and 93 → 93 MiB. The standard-profile gap was Flea's GL
+  context on llvmpipe, not Gust's work.
+- *First window, 6 ms (100k) and 38 ms (media).* The 100k ranges overlap
+  (Gust 205–232, Flea 205–219). The media gap is real. Gust still settles
+  first by 82 ms (100k) and 662 ms (media): the window is usable sooner.
+- *PSS on 100k, 93 vs 75 (+6.9 helper) MiB.* Gust holds the listing in
+  the window process; Flea keeps it in a separate backend and the window
+  gets only the visible rows. Measured with the release binary, software
+  renderer, pinned to 2 CPUs (window process, `smaps_rollup`, 2 runs
+  each): empty folder 53–57 MiB (16 MiB anon), 100k folder 77–80 MiB
+  (39–40 MiB anon), media folder 62–66 MiB (25 MiB anon). About 23 MiB of
+  the 100k figure is the listing itself. Window + helper: Flea 82 MiB,
+  Gust 93 MiB on 100k; on media Gust is lower (76 vs 77).
+- *CPU on 100k, 0.22 vs 0.18 s.* Gust lists and sorts in the window
+  process; Flea's backend does that work outside it, so its window-only
+  CPU is lower while its whole-tree CPU is higher (0.30 vs 0.23 s).
+
+Closing these would mean moving the listing out of the window process.
+That is an architecture change, not a v1 item; it is recorded in
+`docs/HANDOFF.md` under "After v1".
+
+## Earlier run (`just bench-field`, 2026-09-30, at 319fc4b, Flea 0.3.6)
 
 CSVs: `bench/field/2026-09-30-scale-std.csv`, `bench/field/2026-09-30-media-std.csv`
 (medians over three cold runs; the table below this one is the first run at a4541a1).
@@ -72,7 +153,7 @@ the rows on screen (DECISIONS D6).
 |---|---|
 | Lead every column of Flea's table, 100k | **met** |
 | Lead every column of Flea's table, media | **met** vs Flea; Thunar has lower PSS (41 vs 90 MiB) |
-| Low-end profile (2 vCPU / 2 GB / software) | **not run** — needs the VM re-provisioned; `PROFILE=lowend just bench-field` |
+| Low-end profile (2 vCPU / 2 GB / software) | **run 2026-10-03** vs Flea 0.3.7: Gust leads settled on both fixtures; Flea leads first window (6 / 38 ms) and window PSS on 100k — explained above |
 | First rows painted before Flea's first window | not measured |
 | Zero blank frames on folder change | not measured |
 | 100k scroll p95 ≤ 16.7 ms on software rendering | not measured |

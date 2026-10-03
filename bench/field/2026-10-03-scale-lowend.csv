@@ -1,0 +1,19 @@
+id,run,mapped_ms,settled_ms,pss_kb,cpu_s,child_pss_kb,thumbs_n,pss_anon_kb,uss_kb,drm_kb,thumbs_by_dir,cpu_tree_s,thumbs_by_format,ranked,preview_ms,cpu_reaped_s
+flea,1,219,434,76359,0.18,6939,unmeasurable,35008,67744,0,fail=0;large=0,0.31,unmeasurable,unranked: nothing reached the thumbnail cache so its work was not measured,-,0.25
+gust,1,217,365,95337,0.22,0,unmeasurable,47148,86848,0,fail=0;large=0,0.23,unmeasurable,unranked: nothing reached the thumbnail cache so its work was not measured,-,0.22
+nautilus,1,660,4222,374763,4.05,0,unmeasurable,314292,342480,0,fail=0;large=0,4.06,unmeasurable,unranked: nothing reached the thumbnail cache so its work was not measured,-,4.05
+thunar,1,285,11253,375180,11.19,0,unmeasurable,352416,369700,0,fail=0;large=0,11.24,unmeasurable,unranked: nothing reached the thumbnail cache so its work was not measured,-,11.19
+dolphin,1,357,2847,214459,2.83,0,unmeasurable,143368,200512,0,fail=0;large=0,2.86,unmeasurable,unranked: nothing reached the thumbnail cache so its work was not measured,-,2.83
+strata,1,411,1020,208773,0.91,0,0,134748,184136,0,fail=0;large=0,1.00,txt=0;unknown=0,yes,-,0.98
+flea,2,205,354,76417,0.18,7114,unmeasurable,35012,67872,0,fail=0;large=0,0.30,unmeasurable,unranked: nothing reached the thumbnail cache so its work was not measured,-,0.25
+gust,2,232,352,94499,0.23,0,unmeasurable,46776,86028,0,fail=0;large=0,0.25,unmeasurable,unranked: nothing reached the thumbnail cache so its work was not measured,-,0.23
+nautilus,2,478,3863,355326,3.64,0,unmeasurable,296416,323216,0,fail=0;large=0,3.65,unmeasurable,unranked: nothing reached the thumbnail cache so its work was not measured,-,3.64
+thunar,2,251,11404,372008,11.36,0,unmeasurable,349260,366548,0,fail=0;large=0,11.40,unmeasurable,unranked: nothing reached the thumbnail cache so its work was not measured,-,11.36
+dolphin,2,358,2748,212411,2.87,0,unmeasurable,143416,196396,0,fail=0;large=0,2.91,unmeasurable,unranked: nothing reached the thumbnail cache so its work was not measured,-,2.87
+strata,2,362,785,199580,0.62,0,0,126240,175136,0,fail=0;large=0,0.71,txt=0;unknown=0,yes,-,0.69
+flea,3,211,741,76502,0.18,7114,unmeasurable,34980,67868,0,fail=0;large=0,0.30,unmeasurable,unranked: nothing reached the thumbnail cache so its work was not measured,-,0.25
+gust,3,205,348,97043,0.22,0,unmeasurable,47020,86904,0,fail=0;large=0,0.23,unmeasurable,unranked: nothing reached the thumbnail cache so its work was not measured,-,0.22
+nautilus,3,490,3976,356660,3.74,0,unmeasurable,298044,324712,0,fail=0;large=0,3.75,unmeasurable,unranked: nothing reached the thumbnail cache so its work was not measured,-,3.74
+thunar,3,239,11309,372165,11.26,0,unmeasurable,349276,366724,0,fail=0;large=0,11.30,unmeasurable,unranked: nothing reached the thumbnail cache so its work was not measured,-,11.26
+dolphin,3,356,2722,216791,2.87,0,unmeasurable,143736,201204,0,fail=0;large=0,2.91,unmeasurable,unranked: nothing reached the thumbnail cache so its work was not measured,-,2.87
+strata,3,326,717,199126,0.57,0,0,126224,174824,0,fail=0;large=0,0.67,txt=0;unknown=0,yes,-,0.63
