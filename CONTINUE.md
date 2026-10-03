@@ -29,12 +29,14 @@ See `docs/HANDOFF.md` for the full picture (what is built, bench table, what is 
 - Gates at the custom-actions commit: test 719/0 (41 named skips), lint green, qa 410/0, theme matrix 22/22.
 - Uncommitted work: none.
 - qa §28 no longer opens a real terminal (stand-in launcher, D30); full qa 410/0 at 3a95fe5.
-- HEAD = per-folder sort (D31). Verified: app build, core tests 283/0, QML lint, fmt;
-  qa §29 passed 13/0 run alone. Still to run on HEAD: full `just test`, `just lint`
-  (clippy) and full `just qa`.
-- Known bug to fix first: the sort arrow in `ui/RowsView.qml` header shows "↑" for a
-  DESCENDING sort (vision review of 29c). Make ascending ▲/descending ▼ or flip the glyphs,
-  and assert the header text in §29.
+- Per-folder sort (D31) gated on a fresh VM: `just test` 724/0 (41 named skips),
+  `just lint` green, `just qa` 425/0 (includes the new §29 header-arrow asserts).
+- Sort arrows fixed (D32): ▲ ascending, ▼ descending; §29 failed 3 asserts on the old
+  glyphs first, then 17/0.
+- v1 scope is frozen in the owner's handoff (section 4); work it in order:
+  bench vs Flea 0.3.7 → paste image → ownership → Link here → open as admin →
+  pause/resume → restore tabs → copied/cut marks → Flea bug checks → visual pass →
+  release drafts → HANDOFF. Anything else goes to HANDOFF's "After v1" list.
 - Flea 0.3.7 shipped 2026-10-01: rebuild it in `~/src/flea` and re-run `just bench-field`
   before claiming any lead (bench/RESULTS.md is against 0.3.6).
 

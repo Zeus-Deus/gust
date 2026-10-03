@@ -2746,6 +2746,10 @@ Window {
                 const p = it.nameHeaderPoint()
                 return p ? [Math.round(p.x), Math.round(p.y)] : null
             })(),
+            headerTexts: (function () {
+                const it = win.activePaneItem()
+                return it && it.headerTexts ? it.headerTexts() : []
+            })(),
             keyMapRows: keyMapPanel.open ? keyMapPanel.rows.length : 0,
             zoom: Tokens.zoom,
             activeTabPath: win.dirModel ? win.dirModel.location : "",

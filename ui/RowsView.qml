@@ -47,6 +47,10 @@ FocusScope {
     function nameHeaderPoint() {
         return header.mapToItem(null, Tokens.rowPaddingX * 3, header.height / 2)
     }
+    /// The four header labels as drawn, for the qa probe (sort arrows).
+    function headerTexts() {
+        return [nameHeaderText.text, kindHeaderText.text, sizeHeaderText.text, modHeaderText.text]
+    }
 
     function cursorAnchor() {
         const it = list.itemAtIndex(root.model ? root.model.cursor : -1)
@@ -96,8 +100,9 @@ FocusScope {
                         height: parent.height
                         Text {
                             anchors.verticalCenter: parent.verticalCenter
+                            id: nameHeaderText
                             text: "Name" + ((root.model ? root.model.sort_field : "") === "name"
-                                            ? ((root.model ? root.model.sort_ascending : true) ? " ↓" : " ↑") : "")
+                                            ? ((root.model ? root.model.sort_ascending : true) ? " ▲" : " ▼") : "")
                             color: (root.model ? root.model.sort_field : "") === "name" ? Tokens.foregroundBright : Tokens.foregroundDim
                             font.family: Tokens.fontFamily
                             font.pixelSize: Tokens.fontSmall
@@ -117,8 +122,9 @@ FocusScope {
                         Text {
                             anchors.left: parent.left
                             anchors.verticalCenter: parent.verticalCenter
+                            id: kindHeaderText
                             text: "Kind" + ((root.model ? root.model.sort_field : "") === "kind"
-                                            ? ((root.model ? root.model.sort_ascending : true) ? " ↓" : " ↑") : "")
+                                            ? ((root.model ? root.model.sort_ascending : true) ? " ▲" : " ▼") : "")
                             color: (root.model ? root.model.sort_field : "") === "kind" ? Tokens.foregroundBright : Tokens.foregroundDim
                             font.family: Tokens.fontFamily
                             font.pixelSize: Tokens.fontSmall
@@ -139,8 +145,9 @@ FocusScope {
                             anchors.right: parent.right
                             anchors.rightMargin: Tokens.spaceLg
                             anchors.verticalCenter: parent.verticalCenter
+                            id: sizeHeaderText
                             text: "Size" + ((root.model ? root.model.sort_field : "") === "size"
-                                            ? ((root.model ? root.model.sort_ascending : true) ? " ↓" : " ↑") : "")
+                                            ? ((root.model ? root.model.sort_ascending : true) ? " ▲" : " ▼") : "")
                             color: (root.model ? root.model.sort_field : "") === "size" ? Tokens.foregroundBright : Tokens.foregroundDim
                             font.family: Tokens.fontFamily
                             font.pixelSize: Tokens.fontSmall
@@ -160,8 +167,9 @@ FocusScope {
                         Text {
                             anchors.right: parent.right
                             anchors.verticalCenter: parent.verticalCenter
+                            id: modHeaderText
                             text: "Modified" + ((root.model ? root.model.sort_field : "") === "modified"
-                                            ? ((root.model ? root.model.sort_ascending : true) ? " ↓" : " ↑") : "")
+                                            ? ((root.model ? root.model.sort_ascending : true) ? " ▲" : " ▼") : "")
                             color: (root.model ? root.model.sort_field : "") === "modified" ? Tokens.foregroundBright : Tokens.foregroundDim
                             font.family: Tokens.fontFamily
                             font.pixelSize: Tokens.fontSmall

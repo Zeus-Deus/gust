@@ -46,6 +46,10 @@ Item {
         const v = currentView()
         return v.nameHeaderPoint ? v.nameHeaderPoint() : null
     }
+    function headerTexts() {
+        const v = currentView()
+        return v.headerTexts ? v.headerTexts() : []
+    }
 
     RowsView {
         id: rowsView

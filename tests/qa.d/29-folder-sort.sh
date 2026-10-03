@@ -18,10 +18,14 @@ goto "$d29/docs" || bad "could not open docs"
 wait_for "d['model']['settled']" "True" 20 >/dev/null
 expect "docs was never sorted: by name" "d['model']['sort_field']+' '+str(d['model']['sort_ascending'])" "name True"
 expect "docs rows by name" "' '.join(d['model']['visible'])" "a.pdf b.txt c.jpg"
+expect "Name header shows ascending" "d['headerTexts'][0]" "Name ▲"
 goto "$d29/pics" || bad "could not reopen pics"
 wait_for "d['model']['settled']" "True" 20 >/dev/null
 expect "back in pics: its sort came back" "d['model']['sort_field']+' '+str(d['model']['sort_ascending'])" "kind False"
 expect "pics rows by kind, reversed" "' '.join(d['model']['visible'])" "b.txt a.pdf c.jpg"
+# Users read an up-pointing triangle as ascending; descending points down.
+expect "Kind header shows descending" "d['headerTexts'][1]" "Kind ▼"
+expect "Name header has no arrow" "d['headerTexts'][0]" "Name"
 shot 29a-folder-sort
 
 say "29c · a header click with the real pointer is remembered too"
@@ -41,6 +45,7 @@ if [[ "$MOUSE_OK" == 1 ]]; then
   expect "pics kept its own sort" "d['model']['sort_field']+' '+str(d['model']['sort_ascending'])" "kind False"
   goto "$d29/docs"; wait_for "d['model']['settled']" "True" 20 >/dev/null
   expect "docs kept the clicked sort" "' '.join(d['model']['visible'])" "c.jpg b.txt a.pdf"
+  expect "Name header shows descending after the click" "d['headerTexts'][0]" "Name ▼"
   shot 29c-header-click
   palette_run "Sort by name"; sleep 0.6
 else
