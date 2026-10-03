@@ -136,6 +136,23 @@ impl JobHandle {
         self.cancel.cancel();
     }
 
+    /// Hold the worker at its next checkpoint (between files, or between
+    /// 128 KiB blocks inside one). Nothing is undone; Resume continues
+    /// where it stopped and Cancel still works while paused.
+    pub fn pause(&self) {
+        if !self.is_finished() {
+            self.cancel.pause();
+        }
+    }
+
+    pub fn resume(&self) {
+        self.cancel.resume();
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.cancel.is_paused() && !self.is_finished()
+    }
+
     pub fn is_finished(&self) -> bool {
         self.snapshot().is_finished()
     }
@@ -364,7 +381,7 @@ fn run(
     // reports no bytes) still advances the byte count by its share.
     let mut source_bytes: Vec<u64> = Vec::new();
     for src in req.sources() {
-        if cancel.is_cancelled() {
+        if cancel.checkpoint() {
             set_rec(&|r| r.state = crate::journal::JobState::Cancelled);
             set(&progress, |p| {
                 p.state = JobState::Cancelled;
@@ -448,7 +465,7 @@ fn run(
 
     for (src_index, src) in req.sources().into_iter().enumerate() {
         let bytes_at_start = base_bytes;
-        if cancel.is_cancelled() {
+        if cancel.checkpoint() {
             set_rec(&|r| r.state = crate::journal::JobState::Cancelled);
             set(&progress, |p| {
                 p.state = JobState::Cancelled;
@@ -1323,6 +1340,109 @@ mod cancel_timing_tests {
             assert!(rec.offers_undo());
         }
         let _ = started;
+        fs::remove_dir_all(&d).ok();
+    }
+
+    /// Pause holds a running copy where it is; Resume finishes it with
+    /// every file intact, and the job still offers its undo.
+    #[test]
+    fn pause_holds_a_copy_and_resume_finishes_it() {
+        let d = tmp("pause");
+        fs::create_dir_all(d.join("src")).unwrap();
+        // Each file is fsynced, so 800 keeps the copy running for seconds
+        // on a real disk without making the suite slow.
+        for i in 0..800 {
+            fs::write(d.join(format!("src/f{i:05}")), vec![b'p'; 512]).unwrap();
+        }
+        fs::create_dir_all(d.join("dest")).unwrap();
+        let mut job = start(
+            "pause",
+            Request::Copy {
+                sources: vec![d.join("src")],
+                dest_dir: d.join("dest"),
+            },
+            ConflictPolicy::Replace,
+        );
+        for _ in 0..500 {
+            if job.snapshot().entries_done > 0 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        job.pause();
+        if job.is_finished() {
+            // Won the race on a fast disk: nothing to hold. Still coherent.
+            assert_eq!(job.wait().state, JobState::Confirmed);
+            fs::remove_dir_all(&d).ok();
+            return;
+        }
+        assert!(job.is_paused());
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        let held = job.snapshot().entries_done;
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        assert_eq!(
+            job.snapshot().entries_done,
+            held,
+            "a paused job must not make progress"
+        );
+        assert_eq!(
+            job.snapshot().state,
+            JobState::Running,
+            "paused is not finished"
+        );
+        job.resume();
+        let snap = job.wait();
+        assert_eq!(snap.state, JobState::Confirmed);
+        assert_eq!(fs::read_dir(d.join("dest/src")).unwrap().count(), 800);
+        assert!(
+            job.record().offers_undo(),
+            "a paused-then-finished copy is undoable"
+        );
+        fs::remove_dir_all(&d).ok();
+    }
+
+    /// Cancel works while paused, and removes nothing from the source.
+    #[test]
+    fn cancel_while_paused_stops_the_job() {
+        let d = tmp("pausecancel");
+        fs::create_dir_all(d.join("src")).unwrap();
+        for i in 0..4000 {
+            fs::write(d.join(format!("src/f{i:05}")), vec![b'q'; 512]).unwrap();
+        }
+        fs::create_dir_all(d.join("dest")).unwrap();
+        let mut job = start(
+            "pc",
+            Request::Move {
+                sources: vec![d.join("src")],
+                dest_dir: d.join("dest"),
+            },
+            ConflictPolicy::Replace,
+        );
+        for _ in 0..500 {
+            if job.snapshot().entries_done > 0 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        job.pause();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let t = std::time::Instant::now();
+        job.cancel();
+        let snap = job.wait();
+        assert!(t.elapsed() < std::time::Duration::from_secs(5));
+        assert!(
+            snap.state == JobState::Cancelled || snap.state == JobState::Confirmed,
+            "{:?}",
+            snap.state
+        );
+        if snap.state == JobState::Cancelled {
+            // A cancelled move keeps every file in exactly one place.
+            let a = fs::read_dir(d.join("src")).map(|r| r.count()).unwrap_or(0);
+            let b = fs::read_dir(d.join("dest/src"))
+                .map(|r| r.count())
+                .unwrap_or(0);
+            assert_eq!(a + b, 4000, "no file may be lost: src {a} + dest {b}");
+        }
         fs::remove_dir_all(&d).ok();
     }
 

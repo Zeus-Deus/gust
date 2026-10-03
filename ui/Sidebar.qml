@@ -35,6 +35,18 @@ Rectangle {
     /// The user clicked a device row: mount it, or browse it if mounted.
     signal deviceChosen(string path, bool mounted)
 
+    /// Centre of each place row by label, in window coordinates (qa).
+    function placePoints() {
+        const out = {}
+        for (let i = 0; i < placeRepeater.count; i++) {
+            const it = placeRepeater.itemAt(i)
+            if (!it) continue
+            const p = it.mapToItem(null, it.width / 2, it.height / 2)
+            out[places.get(i).label] = [Math.round(p.x), Math.round(p.y)]
+        }
+        return out
+    }
+
     ListModel {
         id: places
         // Populated at startup from XDG dirs that actually exist.
@@ -88,6 +100,7 @@ Rectangle {
         }
 
         Repeater {
+            id: placeRepeater
             model: places
             delegate: Rectangle {
                 width: column.width

@@ -74,6 +74,18 @@ Item {
         keys.forceActiveFocus()
     }
 
+    /// Centre of each entry by label, in window coordinates (qa).
+    function itemPoints() {
+        const out = {}
+        for (let i = 0; i < menuRepeater.count; i++) {
+            const it = menuRepeater.itemAt(i)
+            if (!it || items[i].separator) continue
+            const p = it.mapToItem(null, it.width / 2, it.height / 2)
+            out[items[i].label] = [Math.round(p.x), Math.round(p.y)]
+        }
+        return out
+    }
+
     function close() {
         if (!visible) return
         visible = false
@@ -134,6 +146,7 @@ Item {
             width: parent.width
 
             Repeater {
+                id: menuRepeater
                 model: root.items
                 delegate: Item {
                     required property var modelData

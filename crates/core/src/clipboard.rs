@@ -390,10 +390,102 @@ pub fn offers_files() -> bool {
     types_include_files(&String::from_utf8_lossy(&out.stdout))
 }
 
+/// Does the desktop clipboard hold an image Gust can paste as a file?
+pub fn offers_image() -> bool {
+    let Ok(out) = Command::new("wl-paste")
+        .arg("--list-types")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+    else {
+        return false;
+    };
+    image_type_from_list(&String::from_utf8_lossy(&out.stdout)).is_some()
+}
+
 fn types_include_files(list: &str) -> bool {
     list.lines()
         .map(str::trim)
         .any(|t| t == "x-special/gnome-copied-files" || t == "text/uri-list")
+}
+
+/// The image type to take from a `wl-paste --list-types` answer, with the
+/// file extension it gets. PNG first (screenshots, browsers), then JPEG,
+/// WebP, GIF. SVG is never taken: it is a script-capable document, not a
+/// picture (same rule as the thumbnailer). Files on the clipboard win: an
+/// offer that also lists file URIs is a file copy, not an image.
+pub fn image_type_from_list(list: &str) -> Option<(&'static str, &'static str)> {
+    let types: Vec<&str> = list.lines().map(str::trim).collect();
+    if types_include_files(list) {
+        return None;
+    }
+    for (mime, ext) in [
+        ("image/png", "png"),
+        ("image/jpeg", "jpg"),
+        ("image/webp", "webp"),
+        ("image/gif", "gif"),
+    ] {
+        if types.contains(&mime) {
+            return Some((mime, ext));
+        }
+    }
+    None
+}
+
+/// What an image paste found on the clipboard.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClipImage {
+    /// No image (or files, which a normal paste handles).
+    None,
+    Image {
+        bytes: Vec<u8>,
+        ext: &'static str,
+    },
+    Refused(String),
+}
+
+/// Read an image the desktop offers, at most `max` bytes. The bytes are
+/// never decoded here: they are written to a file as they are. Run this on
+/// a worker thread; `wl-paste` is a separate process.
+pub fn read_image(max: usize) -> ClipImage {
+    use std::io::Read;
+    let Ok(out) = Command::new("wl-paste")
+        .arg("--list-types")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+    else {
+        return ClipImage::Refused("pasting images needs wl-clipboard (wl-paste)".into());
+    };
+    let Some((mime, ext)) = image_type_from_list(&String::from_utf8_lossy(&out.stdout)) else {
+        return ClipImage::None;
+    };
+    let Ok(mut child) = Command::new("wl-paste")
+        .arg("--no-newline")
+        .arg("--type")
+        .arg(mime)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return ClipImage::Refused("could not read the clipboard".into());
+    };
+    let mut bytes = Vec::new();
+    let read = child
+        .stdout
+        .take()
+        .map(|o| o.take(max as u64 + 1).read_to_end(&mut bytes));
+    if bytes.len() > max {
+        let _ = child.kill();
+        let _ = child.wait();
+        return ClipImage::Refused("that image is too large to paste as a file".into());
+    }
+    let ok = child.wait().map(|s| s.success()).unwrap_or(false);
+    if !matches!(read, Some(Ok(_))) || !ok || bytes.is_empty() {
+        return ClipImage::Refused("the clipboard image could not be read".into());
+    }
+    ClipImage::Image { bytes, ext }
 }
 
 /// Read whatever the desktop currently offers.
@@ -431,6 +523,23 @@ pub fn read() -> Option<ClipContents> {
 #[cfg(test)]
 mod codec_tests {
     use super::*;
+
+    #[test]
+    fn an_image_offer_is_recognised_and_files_win() {
+        assert_eq!(
+            image_type_from_list("image/png\ntext/plain\n"),
+            Some(("image/png", "png"))
+        );
+        assert_eq!(
+            image_type_from_list("image/jpeg\nimage/webp\n"),
+            Some(("image/jpeg", "jpg"))
+        );
+        // A file manager's copy also offers icons as images; files win.
+        assert_eq!(image_type_from_list("text/uri-list\nimage/png\n"), None);
+        // SVG is a document that can carry script: never pasted as a picture.
+        assert_eq!(image_type_from_list("image/svg+xml\n"), None);
+        assert_eq!(image_type_from_list("text/plain\n"), None);
+    }
 
     #[test]
     fn the_helper_protocol_carries_any_bytes() {

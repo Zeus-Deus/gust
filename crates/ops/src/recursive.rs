@@ -75,7 +75,7 @@ fn walk(
     plan: &mut Plan,
     cancel: &CancelToken,
 ) -> OpResult<()> {
-    if cancel.is_cancelled() {
+    if cancel.checkpoint() {
         return Err(OpError::Cancelled);
     }
     if depth >= MAX_DEPTH {
@@ -85,7 +85,7 @@ fn walk(
     }
 
     for (name, st) in read_dir_at(dir)? {
-        if cancel.is_cancelled() {
+        if cancel.checkpoint() {
             return Err(OpError::Cancelled);
         }
         let child_rel = rel.join(&name);
@@ -193,7 +193,7 @@ pub fn copy_tree_opts(
         // Create the destination root itself, then mirror the tree.
         create_dir_anchored(dst_root)?;
         for rel in &plan.dirs {
-            if cancel.is_cancelled() {
+            if cancel.checkpoint() {
                 return Err(OpError::Cancelled);
             }
             create_dir_anchored(&out(rel))?;
@@ -201,7 +201,7 @@ pub fn copy_tree_opts(
             progress(done, total, bytes_done, plan.total_bytes);
         }
         for (rel, size) in &plan.files {
-            if cancel.is_cancelled() {
+            if cancel.checkpoint() {
                 return Err(OpError::Cancelled);
             }
             let (sd, sn) = resolve_parent(&src_root.join(rel))?;
@@ -215,7 +215,7 @@ pub fn copy_tree_opts(
             progress(done, total, bytes_done, plan.total_bytes);
         }
         for rel in &plan.symlinks {
-            if cancel.is_cancelled() {
+            if cancel.checkpoint() {
                 return Err(OpError::Cancelled);
             }
             let (sd, sn) = resolve_parent(&src_root.join(rel))?;

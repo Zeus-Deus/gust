@@ -30,6 +30,7 @@ pub mod recent;
 pub mod renderer;
 pub mod search;
 pub mod selection;
+pub mod session;
 pub mod settings;
 pub mod sorts;
 pub mod stall;

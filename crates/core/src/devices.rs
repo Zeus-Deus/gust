@@ -217,6 +217,14 @@ fn json_bool(obj: &str, key: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// The devices the sidebar shows: only ones a click can do something with.
+/// An empty optical drive or a stick with no filesystem the kernel can
+/// name has nothing to open, so it gets no row (Flea 0.3.7: "drives with
+/// no filesystem no longer leave an unusable sidebar row").
+pub fn sidebar_devices(all: Vec<Device>) -> Vec<Device> {
+    all.into_iter().filter(|d| !d.is_empty_drive()).collect()
+}
+
 /// Ask the kernel what block devices exist.
 ///
 /// A local read: this cannot hang on a network and needs no daemon.
@@ -481,5 +489,31 @@ mod tests {
             assert!(!d.display().is_empty());
             assert!(!d.state_text().is_empty());
         }
+    }
+
+    #[test]
+    fn a_drive_with_nothing_to_open_gets_no_sidebar_row() {
+        let mk = |name: &str, fstype: Option<&str>, mp: Option<&str>, kind| Device {
+            name: name.into(),
+            path: format!("/dev/{name}"),
+            kind,
+            label: None,
+            size: "8G".into(),
+            fstype: fstype.map(str::to_string),
+            mount_point: mp.map(PathBuf::from),
+        };
+        let shown = sidebar_devices(vec![
+            mk("sr0", None, None, DeviceKind::Disc),
+            mk("sdb", None, None, DeviceKind::Removable),
+            mk("sdc1", Some("vfat"), None, DeviceKind::Removable),
+            mk(
+                "sdd1",
+                Some("exfat"),
+                Some("/run/media/u/X"),
+                DeviceKind::Removable,
+            ),
+        ]);
+        let names: Vec<&str> = shown.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, ["sdc1", "sdd1"]);
     }
 }

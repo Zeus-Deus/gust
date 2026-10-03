@@ -13,9 +13,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 /// Cooperative cancellation. Every listing/remote call takes one.
+///
+/// A transfer's token can also be paused. Workers call [`checkpoint`] where
+/// they would check for cancellation: it waits there while paused, and a
+/// cancel ends the wait at once. [`is_cancelled`] never waits, so the GUI
+/// thread can always ask.
+///
+/// [`checkpoint`]: CancelToken::checkpoint
+/// [`is_cancelled`]: CancelToken::is_cancelled
 #[derive(Debug, Clone, Default)]
 pub struct CancelToken {
     flag: Arc<AtomicBool>,
+    paused: Arc<AtomicBool>,
 }
 
 impl CancelToken {
@@ -27,6 +36,76 @@ impl CancelToken {
     }
     pub fn is_cancelled(&self) -> bool {
         self.flag.load(Ordering::SeqCst)
+    }
+    pub fn pause(&self) {
+        self.paused.store(true, Ordering::SeqCst);
+    }
+    pub fn resume(&self) {
+        self.paused.store(false, Ordering::SeqCst);
+    }
+    pub fn is_paused(&self) -> bool {
+        self.paused.load(Ordering::SeqCst) && !self.is_cancelled()
+    }
+    /// Worker side: wait while paused, then report cancellation. Never
+    /// call from the GUI thread.
+    pub fn checkpoint(&self) -> bool {
+        while self.paused.load(Ordering::SeqCst) && !self.is_cancelled() {
+            std::thread::sleep(std::time::Duration::from_millis(40));
+        }
+        self.is_cancelled()
+    }
+}
+
+#[cfg(test)]
+mod pause_tests {
+    use super::CancelToken;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn a_paused_checkpoint_waits_until_resumed() {
+        let t = CancelToken::new();
+        t.pause();
+        let w = t.clone();
+        let h = std::thread::spawn(move || {
+            let s = Instant::now();
+            let c = w.checkpoint();
+            (c, s.elapsed())
+        });
+        std::thread::sleep(Duration::from_millis(250));
+        assert!(t.is_paused());
+        t.resume();
+        let (cancelled, waited) = h.join().unwrap();
+        assert!(!cancelled);
+        assert!(
+            waited >= Duration::from_millis(200),
+            "returned early: {waited:?}"
+        );
+    }
+
+    #[test]
+    fn cancel_ends_a_pause_at_once() {
+        let t = CancelToken::new();
+        t.pause();
+        let w = t.clone();
+        let h = std::thread::spawn(move || w.checkpoint());
+        std::thread::sleep(Duration::from_millis(100));
+        let s = Instant::now();
+        t.cancel();
+        assert!(
+            h.join().unwrap(),
+            "a cancelled checkpoint reports cancelled"
+        );
+        assert!(s.elapsed() < Duration::from_millis(500));
+        assert!(!t.is_paused(), "a cancelled job is not 'paused'");
+    }
+
+    #[test]
+    fn is_cancelled_never_waits() {
+        let t = CancelToken::new();
+        t.pause();
+        let s = Instant::now();
+        assert!(!t.is_cancelled());
+        assert!(s.elapsed() < Duration::from_millis(20));
     }
 }
 

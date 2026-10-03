@@ -239,6 +239,54 @@ fn claim_show_in_folder() {
     }
 }
 
+/// Check and apply the administrator window's arguments:
+/// `--admin <wayland socket> <theme state dir> <qa state or -> <folder>`.
+///
+/// Nothing here is a secret (polkit already asked for the password). The
+/// socket must belong to the user pkexec authenticated, so a root window
+/// can only ever appear on that user's own desktop; the folder must be an
+/// absolute, existing directory. The window gets a private runtime dir.
+fn prepare_admin_session(a: &[String]) -> Result<(), String> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
+    if !is_root() {
+        return Err("this mode is only for pkexec".into());
+    }
+    let [socket, theme, qa, folder] = a else {
+        return Err("expected: --admin SOCKET THEME QA FOLDER".into());
+    };
+    let uid: u32 = std::env::var("PKEXEC_UID")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .ok_or("not started by pkexec")?;
+    let sm = std::fs::symlink_metadata(socket).map_err(|_| "no display socket")?;
+    if !socket.starts_with('/') || !sm.file_type().is_socket() || sm.uid() != uid {
+        return Err("the display socket does not belong to the user who asked".into());
+    }
+    let dir = std::path::Path::new(folder);
+    if !dir.is_absolute() || !dir.is_dir() {
+        return Err("the folder is not an absolute, existing folder".into());
+    }
+    let rt = std::env::temp_dir().join(format!("gust-admin-{}", std::process::id()));
+    std::fs::create_dir_all(&rt).map_err(|e| e.to_string())?;
+    std::fs::set_permissions(&rt, std::fs::Permissions::from_mode(0o700))
+        .map_err(|e| e.to_string())?;
+    std::env::set_var("XDG_RUNTIME_DIR", &rt);
+    std::env::set_var("WAYLAND_DISPLAY", socket);
+    std::env::set_var("QT_QPA_PLATFORM", "wayland");
+    if std::env::var_os("LANG").is_none() {
+        std::env::set_var("LANG", "C.UTF-8");
+    }
+    if std::path::Path::new(theme).is_dir() {
+        std::env::set_var("GUST_OMARCHY_STATE", theme);
+    }
+    if qa != "-" && qa.starts_with("/tmp/") {
+        std::env::set_var("GUST_QA_STATE", qa);
+    }
+    std::env::set_var("GUST_ADMIN", "1");
+    std::env::set_var("GUST_ADMIN_FOLDER", folder);
+    Ok(())
+}
+
 fn is_root() -> bool {
     // Reading /proc/self/status avoids pulling in a C binding for one call.
     // Fails safe: if the UID cannot be determined we do NOT claim root, so a
@@ -282,6 +330,15 @@ fn main() {
     // D-Bus activated: answer "Show in folder" from other apps.
     if args.first().map(String::as_str) == Some("--dbus-service") {
         std::process::exit(fm1::run());
+    }
+    // Internal: the administrator window, started by `pkexec` from "Open as
+    // administrator". Only ever root, and only with a display socket owned
+    // by the user who authenticated (pkexec sets PKEXEC_UID).
+    if args.first().map(String::as_str) == Some("--admin") {
+        if let Err(why) = prepare_admin_session(&args[1..]) {
+            eprintln!("gust: not opening an administrator window: {why}");
+            std::process::exit(1);
+        }
     }
     // Internal: hold a clipboard offer after the window that made it.
     if args.first().map(String::as_str) == Some("--clip-serve") {

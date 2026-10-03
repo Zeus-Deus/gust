@@ -52,6 +52,9 @@ pub struct Settings {
     pub density: Density,
     /// Takes effect at the next start: the renderer is chosen before Qt.
     pub renderer: RendererChoice,
+    /// Reopen the tabs that were open when Gust last ran (when it is started
+    /// without a folder). Off by default: a fresh start opens Home.
+    pub restore_tabs: bool,
 }
 
 impl Default for Settings {
@@ -62,6 +65,7 @@ impl Default for Settings {
             sidebar: true,
             density: Density::Normal,
             renderer: RendererChoice::Auto,
+            restore_tabs: false,
         }
     }
 }
@@ -114,6 +118,11 @@ impl Settings {
                     "roomy" => s.density = Density::Roomy,
                     _ => {}
                 },
+                "restore_tabs" => {
+                    if let Ok(b) = v.parse() {
+                        s.restore_tabs = b
+                    }
+                }
                 "renderer" => match v {
                     "auto" => s.renderer = RendererChoice::Auto,
                     "software" => s.renderer = RendererChoice::Software,
@@ -135,7 +144,7 @@ impl Settings {
         // also lands on `value`: from_text ignores what it rejects.
         let known = matches!(
             key,
-            "key_preset" | "show_hidden" | "sidebar" | "density" | "renderer"
+            "key_preset" | "show_hidden" | "sidebar" | "density" | "renderer" | "restore_tabs"
         );
         let echoed = probe.to_text().lines().any(|l| {
             l.split_once('=')
@@ -151,7 +160,7 @@ impl Settings {
     pub fn to_text(&self) -> String {
         format!(
             "# Gust settings. Edited from Settings in the command palette (:settings).\n\
-             key_preset = \"{}\"\nshow_hidden = {}\nsidebar = {}\ndensity = \"{}\"\nrenderer = \"{}\"\n",
+             key_preset = \"{}\"\nshow_hidden = {}\nsidebar = {}\ndensity = \"{}\"\nrenderer = \"{}\"\nrestore_tabs = {}\n",
             match self.key_preset {
                 KeyPreset::Standard => "standard",
                 KeyPreset::Vim => "vim",
@@ -170,6 +179,7 @@ impl Settings {
                 RendererChoice::Software => "software",
                 RendererChoice::Gpu => "gpu",
             },
+            self.restore_tabs,
         )
     }
 

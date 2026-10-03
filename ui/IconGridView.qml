@@ -22,6 +22,11 @@ FocusScope {
     signal dropReleased(int row)
     property bool dragActive: false
     property int dropRow: -1
+    /// A drag made with the right button ends in a Copy/Move/Link menu.
+    property bool dragRight: false
+    /// The click that ends a right-button drag must not also open the menu.
+    property bool suppressClick: false
+    signal dropMenuRequested(int row, real x, real y)
     readonly property int dragThreshold: 8
     signal contextRequested(int row, real x, real y)
     /// Middle-click on a row: open it in a new tab (Main decides).
@@ -181,6 +186,19 @@ FocusScope {
                         wrapMode: Text.Wrap
                     }
 
+                    // Copied / cut, on the tile's corner (Flea #169).
+                    Text {
+                        visible: clipMark !== ""
+                        anchors.top: parent.top
+                        anchors.right: parent.right
+                        anchors.topMargin: Tokens.spaceXs
+                        anchors.rightMargin: Tokens.spaceSm
+                        text: clipMark === "cut" ? qsTr("cut") : qsTr("copied")
+                        color: clipMark === "cut" ? Tokens.warn : Tokens.accent
+                        font.family: Tokens.fontFamily
+                        font.pixelSize: Tokens.fontCaption
+                    }
+
                     MouseArea {
                         anchors.fill: parent
                         acceptedButtons: Qt.LeftButton | Qt.RightButton | Qt.MiddleButton
@@ -191,10 +209,16 @@ FocusScope {
                         property bool armed: false
                         onPressed: (mouse) => {
                             pressPos = Qt.point(mouse.x, mouse.y)
-                            armed = (mouse.button === Qt.LeftButton)
+                            armed = (mouse.button === Qt.LeftButton || mouse.button === Qt.RightButton)
+                            root.dragRight = (mouse.button === Qt.RightButton)
+                            root.suppressClick = false
                         }
-                        onReleased: {
-                            if (root.dragActive)
+                        onReleased: (mouse) => {
+                            if (root.dragActive && root.dragRight) {
+                                const g = mapToItem(null, mouse.x, mouse.y)
+                                root.suppressClick = true
+                                root.dropMenuRequested(root.dropRow, g.x, g.y)
+                            } else if (root.dragActive)
                                 root.dropReleased(root.dropRow)
                             armed = false
                             root.dragActive = false
@@ -217,6 +241,7 @@ FocusScope {
                             root.dragMovedTo(vp.x, vp.y)
                         }
                         onClicked: (mouse) => {
+                            if (root.suppressClick) { root.suppressClick = false; return }
                             if (mouse.button === Qt.MiddleButton) { root.middleClicked(index); return }
                             if (mouse.button === Qt.RightButton) {
                                 if (!root.model.sel_contains(index))

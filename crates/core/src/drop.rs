@@ -16,6 +16,9 @@ pub enum DropAction {
     Copy,
     /// Only ever explicit — never inferred from where something came from.
     Move,
+    /// "Link here": a symbolic link to each source, made in the target.
+    /// Only ever explicit, like Move. Nothing is copied or moved.
+    Link,
 }
 
 impl DropAction {
@@ -23,6 +26,7 @@ impl DropAction {
         match self {
             DropAction::Copy => "Copy",
             DropAction::Move => "Move",
+            DropAction::Link => "Link",
         }
     }
 }
@@ -98,12 +102,19 @@ pub fn plan_drop(
         return DropPlan::Nothing;
     }
 
-    let description = format!(
-        "{} {} to {}",
-        action.verb(),
-        count_phrase(accepted.len()),
-        display_name(&target)
-    );
+    let description = match action {
+        DropAction::Link => format!(
+            "Link {} in {}",
+            count_phrase(accepted.len()),
+            display_name(&target)
+        ),
+        _ => format!(
+            "{} {} to {}",
+            action.verb(),
+            count_phrase(accepted.len()),
+            display_name(&target)
+        ),
+    };
 
     DropPlan::Perform {
         action,
@@ -413,6 +424,34 @@ mod tests {
         assert!(
             got[0].as_os_str().as_bytes().contains(&0xff),
             "a non-UTF-8 path was mangled by the URI decoder"
+        );
+    }
+
+    #[test]
+    fn link_here_is_planned_and_described_like_the_others() {
+        let srcs = vec![pb("/home/u/a.txt"), pb("/home/u/b.txt")];
+        match plan_drop(&srcs, Path::new("/home/u/shelf"), true, DropAction::Link) {
+            DropPlan::Perform {
+                action,
+                description,
+                destination,
+                ..
+            } => {
+                assert_eq!(action, DropAction::Link);
+                assert_eq!(destination, pb("/home/u/shelf"));
+                assert_eq!(description, "Link 2 items in shelf");
+            }
+            other => panic!("{other:?}"),
+        }
+        // The same refusals hold: a folder never links into itself.
+        assert!(matches!(
+            plan_drop(&[pb("/a/f")], Path::new("/a/f/sub"), true, DropAction::Link),
+            DropPlan::Refused(_)
+        ));
+        // A link into the folder it already lives in is a no-op.
+        assert_eq!(
+            plan_drop(&[pb("/a/x")], Path::new("/a"), true, DropAction::Link),
+            DropPlan::Nothing
         );
     }
 }

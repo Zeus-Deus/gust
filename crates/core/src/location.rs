@@ -148,6 +148,29 @@ impl LocationKey {
     }
 }
 
+/// Is `target` the folder `current` already shows? Trailing and doubled
+/// slashes do not make a different place. Used so clicking the folder on
+/// screen (sidebar, breadcrumb) does not reload it (Flea 0.3.7).
+pub fn same_place(current: &LocationKey, target: &Path) -> bool {
+    let norm = |p: &Path| p.components().collect::<std::path::PathBuf>();
+    current.as_path().is_some_and(|c| norm(c) == norm(target))
+}
+
+#[cfg(test)]
+mod same_place_tests {
+    use super::*;
+
+    #[test]
+    fn the_same_folder_is_recognised_however_it_is_written() {
+        let k = LocationKey::local("/home/u/Documents");
+        assert!(same_place(&k, Path::new("/home/u/Documents")));
+        assert!(same_place(&k, Path::new("/home/u/Documents/")));
+        assert!(same_place(&k, Path::new("/home/u//Documents")));
+        assert!(!same_place(&k, Path::new("/home/u/Documents2")));
+        assert!(!same_place(&k, Path::new("/home/u")));
+    }
+}
+
 /// Render OS bytes safely for a UI label.
 ///
 /// Escapes C0/C1 controls and Unicode bidi overrides (a filename containing

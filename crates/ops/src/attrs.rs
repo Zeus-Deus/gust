@@ -22,6 +22,11 @@ pub struct Ident {
     pub mtime_nsec: i64,
 }
 
+/// dev + inode + mtime of `p` (not following a final link), for undo checks.
+pub fn ident_of(p: &Path) -> std::io::Result<Ident> {
+    ident(p)
+}
+
 fn ident(p: &Path) -> std::io::Result<Ident> {
     let m = p.symlink_metadata()?;
     Ok(Ident {
@@ -282,6 +287,196 @@ pub fn undo_modes(changes: &[ModeChanged]) -> (usize, Vec<String>) {
     (back, refused)
 }
 
+// ------------------------------------------------------------- ownership
+
+/// A requested owner change: `user`, `user:group` or `:group`, by name or
+/// number. Names are looked up in `/etc/passwd` and `/etc/group` directly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OwnerSpec {
+    pub uid: Option<u32>,
+    pub gid: Option<u32>,
+}
+
+fn id_from(db: &str, name: &str) -> Option<u32> {
+    if let Ok(n) = name.parse::<u32>() {
+        return Some(n);
+    }
+    db.lines().find_map(|l| {
+        let mut f = l.split(':');
+        let n = f.next()?;
+        let _pw = f.next()?;
+        let id: u32 = f.next()?.parse().ok()?;
+        (n == name).then_some(id)
+    })
+}
+
+impl OwnerSpec {
+    /// Parse against the given passwd/group text (tests pass fixtures).
+    pub fn parse_with(s: &str, passwd: &str, group: &str) -> Result<OwnerSpec, String> {
+        let s = s.trim();
+        if s.is_empty() {
+            return Err("type an owner (user), a group (:group) or both (user:group)".into());
+        }
+        let (u, g) = match s.split_once(':') {
+            Some((u, g)) => (u.trim(), Some(g.trim())),
+            None => (s, None),
+        };
+        let uid = if u.is_empty() {
+            None
+        } else {
+            Some(id_from(passwd, u).ok_or_else(|| format!("there is no user called {u}"))?)
+        };
+        let gid = match g {
+            None => None,
+            Some("") => return Err("after the colon, name a group".into()),
+            Some(g) => {
+                Some(id_from(group, g).ok_or_else(|| format!("there is no group called {g}"))?)
+            }
+        };
+        if uid.is_none() && gid.is_none() {
+            return Err("name a user, a group, or both".into());
+        }
+        Ok(OwnerSpec { uid, gid })
+    }
+
+    pub fn parse(s: &str) -> Result<OwnerSpec, String> {
+        let passwd = std::fs::read_to_string("/etc/passwd").unwrap_or_default();
+        let group = std::fs::read_to_string("/etc/group").unwrap_or_default();
+        Self::parse_with(s, &passwd, &group)
+    }
+}
+
+/// One ownership change, and what undo needs to take it back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnerChanged {
+    pub path: PathBuf,
+    pub old: (u32, u32),
+    pub new: (u32, u32),
+    pub ident: Ident,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct OwnerOutcome {
+    pub changed: Vec<OwnerChanged>,
+    pub unchanged: usize,
+    pub failed: Vec<String>,
+}
+
+fn chown_nofollow(p: &Path, uid: u32, gid: u32) -> std::io::Result<()> {
+    use rustix::fs::{chownat, AtFlags, CWD};
+    use rustix::process::{Gid, Uid};
+    chownat(
+        CWD,
+        p,
+        Some(Uid::from_raw(uid)),
+        Some(Gid::from_raw(gid)),
+        AtFlags::SYMLINK_NOFOLLOW,
+    )
+    .map_err(std::io::Error::from)
+}
+
+/// Change owner and/or group of each path. Links are skipped (their own
+/// owner is meaningless for access), and a file with setuid/setgid is
+/// refused: the kernel clears those bits on a chown, which would change a
+/// privilege boundary as a side effect (same rule as D19). Without admin
+/// rights the kernel allows only a group you belong to; anything else comes
+/// back as a plain refusal, per file.
+pub fn set_owners(paths: &[PathBuf], spec: OwnerSpec) -> OwnerOutcome {
+    let mut out = OwnerOutcome::default();
+    for p in paths {
+        let name = p
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let md = match p.symlink_metadata() {
+            Ok(m) => m,
+            Err(_) => {
+                out.failed.push(format!("{name}: no longer there"));
+                continue;
+            }
+        };
+        if md.file_type().is_symlink() {
+            out.failed
+                .push(format!("{name}: a link has no owner of its own to change"));
+            continue;
+        }
+        if md.is_file() && md.mode() & 0o6000 != 0 {
+            out.failed.push(format!(
+                "{name}: has setuid/setgid, which a change of owner would remove; left as it is"
+            ));
+            continue;
+        }
+        let old = (md.uid(), md.gid());
+        let new = (spec.uid.unwrap_or(old.0), spec.gid.unwrap_or(old.1));
+        if new == old {
+            out.unchanged += 1;
+            continue;
+        }
+        if let Err(e) = chown_nofollow(p, new.0, new.1) {
+            let why = if e.kind() == std::io::ErrorKind::PermissionDenied {
+                if new.0 != old.0 {
+                    "changing the owner needs administrator rights (Open as administrator)"
+                        .to_string()
+                } else {
+                    "you can only give it a group you belong to".to_string()
+                }
+            } else {
+                crate::engine::plain_io_message(&e)
+            };
+            out.failed.push(format!("{name}: {why}"));
+            continue;
+        }
+        match ident(p) {
+            Ok(ident) => out.changed.push(OwnerChanged {
+                path: p.clone(),
+                old,
+                new,
+                ident,
+            }),
+            Err(e) => out
+                .failed
+                .push(format!("{name}: {}", crate::engine::plain_io_message(&e))),
+        }
+    }
+    out
+}
+
+/// Put each owner back, only where the file is the same one and still has
+/// the owner Gust gave it. Returns (restored, refusals).
+pub fn undo_owners(changes: &[OwnerChanged]) -> (usize, Vec<String>) {
+    let mut back = 0;
+    let mut refused = Vec::new();
+    for c in changes {
+        let name = c
+            .path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let (now, md) = match (ident(&c.path), c.path.symlink_metadata()) {
+            (Ok(i), Ok(m)) => (i, m),
+            _ => {
+                refused.push(format!("{name}: no longer there"));
+                continue;
+            }
+        };
+        if now != c.ident {
+            refused.push(format!("{name}: changed since; left as it is"));
+            continue;
+        }
+        if (md.uid(), md.gid()) != c.new {
+            refused.push(format!(
+                "{name}: its owner was changed again; left as it is"
+            ));
+            continue;
+        }
+        match chown_nofollow(&c.path, c.old.0, c.old.1) {
+            Ok(()) => back += 1,
+            Err(e) => refused.push(format!("{name}: {}", crate::engine::plain_io_message(&e))),
+        }
+    }
+    (back, refused)
+}
+
 /// "rwxr-xr-x" for the nine bits.
 pub fn rwx_string(mode: u32) -> String {
     let mut s = String::with_capacity(9);
@@ -460,5 +655,153 @@ mod tests {
     fn rwx_reads_like_ls() {
         assert_eq!(rwx_string(0o754), "rwxr-xr--");
         assert_eq!(rwx_string(0o000), "---------");
+    }
+
+    const PASSWD: &str = "root:x:0:0::/root:/bin/sh\nalice:x:1000:1000::/home/alice:/bin/sh\nbob:x:1001:1001::/home/bob:/bin/sh\n";
+    const GROUP: &str = "root:x:0:\nwheel:x:998:alice\nalice:x:1000:\nmedia:x:1500:alice,bob\n";
+
+    #[test]
+    fn owner_specs_parse_names_numbers_and_groups() {
+        let p = |s| OwnerSpec::parse_with(s, PASSWD, GROUP);
+        assert_eq!(
+            p("bob").unwrap(),
+            OwnerSpec {
+                uid: Some(1001),
+                gid: None
+            }
+        );
+        assert_eq!(
+            p(":media").unwrap(),
+            OwnerSpec {
+                uid: None,
+                gid: Some(1500)
+            }
+        );
+        assert_eq!(
+            p("alice:wheel").unwrap(),
+            OwnerSpec {
+                uid: Some(1000),
+                gid: Some(998)
+            }
+        );
+        assert_eq!(
+            p("1001:1500").unwrap(),
+            OwnerSpec {
+                uid: Some(1001),
+                gid: Some(1500)
+            }
+        );
+        for bad in ["", ":", "carol", ":nogroup", "alice:"] {
+            assert!(p(bad).is_err(), "{bad:?} should be refused");
+        }
+        assert!(p("carol").unwrap_err().contains("no user called carol"));
+    }
+
+    /// Change the group of several files to another group the test user is
+    /// in, then undo. Needs a second group (the VM user is in `wheel`).
+    #[test]
+    fn group_changes_for_many_files_and_undoes() {
+        let me_gid = rustix::process::getgid().as_raw();
+        let other = rustix::process::getgroups()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|g| g.as_raw())
+            .find(|g| *g != me_gid);
+        let Some(other) = other else {
+            gust_testkit::skip!("GROUPS", "the test user belongs to only one group");
+        };
+        let d = tmp("owners");
+        let a = d.join("a.txt");
+        let b = d.join("b.txt");
+        fs::write(&a, b"a").unwrap();
+        fs::write(&b, b"b").unwrap();
+        fs::create_dir(d.join("sub")).unwrap();
+        std::os::unix::fs::symlink(&a, d.join("l")).unwrap();
+        let spec = OwnerSpec {
+            uid: None,
+            gid: Some(other),
+        };
+        let out = set_owners(&[a.clone(), b.clone(), d.join("sub"), d.join("l")], spec);
+        assert_eq!(out.changed.len(), 3, "{:?}", out.failed);
+        assert_eq!(out.failed.len(), 1, "the link is skipped, not followed");
+        for p in [&a, &b] {
+            assert_eq!(p.symlink_metadata().unwrap().gid(), other);
+        }
+        let (back, refused) = undo_owners(&out.changed);
+        assert_eq!((back, refused.len()), (3, 0), "{refused:?}");
+        for p in [&a, &b] {
+            assert_eq!(p.symlink_metadata().unwrap().gid(), me_gid);
+        }
+        fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn owner_undo_refuses_a_file_that_was_replaced() {
+        let me_gid = rustix::process::getgid().as_raw();
+        let Some(other) = rustix::process::getgroups()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|g| g.as_raw())
+            .find(|g| *g != me_gid)
+        else {
+            gust_testkit::skip!("GROUPS", "the test user belongs to only one group");
+        };
+        let d = tmp("ownreplaced");
+        let a = d.join("a.txt");
+        fs::write(&a, b"old").unwrap();
+        let out = set_owners(
+            std::slice::from_ref(&a),
+            OwnerSpec {
+                uid: None,
+                gid: Some(other),
+            },
+        );
+        assert_eq!(out.changed.len(), 1);
+        fs::remove_file(&a).unwrap();
+        fs::write(&a, b"user's new work").unwrap();
+        let (back, refused) = undo_owners(&out.changed);
+        assert_eq!(back, 0);
+        assert!(refused[0].contains("no longer there") || refused[0].contains("left as it is"));
+        assert_eq!(fs::read(&a).unwrap(), b"user's new work");
+        fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn owner_of_a_setuid_file_is_never_changed() {
+        let d = tmp("ownsuid");
+        let a = d.join("tool");
+        fs::write(&a, b"#!/bin/sh\n").unwrap();
+        fs::set_permissions(&a, fs::Permissions::from_mode(0o4755)).unwrap();
+        let out = set_owners(
+            std::slice::from_ref(&a),
+            OwnerSpec {
+                uid: None,
+                gid: Some(0),
+            },
+        );
+        assert!(out.changed.is_empty());
+        assert!(out.failed[0].contains("setuid"), "{:?}", out.failed);
+        assert_eq!(mode(&a), 0o4755);
+        fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn a_new_owner_without_rights_is_refused_in_words() {
+        if rustix::process::getuid().is_root() {
+            gust_testkit::skip!("NONROOT", "running as root: every chown is allowed");
+        }
+        let d = tmp("ownroot");
+        let a = d.join("a.txt");
+        fs::write(&a, b"x").unwrap();
+        let out = set_owners(
+            std::slice::from_ref(&a),
+            OwnerSpec {
+                uid: Some(0),
+                gid: None,
+            },
+        );
+        assert!(out.changed.is_empty());
+        assert!(out.failed[0].contains("administrator"), "{:?}", out.failed);
+        fs::remove_dir_all(&d).ok();
     }
 }

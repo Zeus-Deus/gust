@@ -18,6 +18,7 @@ Usage:
     uinput-mouse.py move X Y
     uinput-mouse.py click X Y [left|right|middle|back|forward]
     uinput-mouse.py drag X1 Y1 X2 Y2
+    uinput-mouse.py rdrag X1 Y1 X2 Y2      (right button: the drop menu)
     uinput-mouse.py wheel X Y TICKS      (negative scrolls down)
 """
 
@@ -171,11 +172,12 @@ def main():
                 button(fd, BTN_LEFT, False)
                 time.sleep(0.05)
 
-        elif cmd == "drag":
+        elif cmd in ("drag", "rdrag"):
             x1, y1, x2, y2 = (int(v) for v in args[1:5])
+            btn = BTN_RIGHT if cmd == "rdrag" else BTN_LEFT
             move_to(fd, x1, y1, w, h)
             time.sleep(0.15)
-            button(fd, BTN_LEFT, True)
+            button(fd, btn, True)
             # Intermediate steps: a drag that teleports is often ignored by
             # toolkits, which start a drag only after a movement threshold.
             steps = 12
@@ -188,7 +190,7 @@ def main():
                     h,
                 )
             time.sleep(0.2)
-            button(fd, BTN_LEFT, False)
+            button(fd, btn, False)
 
         elif cmd == "wheel":
             x, y, ticks = int(args[1]), int(args[2]), int(args[3])

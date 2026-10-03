@@ -15,6 +15,16 @@ Rectangle {
     property bool active: job !== null && job !== undefined
 
     signal requestCancel()
+    signal requestPause()
+    signal requestResume()
+
+    /// Where the Pause/Resume button is, in window coordinates (qa).
+    function pausePoint() {
+        if (!pauseButton.visible) return null
+        const p = pauseButton.mapToItem(null, pauseButton.width / 2, pauseButton.height / 2)
+        return [Math.round(p.x), Math.round(p.y)]
+    }
+    readonly property bool paused: active && !!job.paused
 
     visible: height > 0
     Behavior on height { NumberAnimation { duration: Tokens.animFast } }
@@ -31,6 +41,8 @@ Rectangle {
             return ""
         if (root.job.stopping)
             return qsTr("Stopping")
+        if (root.job.paused)
+            return qsTr("Paused")
         switch (root.job.state) {
         case "Running":   return qsTr("Working")
         case "Confirmed": return qsTr("Done")
@@ -48,7 +60,7 @@ Rectangle {
     readonly property color stateColour: {
         if (!root.active)
             return Tokens.muted
-        if (root.job.stopping)
+        if (root.job.stopping || root.job.paused)
             return Tokens.warn
         switch (root.job.state) {
         case "Confirmed": return Tokens.ok
@@ -109,7 +121,7 @@ Rectangle {
             Text {
                 id: detailText
                 objectName: "jobDetail"
-                anchors.right: cancelButton.visible ? cancelButton.left : parent.right
+                anchors.right: pauseButton.visible ? pauseButton.left : (cancelButton.visible ? cancelButton.left : parent.right)
                 anchors.rightMargin: cancelButton.visible ? Tokens.spaceMd : 0
                 anchors.verticalCenter: parent.verticalCenter
                 text: {
@@ -120,6 +132,8 @@ Rectangle {
                     // empty files or folders is better told in items.
                     if (root.job.stopping)
                         return ""
+                    if (root.job.paused)
+                        return root.job.bytes_text ? root.job.bytes_text + qsTr("  ·  paused") : qsTr("paused")
                     if (root.job.bytes_text && root.job.state === "Running")
                         parts.push(root.job.bytes_text)
                     else if (root.job.total > 0)
@@ -133,6 +147,39 @@ Rectangle {
                 color: Tokens.muted
                 font.family: Tokens.fontFamily
                 font.pixelSize: Tokens.fontSmall
+            }
+
+            // Pause holds the copy between blocks; nothing is undone, and
+            // Cancel still works while paused.
+            Rectangle {
+                id: pauseButton
+                objectName: "jobPause"
+                anchors.right: cancelButton.left
+                anchors.rightMargin: Tokens.spaceSm
+                anchors.verticalCenter: parent.verticalCenter
+                width: pauseText.implicitWidth + Tokens.spaceLg
+                height: Tokens.controlHeight
+                visible: cancelButton.visible
+                color: pauseArea.containsMouse ? Tokens.withAlpha(Tokens.accent, 0.18) : "transparent"
+                border.color: pauseArea.containsMouse ? Tokens.accent : Tokens.border
+                border.width: Math.max(1, Tokens.borderWidth)
+                radius: Tokens.radius
+                Text {
+                    id: pauseText
+                    anchors.centerIn: parent
+                    text: root.paused ? qsTr("Resume") : qsTr("Pause")
+                    color: Tokens.foreground
+                    font.family: Tokens.fontFamily
+                    font.pixelSize: Tokens.fontSmall
+                }
+                MouseArea {
+                    id: pauseArea
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    onClicked: root.paused ? root.requestResume() : root.requestPause()
+                }
+                Accessible.role: Accessible.Button
+                Accessible.name: root.paused ? qsTr("Resume") : qsTr("Pause")
             }
 
             Rectangle {

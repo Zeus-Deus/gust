@@ -24,8 +24,16 @@ fn a_round_trip_keeps_every_value() {
         sidebar: false,
         density: Density::Compact,
         renderer: RendererChoice::Software,
+        restore_tabs: true,
     };
     assert_eq!(Settings::from_text(&s.to_text()), s);
+}
+
+#[test]
+fn restoring_tabs_is_off_unless_chosen() {
+    assert!(!Settings::default().restore_tabs);
+    assert!(!Settings::from_text("restore_tabs = maybe\n").restore_tabs);
+    assert!(Settings::from_text("restore_tabs = true\n").restore_tabs);
 }
 
 #[test]

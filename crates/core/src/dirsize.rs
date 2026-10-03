@@ -37,6 +37,21 @@ pub struct Sized {
     pub complete: bool,
 }
 
+/// The rows whose folder sizes are worth measuring: the ones on screen plus
+/// half a screen either way. `count` is what the view reported; before it
+/// reports (0), one generous screen is assumed. Flea 0.3.7 (#66): sizes are
+/// walked only where a size is drawn, never for the whole folder.
+pub fn rows_in_view(first: i32, count: i32, n: usize) -> std::ops::Range<usize> {
+    if n == 0 {
+        return 0..0;
+    }
+    let count = if count <= 0 { 60 } else { count as usize };
+    let first = (first.max(0) as usize).min(n - 1);
+    let lo = first.saturating_sub(count / 2);
+    let hi = (first + count + count / 2).min(n);
+    lo..hi
+}
+
 pub fn dir_size(root: &Path, cancel: &CancelToken, limits: SizeLimits) -> Sized {
     let mut out = Sized {
         complete: true,
@@ -101,4 +116,19 @@ pub fn dir_size(root: &Path, cancel: &CancelToken, limits: SizeLimits) -> Sized 
         }
     }
     out
+}
+
+#[cfg(test)]
+mod view_tests {
+    use super::rows_in_view;
+
+    #[test]
+    fn only_rows_near_the_screen_are_measured() {
+        assert_eq!(rows_in_view(0, 20, 400), 0..30);
+        assert_eq!(rows_in_view(200, 20, 400), 190..230);
+        assert_eq!(rows_in_view(395, 20, 400), 385..400);
+        assert_eq!(rows_in_view(0, 0, 400), 0..90, "before the view reports");
+        assert_eq!(rows_in_view(-5, 20, 3), 0..3);
+        assert_eq!(rows_in_view(0, 20, 0), 0..0);
+    }
 }

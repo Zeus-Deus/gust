@@ -99,6 +99,15 @@ Ran out of session budget, not blocked. Remaining, in suggested order:
 
 New ideas and newer-Flea features go here instead of into v1.
 
+- Move directory listing out of the window process (about 23 MiB of the
+  window's PSS on a 100k folder is the listing itself; Flea's low-end PSS lead).
+- Administrator window: a GUI prompt for polkit when no agent is running
+  (today pkexec needs the desktop's polkit agent); an admin:// mount if gvfs
+  ever registers one on Omarchy.
+- Paste image: offer a name before saving; paste into a remote folder.
+- Drop menu: "Link here" for remote targets (refused today, as copy rules).
+- Restore tabs: remember selection, scroll and history per tab.
+
 - Tree expand in the list view, Miller column count, preview-column toggle.
 - Markdown, audio and PDF previews; a transfer queue; i18n.
 - Flea 0.3.7 settings: hidden files last, tight row density, Huge/Largest grid sizes, tint today's dates, columns sized from the window.

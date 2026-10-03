@@ -23,6 +23,8 @@ Updated after every commit. Read this first after a realm replacement.
 - `just test` counts skips from `target/test-skips.log`; a test that returns
   early without `gust_testkit::skip!` is a lie — use the macro.
 - `cargo fmt --all` touches many files on this toolchain; keep it in its own commit.
+- qa §30h (Open as administrator) needs `tests/admin-fixture.sh start` once per VM:
+  a polkit rule letting the test user pkexec exactly this checkout's Gust builds.
 
 ## State
 See `docs/HANDOFF.md` for the full picture (what is built, bench table, what is not done).
@@ -38,6 +40,9 @@ See `docs/HANDOFF.md` for the full picture (what is built, bench table, what is 
   pause/resume → restore tabs → copied/cut marks → Flea bug checks → visual pass →
   release drafts → HANDOFF. Anything else goes to HANDOFF's "After v1" list.
 - Re-bench vs Flea 0.3.7 done (2026-10-03), standard + low-end: bench/RESULTS.md.
+- The seven everyday features and the four Flea 0.3.7 bug checks are done (D35–D45,
+  qa §30, 64 asserts). Gates: `just test` 749/0 (41 named skips), `just lint` green,
+  `just qa` 489/0. Next: visual pass → release drafts → HANDOFF.
 
 ## Running a single qa section
 `tests/qa-one.sh tests/qa.d/NN-name.sh /tmp/out` — same setup as the full suite.

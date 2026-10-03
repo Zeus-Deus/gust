@@ -21,6 +21,11 @@ FocusScope {
     signal dropReleased(int row)
     property bool dragActive: false
     property int dropRow: -1
+    /// A drag made with the right button ends in a Copy/Move/Link menu.
+    property bool dragRight: false
+    /// The click that ends a right-button drag must not also open the menu.
+    property bool suppressClick: false
+    signal dropMenuRequested(int row, real x, real y)
     // Pixels the pointer must travel before a click becomes a drag.
     readonly property int dragThreshold: 8
     signal contextRequested(int row, real x, real y)
@@ -50,6 +55,19 @@ FocusScope {
     /// The four header labels as drawn, for the qa probe (sort arrows).
     function headerTexts() {
         return [nameHeaderText.text, kindHeaderText.text, sizeHeaderText.text, modHeaderText.text]
+    }
+
+    /// Centre of each visible row by name, in window coordinates (qa).
+    function rowPoints() {
+        const out = {}
+        if (!root.model) return out
+        for (let i = 0; i < Math.min(list.count, 80); i++) {
+            const it = list.itemAtIndex(i)
+            if (!it) continue
+            const p = it.mapToItem(null, Tokens.rowPaddingX * 4, it.height / 2)
+            if (p.y > 0) out[root.model.entry_name(i)] = [Math.round(p.x), Math.round(p.y)]
+        }
+        return out
     }
 
     function cursorAnchor() {
@@ -258,12 +276,22 @@ FocusScope {
                                 }
                                 Text {
                                     text: name
-                                    color: isHidden ? Tokens.foregroundDim
+                                    // A cut row is dimmed: it is about to leave.
+                                    color: clipMark === "cut" || isHidden ? Tokens.foregroundDim
                                                     : (isDir ? Tokens.foregroundBright : Tokens.foreground)
                                     font.family: Tokens.fontFamily
                                     font.pixelSize: Tokens.fontBody
                                     elide: Text.ElideMiddle
                                     width: Math.min(implicitWidth, rowItem.width * 0.55)
+                                }
+                                // Copied / cut, after the name (Flea #169).
+                                Text {
+                                    visible: clipMark !== ""
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    text: clipMark === "cut" ? qsTr("cut") : qsTr("copied")
+                                    color: clipMark === "cut" ? Tokens.warn : Tokens.accent
+                                    font.family: Tokens.fontFamily
+                                    font.pixelSize: Tokens.fontCaption
                                 }
                                 Text {
                                     visible: isSymlink && !linkOk
@@ -336,10 +364,16 @@ FocusScope {
 
                         onPressed: (mouse) => {
                             pressPos = Qt.point(mouse.x, mouse.y)
-                            armed = (mouse.button === Qt.LeftButton)
+                            armed = (mouse.button === Qt.LeftButton || mouse.button === Qt.RightButton)
+                            root.dragRight = (mouse.button === Qt.RightButton)
+                            root.suppressClick = false
                         }
-                        onReleased: {
-                            if (root.dragActive)
+                        onReleased: (mouse) => {
+                            if (root.dragActive && root.dragRight) {
+                                const g = mapToItem(null, mouse.x, mouse.y)
+                                root.suppressClick = true
+                                root.dropMenuRequested(root.dropRow, g.x, g.y)
+                            } else if (root.dragActive)
                                 root.dropReleased(root.dropRow)
                             armed = false
                             root.dragActive = false
@@ -363,6 +397,7 @@ FocusScope {
                             root.dragMovedTo(vp.x, vp.y)
                         }
                         onClicked: (mouse) => {
+                            if (root.suppressClick) { root.suppressClick = false; return }
                             if (mouse.button === Qt.MiddleButton) { root.middleClicked(index); return }
                             if (mouse.button === Qt.RightButton) {
                                 // Right-clicking outside the selection acts on

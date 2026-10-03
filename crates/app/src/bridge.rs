@@ -425,6 +425,52 @@ pub mod qobject {
         /// The cursor row's rwx and octal, e.g. "rw-r--r--  644".
         #[qinvokable]
         fn mode_text(self: &DirModel) -> QString;
+        /// Change owner and/or group of the targets ("bob", ":media",
+        /// "bob:media"). Ctrl+Z puts every owner back where unchanged since.
+        #[qinvokable]
+        fn set_owner(self: Pin<&mut DirModel>, spec: &QString) -> QString;
+        /// The cursor row's owner, "alice : alice".
+        #[qinvokable]
+        fn owner_text(self: &DirModel) -> QString;
+        /// Paste an image from the clipboard as a new file here. Runs on a
+        /// worker; the result arrives as place_done("paste-image", ...).
+        #[qinvokable]
+        fn paste_image(self: Pin<&mut DirModel>) -> QString;
+        /// "Link here": a symbolic link to each dragged item, in the drop
+        /// target. Ctrl+Z removes exactly those links.
+        #[qinvokable]
+        fn drop_link_on_row(self: Pin<&mut DirModel>, row: i32) -> QString;
+        #[qinvokable]
+        fn drop_link_preview(self: &DirModel, row: i32) -> QString;
+        #[qinvokable]
+        fn pause_job(self: Pin<&mut DirModel>);
+        #[qinvokable]
+        fn resume_job(self: Pin<&mut DirModel>);
+        /// Is this the administrator window?
+        #[qinvokable]
+        fn is_admin(self: &DirModel) -> bool;
+        /// Open the cursor folder (or this one) in an administrator window,
+        /// through pkexec. "" when the request was made, else why not.
+        #[qinvokable]
+        fn open_as_admin(self: &DirModel) -> QString;
+        /// The tabs to reopen at start, as JSON, or "" when there are none
+        /// (restoring is off, or Gust was asked for a folder).
+        #[qinvokable]
+        fn session_json(self: &DirModel) -> QString;
+        /// Remember the open tabs: one "token view" line per tab.
+        #[qinvokable]
+        fn session_save(self: &DirModel, lines: &QString, active: i32);
+        /// This folder as a location token (hex bytes, any name survives).
+        #[qinvokable]
+        fn location_token(self: &DirModel) -> QString;
+        #[qinvokable]
+        fn navigate_token(self: Pin<&mut DirModel>, token: &QString);
+        /// Open a restored tab's folder as its starting point (no history).
+        #[qinvokable]
+        fn start_at_token(self: Pin<&mut DirModel>, token: &QString);
+        /// A typed path as a location token (for tabs not yet opened).
+        #[qinvokable]
+        fn token_for(self: &DirModel, path: &QString) -> QString;
         /// Quick Look's visual: render a large preview for the row on a
         /// worker (sandboxed helpers only) and publish it in `peek_visual`
         /// as JSON — an image path, or an archive's entry list.
@@ -732,6 +778,7 @@ const ROLE_PATH: i32 = 0x0108;
 const ROLE_SELECTED: i32 = 0x0109;
 const ROLE_THUMB: i32 = 0x010A;
 const ROLE_TYPE_TEXT: i32 = 0x010B;
+const ROLE_CLIP: i32 = 0x010C;
 
 pub struct DirModelRust {
     empty_reason: QString,
@@ -773,6 +820,10 @@ pub struct DirModelRust {
     last_link: Option<gust_ops::attrs::LinkMade>,
     /// The newest permissions change, for Ctrl+Z.
     last_modes: Vec<gust_ops::attrs::ModeChanged>,
+    /// Undo for links dropped, owners changed, images pasted.
+    last_extra: UndoExtra,
+    /// What Ctrl+C / Ctrl+X marked, as paths, so rows can show it.
+    clip_set: std::collections::HashSet<PathBuf>,
     /// What Ctrl+C / Ctrl+X marked, waiting for a paste.
     clipboard: Option<(Vec<std::path::PathBuf>, ClipMode)>,
     /// The job currently running, if any. Only one at a time in M2.
@@ -881,6 +932,25 @@ enum PlaceOutcome {
     Then(Box<dyn FnOnce(Pin<&mut qobject::DirModel>) + Send>),
 }
 
+/// Is this the administrator window (root, started through pkexec)? Set
+/// only by main.rs after it checked it is really running as root.
+pub fn admin_session() -> bool {
+    std::env::var_os("GUST_ADMIN").is_some_and(|v| v == "1")
+}
+
+/// What the administrator window refuses, in one sentence.
+const ADMIN_REFUSAL: &str = "Administrator window: files are never opened or run here";
+
+/// Undo for the actions added in v1 (each newest action owns Ctrl+Z).
+#[derive(Debug, Clone, Default)]
+pub enum UndoExtra {
+    #[default]
+    None,
+    Links(Vec<gust_ops::attrs::LinkMade>),
+    Owners(Vec<gust_ops::attrs::OwnerChanged>),
+    Created(gust_ops::create::Created),
+}
+
 /// Whether a clipboard entry will be copied or moved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClipMode {
@@ -899,6 +969,14 @@ pub fn startup_location() -> PathBuf {
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("/"))
     };
+
+    // The administrator window was handed its folder by its parent, which
+    // already checked it (main.rs, prepare_admin_session).
+    if let Some(d) = std::env::var_os("GUST_ADMIN_FOLDER") {
+        if admin_session() {
+            return PathBuf::from(d);
+        }
+    }
 
     // First non-flag argument wins. Flags are reserved for later options.
     let arg = std::env::args_os()
@@ -999,6 +1077,8 @@ impl DirModelRust {
             last_bulk_rename: Vec::new(),
             last_link: None,
             last_modes: Vec::new(),
+            last_extra: UndoExtra::None,
+            clip_set: Default::default(),
             clipboard: None,
             pending: None,
             job_rate: gust_ops::rate::RateMeter::new(),
@@ -1384,6 +1464,10 @@ impl qobject::DirModel {
     /// Leaving the folder cancels the pass: a directory of 500 photos must
     /// not keep a helper running after the user has moved on.
     fn start_thumbnails(mut self: Pin<&mut Self>) {
+        // The administrator window never feeds file contents to helpers.
+        if admin_session() {
+            return;
+        }
         if !self.as_ref().thumbs_wanted {
             return;
         }
@@ -1665,6 +1749,9 @@ impl qobject::DirModel {
     }
 
     fn request_peek_visual(mut self: Pin<&mut Self>, row: i32) {
+        if admin_session() {
+            return;
+        }
         let gen = self.as_ref().peek_gen.wrapping_add(1);
         self.as_mut().rust_mut().peek_gen = gen;
         self.as_mut().set_peek_visual(QString::default());
@@ -1827,6 +1914,12 @@ impl qobject::DirModel {
         let (Some(dir), Some(name)) = (p.parent(), p.file_name()) else {
             return;
         };
+        // Already showing that folder: navigate is a no-op there, so put
+        // the cursor on the file with a relist instead.
+        if gust_core::location::same_place(&self.as_ref().key, dir) {
+            self.as_mut().relist_focusing(name.to_owned());
+            return;
+        }
         self.as_mut().rust_mut().focus_name = Some(name.to_owned());
         self.navigate(&QString::from(dir.to_string_lossy().as_ref()));
     }
@@ -1998,6 +2091,7 @@ impl qobject::DirModel {
             ("sidebar", st.sidebar.to_string()),
             ("density", Self::json_str(st.density_name())),
             ("renderer", Self::json_str(st.renderer_name())),
+            ("restore_tabs", st.restore_tabs.to_string()),
             ("spacing", st.density.spacing().to_string()),
             ("is_default", is_default.to_string()),
             (
@@ -2030,6 +2124,9 @@ impl qobject::DirModel {
     }
 
     fn settings_set(&self, key: &QString, value: &QString) -> QString {
+        if admin_session() {
+            return QString::from("Settings belong to your normal Gust window.");
+        }
         use gust_core::settings::Settings;
         let Some(path) = Settings::default_path() else {
             return QString::from("no home folder to keep settings in");
@@ -2403,6 +2500,9 @@ impl qobject::DirModel {
     /// falls back to ordinary single-row activation rather than this
     /// silently doing nothing.
     fn activate_selection(mut self: Pin<&mut Self>) -> QString {
+        if admin_session() {
+            return QString::from(ADMIN_REFUSAL);
+        }
         let paths = self.as_ref().target_paths();
         if paths.len() < 2 {
             return QString::default();
@@ -2534,6 +2634,9 @@ impl qobject::DirModel {
     }
 
     fn open_with_id(&self, row: i32, id: &QString) -> QString {
+        if admin_session() {
+            return QString::from(ADMIN_REFUSAL);
+        }
         let Some(path) = self.path_of_row(row) else {
             return QString::from("That item is no longer there.");
         };
@@ -2829,7 +2932,7 @@ impl qobject::DirModel {
     }
 
     fn devices_json(&self) -> QString {
-        let found = gust_core::devices::list_devices();
+        let found = gust_core::devices::sidebar_devices(gust_core::devices::list_devices());
         let can_act = gust_core::devices::udisks_available();
         let mut out = String::from("[");
         for (i, d) in found.iter().take(30).enumerate() {
@@ -3688,12 +3791,13 @@ impl qobject::DirModel {
         }
         let want: Vec<std::ffi::OsString> = {
             let r = self.as_ref();
-            r.visible
+            let (first, count) = r.view_rows;
+            let range = gust_core::dirsize::rows_in_view(first, count, r.visible.len());
+            r.visible[range]
                 .iter()
                 .filter_map(|i| r.all.get(*i))
                 .filter(|e| e.kind == EntryKind::Dir && !r.dir_sizes.contains_key(&e.name))
                 .map(|e| e.name.clone())
-                .take(500)
                 .collect()
         };
         if want.is_empty() {
@@ -4229,6 +4333,10 @@ impl qobject::DirModel {
 
     fn want_rows(mut self: Pin<&mut Self>, first: i32, count: i32) {
         self.as_mut().rust_mut().view_rows = (first, count);
+        // Rows that scrolled into view get their folder sizes now.
+        if self.as_ref().settled {
+            self.as_mut().start_dir_sizes();
+        }
         let n = self.as_ref().visible.len();
         if n == 0 || count <= 0 {
             return;
@@ -4417,6 +4525,16 @@ impl qobject::DirModel {
         // trailing slash (and doubled ones), so history and breadcrumbs see
         // one location, not two. "/" stays "/".
         let p: PathBuf = p.components().collect();
+        // The folder already on screen: nothing to do (Flea 0.3.7). Not on
+        // the first listing, and not over search results, which are left by
+        // navigating to the folder they were found in.
+        if self.as_ref().generation > 0
+            && !self.as_ref().finding
+            && self.as_ref().empty_reason.is_empty()
+            && gust_core::location::same_place(&self.as_ref().key, &p)
+        {
+            return;
+        }
         // `is_dir()` is a stat, and a stat on a stalled mount blocks the UI
         // thread with no way back. A killable child answers first.
         {
@@ -4714,6 +4832,9 @@ impl qobject::DirModel {
                 }
             }
         }
+        if admin_session() {
+            return QString::from(&format!("blocked:{ADMIN_REFUSAL}"));
+        }
         // A row whose details were not read yet has an unknown mode, and an
         // unknown mode could hide an executable bit. Never guess: read it.
         if kind == EntryKind::File && mode.is_none() {
@@ -4756,6 +4877,9 @@ impl qobject::DirModel {
 
     /// Open a terminal in the current folder.
     fn open_terminal(&self) -> QString {
+        if admin_session() {
+            return QString::from(ADMIN_REFUSAL);
+        }
         let Some(dir) = self.key.as_path() else {
             return QString::from("this location is not a local folder");
         };
@@ -4921,7 +5045,7 @@ impl qobject::DirModel {
                 "{{\"location\":\"{}\",\"count\":{},\"cursor\":{},",
                 "\"cursor_name\":\"{}\",\"filter\":\"{}\",\"show_hidden\":{},",
                 "\"sort_field\":\"{}\",\"sort_ascending\":{},\"settled\":{},",
-                "\"status\":\"{}\",\"meta_known\":{},\"cursor_meta\":{},\"visible\":[{}]}}"
+                "\"status\":\"{}\",\"meta_known\":{},\"cursor_meta\":{},\"marked\":{},\"sized\":{},\"generation\":{},\"visible\":[{}]}}"
             ),
             esc(&self.location.to_string()),
             self.count,
@@ -4935,6 +5059,12 @@ impl qobject::DirModel {
             esc(&self.status.to_string()),
             self.all.iter().filter(|e| e.meta.is_some()).count(),
             self.entry_at(self.cursor).is_some_and(|e| e.meta.is_some()),
+            self.key
+                .as_path()
+                .map(|d| self.all.iter().filter(|e| self.clip_set.contains(&d.join(&e.name))).count())
+                .unwrap_or(0),
+            self.dir_sizes.len(),
+            self.generation,
             list
         ))
     }
@@ -4979,6 +5109,7 @@ impl qobject::DirModel {
             r.last_job = None;
             r.last_link = None;
             r.last_modes.clear();
+            r.last_extra = UndoExtra::None;
         }
         self.as_mut().rust_mut().selection.clear();
         self.as_mut().reload();
@@ -4994,6 +5125,58 @@ impl qobject::DirModel {
     }
 
     fn undo_last(mut self: Pin<&mut Self>) -> QString {
+        let extra = std::mem::take(&mut self.as_mut().rust_mut().last_extra);
+        match extra {
+            UndoExtra::None => {}
+            UndoExtra::Links(made) => {
+                let mut refused = Vec::new();
+                for m in &made {
+                    if let Err(e) = gust_ops::attrs::undo_link(m) {
+                        refused.push(e);
+                    }
+                }
+                self.as_mut().reload();
+                if refused.is_empty() {
+                    self.as_mut().set_status(QString::from(&format!(
+                        "Removed {} link{}",
+                        made.len(),
+                        if made.len() == 1 { "" } else { "s" }
+                    )));
+                    return QString::default();
+                }
+                return QString::from(&refused.join("; "));
+            }
+            UndoExtra::Owners(ch) => {
+                let (back, refused) = gust_ops::attrs::undo_owners(&ch);
+                self.as_mut().reload();
+                let msg = if refused.is_empty() {
+                    format!(
+                        "Owner put back on {back} item{}",
+                        if back == 1 { "" } else { "s" }
+                    )
+                } else {
+                    format!(
+                        "Put back {back}; {} left as they are: {}",
+                        refused.len(),
+                        refused.join("; ")
+                    )
+                };
+                self.as_mut().set_status(QString::from(&msg));
+                return QString::default();
+            }
+            UndoExtra::Created(c) => {
+                let r = gust_ops::create::undo_create(&c);
+                self.as_mut().reload();
+                return match r {
+                    Ok(()) => {
+                        self.as_mut()
+                            .set_status(QString::from("Removed the pasted image"));
+                        QString::default()
+                    }
+                    Err(e) => QString::from(&e),
+                };
+            }
+        }
         if let Some(made) = self.as_ref().last_link.clone() {
             self.as_mut().rust_mut().last_link = None;
             let r = gust_ops::attrs::undo_link(&made);
@@ -5159,6 +5342,12 @@ impl qobject::DirModel {
     }
 
     fn undo_label(&self) -> QString {
+        match &self.last_extra {
+            UndoExtra::None => {}
+            UndoExtra::Links(_) => return QString::from("Undo: remove the links"),
+            UndoExtra::Owners(_) => return QString::from("Undo: put owners back"),
+            UndoExtra::Created(_) => return QString::from("Undo: remove the pasted image"),
+        }
         if self.last_link.is_some() {
             return QString::from("Undo: remove the link");
         }
@@ -5205,7 +5394,7 @@ impl qobject::DirModel {
             &clip_holder(),
         )
         .is_ok();
-        self.as_mut().rust_mut().clipboard = Some((paths, ClipMode::Copy));
+        self.as_mut().set_clip(paths, ClipMode::Copy);
         if shared {
             QString::from(&format!("Copied {label} — paste with Ctrl+V"))
         } else {
@@ -5216,7 +5405,9 @@ impl qobject::DirModel {
     }
 
     fn can_paste(&self) -> bool {
-        self.clipboard.is_some() || gust_core::clipboard::offers_files()
+        self.clipboard.is_some()
+            || gust_core::clipboard::offers_files()
+            || gust_core::clipboard::offers_image()
     }
 
     fn copy_path(mut self: Pin<&mut Self>, row: i32) -> QString {
@@ -5253,7 +5444,7 @@ impl qobject::DirModel {
             &clip_holder(),
         )
         .is_ok();
-        self.as_mut().rust_mut().clipboard = Some((paths, ClipMode::Cut));
+        self.as_mut().set_clip(paths, ClipMode::Cut);
         if shared {
             QString::from(&format!("Cut {label} — paste with Ctrl+V"))
         } else {
@@ -5286,7 +5477,7 @@ impl qobject::DirModel {
     }
 
     fn clip_clear(mut self: Pin<&mut Self>) {
-        self.as_mut().rust_mut().clipboard = None;
+        self.as_mut().clear_clip();
     }
 
     fn clip_paste(self: Pin<&mut Self>) -> QString {
@@ -5332,7 +5523,7 @@ impl qobject::DirModel {
         // Drop anything that vanished since it was copied.
         let sources: Vec<PathBuf> = srcs.into_iter().filter(|p| p.exists()).collect();
         if sources.is_empty() {
-            self.as_mut().rust_mut().clipboard = None;
+            self.as_mut().clear_clip();
             return QString::from("the copied items no longer exist");
         }
         // Pasting a folder into itself would build an infinite tree.
@@ -5397,8 +5588,11 @@ impl qobject::DirModel {
         // A new operation supersedes the previous undo.
         r.last_job = None;
         r.last_trashed_batch.clear();
-        if p.consumes_cut {
-            r.clipboard = None;
+        r.last_extra = UndoExtra::None;
+        let cut = p.consumes_cut;
+        drop(r);
+        if cut {
+            self.as_mut().clear_clip();
         }
         QString::default()
     }
@@ -5589,6 +5783,8 @@ impl qobject::DirModel {
                 sources,
                 dest_dir: destination,
             },
+            // Links never go through the transfer engine (drop_link_on_row).
+            DropAction::Link => return QString::from("Link here makes links, not copies"),
         };
         self.begin_transfer(req, false)
     }
@@ -5676,6 +5872,7 @@ impl qobject::DirModel {
                         sources,
                         dest_dir: destination,
                     },
+                    DropAction::Link => return QString::from("Link here makes links, not copies"),
                 };
                 self.begin_transfer(req, false)
             }
@@ -5777,6 +5974,7 @@ impl qobject::DirModel {
             self.as_mut().rust_mut().last_bulk_rename = outcome.done.clone();
             self.as_mut().rust_mut().last_link = None;
             self.as_mut().rust_mut().last_modes.clear();
+            self.as_mut().rust_mut().last_extra = UndoExtra::None;
         }
         self.as_mut().rust_mut().selection.clear();
         self.as_mut().reload();
@@ -6187,6 +6385,9 @@ impl qobject::DirModel {
     }
 
     fn run_custom_action(mut self: Pin<&mut Self>, id: &QString) -> QString {
+        if admin_session() {
+            return QString::from(ADMIN_REFUSAL);
+        }
         let Some(dir) = gust_core::actions::actions_dir() else {
             return QString::from("no actions folder");
         };
@@ -6262,6 +6463,9 @@ impl qobject::DirModel {
     }
 
     fn run_row(mut self: Pin<&mut Self>, row: i32) -> QString {
+        if admin_session() {
+            return QString::from(ADMIN_REFUSAL);
+        }
         let argv = match self.as_ref().run_argv_for(row) {
             Ok(v) => v,
             Err(e) => return QString::from(&e),
@@ -6289,6 +6493,418 @@ impl qobject::DirModel {
         }
     }
 
+    fn set_clip(mut self: Pin<&mut Self>, paths: Vec<PathBuf>, mode: ClipMode) {
+        {
+            let mut r = self.as_mut().rust_mut();
+            r.clip_set = paths.iter().cloned().collect();
+            r.clipboard = Some((paths, mode));
+        }
+        self.as_mut().refresh_clip_marks();
+    }
+
+    fn clear_clip(mut self: Pin<&mut Self>) {
+        {
+            let mut r = self.as_mut().rust_mut();
+            r.clipboard = None;
+            r.clip_set.clear();
+        }
+        self.as_mut().refresh_clip_marks();
+    }
+
+    /// Repaint the copied/cut mark on every row (only that role).
+    fn refresh_clip_marks(mut self: Pin<&mut Self>) {
+        let n = self.as_ref().visible.len() as i32;
+        if n == 0 {
+            return;
+        }
+        let root = cxx_qt_lib::QModelIndex::default();
+        let mut roles = cxx_qt_lib::QVector::<i32>::default();
+        roles.append(ROLE_CLIP);
+        // Safety: GUI thread.
+        unsafe {
+            let top = self.as_ref().index(0, 0, &root);
+            let bottom = self.as_ref().index(n - 1, 0, &root);
+            self.as_mut().data_changed(&top, &bottom, &roles);
+        }
+    }
+
+    fn set_owner(mut self: Pin<&mut Self>, spec: &QString) -> QString {
+        let spec = match gust_ops::attrs::OwnerSpec::parse(&spec.to_string()) {
+            Ok(s) => s,
+            Err(e) => return QString::from(&e),
+        };
+        let targets = self.as_ref().target_paths();
+        if targets.is_empty() {
+            return QString::from("nothing to change");
+        }
+        let out = gust_ops::attrs::set_owners(&targets, spec);
+        let n = out.changed.len();
+        if n > 0 {
+            let mut r = self.as_mut().rust_mut();
+            r.last_extra = UndoExtra::Owners(out.changed);
+            r.last_modes.clear();
+            r.last_link = None;
+            r.last_job = None;
+            r.last_bulk_rename.clear();
+            r.last_trashed_batch.clear();
+        }
+        self.as_mut().reload();
+        if n == 0 {
+            if !out.failed.is_empty() {
+                return QString::from(&out.failed.join("; "));
+            }
+            self.as_mut()
+                .set_status(QString::from("They already had that owner"));
+            return QString::default();
+        }
+        let mut msg = format!("Owner changed on {n} item{}", if n == 1 { "" } else { "s" });
+        if out.unchanged > 0 {
+            msg.push_str(&format!(", {} already had it", out.unchanged));
+        }
+        if !out.failed.is_empty() {
+            msg.push_str(&format!(
+                "; {} not changed: {}",
+                out.failed.len(),
+                out.failed.join("; ")
+            ));
+        }
+        msg.push_str("  ·  Ctrl+Z puts them back");
+        self.as_mut().set_status(QString::from(&msg));
+        QString::default()
+    }
+
+    fn owner_text(&self) -> QString {
+        use std::os::unix::fs::MetadataExt;
+        let Some(p) = self.path_of_row(self.cursor) else {
+            return QString::default();
+        };
+        let Ok(md) = p.symlink_metadata() else {
+            return QString::default();
+        };
+        let passwd = std::fs::read_to_string("/etc/passwd").unwrap_or_default();
+        let group = std::fs::read_to_string("/etc/group").unwrap_or_default();
+        QString::from(&gust_core::properties::owner_names(
+            md.uid(),
+            md.gid(),
+            &passwd,
+            &group,
+        ))
+    }
+
+    fn paste_image(self: Pin<&mut Self>) -> QString {
+        let Some(dir) = self.as_ref().key.as_path().map(|p| p.to_path_buf()) else {
+            return QString::from("cannot paste here");
+        };
+        let Some(thread) = self.as_ref().qt_thread_handle() else {
+            return QString::from("cannot paste here");
+        };
+        std::thread::Builder::new()
+            .name("gust-paste-image".into())
+            .spawn(move || {
+                use gust_core::clipboard::{read_image, ClipImage};
+                let r = match read_image(gust_ops::create::PASTE_MAX_BYTES) {
+                    ClipImage::None => Err("nothing to paste".to_string()),
+                    ClipImage::Refused(w) => Err(w),
+                    ClipImage::Image { bytes, ext } => {
+                        let stamp = gust_core::properties::full_time(
+                            gust_ops::journal::now_unix(),
+                            gust_core::properties::local_offset_seconds(),
+                        )
+                        .replace(':', ".");
+                        let name = gust_ops::create::pasted_image_name(&dir, &stamp, ext);
+                        gust_ops::create::create_from_bytes(&dir, &name, &bytes)
+                    }
+                };
+                let _ = thread.queue(move |model| Self::paste_image_done(model, r));
+            })
+            .ok();
+        QString::default()
+    }
+
+    fn paste_image_done(mut self: Pin<&mut Self>, r: Result<gust_ops::create::Created, String>) {
+        let op = QString::from("paste-image");
+        match r {
+            Ok(c) => {
+                let name = c
+                    .path
+                    .file_name()
+                    .map(|n| n.to_os_string())
+                    .unwrap_or_default();
+                let here = c.path.parent().map(|p| p.to_path_buf());
+                let msg = format!("Saved {}  ·  Ctrl+Z removes it", name.to_string_lossy());
+                {
+                    let mut r = self.as_mut().rust_mut();
+                    r.last_extra = UndoExtra::Created(c);
+                    r.last_modes.clear();
+                    r.last_link = None;
+                    r.last_job = None;
+                    r.last_bulk_rename.clear();
+                    r.last_trashed_batch.clear();
+                }
+                if here.as_deref() == self.as_ref().key.as_path() {
+                    self.as_mut().relist_focusing(name);
+                }
+                self.as_mut()
+                    .place_done(op, QString::from(&msg), QString::default());
+            }
+            Err(e) => self
+                .as_mut()
+                .place_done(op, QString::default(), QString::from(&e)),
+        }
+    }
+
+    fn drop_link_preview(&self, row: i32) -> QString {
+        use gust_core::drop::{plan_drop, DropAction, DropPlan};
+        let Some((target, is_dir)) = self.drop_target(row) else {
+            return QString::default();
+        };
+        match plan_drop(&self.drag_sources(row), &target, is_dir, DropAction::Link) {
+            DropPlan::Perform { description, .. } => QString::from(&description),
+            DropPlan::Refused(why) => QString::from(&why),
+            DropPlan::Nothing => QString::default(),
+        }
+    }
+
+    fn drop_link_on_row(mut self: Pin<&mut Self>, row: i32) -> QString {
+        use gust_core::drop::{plan_drop, DropAction, DropPlan};
+        let Some((target, is_dir)) = self.as_ref().drop_target(row) else {
+            return QString::from("cannot drop here");
+        };
+        let (sources, dest) = match plan_drop(
+            &self.as_ref().drag_sources(row),
+            &target,
+            is_dir,
+            DropAction::Link,
+        ) {
+            DropPlan::Perform {
+                sources,
+                destination,
+                ..
+            } => (sources, destination),
+            DropPlan::Refused(why) => return QString::from(&why),
+            DropPlan::Nothing => return QString::default(),
+        };
+        let mut made = Vec::new();
+        let mut failed = Vec::new();
+        for src in &sources {
+            // The link keeps the item's own name when it is free there.
+            let own = src
+                .file_name()
+                .map(|n| n.to_os_string())
+                .unwrap_or_default();
+            let name = if !own.is_empty() && dest.join(&own).symlink_metadata().is_err() {
+                own
+            } else {
+                gust_ops::attrs::link_name_for(&dest, src)
+            };
+            match gust_ops::attrs::create_link(src, &dest, &name) {
+                Ok(m) => made.push(m),
+                Err(e) => failed.push(format!("{}: {e}", name.to_string_lossy())),
+            }
+        }
+        let n = made.len();
+        if n > 0 {
+            let mut r = self.as_mut().rust_mut();
+            r.last_extra = UndoExtra::Links(made);
+            r.last_modes.clear();
+            r.last_link = None;
+            r.last_job = None;
+            r.last_bulk_rename.clear();
+            r.last_trashed_batch.clear();
+        }
+        self.as_mut().reload();
+        if n == 0 {
+            return QString::from(&failed.join("; "));
+        }
+        let mut msg = format!(
+            "Linked {n} item{} in {}  ·  Ctrl+Z removes {}",
+            if n == 1 { "" } else { "s" },
+            dest.file_name()
+                .map(|f| f.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "/".into()),
+            if n == 1 { "it" } else { "them" }
+        );
+        if !failed.is_empty() {
+            msg.push_str(&format!("; not linked: {}", failed.join("; ")));
+        }
+        self.as_mut().set_status(QString::from(&msg));
+        QString::default()
+    }
+
+    fn pause_job(self: Pin<&mut Self>) {
+        if let Some(job) = self.job.as_ref() {
+            job.pause();
+        }
+    }
+
+    fn resume_job(self: Pin<&mut Self>) {
+        if let Some(job) = self.job.as_ref() {
+            job.resume();
+        }
+    }
+
+    fn is_admin(&self) -> bool {
+        admin_session()
+    }
+
+    fn open_as_admin(&self) -> QString {
+        if admin_session() {
+            return QString::from("This already is the administrator window.");
+        }
+        let Some(pkexec) = gust_core::open::which("pkexec") else {
+            return QString::from(
+                "Opening as administrator needs polkit (pkexec), which is not installed.",
+            );
+        };
+        // The folder on screen: what the user is looking at is what opens.
+        let folder = self.key.as_path().map(|p| p.to_path_buf());
+        let Some(folder) = folder else {
+            return QString::from("Only a local folder can be opened as administrator.");
+        };
+        let Ok(exe) = std::env::current_exe() else {
+            return QString::from("Gust could not find its own program file.");
+        };
+        let socket = match (
+            std::env::var_os("WAYLAND_DISPLAY"),
+            std::env::var_os("XDG_RUNTIME_DIR"),
+        ) {
+            (Some(w), _) if PathBuf::from(&w).is_absolute() => PathBuf::from(w),
+            (Some(w), Some(rt)) => PathBuf::from(rt).join(w),
+            _ => return QString::from("Opening as administrator needs a Wayland session."),
+        };
+        let theme = gust_core::theme::default_state_dir().unwrap_or_default();
+        // Its own probe file, never a sibling name the main window stages to.
+        let qa = std::env::var("GUST_QA_STATE")
+            .map(|p| match p.strip_suffix(".json") {
+                Some(b) => format!("{b}-admin.json"),
+                None => format!("{p}-admin"),
+            })
+            .unwrap_or_else(|_| "-".into());
+        let child = std::process::Command::new(pkexec)
+            .arg(exe)
+            .arg("--admin")
+            .arg(&socket)
+            .arg(&theme)
+            .arg(&qa)
+            .arg(&folder)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        match child {
+            Ok(mut c) => {
+                // Reaped on its own thread: polkit's prompt can wait for the
+                // user as long as it likes without the window waiting too.
+                std::thread::spawn(move || {
+                    let _ = c.wait();
+                });
+                QString::default()
+            }
+            Err(e) => QString::from(&format!("Could not ask for administrator rights: {e}")),
+        }
+    }
+
+    fn session_json(&self) -> QString {
+        use gust_core::session::Session;
+        if admin_session()
+            || std::env::var_os("GUST_CHOOSER").is_some_and(|v| !v.is_empty())
+            || std::env::args_os()
+                .skip(1)
+                .any(|a| !a.to_string_lossy().starts_with('-'))
+        {
+            return QString::default();
+        }
+        let on = gust_core::settings::Settings::default_path()
+            .map(|p| gust_core::settings::Settings::load(&p).restore_tabs)
+            .unwrap_or(false);
+        if !on {
+            return QString::default();
+        }
+        let Some(path) = Session::default_path() else {
+            return QString::default();
+        };
+        let s = Session::load(&path).still_there();
+        if s.tabs.is_empty() {
+            return QString::default();
+        }
+        let tabs: Vec<String> = s
+            .tabs
+            .iter()
+            .map(|t| {
+                let name = t
+                    .key
+                    .as_path()
+                    .and_then(|p| p.file_name())
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "/".into());
+                format!(
+                    "{{\"token\":{},\"view\":{},\"name\":{}}}",
+                    Self::json_str(&t.key.to_token()),
+                    Self::json_str(&t.view),
+                    Self::json_str(&name)
+                )
+            })
+            .collect();
+        QString::from(&format!(
+            "{{\"active\":{},\"tabs\":[{}]}}",
+            s.active,
+            tabs.join(",")
+        ))
+    }
+
+    fn session_save(&self, lines: &QString, active: i32) {
+        if admin_session() {
+            return;
+        }
+        let parts: Vec<(String, String)> = lines
+            .to_string()
+            .lines()
+            .filter_map(|l| {
+                l.split_once(' ')
+                    .map(|(t, v)| (t.to_string(), v.to_string()))
+            })
+            .collect();
+        let s = gust_core::session::Session::from_parts(&parts, active.max(0) as usize);
+        let Some(path) = gust_core::session::Session::default_path() else {
+            return;
+        };
+        // Off the GUI thread: it reads the setting and fsyncs. Nothing is
+        // written while restoring is off, so no folder list is kept then.
+        std::thread::Builder::new()
+            .name("gust-session".into())
+            .spawn(move || {
+                let on = gust_core::settings::Settings::default_path()
+                    .map(|p| gust_core::settings::Settings::load(&p).restore_tabs)
+                    .unwrap_or(false);
+                if on {
+                    let _ = s.save(&path);
+                }
+            })
+            .ok();
+    }
+
+    fn token_for(&self, path: &QString) -> QString {
+        QString::from(&LocationKey::local(PathBuf::from(path.to_string())).to_token())
+    }
+
+    fn start_at_token(mut self: Pin<&mut Self>, token: &QString) {
+        self.as_mut().navigate_token(token);
+        // A restored tab starts here; Back must not lead to Home.
+        self.as_mut().rust_mut().back.clear();
+    }
+
+    fn location_token(&self) -> QString {
+        QString::from(&self.key.to_token())
+    }
+
+    fn navigate_token(self: Pin<&mut Self>, token: &QString) {
+        if let Some(p) = LocationKey::from_token(&token.to_string())
+            .and_then(|k| k.as_path().map(|p| p.to_path_buf()))
+        {
+            self.navigate(&QString::from(&p.to_string_lossy().to_string()));
+        }
+    }
+
     fn make_link(mut self: Pin<&mut Self>) -> QString {
         let targets = self.as_ref().target_paths();
         let [target] = targets.as_slice() else {
@@ -6304,6 +6920,7 @@ impl qobject::DirModel {
                     let mut r = self.as_mut().rust_mut();
                     r.last_link = Some(made);
                     r.last_modes.clear();
+                    r.last_extra = UndoExtra::None;
                     r.last_job = None;
                     r.last_bulk_rename.clear();
                     r.last_trashed_batch.clear();
@@ -6333,6 +6950,7 @@ impl qobject::DirModel {
         if n > 0 {
             let mut r = self.as_mut().rust_mut();
             r.last_modes = out.changed;
+            r.last_extra = UndoExtra::None;
             r.last_link = None;
             r.last_job = None;
             r.last_bulk_rename.clear();
@@ -6411,13 +7029,15 @@ impl qobject::DirModel {
                 .job
                 .as_ref()
                 .is_some_and(|j| j.cancel_requested());
+        let paused = self.as_ref().job.as_ref().is_some_and(|j| j.is_paused());
         // Speed and time left, from the bytes seen on successive polls.
         let (speed, eta) = {
             let mut r = self.as_mut().rust_mut();
             let start = *r.job_clock.get_or_insert_with(std::time::Instant::now);
             r.job_rate
                 .observe(start.elapsed().as_secs_f64(), snap.bytes_done);
-            let running = snap.state == gust_ops::journal::JobState::Running && !stopping;
+            let running =
+                snap.state == gust_ops::journal::JobState::Running && !stopping && !paused;
             let speed = r
                 .job_rate
                 .bytes_per_sec()
@@ -6436,7 +7056,7 @@ impl qobject::DirModel {
             concat!(
                 "{{\"id\":\"{}\",\"state\":\"{:?}\",\"done\":{},\"total\":{},",
                 "\"bytes_done\":{},\"bytes_total\":{},\"message\":\"{}\",\"refused\":{},",
-                "\"bytes_text\":\"{}\",\"speed\":\"{}\",\"eta\":\"{}\",\"stopping\":{}}}"
+                "\"bytes_text\":\"{}\",\"speed\":\"{}\",\"eta\":\"{}\",\"stopping\":{},\"paused\":{}}}"
             ),
             esc(&snap.id),
             snap.state,
@@ -6458,6 +7078,7 @@ impl qobject::DirModel {
             speed,
             eta,
             stopping,
+            paused,
         );
 
         if snap.is_finished() || snap.state == gust_ops::journal::JobState::Conflict {
@@ -6483,6 +7104,7 @@ impl qobject::DirModel {
                 if r.last_job.is_some() {
                     r.last_link = None;
                     r.last_modes.clear();
+                    r.last_extra = UndoExtra::None;
                 }
             }
             self.as_mut().reload();
@@ -6525,6 +7147,20 @@ impl qobject::DirModel {
             ROLE_LINK_OK => QVariant::from(&e.meta.and_then(|m| m.link_ok).unwrap_or(true)),
             ROLE_PATH => QVariant::from(&QString::from(&self.key.join(&e.name).display_path())),
             ROLE_SELECTED => QVariant::from(&self.selection.contains(&e.name)),
+            // "copy" / "cut" when Ctrl+C / Ctrl+X marked this row (Flea #169).
+            ROLE_CLIP => {
+                let marked = !self.clip_set.is_empty()
+                    && self
+                        .key
+                        .as_path()
+                        .is_some_and(|d| self.clip_set.contains(&d.join(&e.name)));
+                let s = match (&self.clipboard, marked) {
+                    (Some((_, ClipMode::Cut)), true) => "cut",
+                    (Some((_, ClipMode::Copy)), true) => "copy",
+                    _ => "",
+                };
+                QVariant::from(&QString::from(s))
+            }
             ROLE_THUMB => {
                 // Only ever a CACHED thumbnail. This runs on the GUI thread,
                 // so it must not render, and must not even stat the source
@@ -6558,6 +7194,7 @@ impl qobject::DirModel {
         h.insert(ROLE_SELECTED, QByteArray::from("isSelected"));
         h.insert(ROLE_THUMB, QByteArray::from("thumbUrl"));
         h.insert(ROLE_TYPE_TEXT, QByteArray::from("typeText"));
+        h.insert(ROLE_CLIP, QByteArray::from("clipMark"));
         h
     }
 }

@@ -29,6 +29,8 @@ Item {
     /// window coordinates.
     signal contextRequested(int row, real x, real y)
     signal openInNewTab(int row)
+    /// A right-button drag was released: offer Copy, Move or Link here.
+    signal dropMenu(int row, real x, real y)
 
     /// The view the user is looking at, for focus and page-step maths.
     function currentView() {
@@ -67,9 +69,11 @@ Item {
         // operation and destination are never a surprise.
         onDropMovedOver: (r) => {
             if (pane.model)
-                pane.dropPreview(pane.model.drop_preview(r, pane.dropAsMove))
+                pane.dropPreview(rowsView.dragRight ? qsTr("Release to choose: Copy, Move or Link here")
+                                 : pane.model.drop_preview(r, pane.dropAsMove))
         }
         onDropReleased: (r) => pane.finishDrop(r)
+        onDropMenuRequested: (r, x, y) => pane.requestDropMenu(r, x, y)
         onDragMovedTo: (x, y) => pane.maybeHandOff(rowsView, x, y)
         onContextRequested: (r, x, y) => pane.contextRequested(r, x, y)
         onMiddleClicked: (r) => pane.openInNewTab(r)
@@ -89,9 +93,11 @@ Item {
         }
         onDropMovedOver: (r) => {
             if (pane.model)
-                pane.dropPreview(pane.model.drop_preview(r, pane.dropAsMove))
+                pane.dropPreview(gridView.dragRight ? qsTr("Release to choose: Copy, Move or Link here")
+                                 : pane.model.drop_preview(r, pane.dropAsMove))
         }
         onDropReleased: (r) => pane.finishDrop(r)
+        onDropMenuRequested: (r, x, y) => pane.requestDropMenu(r, x, y)
         onDragMovedTo: (x, y) => pane.maybeHandOff(gridView, x, y)
         onContextRequested: (r, x, y) => pane.contextRequested(r, x, y)
         onMiddleClicked: (r) => pane.openInNewTab(r)
@@ -111,9 +117,11 @@ Item {
         }
         onDropMovedOver: (r) => {
             if (pane.model)
-                pane.dropPreview(pane.model.drop_preview(r, pane.dropAsMove))
+                pane.dropPreview(columnsView.dragRight ? qsTr("Release to choose: Copy, Move or Link here")
+                                 : pane.model.drop_preview(r, pane.dropAsMove))
         }
         onDropReleased: (r) => pane.finishDrop(r)
+        onDropMenuRequested: (r, x, y) => pane.requestDropMenu(r, x, y)
         onDragMovedTo: (x, y) => pane.maybeHandOff(columnsView, x, y)
         onContextRequested: (r, x, y) => pane.contextRequested(r, x, y)
         onMiddleClicked: (r) => pane.openInNewTab(r)
@@ -121,6 +129,15 @@ Item {
 
     /// A drop is an ordinary copy or move through the same engine as any
     /// other (DESIGN §6.1). A refusal is reported, never swallowed.
+    function requestDropMenu(row, x, y) {
+        if (outward.handedOff) { outward.handedOff = false; return }
+        pane.dropMenu(row, x, y)
+    }
+    function rowPoints() {
+        const v = currentView()
+        return v.rowPoints ? v.rowPoints() : ({})
+    }
+
     function finishDrop(row) {
         if (!pane.model) return
         if (outward.handedOff) { outward.handedOff = false; return }

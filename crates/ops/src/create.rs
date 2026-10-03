@@ -84,6 +84,67 @@ fn create_with(dir: &Path, name: &OsStr, bytes: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
+/// The biggest image a paste will write (a screenshot of a 8K display as
+/// PNG is ~60 MiB). Anything larger is refused rather than held in memory.
+pub const PASTE_MAX_BYTES: usize = 128 * 1024 * 1024;
+
+/// A file Gust created from pasted bytes, and what undo needs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Created {
+    pub path: PathBuf,
+    pub ident: crate::attrs::Ident,
+    pub len: u64,
+}
+
+/// "Pasted image 2026-10-03 16-24-05.png", then " (2)", " (3)"… in `dir`.
+/// Never an existing name. `stamp` is local time, already formatted.
+pub fn pasted_image_name(dir: &Path, stamp: &str, ext: &str) -> std::ffi::OsString {
+    for i in 1..1000 {
+        let cand = if i == 1 {
+            format!("Pasted image {stamp}.{ext}")
+        } else {
+            format!("Pasted image {stamp} ({i}).{ext}")
+        };
+        if dir.join(&cand).symlink_metadata().is_err() {
+            return cand.into();
+        }
+    }
+    format!("Pasted image {stamp} ({}).{ext}", std::process::id()).into()
+}
+
+/// Create `dir/name` holding `bytes` (never replacing anything) and record
+/// its identity so the undo can prove it is still that file.
+pub fn create_from_bytes(dir: &Path, name: &OsStr, bytes: &[u8]) -> Result<Created, String> {
+    if bytes.len() > PASTE_MAX_BYTES {
+        return Err("that image is too large to paste as a file".into());
+    }
+    create_with(dir, name, bytes)?;
+    let path = dir.join(name);
+    let ident = crate::attrs::ident_of(&path).map_err(|e| crate::engine::plain_io_message(&e))?;
+    Ok(Created {
+        path,
+        ident,
+        len: bytes.len() as u64,
+    })
+}
+
+/// Remove a file Gust created, only if it is still exactly that file
+/// (same dev + inode + mtime and size). A file that was edited or replaced
+/// since is the user's work and is left alone.
+pub fn undo_create(c: &Created) -> Result<(), String> {
+    let now =
+        crate::attrs::ident_of(&c.path).map_err(|_| "the file is already gone".to_string())?;
+    let len = c
+        .path
+        .symlink_metadata()
+        .map(|m| m.len())
+        .unwrap_or(u64::MAX);
+    if now != c.ident || len != c.len {
+        return Err("the file was changed since; left as it is".into());
+    }
+    std::fs::remove_file(&c.path).map_err(|e| crate::engine::plain_io_message(&e))
+}
+
 /// The user's Templates folder (XDG user-dirs), when it exists.
 pub fn templates_dir() -> Option<PathBuf> {
     let home = std::env::var_os("HOME").filter(|h| !h.is_empty())?;
@@ -242,6 +303,42 @@ mod tests {
             .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
             .collect();
         assert_eq!(names, vec!["a.txt", "b.md"]);
+        fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn a_pasted_image_gets_a_fresh_name_and_its_bytes() {
+        let d = tmp("pasteimg");
+        let png = b"\x89PNG\r\n\x1a\nnot really decoded";
+        let n1 = pasted_image_name(&d, "2026-10-03 16-24-05", "png");
+        assert_eq!(n1, "Pasted image 2026-10-03 16-24-05.png");
+        let c = create_from_bytes(&d, &n1, png).unwrap();
+        assert_eq!(fs::read(&c.path).unwrap(), png);
+        let n2 = pasted_image_name(&d, "2026-10-03 16-24-05", "png");
+        assert_eq!(n2, "Pasted image 2026-10-03 16-24-05 (2).png");
+        undo_create(&c).unwrap();
+        assert!(!c.path.exists());
+        fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn undo_of_a_paste_leaves_an_edited_file_alone() {
+        let d = tmp("pasteedit");
+        let c = create_from_bytes(&d, OsStr::new("p.png"), b"one").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::write(&c.path, b"the user drew on it").unwrap();
+        let e = undo_create(&c).unwrap_err();
+        assert!(e.contains("left as it is"), "{e}");
+        assert_eq!(fs::read(&c.path).unwrap(), b"the user drew on it");
+        fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn a_paste_never_replaces_an_existing_file() {
+        let d = tmp("pasteclash");
+        fs::write(d.join("p.png"), b"keep").unwrap();
+        assert!(create_from_bytes(&d, OsStr::new("p.png"), b"new").is_err());
+        assert_eq!(fs::read(d.join("p.png")).unwrap(), b"keep");
         fs::remove_dir_all(&d).ok();
     }
 }

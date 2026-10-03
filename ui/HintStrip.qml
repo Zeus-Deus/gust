@@ -41,6 +41,16 @@ Rectangle {
         color: Tokens.withAlpha(Tokens.border, Tokens.borderAlpha)
     }
 
+    /// Hints drawn but not whole (qa): must always be 0.
+    function cutHints() {
+        let n = 0
+        for (let i = 0; i < hintRep.count; i++) {
+            const it = hintRep.itemAt(i)
+            if (it && it.opacity > 0 && it.x + it.width > hintRow.width) n++
+        }
+        return n
+    }
+
     Row {
         id: hintRow
         anchors.left: parent.left
@@ -77,6 +87,10 @@ Rectangle {
 
             delegate: Row {
                 spacing: Tokens.spaceSm
+                // A hint that does not fit whole is hidden whole, never cut
+                // through its letters. Opacity, not visible: it must keep
+                // its place so the Row's layout does not depend on itself.
+                opacity: x + width <= hintRow.width ? 1 : 0
                 Text {
                     text: modelData.k
                     color: Tokens.accent

@@ -39,6 +39,7 @@ Window {
                 return (cut >= 0 && cut < p.length - 1) ? p.substring(cut + 1) : p
             }
             onTabLabelChanged: win.refreshTabLabels()
+            onLocationChanged: sessionSaveTimer.restart()
             // Mounts and connections finish on a worker; every tab reports
             // here, so a result still lands if the user switched tabs.
             onPlace_done: (op, name, message) => win.placeDone(op, name, message)
@@ -274,6 +275,12 @@ Window {
     /// A mount, connect, eject or disconnect finished on its worker.
     /// "" is success; "ASK:" is a decision only the user can make.
     function placeDone(op, name, message) {
+        if (op === "paste-image") {
+            if (message !== "") win.alertText = message
+            else { win.alertText = ""; hints.status = name }
+            win.qaDump("paste-image" + (message === "" ? "" : "-failed"))
+            return
+        }
         if (op === "cloud-disconnect" && message.startsWith("ASK:")) {
             win.pendingCloudOff = name
             confirm.purpose = "clouddirty"
@@ -541,7 +548,9 @@ Window {
     minimumWidth: 520
     minimumHeight: 320
     visible: true
-    title: dirModel.location_display + " — Gust"
+    title: (win.adminMode ? qsTr("Administrator — ") : "") + dirModel.location_display + " — Gust"
+    /// The root window started by "Open as administrator".
+    readonly property bool adminMode: dirModel ? dirModel.is_admin() : false
     color: Tokens.background
 
     // "standard" (safe default) or "vim". Both keep / for filter, : for
@@ -751,12 +760,16 @@ Window {
     function refreshTabLabels() {
         for (let i = 0; i < tabList.count; i++) {
             const m = tabs.objectAt(i)
-            const name = m ? m.tabLabel : "…"
+            // A tab not opened yet (restored, or opened in the background)
+            // keeps the name it was given until it lists its folder.
+            const keep = m && !m.everActivated && tabList.get(i).startPath !== "" && i !== win.activeTab
+            const name = keep ? tabList.get(i).label : (m ? m.tabLabel : "…")
             if (tabList.get(i).label !== name)
                 tabList.setProperty(i, "label", name)
         }
     }
     onActiveTabChanged: {
+        sessionSaveTimer.restart()
         refreshActiveModel()
         // The transfer card belongs to the tab on screen.
         win.job = null
@@ -871,7 +884,8 @@ Window {
         if (it && !it.everActivated) {
             it.everActivated = true
             const p = it.startPath
-            if (p && p !== "") it.navigate(p)
+            if (p && p.startsWith("token:")) it.navigate_token(p.substring(6))
+            else if (p && p !== "") it.navigate(p)
             else it.reload()
         }
         win.viewMode = tabViews[i] || "rows"
@@ -907,6 +921,7 @@ Window {
         // An EXPLICIT choice, so it is remembered for this location.
         // applyRememberedView() must never call this.
         dirModel.remember_view(m)
+        sessionSaveTimer.restart()
         // Only Grid shows thumbnails. Asking for them anywhere else would
         // spend a sandbox launch per file for something nobody can see.
         if (m === "grid")
@@ -1217,6 +1232,26 @@ Window {
         else if (a === "new-file") win.askNewFile()
         else if (a === "invert-selection") { dirModel.sel_invert(); win.qaDump("select") }
         else if (a === "deselect-all") { dirModel.sel_clear(); win.qaDump("select") }
+        else if (a === "owner") win.askOwner()
+        else if (a === "paste-image") win.pasteImage()
+        else if (a === "open-admin") {
+            const e = dirModel.open_as_admin()
+            if (e !== "") win.alertText = e
+            else hints.status = qsTr("Asked for administrator rights")
+            win.qaDump("open-admin")
+        }
+        else if (a === "drop-copy" || a === "drop-move") {
+            const m = win.dropMenuModel
+            if (m) win.transferStarted(m, m.drop_on_row(win.dropMenuRow, a === "drop-move"), "drop")
+        }
+        else if (a === "drop-link") {
+            const m = win.dropMenuModel
+            if (m) {
+                const e = m.drop_link_on_row(win.dropMenuRow)
+                if (e !== "") win.alertText = e
+            }
+            win.qaDump("drop-link")
+        }
         else if (a === "noop") { /* nothing to do */ }
         else if (a.startsWith("openwith:")) {
             const msg = dirModel.open_with_id(dirModel.cursor, a.substring(9))
@@ -1317,6 +1352,7 @@ Window {
                 { label: qsTr("Paste"), hint: "Ctrl+V", action: "paste", enabled: canPaste },
                 sep,
                 { label: qsTr("Open terminal here"), hint: "", action: "terminal" },
+                { label: qsTr("Open as administrator"), hint: "", action: "open-admin" },
                 { label: qsTr("Copy folder path"), hint: "", action: "copy-path-folder" },
                 win.bookmarkList.some(b => b.path === dirModel.location)
                     ? { label: qsTr("Remove this folder from Bookmarks"), hint: "", action: "unpin-here" }
@@ -1368,6 +1404,7 @@ Window {
             for (const c of custom) list.push({ label: c.name, hint: "", action: "custom:" + c.id })
         }
         list.push({ label: qsTr("Permissions…"), hint: "", action: "permissions" })
+        list.push({ label: qsTr("Owner…"), hint: "", action: "owner" })
         list.push({ label: qsTr("Compress"), hint: "", action: "compress" })
         if (!many && dirModel.row_is_archive(row)) list.push({ label: qsTr("Extract here"), hint: "", action: "extract" })
         list.push(sep)
@@ -1412,7 +1449,80 @@ Window {
     }
 
     function doPaste() {
-        win.transferStarted(dirModel, dirModel.clip_paste(), "paste")
+        const r = dirModel.clip_paste()
+        // No files to paste: an image on the clipboard becomes a file.
+        if (r === "nothing to paste") { win.pasteImage(); return }
+        win.transferStarted(dirModel, r, "paste")
+    }
+    function pasteImage() {
+        const e = dirModel.paste_image()
+        if (e !== "") { win.alertText = e; return }
+        hints.status = qsTr("Pasting the image…")
+        win.qaDump("paste-image-started")
+    }
+
+    function askOwner() {
+        const n = dirModel.sel_count()
+        prompt.mode = "owner"
+        prompt.openWith(n > 1 ? qsTr("Owner for ") + n + qsTr(" items") : qsTr("Owner"), "",
+                        qsTr("Now: ") + dirModel.owner_text()
+                            + qsTr("  ·  a user, :group or user:group.  Ctrl+Z undoes it."), -1)
+        win.qaDump("prompt")
+    }
+
+    /// Where a right-button drag was released, and in which pane's model.
+    property var dropMenuModel: null
+    property int dropMenuRow: -1
+    function openDropMenu(model, row, x, y) {
+        win.dropMenuModel = model
+        win.dropMenuRow = row
+        contextMenu.popup(x, y, [
+            { label: qsTr("Copy here"), hint: "", action: "drop-copy" },
+            { label: qsTr("Move here"), hint: "", action: "drop-move" },
+            { label: qsTr("Link here"), hint: "", action: "drop-link" },
+            { separator: true },
+            { label: qsTr("Cancel"), hint: "Esc", action: "noop" }
+        ])
+        hints.status = qsTr("Choose Copy, Move or Link · Esc cancels")
+        win.qaDump("drop-menu")
+    }
+
+    // --- tabs at start ------------------------------------------------------
+    Timer { id: sessionSaveTimer; interval: 600; onTriggered: win.saveSession() }
+    onTabCountChanged: sessionSaveTimer.restart()
+    function saveSession() {
+        if (win.adminMode) return
+        const lines = []
+        for (let i = 0; i < tabList.count; i++) {
+            const m = tabs.objectAt(i)
+            const sp = tabList.get(i).startPath
+            let tok = ""
+            if (m && (m.everActivated || sp === "")) tok = m.location_token()
+            else if (sp.startsWith("token:")) tok = sp.substring(6)
+            else tok = dirModel.token_for(sp)
+            lines.push(tok + " " + (win.tabViews[i] || "rows"))
+        }
+        dirModel.session_save(lines.join("\n"), win.activeTab)
+    }
+    /// Reopen last time's tabs (Settings → Tabs at start). Only the active
+    /// one lists its folder now; the others when they are first shown.
+    function restoreSession() {
+        const raw = dirModel.session_json()
+        if (raw === "") return false
+        let s
+        try { s = JSON.parse(raw) } catch (e) { return false }
+        if (!s.tabs || s.tabs.length === 0) return false
+        dirModel.start_at_token(s.tabs[0].token)
+        win.tabViews[0] = s.tabs[0].view
+        for (let i = 1; i < s.tabs.length; i++) {
+            tabList.append({ startPath: "token:" + s.tabs[i].token, label: s.tabs[i].name, pane: 0 })
+            win.tabViews.push(s.tabs[i].view)
+        }
+        win.refreshPaneTabCount()
+        if (s.active > 0 && s.active < tabList.count) Qt.callLater(() => win.activateTab(s.active))
+        else { win.viewMode = win.tabViews[0]; win.refreshPanes() }
+        hints.status = qsTr("Reopened ") + s.tabs.length + qsTr(" tabs from last time")
+        return true
     }
 
     /// Every copy/move funnel returns "" (started), "?conflict" (names are
@@ -1510,6 +1620,33 @@ Window {
 
     Column {
         anchors.fill: parent
+
+        // The administrator window says so, on every screen of it.
+        Rectangle {
+            id: adminBanner
+            width: parent.width
+            height: win.adminMode ? Tokens.controlHeight : 0
+            visible: win.adminMode
+            color: Tokens.withAlpha(Tokens.danger, 0.16)
+            Rectangle {
+                width: Math.max(2, Tokens.borderWidth * 2)
+                height: parent.height
+                color: Tokens.danger
+            }
+            Text {
+                anchors.verticalCenter: parent.verticalCenter
+                x: Tokens.rowPaddingX
+                width: parent.width - Tokens.rowPaddingX * 2
+                text: qsTr("Administrator — changes here affect the whole system")
+                color: Tokens.foregroundBright
+                font.family: Tokens.fontFamily
+                font.pixelSize: Tokens.fontSmall
+                font.bold: true
+                elide: Text.ElideRight
+            }
+            Accessible.role: Accessible.StaticText
+            Accessible.name: qsTr("Administrator window")
+        }
 
         // Tab strip. Hidden with a single tab: one tab is not a choice, and
         // a strip showing it is chrome that earns nothing.
@@ -1793,7 +1930,7 @@ Window {
         Item {
             id: body
             width: parent.width
-            height: parent.height - headerBar.height - filterBar.height
+            height: parent.height - tabStrip.height - headerBar.height - filterBar.height - adminBanner.height
                     - chooserBar.height - interruptedNotice.height - jobDrawer.height - hints.height
 
             Sidebar {
@@ -1850,6 +1987,7 @@ Window {
                     onDragBegan: { win.focusPane(0); win.qaDump("drag-begin") }
                     onDropPreview: (t) => { hints.status = t }
                     onDropFailed: (m) => { win.transferStarted(win.paneAModel, m, "drop") }
+                    onDropMenu: (r, x, y) => { win.focusPane(0); win.openDropMenu(win.paneAModel, r, x, y) }
                     onDropDone: { hints.status = ""; jobTimer.start(); win.qaDump("drop") }
                     onContextRequested: (r, x, y) => { win.focusPane(0); win.openContextMenu(r, x, y) }
                 }
@@ -1885,6 +2023,7 @@ Window {
                         onDragBegan: { win.focusPane(1); win.qaDump("drag-begin") }
                         onDropPreview: (t) => { hints.status = t }
                         onDropFailed: (m) => { win.transferStarted(win.paneBModel, m, "drop") }
+                        onDropMenu: (r, x, y) => { win.focusPane(1); win.openDropMenu(win.paneBModel, r, x, y) }
                         onDropDone: { hints.status = ""; jobTimer.start(); win.qaDump("drop") }
                         onContextRequested: (r, x, y) => { win.focusPane(1); win.openContextMenu(r, x, y) }
                     }
@@ -2009,6 +2148,20 @@ Window {
             width: parent.width
             model: dirModel
             job: win.job
+            onRequestPause: {
+                dirModel.pause_job()
+                hints.status = qsTr("Paused · Resume carries on, Cancel stops")
+                const raw = dirModel.poll_job()
+                if (raw !== "") { try { win.job = JSON.parse(raw) } catch (e) {} }
+                win.qaDump("job-pause")
+            }
+            onRequestResume: {
+                dirModel.resume_job()
+                hints.status = qsTr("Resumed")
+                const raw = dirModel.poll_job()
+                if (raw !== "") { try { win.job = JSON.parse(raw) } catch (e) {} }
+                win.qaDump("job-resume")
+            }
             onRequestCancel: {
                 dirModel.cancel_job()
                 // Show "Stopping" now, not on the next poll.
@@ -2273,6 +2426,9 @@ Window {
                     if (err === "") {
                         win.alertText = ""
                         hints.status = label === "Undo: remove the link" ? qsTr("Removed the link")
+                                     : label === "Undo: remove the links" ? qsTr("Removed the links")
+                                     : label === "Undo: put owners back" ? qsTr("Owners put back")
+                                     : label === "Undo: remove the pasted image" ? qsTr("Removed the pasted image")
                                      : label === "Undo: put permissions back" ? qsTr("Permissions put back")
                                      : label.startsWith("Undo: remove") ? "Copies removed"
                                      : label.startsWith("Undo: move") ? "Moved back"
@@ -2430,6 +2586,10 @@ Window {
                 err = dirModel.new_folder(text)
             else if (prompt.mode === "newfile")
                 err = dirModel.new_file(text)
+            else if (prompt.mode === "owner") {
+                err = dirModel.set_owner(text)
+                if (err === "") { prompt.close(); win.qaDump("prompt-ok"); return }
+            }
             else if (prompt.mode === "permissions") {
                 err = dirModel.set_mode(text)
                 if (err === "") { prompt.close(); win.qaDump("prompt-ok"); return }
@@ -2752,6 +2912,19 @@ Window {
             })(),
             keyMapRows: keyMapPanel.open ? keyMapPanel.rows.length : 0,
             zoom: Tokens.zoom,
+            adminMode: win.adminMode,
+            hintsCut: hints.cutHints(),
+            // How far the hint strip's bottom edge sits past the window's
+            // (0 when it is fully inside; > 0 means it was pushed off).
+            hintsOverflow: Math.round(hints.mapToItem(null, 0, hints.height).y - win.height),
+            jobPaused: win.job ? !!win.job.paused : false,
+            jobPausePoint: jobDrawer.pausePoint(),
+            menuPoints: contextMenu.open ? contextMenu.itemPoints() : ({}),
+            placePoints: sidebar.placePoints(),
+            rowPoints: (function () {
+                const it = win.activePaneItem()
+                return it && it.rowPoints ? it.rowPoints() : ({})
+            })(),
             activeTabPath: win.dirModel ? win.dirModel.location : "",
             quickLookName: quickLook.info ? quickLook.info.name : "",
             quickLookKind: quickLook.info ? quickLook.info.kindWords : "",
@@ -2892,8 +3065,9 @@ Window {
 
     Component.onCompleted: {
         // The model does not list anything until it is told to: construction
-        // must not do I/O. This is the one explicit kick at startup.
-        dirModel.reload()
+        // must not do I/O. This is the one explicit kick at startup — or the
+        // first restored tab, when Settings asks for last time's tabs.
+        if (!win.restoreSession()) dirModel.reload()
         // After a crash, say what was interrupted — read once, here.
         try { interruptedNotice.items = JSON.parse(dirModel.interrupted_jobs()) } catch (e) {}
         // The folder Gust opens with gets its remembered view too.

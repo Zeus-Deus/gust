@@ -267,7 +267,7 @@ pub fn copy_regular_file_with(
     // last free bytes, invisible to the user and cleaned up by nobody.
     let copy_result = (|| -> OpResult<()> {
         loop {
-            if cancel.is_cancelled() {
+            if cancel.checkpoint() {
                 return Err(OpError::Cancelled);
             }
             let n = rustix::io::read(&src, &mut buf)?;
@@ -436,7 +436,7 @@ pub fn plan_job(
 pub fn run_copy_job(job: &mut Job, cancel: &CancelToken) -> OpResult<()> {
     job.state = JobState::Running;
     for idx in 0..job.entries.len() {
-        if cancel.is_cancelled() {
+        if cancel.checkpoint() {
             job.state = JobState::Cancelled;
             return Err(OpError::Cancelled);
         }
