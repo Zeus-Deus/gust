@@ -246,8 +246,10 @@ dismiss_desktop_overlays() {
   # These are the ones a fresh install shows; an unknown card is harmless
   # here because the foreign-window check below still reports it.
   local card
+  # "Update System" and "Learn Keybindings" sit over the toolbar's right end
+  # (view and sort buttons), where they took a click meant for Gust.
   for card in "Set your default agent" "Install Dictation with Voxtype" \
-              "Update available" "Omarchy"; do
+              "Update available" "Omarchy" "Update System" "Learn Keybindings"; do
     vm omarchy-notification-dismiss "$card" >/dev/null 2>&1 || true
   done
   sleep 0.5
@@ -269,6 +271,13 @@ else
 fi
 
 say "fixture"
+# A run killed mid-section can leave a bind mount or a mode-000 folder in the
+# fixture (qa §31 makes both), and make-fixture's rm -rf then fails on them.
+if [[ -d "$FIXTURE" ]]; then
+  grep -F " $FIXTURE/" /proc/self/mountinfo | awk '{print $5}' | sort -r \
+    | while read -r m; do sudo -n umount "$m" 2>/dev/null; done
+  chmod -R u+rwx "$FIXTURE" 2>/dev/null
+fi
 "$HERE/make-fixture.sh" "$FIXTURE" >/dev/null
 mkdir -p "$FIXTURE/.local/share" "$FIXTURE/.cache"
 rm -f /tmp/gust-fixture-EXECUTED

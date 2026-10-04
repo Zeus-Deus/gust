@@ -2,6 +2,14 @@
 
 A fast, calm file manager for Omarchy. One Rust binary, Qt Quick UI (cxx-qt), MIT.
 
+<p align="center">
+  <img src="docs/screens/readme/gust-dark-grid.png" alt="Gust in Grid view, dark theme: drawn folders and labelled file pages" width="49%">
+  <img src="docs/screens/readme/gust-light-grid.png" alt="Gust in Grid view, light theme" width="49%">
+</p>
+<p align="center">
+  <img src="docs/screens/readme/gust-dark-rows.png" alt="Gust in Rows view: name, kind, size, modified, with read-only, no-access, mount and link badges" width="80%">
+</p>
+
 > **Status: M1 complete, M2 started.** Listing, three views, navigation, filter,
 > search, theming, keyboard and the safety primitives are proven on a real
 > Omarchy desktop, and Trash + Undo are wired end to end. Copy/move/rename have

@@ -38,6 +38,23 @@ FocusScope {
         return grid.mapToItem(null, 0, 0)
     }
 
+    /// How far the list is scrolled, in pixels (qa).
+    function scrollTop() { return Math.round(grid.contentY - grid.originY) }
+    /// What each of the first rows shows for an icon (qa).
+    function iconInfo() {
+        const out = []
+        if (!root.model) return out
+        for (let i = 0; i < Math.min(grid.count, 40); i++) {
+            const it = grid.itemAtIndex(i)
+            const k = root.model.entry_icon_key(i)
+            out.push({ name: root.model.entry_name(i), key: k,
+                       emblems: root.model.entry_emblems(i),
+                       look: Tokens.iconLook(k),
+                       shown: it ? it.iconShown : null })
+        }
+        return out
+    }
+
     function zoomIn() { tileSize = Math.min(tileSize + 16, 240) }
     function zoomOut() { tileSize = Math.max(tileSize - 16, 48) }
     function zoomReset() { tileSize = Math.round(96 * Tokens.spacingScale) }
@@ -81,6 +98,8 @@ FocusScope {
             reuseItems: true
             cacheBuffer: Math.round((root.tileSize + Tokens.spaceXxl) * 4)
             boundsBehavior: Flickable.StopAtBounds
+            keyNavigationEnabled: false
+            WheelScroll { view: grid }
             onContentYChanged: gridReport.restart()
             onHeightChanged: gridReport.restart()
             onCountChanged: gridReport.restart()
@@ -95,6 +114,7 @@ FocusScope {
 
             delegate: Item {
                 id: cell
+                property bool iconShown: tileIcon.visible || thumb.status === Image.Ready
                 width: grid.cellWidth
                 height: grid.cellHeight
 
@@ -122,24 +142,23 @@ FocusScope {
                         anchors.horizontalCenter: parent.horizontalCenter
                         anchors.top: parent.top
                         anchors.topMargin: Tokens.spaceSm
-                        color: Tokens.withAlpha(Tokens.foreground, 0.06)
-                        border.width: Tokens.borderWidth
+                        // A thumbnail sits in a frame; a drawn icon is bare.
+                        readonly property bool bare: thumb.status !== Image.Ready
+                        color: bare ? "transparent" : Tokens.withAlpha(Tokens.foreground, 0.06)
+                        border.width: bare ? 0 : Tokens.borderWidth
                         border.color: Tokens.withAlpha(Tokens.border, Tokens.borderAlpha)
                         radius: Tokens.radius
 
-                        // The glyph is what a tile shows until a thumbnail
-                        // exists, and what it keeps forever for anything we
-                        // will not preview. It is never replaced by a broken
-                        // image icon.
-                        Text {
+                        // The drawn icon (DESIGN §6.21) is what a tile shows
+                        // until a thumbnail exists, and what it keeps forever
+                        // for anything we will not preview.
+                        FileIcon {
+                            id: tileIcon
                             anchors.centerIn: parent
+                            size: Math.round(parent.width * 0.62)
                             visible: thumb.status !== Image.Ready
-                            text: isDir ? "▣" : (isSymlink ? "↳" : "▢")
-                            color: isDir ? Tokens.accent
-                                         : (isSymlink ? (linkOk ? Tokens.warn : Tokens.danger)
-                                                      : Tokens.foregroundDim)
-                            font.family: Tokens.fontFamily
-                            font.pixelSize: Math.round(root.tileSize * 0.32)
+                            look: Tokens.iconLook(iconKey)
+                            opacity: clipMark === "cut" || isHidden ? 0.55 : 1
                         }
 
                         // The thumbnail itself. `thumbUrl` is empty until a
@@ -164,6 +183,25 @@ FocusScope {
                             sourceSize.width: 256
                             sourceSize.height: 256
                         }
+
+                        // Read-only, no access, mount point, link: square
+                        // badges on the icon's bottom-right corner.
+                        Row {
+                            anchors.bottom: tileIcon.visible ? tileIcon.bottom : parent.bottom
+                            anchors.bottomMargin: -Tokens.spaceXs
+                            anchors.right: tileIcon.visible ? tileIcon.right : parent.right
+                            anchors.rightMargin: -Tokens.spaceSm
+                            spacing: Tokens.spaceXs
+                            visible: emblems !== ""
+                            Repeater {
+                                model: emblems === "" ? [] : emblems.split(",")
+                                delegate: Emblem {
+                                    required property string modelData
+                                    kind: modelData
+                                    size: Math.round(root.tileSize * 0.24)
+                                }
+                            }
+                        }
                     }
 
                     Text {
@@ -176,7 +214,8 @@ FocusScope {
                         height: grid.labelHeight
                         horizontalAlignment: Text.AlignHCenter
                         verticalAlignment: Text.AlignTop
-                        text: name
+                        // Break long names after _ . - rather than mid-word.
+                        text: Tokens.wrapName(name)
                         color: isHidden ? Tokens.foregroundDim
                                         : (isDir ? Tokens.foregroundBright : Tokens.foreground)
                         font.family: Tokens.fontFamily
@@ -289,6 +328,9 @@ FocusScope {
             anchors.fill: grid
             view: grid
             model: root.model
+            // A click or drag on empty space hands the keyboard back to the
+            // window (arrow keys were dead after one before).
+            onBandChanged: root.selectionTouched()
             cellWidth: grid.cellWidth
             cellHeight: grid.cellHeight
             columns: root.columns()

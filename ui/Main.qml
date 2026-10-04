@@ -1222,6 +1222,15 @@ Window {
             if (err !== "") win.alertText = err
             win.qaDump("custom-action")
         }
+        else if (a.startsWith("sortto-")) {
+            // The sort menu: a field keeps the current direction.
+            dirModel.set_sort_to(a.substring(7), dirModel.sort_ascending)
+            win.qaDump("sort")
+        }
+        else if (a === "sortdir-asc" || a === "sortdir-desc") {
+            dirModel.set_sort_to(dirModel.sort_field, a === "sortdir-asc")
+            win.qaDump("sort")
+        }
         else if (a.startsWith("sort-")) { dirModel.set_sort(a.substring(5)); win.qaDump("sort") }
         else if (a === "make-link") {
             const err = dirModel.make_link()
@@ -1418,6 +1427,27 @@ Window {
         win.alertText = ""
         contextMenu.popup(x, y, win.contextItems(row))
         win.qaDump("context-menu")
+    }
+
+    /// The toolbar's sort menu, under its button. The check marks what is
+    /// active now; choosing re-sorts this folder and is remembered for it.
+    function openSortMenu() {
+        if (!dirModel) return
+        if (quickLook.open) quickLook.hide()
+        const f = dirModel.sort_field
+        const asc = dirModel.sort_ascending
+        const mark = (on) => on ? "✓" : ""
+        const p = sortButton.mapToItem(null, 0, sortButton.height)
+        contextMenu.popup(p.x, p.y, [
+            { label: qsTr("Name"), hint: mark(f === "name"), action: "sortto-name" },
+            { label: qsTr("Kind"), hint: mark(f === "kind"), action: "sortto-kind" },
+            { label: qsTr("Size"), hint: mark(f === "size"), action: "sortto-size" },
+            { label: qsTr("Date modified"), hint: mark(f === "modified"), action: "sortto-modified" },
+            { separator: true },
+            { label: qsTr("Ascending"), hint: mark(asc), action: "sortdir-asc" },
+            { label: qsTr("Descending"), hint: mark(!asc), action: "sortdir-desc" }
+        ])
+        win.qaDump("sort-menu")
     }
 
     /// Menu key / Shift+F10: the same menu, anchored under the cursor row.
@@ -1862,6 +1892,44 @@ Window {
                 anchors.rightMargin: Tokens.spaceLg
                 anchors.verticalCenter: parent.verticalCenter
                 spacing: Tokens.spaceXs
+
+                // Sort: what the list is ordered by, and a menu to change it,
+                // where Nautilus keeps the same control. Every view, not
+                // only Rows, whose column headers also sort.
+                Rectangle {
+                    id: sortButton
+                    objectName: "sortButton"
+                    width: sortText.implicitWidth + Tokens.spaceLg * 2
+                    height: Tokens.controlHeight
+                    color: sortHover.hovered ? Tokens.withAlpha(Tokens.foreground, 0.1) : "transparent"
+                    radius: Tokens.radius
+                    readonly property string word: {
+                        const f = win.dirModel ? win.dirModel.sort_field : "name"
+                        return f === "kind" ? qsTr("Kind")
+                             : f === "size" ? qsTr("Size")
+                             : f === "modified" ? qsTr("Modified")
+                             : qsTr("Name")
+                    }
+                    HoverHandler { id: sortHover }
+                    Text {
+                        id: sortText
+                        anchors.centerIn: parent
+                        text: sortButton.word
+                              + ((win.dirModel && !win.dirModel.sort_ascending) ? " ▼" : " ▲")
+                        color: Tokens.foreground
+                        font.family: Tokens.fontFamily
+                        font.pixelSize: Tokens.fontSmall
+                    }
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: win.openSortMenu()
+                    }
+                    Accessible.role: Accessible.Button
+                    Accessible.name: qsTr("Sort by %1").arg(sortButton.word)
+                }
+
+                Item { width: Tokens.spaceSm; height: 1 }
 
                 Repeater {
                     model: [
@@ -2934,6 +3002,7 @@ Window {
                             ? quickLook.info.lines.length : 0,
             quickLookNoPreview: quickLook.info ? quickLook.info.noPreview : "",
             quickLookFacts: quickLook.info && quickLook.info.facts ? quickLook.info.facts : [],
+            quickLookImage: quickLook.open ? quickLook.imageInfo() : null,
             quickLookVisual: quickLook.visual ? (quickLook.visual.image ? "image" : quickLook.visual.archive ? "archive:" + quickLook.visual.total : "why:" + quickLook.visual.why) : "",
             tabDropZone: win.tabDropZone,
             paletteOpen: palette.visible,
@@ -3006,6 +3075,26 @@ Window {
             hintAlert: hints.alert,
             notice: dirModel.notice,
             undoLabel: dirModel.undo_label(),
+            // Which item holds the keyboard: "listFocus" is the window's key
+            // handler; anything else means arrow keys go somewhere else.
+            focusOwner: win.activeFocusItem
+                        ? (win.activeFocusItem.objectName !== "" ? win.activeFocusItem.objectName
+                                                                 : String(win.activeFocusItem))
+                        : "",
+            listScroll: (function () {
+                const it = win.activePaneItem()
+                return it && it.scrollTop ? it.scrollTop() : -1
+            })(),
+            nerdGlyphs: Tokens.nerdGlyphs,
+            icons: (function () {
+                const it = win.activePaneItem()
+                return it && it.iconInfo ? it.iconInfo() : []
+            })(),
+            sortButtonPoint: (function () {
+                const p = sortButton.mapToItem(null, sortButton.width / 2, sortButton.height / 2)
+                return [Math.round(p.x), Math.round(p.y)]
+            })(),
+            sortButtonText: sortText.text,
             model: JSON.parse(dirModel.state_json())
         }
         qaWriter.write(qaStatePath, JSON.stringify(payload, null, 2))

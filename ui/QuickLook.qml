@@ -45,6 +45,14 @@ Item {
         if (root.open && root.model && row !== undefined) root.model.request_peek_visual(row)
     }
     /// Is the close hint inside the panel? (qa)
+    /// The preview image: rendered size and drawn size, in pixels (qa).
+    /// Drawn larger than rendered means it was stretched, i.e. blurry.
+    function imageInfo() {
+        if (!visualImage.visible || visualImage.status !== Image.Ready) return null
+        return { rendered: [visualImage.implicitWidth, visualImage.implicitHeight],
+                 drawn: [Math.round(visualImage.paintedWidth), Math.round(visualImage.paintedHeight)] }
+    }
+
     function closeInside() {
         if (!root.open) return true
         const b = qlClose.mapToItem(panel, 0, qlClose.height)
@@ -185,19 +193,29 @@ Item {
 
                 // Image, PDF first page or video frame: a PNG the sandboxed
                 // helper made. Only this PNG is decoded here, never the file.
+                //
+                // Never larger than the render itself: stretching a small
+                // image past its own pixels is what made previews blurry.
+                // Larger renders are scaled DOWN to fit, with mipmaps.
                 Image {
                     id: visualImage
-                    anchors.fill: parent
+                    objectName: "quickLookImage"
+                    anchors.centerIn: parent
+                    width: Math.min(parent.width, implicitWidth)
+                    height: Math.min(parent.height, implicitHeight)
                     visible: root.visual && root.visual.image !== undefined
                     source: visible ? "file://" + root.visual.image : ""
                     fillMode: Image.PreserveAspectFit
                     asynchronous: true
                     cache: false
                     smooth: true
+                    mipmap: true
                 }
 
                 // Archive: what is inside, listed without extracting.
                 ListView {
+                    id: archiveList
+                    WheelScroll { view: archiveList }
                     anchors.fill: parent
                     visible: root.visual && root.visual.archive !== undefined
                     clip: true
@@ -246,6 +264,8 @@ Item {
                 }
 
                 Flickable {
+                    id: textFlick
+                    WheelScroll { view: textFlick }
                     anchors.fill: parent
                     visible: root.info && root.info.lines
                              && root.info.lines.length > 0 && !root.visual

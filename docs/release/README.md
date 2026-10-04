@@ -6,6 +6,14 @@ that never loses data.
 
 > Draft for v0.1.0. Not published.
 
+<p align="center">
+  <img src="docs/screens/readme/gust-dark-grid.png" alt="Gust in Grid view, dark theme: drawn folders and labelled file pages" width="49%">
+  <img src="docs/screens/readme/gust-light-grid.png" alt="Gust in Grid view, light theme" width="49%">
+</p>
+<p align="center">
+  <img src="docs/screens/readme/gust-dark-rows.png" alt="Gust in Rows view: name, kind, size, modified, with read-only, no-access, mount and link badges" width="80%">
+</p>
+
 ## Why Gust
 
 - **Fast where it shows.** A 100,000-file folder settles in about 0.4 s on a

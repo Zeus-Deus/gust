@@ -6,6 +6,9 @@ use std::path::{Path, PathBuf};
 pub enum ThumbSize {
     Normal, // 128px
     Large,  // 256px
+    /// 1024px, the freedesktop spec's `xx-large`: what Quick Look shows.
+    /// A 256px render stretched across the panel was visibly blurry.
+    XxLarge,
 }
 
 impl ThumbSize {
@@ -13,12 +16,14 @@ impl ThumbSize {
         match self {
             ThumbSize::Normal => "normal",
             ThumbSize::Large => "large",
+            ThumbSize::XxLarge => "xx-large",
         }
     }
     pub fn pixels(self) -> u32 {
         match self {
             ThumbSize::Normal => 128,
             ThumbSize::Large => 256,
+            ThumbSize::XxLarge => 1024,
         }
     }
 }

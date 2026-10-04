@@ -105,7 +105,12 @@ SAFE = re.compile(r':\s*(Qt|Math|JSON|String|Number|Boolean|parseInt|parseFloat|
 # indexOf/includes are Array methods on a notifying property (the binding is
 # re-run when the array is reassigned); valueOf (SettingsPanel) only reads
 # root.s, a QObject whose properties notify, so QML records the dependency.
-ALLOW = re.compile(r'\b(columns|pageStep|currentView|withAlpha|color|metric|scaled|indexOf|includes|valueOf)\s*\(')
+# iconLook (Tokens) reads tokens.icons_rev first, a notifying property bumped
+# when the MIME database finishes loading; the families arrive after the
+# first paint, and qa §31 proves the bindings pick them up.
+# wrapName (Tokens) is pure: its only input is the argument, a model role the
+# binding reads (and so tracks) while evaluating the call.
+ALLOW = re.compile(r'\b(columns|pageStep|currentView|withAlpha|color|metric|scaled|indexOf|includes|valueOf|iconLook|wrapName)\s*\(')
 BIND = re.compile(r'^\s*(readonly\s+)?(property\s+[\w<>.]+\s+)?(?!on[A-Z])[a-z][\w.]*\s*:\s+[A-Za-z_][\w.]*\s*\(')
 
 bad = []

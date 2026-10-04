@@ -195,11 +195,15 @@ pub fn list_names(
 pub fn stat_entry(dir: &Path, name: &OsStr, kind: EntryKind) -> Option<Metadata> {
     let p = dir.join(name);
     let md = std::fs::symlink_metadata(&p).ok()?;
-    let link_ok = if kind == EntryKind::Symlink {
-        Some(std::fs::metadata(&p).is_ok())
+    let (link_ok, link_dir) = if kind == EntryKind::Symlink {
+        match std::fs::metadata(&p) {
+            Ok(t) => (Some(true), t.is_dir()),
+            Err(_) => (Some(false), false),
+        }
     } else {
-        None
+        (None, false)
     };
+    let mount_root = kind == EntryKind::Dir && is_mount_root(&p);
     Some(Metadata {
         size: md.size(),
         mtime: md.mtime(),
@@ -209,7 +213,29 @@ pub fn stat_entry(dir: &Path, name: &OsStr, kind: EntryKind) -> Option<Metadata>
         dev: md.dev(),
         ino: md.ino(),
         link_ok,
+        link_dir,
+        mount_root,
     })
+}
+
+/// Is `path` the root of a mount? `statx` reports it directly (bind mounts
+/// included, which a device-number comparison misses), and AT_NO_AUTOMOUNT
+/// keeps an autofs point from being mounted just because it was listed.
+/// Unknown (an old kernel) counts as no.
+pub fn is_mount_root(path: &Path) -> bool {
+    use rustix::fs::{statx, AtFlags, StatxAttributes, StatxFlags, CWD};
+    match statx(
+        CWD,
+        path,
+        AtFlags::NO_AUTOMOUNT | AtFlags::SYMLINK_NOFOLLOW,
+        StatxFlags::empty(),
+    ) {
+        Ok(r) => {
+            r.stx_attributes_mask.contains(StatxAttributes::MOUNT_ROOT)
+                && r.stx_attributes.contains(StatxAttributes::MOUNT_ROOT)
+        }
+        Err(_) => false,
+    }
 }
 
 /// Fill metadata for a snapshot's entries. Symlinks are lstat'ed (never
@@ -282,6 +308,31 @@ mod tests {
         let _ = fs::remove_dir_all(&p);
         fs::create_dir_all(&p).unwrap();
         p
+    }
+
+    #[test]
+    fn mount_roots_are_recognised() {
+        // `/proc` is a mount on every Linux system; a plain folder is not.
+        assert!(is_mount_root(Path::new("/proc")));
+        let d = tmpdir("mount");
+        fs::create_dir(d.join("plain")).unwrap();
+        assert!(!is_mount_root(&d.join("plain")));
+        let meta = stat_entry(&d, OsStr::new("plain"), EntryKind::Dir).unwrap();
+        assert!(!meta.mount_root);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_link_to_a_folder_says_so() {
+        let d = tmpdir("linkdir");
+        fs::create_dir(d.join("sub")).unwrap();
+        std::os::unix::fs::symlink("sub", d.join("to-sub")).unwrap();
+        std::os::unix::fs::symlink("gone", d.join("dangling")).unwrap();
+        let m = stat_entry(&d, OsStr::new("to-sub"), EntryKind::Symlink).unwrap();
+        assert_eq!((m.link_ok, m.link_dir), (Some(true), true));
+        let m = stat_entry(&d, OsStr::new("dangling"), EntryKind::Symlink).unwrap();
+        assert_eq!((m.link_ok, m.link_dir), (Some(false), false));
+        let _ = fs::remove_dir_all(&d);
     }
 
     #[test]

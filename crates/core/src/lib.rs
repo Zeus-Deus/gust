@@ -16,6 +16,7 @@ pub mod filemanager1;
 pub mod grep;
 pub mod handoff;
 pub mod hash;
+pub mod icons;
 pub mod jump;
 pub mod keymap;
 pub mod lister;

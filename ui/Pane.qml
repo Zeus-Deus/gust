@@ -137,6 +137,17 @@ Item {
         const v = currentView()
         return v.rowPoints ? v.rowPoints() : ({})
     }
+    /// How far the list is scrolled, in pixels (qa).
+    function scrollTop() {
+        const v = currentView()
+        return v.scrollTop ? v.scrollTop() : -1
+    }
+    /// Per visible row: name, icon key, emblems, resolved URL and whether
+    /// the delegate is drawing the icon (qa).
+    function iconInfo() {
+        const v = currentView()
+        return v.iconInfo ? v.iconInfo() : []
+    }
 
     function finishDrop(row) {
         if (!pane.model) return

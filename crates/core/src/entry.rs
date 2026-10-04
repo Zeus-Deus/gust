@@ -45,6 +45,12 @@ pub struct Metadata {
     pub ino: u64,
     /// For symlinks: does the target resolve?
     pub link_ok: Option<bool>,
+    /// For symlinks: is the target a folder? (Picks the icon; the link
+    /// itself is still never followed for anything else.)
+    pub link_dir: bool,
+    /// Is something mounted here (a disk, a bind mount, a network share)?
+    /// Read without triggering an automount.
+    pub mount_root: bool,
 }
 
 #[derive(Debug, Clone)]

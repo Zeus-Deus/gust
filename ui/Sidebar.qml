@@ -76,6 +76,7 @@ Rectangle {
     // the plan requires ("narrow window/rail restore").
     Flickable {
         id: rail
+        WheelScroll { view: rail; enabled: rail.interactive }
         anchors.fill: parent
         anchors.topMargin: Tokens.spaceXl
         contentWidth: width

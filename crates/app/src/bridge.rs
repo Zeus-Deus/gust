@@ -216,6 +216,15 @@ pub mod qobject {
         fn view_for_here(self: &DirModel) -> QString;
         #[qinvokable]
         fn set_sort(self: Pin<&mut DirModel>, field: &QString);
+        /// Set the sort exactly (the toolbar's sort menu), rather than
+        /// flipping direction when the field is already active.
+        #[qinvokable]
+        fn set_sort_to(self: Pin<&mut DirModel>, field: &QString, ascending: bool);
+        /// The icon key and emblems of a row (QA probe; views use roles).
+        #[qinvokable]
+        fn entry_icon_key(self: &DirModel, row: i32) -> QString;
+        #[qinvokable]
+        fn entry_emblems(self: &DirModel, row: i32) -> QString;
         #[qinvokable]
         fn set_filter_text(self: Pin<&mut DirModel>, text: &QString);
         /// Type-ahead: SELECT a row, never start a search (Nautilus #1157).
@@ -736,6 +745,9 @@ pub mod qobject {
         /// Bumped whenever the token values change. QML bindings read it so
         /// they re-evaluate: `color()` is a call, which QML cannot track.
         #[qproperty(i32, revision)]
+        /// Bumped when the file-type data (MIME database, special folders)
+        /// has been (re)loaded, so bindings that ask for a look re-evaluate.
+        #[qproperty(i32, icons_rev)]
         type ThemeTokens = super::ThemeTokensRust;
 
         /// Follow Omarchy theme switches from now on (live reload).
@@ -750,6 +762,11 @@ pub mod qobject {
         fn reload(self: Pin<&mut ThemeTokens>);
         #[qinvokable]
         fn load_theme_dir(self: Pin<&mut ThemeTokens>, dir: &QString, name: &QString);
+        /// How an entry is drawn, for its `iconKey` role:
+        /// `shape\tfamily\tlabel\tglyph` (DESIGN §6.21). A lookup in memory:
+        /// the MIME database was read on a worker.
+        #[qinvokable]
+        fn icon_look(self: &ThemeTokens, key: &QString) -> QString;
     }
 
     // Lets a worker thread queue work back onto the GUI thread.
@@ -784,6 +801,8 @@ const ROLE_SELECTED: i32 = 0x0109;
 const ROLE_THUMB: i32 = 0x010A;
 const ROLE_TYPE_TEXT: i32 = 0x010B;
 const ROLE_CLIP: i32 = 0x010C;
+const ROLE_ICON_KEY: i32 = 0x010D;
+const ROLE_EMBLEMS: i32 = 0x010E;
 
 pub struct DirModelRust {
     empty_reason: QString,
@@ -1161,6 +1180,16 @@ impl DirModelRust {
     fn entry_at(&self, row: i32) -> Option<&Entry> {
         let idx = *self.visible.get(usize::try_from(row).ok()?)?;
         self.all.get(idx)
+    }
+
+    /// What an entry looks like, as a key `icon_look` resolves.
+    fn icon_key_of(&self, e: &Entry) -> String {
+        let full = self
+            .key
+            .as_path()
+            .map(|d| d.join(&e.name))
+            .unwrap_or_default();
+        gust_core::icons::key_for(&e.name, e.kind, e.meta.as_ref(), &full)
     }
 
     /// Local filesystem path of a visible row, if it has one.
@@ -1779,7 +1808,9 @@ impl qobject::DirModel {
                     match gust_thumbs::render::thumbnail(
                         &path,
                         mime,
-                        gust_thumbs::cache::ThumbSize::Large,
+                        // Big enough for the panel on a 1440p screen; small
+                        // images keep their own size (never enlarged).
+                        gust_thumbs::cache::ThumbSize::XxLarge,
                     ) {
                         Ok(img) => {
                             format!("{{\"image\":{}}}", Self::json_str(&img.to_string_lossy()))
@@ -4440,6 +4471,10 @@ impl qobject::DirModel {
             roles.append(ROLE_SIZE);
             roles.append(ROLE_MODIFIED);
             roles.append(ROLE_LINK_OK);
+            // Executable, empty, link-to-folder, read-only and mount all
+            // come from the details just read.
+            roles.append(ROLE_ICON_KEY);
+            roles.append(ROLE_EMBLEMS);
             // Safety: GUI thread, inside a queued model callback.
             unsafe {
                 let top = self.as_ref().index(lo as i32, 0, &root);
@@ -4684,15 +4719,26 @@ impl qobject::DirModel {
             .set_status(QString::from(&format!("{n} items")));
     }
 
-    fn set_sort(mut self: Pin<&mut Self>, field: &QString) {
-        let f = field.to_string();
+    fn set_sort(self: Pin<&mut Self>, field: &QString) {
         // Clicking the active column flips direction.
-        if self.as_ref().sort_field.to_string() == f {
-            let asc = !self.as_ref().sort_ascending;
-            self.as_mut().set_sort_ascending(asc);
+        let asc = if self.as_ref().sort_field.to_string() == field.to_string() {
+            !self.as_ref().sort_ascending
         } else {
+            true
+        };
+        self.set_sort_to(field, asc);
+    }
+
+    fn set_sort_to(mut self: Pin<&mut Self>, field: &QString, ascending: bool) {
+        let f = field.to_string();
+        if !matches!(f.as_str(), "name" | "kind" | "size" | "modified") {
+            return;
+        }
+        if self.as_ref().sort_field.to_string() != f {
             self.as_mut().set_sort_field(QString::from(&f));
-            self.as_mut().set_sort_ascending(true);
+        }
+        if self.as_ref().sort_ascending != ascending {
+            self.as_mut().set_sort_ascending(ascending);
         }
         let spec = self.as_ref().sort_spec();
         // Remembered for THIS folder only (per-folder sort, D31).
@@ -4906,6 +4952,18 @@ impl qobject::DirModel {
             list.append(QString::from(&acc.to_string_lossy().to_string()));
         }
         list
+    }
+
+    fn entry_icon_key(&self, row: i32) -> QString {
+        let k = self.entry_at(row).map(|e| self.icon_key_of(e));
+        QString::from(&k.unwrap_or_default())
+    }
+
+    fn entry_emblems(&self, row: i32) -> QString {
+        let v = self
+            .entry_at(row)
+            .map(|e| gust_core::icons::emblems_for(e.kind, e.meta.as_ref()).join(","));
+        QString::from(&v.unwrap_or_default())
     }
 
     fn entry_name(&self, row: i32) -> QString {
@@ -7181,6 +7239,12 @@ impl qobject::DirModel {
                 };
                 QVariant::from(&QString::from(s))
             }
+            // What the entry looks like, for the icon theme to resolve
+            // (DESIGN §6.21). Pure: name, kind and details already read.
+            ROLE_ICON_KEY => QVariant::from(&QString::from(&self.icon_key_of(e))),
+            ROLE_EMBLEMS => QVariant::from(&QString::from(
+                &gust_core::icons::emblems_for(e.kind, e.meta.as_ref()).join(","),
+            )),
             ROLE_THUMB => {
                 // Only ever a CACHED thumbnail. This runs on the GUI thread,
                 // so it must not render, and must not even stat the source
@@ -7215,6 +7279,8 @@ impl qobject::DirModel {
         h.insert(ROLE_THUMB, QByteArray::from("thumbUrl"));
         h.insert(ROLE_TYPE_TEXT, QByteArray::from("typeText"));
         h.insert(ROLE_CLIP, QByteArray::from("clipMark"));
+        h.insert(ROLE_ICON_KEY, QByteArray::from("iconKey"));
+        h.insert(ROLE_EMBLEMS, QByteArray::from("emblems"));
         h
     }
 }
@@ -7259,6 +7325,11 @@ pub struct ThemeTokensRust {
     name: QString,
     is_light: bool,
     revision: i32,
+    icons_rev: i32,
+    /// File families and special folders, read on a worker.
+    icons: gust_core::icons::Looks,
+    /// Newest icon load asked for; an older one finishing later is dropped.
+    icons_gen: u64,
     tokens: Tokens,
     /// Watches on the Omarchy state folders; dropped with the object.
     watches: Vec<gust_core::watch::DirWatch>,
@@ -7271,6 +7342,9 @@ impl Default for ThemeTokensRust {
             name: QString::from(&t.name),
             is_light: t.is_light(),
             revision: 0,
+            icons_rev: 0,
+            icons: gust_core::icons::Looks::default(),
+            icons_gen: 0,
             tokens: t,
             watches: Vec::new(),
         }
@@ -7286,9 +7360,37 @@ impl qobject::ThemeTokens {
         self.tokens.metric(&key.to_string())
     }
 
-    fn reload(self: Pin<&mut Self>) {
+    fn reload(mut self: Pin<&mut Self>) {
         let t = gust_core::theme::load_current();
-        self.install(t);
+        self.as_mut().install(t);
+        // Icons are drawn in theme colours, so a theme switch needs no
+        // reload here: the colour bindings follow `revision`.
+    }
+
+    fn icon_look(&self, key: &QString) -> QString {
+        QString::from(&self.icons.look(&key.to_string()).wire())
+    }
+
+    /// Read the MIME database and user folders on a worker, then publish
+    /// them on the GUI thread (DESIGN §6.21).
+    fn load_icons(mut self: Pin<&mut Self>) {
+        let gen = self.as_ref().icons_gen + 1;
+        self.as_mut().rust_mut().icons_gen = gen;
+        let thread = <qobject::ThemeTokens as cxx_qt::Threading>::qt_thread(&self.as_ref());
+        std::thread::Builder::new()
+            .name("gust-icons".into())
+            .spawn(move || {
+                let set = gust_core::icons::Looks::load_current();
+                let _ = thread.queue(move |mut tokens| {
+                    if tokens.as_ref().icons_gen != gen {
+                        return;
+                    }
+                    tokens.as_mut().rust_mut().icons = set;
+                    let rev = tokens.as_ref().icons_rev.wrapping_add(1);
+                    tokens.as_mut().set_icons_rev(rev);
+                });
+            })
+            .ok();
     }
 
     fn load_theme_dir(self: Pin<&mut Self>, dir: &QString, name: &QString) {
@@ -7316,6 +7418,10 @@ impl qobject::ThemeTokens {
     }
 
     fn watch_theme(mut self: Pin<&mut Self>) {
+        // File looks are wanted whether or not there is an Omarchy theme.
+        if self.as_ref().icons_gen == 0 {
+            self.as_mut().load_icons();
+        }
         let Some(state) = gust_core::theme::default_state_dir() else {
             return;
         };

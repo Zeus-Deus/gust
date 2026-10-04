@@ -62,6 +62,23 @@ FocusScope {
     onVisibleChanged: if (visible) sideTimer.restart()
     onModelChanged: sideTimer.restart()
 
+    /// How far the list is scrolled, in pixels (qa).
+    function scrollTop() { return Math.round(list.contentY - list.originY) }
+    /// What each of the first rows shows for an icon (qa).
+    function iconInfo() {
+        const out = []
+        if (!root.model) return out
+        for (let i = 0; i < Math.min(list.count, 40); i++) {
+            const it = list.itemAtIndex(i)
+            const k = root.model.entry_icon_key(i)
+            out.push({ name: root.model.entry_name(i), key: k,
+                       emblems: root.model.entry_emblems(i),
+                       look: Tokens.iconLook(k),
+                       shown: it ? it.iconShown : null })
+        }
+        return out
+    }
+
     function cursorAnchor() {
         const it = list.itemAtIndex(root.model ? root.model.cursor : -1)
         if (it) return it.mapToItem(null, Tokens.rowPaddingX * 3, it.height)
@@ -95,6 +112,7 @@ FocusScope {
                 // go there — the column is navigation, not a label.
                 ListView {
                     id: parentList
+                    WheelScroll { view: parentList }
                     objectName: "columnsParent"
                     anchors.fill: parent
                     clip: true
@@ -121,10 +139,22 @@ FocusScope {
                         color: modelData.cur
                                ? Tokens.withAlpha(Tokens.selectedBackground, Math.max(Tokens.selectedAlpha, 0.14))
                                : pMouse.containsMouse ? Tokens.withAlpha(Tokens.foreground, 0.06) : "transparent"
+                        // Same drawn icons as the main list. These rows
+                        // carry only a name and a folder bit, so the look
+                        // comes from the name (no metadata, no emblems).
+                        FileIcon {
+                            id: pIcon
+                            x: Tokens.rowPaddingX
+                            anchors.verticalCenter: parent.verticalCenter
+                            size: Math.round(Tokens.rowHeight * 0.6)
+                            look: Tokens.iconLook(modelData.d ? "d:" + root.side.parent.path + "/" + modelData.n
+                                                              : "f:" + modelData.n.toLowerCase())
+                        }
                         Text {
                             anchors.verticalCenter: parent.verticalCenter
-                            leftPadding: Tokens.rowPaddingX
-                            width: parent.width - Tokens.rowPaddingX
+                            anchors.left: pIcon.right
+                            anchors.leftMargin: Tokens.spaceLg
+                            anchors.right: parent.right
                             text: modelData.n + (modelData.d ? "  ›" : "")
                             color: modelData.cur ? Tokens.foregroundBright
                                    : modelData.d ? Tokens.foreground : Tokens.foregroundDim
@@ -179,12 +209,15 @@ FocusScope {
                     currentIndex: root.model ? root.model.cursor : 0
                     highlightMoveDuration: 0
                     boundsBehavior: Flickable.StopAtBounds
+                    keyNavigationEnabled: false
+                    WheelScroll { view: list }
                     onContentYChanged: colsReport.restart()
                     onHeightChanged: colsReport.restart()
                     onCountChanged: colsReport.restart()
                     onCurrentIndexChanged: colsReport.restart()
 
                     delegate: Rectangle {
+                        property bool iconShown: colIcon.visible
                         width: list.width
                         height: Tokens.rowHeight
                         color: index === root.model.cursor
@@ -197,6 +230,14 @@ FocusScope {
                             anchors.rightMargin: Tokens.spaceLg
                             spacing: Tokens.spaceLg
 
+                            FileIcon {
+                                id: colIcon
+                                anchors.verticalCenter: parent.verticalCenter
+                                size: Math.round(Tokens.rowHeight * 0.7)
+                                look: Tokens.iconLook(iconKey)
+                                opacity: clipMark === "cut" || isHidden ? 0.55 : 1
+                            }
+
                             Text {
                                 anchors.verticalCenter: parent.verticalCenter
                                 text: name
@@ -208,6 +249,7 @@ FocusScope {
                                 font.pixelSize: Tokens.fontBody
                                 elide: Text.ElideMiddle
                                 width: parent.width - chevron.width - Tokens.spaceLg
+                                       - (colIcon.visible ? colIcon.width + Tokens.spaceLg : 0)
                             }
                             Text {
                                 id: chevron
@@ -336,6 +378,7 @@ FocusScope {
                 // Folder: its entries (click one to go straight there).
                 ListView {
                     id: peekList
+                    WheelScroll { view: peekList }
                     objectName: "columnsPeek"
                     visible: parent.peek && parent.peek.kind === "dir"
                     anchors.top: prevHead.bottom
@@ -351,10 +394,19 @@ FocusScope {
                         width: peekList.width
                         height: Tokens.rowHeight
                         color: kMouse.containsMouse ? Tokens.withAlpha(Tokens.foreground, 0.06) : "transparent"
+                        FileIcon {
+                            id: kIcon
+                            x: Tokens.rowPaddingX
+                            anchors.verticalCenter: parent.verticalCenter
+                            size: Math.round(Tokens.rowHeight * 0.6)
+                            look: Tokens.iconLook(modelData.d ? "d:" + root.model.entry_path(root.model.cursor) + "/" + modelData.n
+                                                              : "f:" + modelData.n.toLowerCase())
+                        }
                         Text {
                             anchors.verticalCenter: parent.verticalCenter
-                            leftPadding: Tokens.rowPaddingX
-                            width: parent.width - Tokens.rowPaddingX
+                            anchors.left: kIcon.right
+                            anchors.leftMargin: Tokens.spaceLg
+                            anchors.right: parent.right
                             text: modelData.n + (modelData.d ? "  ›" : "")
                             color: modelData.d ? Tokens.foreground : Tokens.foregroundDim
                             font.family: Tokens.fontFamily

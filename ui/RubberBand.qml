@@ -33,7 +33,10 @@ MouseArea {
         if (!view || view.indexAt(mouse.x + view.contentX, mouse.y + view.contentY) >= 0) {
             mouse.accepted = false; return
         }
-        view.forceActiveFocus()
+        // No forceActiveFocus() here: the window's key handler owns the
+        // keyboard, and a view that took focus swallowed every arrow key
+        // until something else gave it back. Views report the band through
+        // bandChanged, and the window refocuses its key handler on that.
         startContent = toContent(mouse.x, mouse.y)
         nowView = Qt.point(mouse.x, mouse.y)
         dragging = false

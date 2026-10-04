@@ -89,6 +89,7 @@ Item {
 
         ListView {
             id: list
+            WheelScroll { view: list }
             objectName: "trashList"
             anchors.top: head.bottom
             anchors.topMargin: Tokens.spaceLg

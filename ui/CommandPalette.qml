@@ -397,6 +397,7 @@ Rectangle {
 
             ListView {
                 id: list
+                WheelScroll { view: list }
                 width: parent.width
                 height: Math.min(results.count, 8) * Tokens.rowHeight
                 model: results

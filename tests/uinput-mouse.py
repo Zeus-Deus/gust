@@ -20,6 +20,9 @@ Usage:
     uinput-mouse.py drag X1 Y1 X2 Y2
     uinput-mouse.py rdrag X1 Y1 X2 Y2      (right button: the drop menu)
     uinput-mouse.py wheel X Y TICKS      (negative scrolls down)
+    uinput-mouse.py hiwheel X Y TICKS    (the same notches as a high-resolution
+                                          wheel sends them: eighths, then the
+                                          classic event on every full notch)
 """
 
 import fcntl
@@ -35,6 +38,7 @@ BTN_LEFT, BTN_RIGHT, BTN_MIDDLE = 0x110, 0x111, 0x112
 # The side buttons most mice have: Back and Forward.
 BTN_SIDE, BTN_EXTRA = 0x113, 0x114
 REL_WHEEL = 0x08
+REL_WHEEL_HI_RES = 0x0B
 ABS_X, ABS_Y = 0x00, 0x01
 
 # linux/uinput.h
@@ -64,6 +68,7 @@ def open_device(width, height):
         _ioctl(fd, UI_SET_KEYBIT, btn)
     _ioctl(fd, UI_SET_EVBIT, EV_REL)
     _ioctl(fd, UI_SET_RELBIT, REL_WHEEL)
+    _ioctl(fd, UI_SET_RELBIT, REL_WHEEL_HI_RES)
     _ioctl(fd, UI_SET_EVBIT, EV_ABS)
     for axis in (ABS_X, ABS_Y):
         _ioctl(fd, UI_SET_ABSBIT, axis)
@@ -197,8 +202,29 @@ def main():
             move_to(fd, x, y, w, h)
             step = 1 if ticks > 0 else -1
             for _ in range(abs(ticks)):
+                # Real wheels send both in one frame. libinput reads only the
+                # high-resolution axis from a device that has one, so the
+                # classic event alone would be ignored.
+                emit(fd, EV_REL, REL_WHEEL_HI_RES, 120 * step)
                 emit(fd, EV_REL, REL_WHEEL, step)
                 sync(fd)
+                time.sleep(0.05)
+
+        elif cmd == "hiwheel":
+            # A high-resolution wheel (most current mice) reports each notch
+            # as several small REL_WHEEL_HI_RES steps (120 per notch) and the
+            # classic REL_WHEEL only once the notch completes. Toolkits that
+            # treat every small step as a tiny flick scroll in slow motion.
+            x, y, ticks = int(args[1]), int(args[2]), int(args[3])
+            move_to(fd, x, y, w, h)
+            sign = 1 if ticks > 0 else -1
+            for _ in range(abs(ticks)):
+                for part in range(8):
+                    emit(fd, EV_REL, REL_WHEEL_HI_RES, 15 * sign)
+                    if part == 7:
+                        emit(fd, EV_REL, REL_WHEEL, sign)
+                    sync(fd)
+                    time.sleep(0.006)
                 time.sleep(0.05)
 
         else:

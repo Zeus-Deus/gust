@@ -928,6 +928,73 @@ The threshold is the same as the file-list drag: a few pixels of movement
 before anything is considered a drag at all, so a slightly imprecise click
 is still a click.
 
+## 6.21 File icons and emblems
+
+Gust draws its own file icons in the theme's colours instead of loading an
+icon theme (D51). The look was chosen from a design page of variants
+("3a · line drawing"): it reads at a glance, and it looks like Omarchy's
+Quattro surfaces rather than like Nautilus.
+
+- **Folders** are a thin outline in the accent colour with a lightly tinted
+  fill and a solid tab. Special folders (Home, Documents, Downloads, Music,
+  Pictures, Videos, Desktop, Templates, Public, from `user-dirs.dirs`) carry a
+  JetBrainsMono Nerd Font glyph inside, at Grid size only.
+- **Files** are a page with a folded corner, outlined in their family's
+  colour, with the extension printed on it (`RS`, `JSON`, `TAR`). A name with
+  no usable extension (LICENSE, .bashrc) shows lines of text instead.
+- **Families** (`icons::family_of`): code `ok`, data `cyan`, plain text
+  `foreground`, documents `blue`, images and video `magenta`, audio
+  `orange`, archives `warn`, programs `danger`, fonts `foreground`, anything
+  else `dark_foreground`. A MIME type's family comes from shared-mime-info's
+  own generic icon, its media type and a short fix list (`FAMILY_FIXES`), so
+  new types sort themselves with no per-extension list to keep.
+- **The label** (`icons::label_for`) is the last extension, lowercase ASCII
+  letters and digits, five characters at most; `.tar.*` says `tar`,
+  `.AppImage` says `app`.
+- **Drawn with QtQuick.Shapes** (`ui/FileIcon.qml`): two paths and a label,
+  no image files. Every colour is a token, so a theme switch restyles icons
+  with the window and the 22-theme screenshot matrix covers them.
+- **The UI thread never reads files.** `gust_core::icons::Looks` (the MIME
+  database: `globs2` and `generic-icons` from every `mime` data dir, plus
+  `user-dirs.dirs`) is built on a worker (`gust-icons`). `key_for(name, kind,
+  meta, path)` is pure and runs in `data()`; `Looks::look(key)` is a lookup in
+  memory. Before the worker finishes, files are labelled pages without a
+  family colour; `icons_rev` then re-resolves the bindings.
+- **What decides the look**: `d:<path>` folder, `f[x][z]:<name>` file (MIME by
+  the longest glob suffix; executable with no type → program), `broken`,
+  `special`. A link to a folder looks like a folder; the link is an emblem.
+  Nothing is sniffed and nothing is executed.
+- **Emblems** (`icons::emblems_for`), square badges on the icon's corner in
+  Grid and bare glyphs after the name in Rows: `unreadable` / `readonly`
+  from the mode bits against the process's uid and groups (no `access()` per
+  row), `mount` for a mount point (`statx` `STATX_ATTR_MOUNT_ROOT` with
+  `AT_NO_AUTOMOUNT`, so listing never triggers an autofs mount, and bind
+  mounts count), `link` or `broken-link` for a symlink. Without a Nerd Font
+  they fall back to plain characters.
+- Thumbnails still replace the icon in Grid when a sandboxed one exists.
+- QA reads the looks through the `icons` field of the state dump
+  (`look` = `shape\tfamily\tlabel\tglyph`), qa §31.
+
+## 6.22 Wheel and keyboard ownership
+
+- **Wheel.** Qt Quick turns each wheel event into a small flick. A
+  high-resolution wheel reports a notch as eight events of 15/120, and eight
+  tiny flicks barely move the list (5 notches: 0 px in the qa probe). Every
+  scrolling list uses `WheelScroll`, which moves a fixed distance per notch
+  — GTK's `page_height ^ (2/3)`, about three rows — and passes a touchpad's
+  pixel deltas straight through. Modified wheels are left alone.
+- **Keyboard.** One item, `listFocus` in Main.qml, owns the file-list keys.
+  Views set `keyNavigationEnabled: false` and nothing in a view calls
+  `forceActiveFocus()` on itself; a click on a row or on empty space reports
+  `selectionTouched`, and the window refocuses `listFocus`. The rubber band
+  used to focus its view, which left the arrow keys dead after a click on
+  empty space in Grid until something else moved focus.
+- **Sort button.** The toolbar shows the active order ("Name ▲") and opens a
+  menu: Name, Kind, Size, Date modified, then Ascending / Descending.
+  `set_sort_to(field, ascending)` sets it exactly; the Rows headers keep
+  `set_sort(field)`, which flips direction on the active column. Both are
+  remembered per folder (D31).
+
 ## 7. Undo journal
 
 An undo entry records, per affected path: the expected identity

@@ -34,6 +34,12 @@ QtObject {
     readonly property color danger: root.col("red")
     readonly property color ok: root.col("green")
     readonly property color warn: root.col("yellow")
+    // File families (DESIGN §6.21): code ok, data cyan, documents blue,
+    // media magenta, audio orange, archives warn, programs danger.
+    readonly property color blue: root.col("blue")
+    readonly property color cyan: root.col("cyan")
+    readonly property color magenta: root.col("magenta")
+    readonly property color orange: root.col("orange")
     readonly property color barBackground: root.col("bar_background")
     readonly property color menuBackground: root.col("menu_background")
     readonly property color selectedBackground: root.col("selected_background")
@@ -76,6 +82,24 @@ QtObject {
 
     // Quattro surfaces use sharp borders; radius is a token, not a constant.
     readonly property real radius: 0
+
+    /// How an entry is drawn (`iconKey` role → "shape\tfamily\tlabel\tglyph",
+    /// for FileIcon). Reads `icons_rev` so a binding that calls it
+    /// re-resolves once the MIME database has loaded.
+    function iconLook(k) {
+        return tokens.icons_rev >= 0 && k !== "" ? tokens.icon_look(k) : ""
+    }
+
+    /// Whether the UI font carries Nerd Font icons (Omarchy ships
+    /// JetBrainsMono Nerd Font). Without them, special folders lose their
+    /// glyph and emblems fall back to plain characters.
+    readonly property bool nerdGlyphs: Qt.fontFamilies().some(f => f.indexOf("Nerd Font") >= 0)
+
+    /// A file name with break points after `_`, `.` and `-`, so a wrapped
+    /// label breaks at a word boundary rather than mid-word.
+    function wrapName(s) {
+        return s.replace(/([_.\-])/g, "$1\u200b")
+    }
 
     function withAlpha(c, a) {
         return Qt.rgba(c.r, c.g, c.b, a)

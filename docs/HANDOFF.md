@@ -175,8 +175,8 @@ New ideas and newer-Flea features go here instead of into v1.
 - Paste image: offer a name before saving; paste into a remote folder.
 - Drop menu: "Link here" for remote targets (refused today, as copy rules).
 - Restore tabs: remember selection, scroll and history per tab.
-- From the visual pass (scored 1, not 0; see docs/screens/SCORES.md): file-type
-  icons in place of the ▸ / · markers; a filled primary-button style; the
+- From the visual pass (scored 1, not 0; see docs/screens/SCORES.md): a
+  filled primary-button style; the
   transfer card naming what it copies ("3 items → dest") and Replace tinted as
   destructive in the conflict dialog; a shadow under menus; Quick Look sized to
   short files; rendered Markdown in Quick Look.

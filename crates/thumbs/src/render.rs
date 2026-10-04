@@ -55,29 +55,34 @@ impl std::fmt::Display for ThumbError {
 pub struct Helper {
     /// Binary name, looked up on PATH inside the sandbox.
     pub binary: &'static str,
-    /// Arguments, with `{in}` and `{out}` replaced by the in-sandbox paths.
-    pub args: &'static [&'static str],
+    /// Arguments. Paths are the fixed in-sandbox ones; the only variable is
+    /// the size, a number Gust chose.
+    pub args: Vec<String>,
 }
 
 /// Helpers we are willing to run, in preference order.
 ///
 /// The in-sandbox paths are fixed: the input is bound read-only at
 /// `/in/input` and the private output directory at `/out`.
-fn helpers_for(mime: &str) -> Vec<Helper> {
+fn helpers_for(mime: &str, px: u32) -> Vec<Helper> {
+    let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let n = px.to_string();
     let mut v = Vec::new();
     if mime.starts_with("image/") {
         // ImageMagick: `[0]` takes the first frame so an animation or a
-        // multi-page document cannot expand into hundreds of renders.
+        // multi-page document cannot expand into hundreds of renders. `>`
+        // only ever shrinks: a small image keeps its real size.
+        let geom = format!("{px}x{px}>");
         v.push(Helper {
             binary: "magick",
-            args: &[
+            args: args(&[
                 "/in/input[0]",
                 "-auto-orient",
                 "-thumbnail",
-                "256x256>",
+                &geom,
                 "-strip",
                 "png:/out/thumb.png",
-            ],
+            ]),
         });
     }
     if mime == "application/pdf" {
@@ -87,7 +92,7 @@ fn helpers_for(mime: &str) -> Vec<Helper> {
         // /out/thumb.png, the path the validator reads.
         v.push(Helper {
             binary: "pdftoppm",
-            args: &[
+            args: args(&[
                 "-png",
                 "-f",
                 "1",
@@ -95,25 +100,25 @@ fn helpers_for(mime: &str) -> Vec<Helper> {
                 "1",
                 "-singlefile",
                 "-scale-to",
-                "256",
+                &n,
                 "/in/input",
                 "/out/thumb",
-            ],
+            ]),
         });
     }
     if mime.starts_with("video/") {
         v.push(Helper {
             binary: "ffmpegthumbnailer",
-            args: &[
+            args: args(&[
                 "-i",
                 "/in/input",
                 "-o",
                 "/out/thumb.png",
                 "-s",
-                "256",
+                &n,
                 "-q",
                 "6",
-            ],
+            ]),
         });
     }
     v
@@ -121,7 +126,7 @@ fn helpers_for(mime: &str) -> Vec<Helper> {
 
 /// Can anything on this system thumbnail this MIME type?
 pub fn can_thumbnail(mime: &str) -> bool {
-    !helpers_for(mime).is_empty()
+    !helpers_for(mime, 256).is_empty()
 }
 
 /// The freedesktop `Thumb::MTime` of the source, as the spec requires.
@@ -206,7 +211,7 @@ pub fn thumbnail(path: &Path, mime: &str, size: ThumbSize) -> Result<PathBuf, Th
     if !sandbox_available() {
         return Err(ThumbError::SandboxUnavailable);
     }
-    let helpers = helpers_for(mime);
+    let helpers = helpers_for(mime, size.pixels());
     if helpers.is_empty() {
         return Err(ThumbError::NoHelper);
     }
@@ -261,7 +266,8 @@ fn run_helpers(path: &Path, helpers: &[Helper], scratch: &Path) -> Result<Vec<u8
     let mut last = ThumbError::NoHelper;
     for h in helpers {
         let spec = SandboxSpec::new(path, scratch);
-        let argv = spec.bwrap_argv(h.binary, h.args);
+        let hargs: Vec<&str> = h.args.iter().map(String::as_str).collect();
+        let argv = spec.bwrap_argv(h.binary, &hargs);
         let out_file = scratch.join("thumb.png");
         let _ = std::fs::remove_file(&out_file);
 
@@ -363,11 +369,12 @@ mod tests {
     fn a_helper_never_receives_the_real_path_as_an_argument() {
         // The input is bound at a fixed in-sandbox path, so a filename can
         // never be interpreted as an option by the helper.
-        for h in helpers_for("image/png")
+        for h in helpers_for("image/png", 1024)
             .into_iter()
-            .chain(helpers_for("application/pdf"))
+            .chain(helpers_for("application/pdf", 1024))
+            .chain(helpers_for("video/mp4", 1024))
         {
-            for a in h.args {
+            for a in &h.args {
                 assert!(
                     !a.contains("{in}") && !a.contains("{out}"),
                     "unsubstituted placeholder in {a}"
@@ -378,6 +385,28 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn every_helper_renders_at_the_size_asked_for() {
+        // Quick Look asks for xx-large; a 256px render stretched across the
+        // panel was the blur users saw.
+        for mime in ["image/png", "application/pdf", "video/mp4"] {
+            for (size, want) in [(ThumbSize::Large, "256"), (ThumbSize::XxLarge, "1024")] {
+                let hs = helpers_for(mime, size.pixels());
+                assert!(!hs.is_empty(), "{mime}");
+                for h in hs {
+                    assert!(
+                        h.args.iter().any(|a| a.contains(want)),
+                        "{mime} at {want}: {:?}",
+                        h.args
+                    );
+                }
+            }
+        }
+        // An image is only ever shrunk, never blown up past its own size.
+        let img = &helpers_for("image/png", 1024)[0];
+        assert!(img.args.iter().any(|a| a == "1024x1024>"));
     }
 
     #[test]

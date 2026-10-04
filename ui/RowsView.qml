@@ -32,6 +32,27 @@ FocusScope {
     /// Middle-click on a row: open it in a new tab (Main decides).
     signal middleClicked(int row)
 
+    readonly property int iconSize: Math.round(Tokens.rowHeight * 0.7)
+    readonly property int emblemSize: Math.round(Tokens.rowHeight * 0.6)
+
+
+    /// How far the list is scrolled, in pixels (qa).
+    function scrollTop() { return Math.round(list.contentY - list.originY) }
+    /// What each of the first rows shows for an icon (qa).
+    function iconInfo() {
+        const out = []
+        if (!root.model) return out
+        for (let i = 0; i < Math.min(list.count, 40); i++) {
+            const it = list.itemAtIndex(i)
+            const k = root.model.entry_icon_key(i)
+            out.push({ name: root.model.entry_name(i), key: k,
+                       emblems: root.model.entry_emblems(i),
+                       look: Tokens.iconLook(k),
+                       shown: it ? it.iconShown : null })
+        }
+        return out
+    }
+
     function ensureCursorVisible() { list.positionViewAtIndex(model.cursor, ListView.Contain) }
 
     // Tell the model which rows are on screen, so details (size, date) are
@@ -222,7 +243,11 @@ FocusScope {
                 // model, whatever its size.
                 cacheBuffer: Math.round(Tokens.rowHeight * 12)
                 boundsBehavior: Flickable.StopAtBounds
+                // Keys belong to the window's handler; a view that took
+                // focus must not quietly consume them (DESIGN §6.22).
+                keyNavigationEnabled: false
                 objectName: "rowsList"
+                WheelScroll { view: list }
                 onContentYChanged: rowsReport.restart()
                 onHeightChanged: rowsReport.restart()
                 onCountChanged: rowsReport.restart()
@@ -230,6 +255,7 @@ FocusScope {
 
                 delegate: Rectangle {
                     id: rowItem
+                    property bool iconShown: rowIcon.visible
                     width: list.width
                     height: Tokens.rowHeight
                     // Three distinct states: selected (band), cursor (bar),
@@ -264,15 +290,13 @@ FocusScope {
                             Row {
                                 anchors.verticalCenter: parent.verticalCenter
                                 spacing: Tokens.spaceLg
-                                Text {
-                                    // Type glyph, with a distinct symlink badge.
-                                    text: isDir ? "▸" : (isSymlink ? "↳" : "·")
-                                    color: isDir ? Tokens.accent
-                                                 : (isSymlink ? (linkOk ? Tokens.warn : Tokens.danger)
-                                                              : Tokens.foregroundDim)
-                                    font.family: Tokens.fontFamily
-                                    font.pixelSize: Tokens.fontBody
-                                    width: Tokens.fontBody
+                                // The drawn file icon (DESIGN §6.21).
+                                FileIcon {
+                                    id: rowIcon
+                                    size: root.iconSize
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    look: Tokens.iconLook(iconKey)
+                                    opacity: clipMark === "cut" || isHidden ? 0.55 : 1
                                 }
                                 Text {
                                     text: name
@@ -283,6 +307,21 @@ FocusScope {
                                     font.pixelSize: Tokens.fontBody
                                     elide: Text.ElideMiddle
                                     width: Math.min(implicitWidth, rowItem.width * 0.55)
+                                }
+                                // Read-only, no access, mount point, link.
+                                Row {
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    spacing: Tokens.spaceXs
+                                    visible: emblems !== ""
+                                    Repeater {
+                                        model: emblems === "" ? [] : emblems.split(",")
+                                        delegate: Emblem {
+                                            required property string modelData
+                                            kind: modelData
+                                            size: root.emblemSize
+                                            framed: false
+                                        }
+                                    }
                                 }
                                 // Copied / cut, after the name (Flea #169).
                                 Text {
