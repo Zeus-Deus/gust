@@ -41,6 +41,19 @@ FocusScope {
     /// How far the list is scrolled, in pixels (qa).
     function scrollTop() { return Math.round(grid.contentY - grid.originY) }
     /// What each of the first rows shows for an icon (qa).
+    /// Centre of each visible tile by name, in window coordinates (qa).
+    function rowPoints() {
+        const out = {}
+        if (!root.model) return out
+        for (let i = 0; i < Math.min(grid.count, 80); i++) {
+            const it = grid.itemAtIndex(i)
+            if (!it) continue
+            const p = it.mapToItem(null, it.width / 2, it.height / 2)
+            if (p.y > 0) out[root.model.entry_name(i)] = [Math.round(p.x), Math.round(p.y)]
+        }
+        return out
+    }
+
     function iconInfo() {
         const out = []
         if (!root.model) return out

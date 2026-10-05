@@ -2948,6 +2948,17 @@ Window {
         const payload = {
             tag: tag,
             view: win.viewMode,
+            // A file is being dragged inside the window (qa).
+            dragging: (function () {
+                const it = win.activePaneItem()
+                const v = it && it.currentView ? it.currentView() : null
+                return v ? !!v.dragActive : false
+            })(),
+            // The name riding under the pointer during a drag, "" if none (qa).
+            dragGhost: (function () {
+                const it = win.activePaneItem()
+                return it && it.ghostName ? it.ghostName() : ""
+            })(),
             preset: win.keyPreset,
             filterBarActive: filterBar.filterActive,
             finding: dirModel.finding,

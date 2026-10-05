@@ -19,6 +19,18 @@ FocusScope {
         return list.indexAt(p.x, p.y)
     }
     signal dropReleased(int row)
+    /// Centre of each visible row of the current column, by name (qa).
+    function rowPoints() {
+        const out = {}
+        if (!root.model) return out
+        for (let i = 0; i < Math.min(list.count, 80); i++) {
+            const it = list.itemAtIndex(i)
+            if (!it) continue
+            const p = it.mapToItem(null, it.width / 3, it.height / 2)
+            if (p.y > 0) out[root.model.entry_name(i)] = [Math.round(p.x), Math.round(p.y)]
+        }
+        return out
+    }
     property bool dragActive: false
     property int dropRow: -1
     /// A drag made with the right button ends in a Copy/Move/Link menu.

@@ -17,7 +17,7 @@ passes once fail the next time.
 Usage:
     uinput-mouse.py move X Y
     uinput-mouse.py click X Y [left|right|middle|back|forward]
-    uinput-mouse.py drag X1 Y1 X2 Y2
+    uinput-mouse.py drag X1 Y1 X2 Y2 [HOLD_SECONDS]
     uinput-mouse.py rdrag X1 Y1 X2 Y2      (right button: the drop menu)
     uinput-mouse.py wheel X Y TICKS      (negative scrolls down)
     uinput-mouse.py hiwheel X Y TICKS    (the same notches as a high-resolution
@@ -194,7 +194,11 @@ def main():
                     w,
                     h,
                 )
-            time.sleep(0.2)
+            # An optional sixth argument keeps the button down that many
+            # seconds at the end, so a screenshot can catch a drag in flight
+            # (an argument, not an env var: sudo drops the environment).
+            hold = float(args[5]) if len(args) > 5 else 0.0
+            time.sleep(max(0.2, hold))
             button(fd, btn, False)
 
         elif cmd == "wheel":

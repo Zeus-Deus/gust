@@ -43,6 +43,8 @@ Item {
         return viewMode === "grid" ? gridView.columns() : 1
     }
     function focusList() { currentView().forceActiveFocus() }
+    /// What the drag preview shows while it is up, else "" (qa).
+    function ghostName() { return ghost.visible ? ghost.name : "" }
     function cursorAnchor() { return currentView().cursorAnchor() }
     function nameHeaderPoint() {
         const v = currentView()
@@ -63,6 +65,7 @@ Item {
         onDragStarted: (r) => {
             rowsView.dragActive = true
             if (pane.model) pane.model.drag_begin(r)
+            ghost.begin(r)
             pane.dragBegan()
         }
         // Say what a drop would do BEFORE the button is released, so the
@@ -74,7 +77,7 @@ Item {
         }
         onDropReleased: (r) => pane.finishDrop(r)
         onDropMenuRequested: (r, x, y) => pane.requestDropMenu(r, x, y)
-        onDragMovedTo: (x, y) => pane.maybeHandOff(rowsView, x, y)
+        onDragMovedTo: (x, y) => { ghost.follow(rowsView, x, y); pane.maybeHandOff(rowsView, x, y) }
         onContextRequested: (r, x, y) => pane.contextRequested(r, x, y)
         onMiddleClicked: (r) => pane.openInNewTab(r)
     }
@@ -89,6 +92,7 @@ Item {
         onDragStarted: (r) => {
             gridView.dragActive = true
             if (pane.model) pane.model.drag_begin(r)
+            ghost.begin(r)
             pane.dragBegan()
         }
         onDropMovedOver: (r) => {
@@ -98,7 +102,7 @@ Item {
         }
         onDropReleased: (r) => pane.finishDrop(r)
         onDropMenuRequested: (r, x, y) => pane.requestDropMenu(r, x, y)
-        onDragMovedTo: (x, y) => pane.maybeHandOff(gridView, x, y)
+        onDragMovedTo: (x, y) => { ghost.follow(gridView, x, y); pane.maybeHandOff(gridView, x, y) }
         onContextRequested: (r, x, y) => pane.contextRequested(r, x, y)
         onMiddleClicked: (r) => pane.openInNewTab(r)
     }
@@ -113,6 +117,7 @@ Item {
         onDragStarted: (r) => {
             columnsView.dragActive = true
             if (pane.model) pane.model.drag_begin(r)
+            ghost.begin(r)
             pane.dragBegan()
         }
         onDropMovedOver: (r) => {
@@ -122,7 +127,7 @@ Item {
         }
         onDropReleased: (r) => pane.finishDrop(r)
         onDropMenuRequested: (r, x, y) => pane.requestDropMenu(r, x, y)
-        onDragMovedTo: (x, y) => pane.maybeHandOff(columnsView, x, y)
+        onDragMovedTo: (x, y) => { ghost.follow(columnsView, x, y); pane.maybeHandOff(columnsView, x, y) }
         onContextRequested: (r, x, y) => pane.contextRequested(r, x, y)
         onMiddleClicked: (r) => pane.openInNewTab(r)
     }
@@ -155,6 +160,60 @@ Item {
         const err = pane.model.drop_on_row(row, pane.dropAsMove)
         if (err !== "") pane.dropFailed(err)
         else pane.dropDone()
+    }
+
+    // --- what is being dragged, under the pointer --------------------------
+    //
+    // A held file follows the pointer: its icon, its name and how many
+    // items travel with it, so a drag is unmistakable before anything is
+    // dropped. Drawn above the views; it never takes the mouse.
+    Rectangle {
+        id: ghost
+        objectName: "dragGhost"
+        z: 100
+        visible: pane.currentView().dragActive && !outward.handedOff
+        enabled: false
+        property string name: ""
+        property string look: ""
+        property int count: 0
+        function begin(row) {
+            if (!pane.model) return
+            ghost.name = pane.model.entry_name(row)
+            ghost.look = Tokens.iconLook(pane.model.entry_icon_key(row))
+            ghost.count = pane.model.drag_count()
+        }
+        function follow(view, x, y) {
+            const p = view.mapToItem(pane, x, y)
+            // Below-right of the pointer, so the drop target stays visible.
+            ghost.x = Math.min(p.x + Tokens.spaceLg, pane.width - ghost.width)
+            ghost.y = Math.min(p.y + Tokens.spaceLg, pane.height - ghost.height)
+        }
+        width: ghostRow.implicitWidth + Tokens.spaceLg * 2
+        height: ghostRow.implicitHeight + Tokens.spaceSm * 2
+        radius: Tokens.radius
+        color: Tokens.withAlpha(Tokens.backgroundDark, 0.92)
+        border.width: Math.max(1, Tokens.borderWidth)
+        border.color: Tokens.accent
+        Row {
+            id: ghostRow
+            anchors.centerIn: parent
+            spacing: Tokens.spaceSm
+            FileIcon {
+                size: Tokens.rowHeight * 0.8
+                look: ghost.look
+                anchors.verticalCenter: parent.verticalCenter
+            }
+            Text {
+                anchors.verticalCenter: parent.verticalCenter
+                text: ghost.count > 1 ? qsTr("%1 items").arg(ghost.count) : ghost.name
+                color: Tokens.foregroundBright
+                font.family: Tokens.fontFamily
+                font.pixelSize: Tokens.fontSmall
+                textFormat: Text.PlainText
+                elide: Text.ElideMiddle
+                width: Math.min(implicitWidth, Tokens.rowHeight * 10)
+            }
+        }
     }
 
     // --- dragging OUT to other applications ------------------------------

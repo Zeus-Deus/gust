@@ -156,6 +156,10 @@ undo as any other — never a shortcut around them.
   accidental drop must not be read as "replace this".
 - Dropping a folder into itself or into its own descendant is refused with
   a reason, because it would recurse forever.
+- **A held item is visible.** While a drag is in flight the item's icon and
+  name (or "N items") ride under the pointer, the target is ringed, and the
+  status line names the operation. Without the preview a drag looked like
+  nothing was happening and read as "drag does not work".
 - Text dropped from another application is not a file operation. Only URIs
   Gust can resolve to real paths are accepted.
 

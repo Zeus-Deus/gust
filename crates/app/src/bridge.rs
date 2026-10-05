@@ -513,6 +513,9 @@ pub mod qobject {
         fn audio_status(self: &DirModel) -> QString;
         #[qinvokable]
         fn drag_begin(self: Pin<&mut DirModel>, row: i32);
+        /// How many items the in-flight drag carries (the drag preview).
+        #[qinvokable]
+        fn drag_count(self: &DirModel) -> i32;
         #[qinvokable]
         fn drop_preview(self: &DirModel, row: i32, as_move: bool) -> QString;
         /// Perform a drop of the current selection onto `row`. Returns ""
@@ -5904,6 +5907,10 @@ impl qobject::DirModel {
             None => Vec::new(),
         };
         self.as_mut().rust_mut().drag_payload = sources;
+    }
+
+    fn drag_count(&self) -> i32 {
+        i32::try_from(self.drag_payload.len()).unwrap_or(i32::MAX)
     }
 
     fn drag_uri_list(&self) -> QString {
