@@ -145,8 +145,18 @@ planned → running → committing → (remote-pending) → confirmed
 A drop is an ordinary copy or move through the same engine, journal and
 undo as any other — never a shortcut around them.
 
-- **A cross-location drop defaults to Copy.** The safe operation is the
-  default; Move is offered explicitly and never inferred.
+- **A plain drop moves on the same drive and copies onto another** (D60),
+  as in every mainstream file manager: dragging between folders is how
+  people move files. "Same drive" is the mount each path sits on, read
+  from `/proc/self/mounts` when the drag starts; an unknown mount copies.
+  Ctrl held while dropping copies; Shift moves. A right-button drag asks
+  (Copy, Move or Link here). A move by drop is journaled like any other,
+  so Ctrl+Z puts it back.
+- Folders outside the view take drops too: sidebar places, bookmarks,
+  mounted drives and path-bar crumbs. Gust's own drag becomes a platform
+  drag when it leaves the pane; targets recognise it by its source and
+  plan it with the same rules. A drop from another application is still
+  always a copy.
 - The drop target and the operation are **named before it runs**: "Copy 3
   items to backups". A drop that does not say where things went is a data
   loss report waiting to happen.
@@ -157,7 +167,8 @@ undo as any other — never a shortcut around them.
 - Dropping a folder into itself or into its own descendant is refused with
   a reason, because it would recurse forever.
 - **A held item is visible.** While a drag is in flight the item's icon and
-  name (or "N items") ride under the pointer, the target is ringed, and the
+  name (or "N items") and what releasing would do ("Move 1 item to inbox")
+  ride under the pointer, the target is ringed, and the
   status line names the operation. Without the preview a drag looked like
   nothing was happening and read as "drag does not work".
 - Text dropped from another application is not a file operation. Only URIs

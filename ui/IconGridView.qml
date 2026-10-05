@@ -21,6 +21,8 @@ FocusScope {
     }
     signal dropReleased(int row)
     property bool dragActive: false
+    /// Keyboard modifiers held during the drag: Ctrl copies, Shift moves.
+    property int dragMods: 0
     property int dropRow: -1
     /// A drag made with the right button ends in a Copy/Move/Link menu.
     property bool dragRight: false
@@ -270,8 +272,10 @@ FocusScope {
                                 const g = mapToItem(null, mouse.x, mouse.y)
                                 root.suppressClick = true
                                 root.dropMenuRequested(root.dropRow, g.x, g.y)
-                            } else if (root.dragActive)
+                            } else if (root.dragActive) {
+                                root.dragMods = mouse.modifiers
                                 root.dropReleased(root.dropRow)
+                            }
                             armed = false
                             root.dragActive = false
                             root.dropRow = -1
@@ -288,6 +292,7 @@ FocusScope {
                             }
                             const gp = mapToItem(grid.contentItem, mouse.x, mouse.y)
                             root.dropRow = grid.indexAt(gp.x, gp.y)
+                            root.dragMods = mouse.modifiers
                             root.dropMovedOver(root.dropRow)
                             const vp = mapToItem(root, mouse.x, mouse.y)
                             root.dragMovedTo(vp.x, vp.y)

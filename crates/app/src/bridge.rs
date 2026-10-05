@@ -518,6 +518,19 @@ pub mod qobject {
         fn drag_count(self: &DirModel) -> i32;
         #[qinvokable]
         fn drop_preview(self: &DirModel, row: i32, as_move: bool) -> QString;
+        /// A drag released by hand: `mode` 0 = the default for where it
+        /// lands (Move on the same drive, Copy onto another), 1 = Copy
+        /// (Ctrl held), 2 = Move (Shift held). DESIGN §6.1.
+        #[qinvokable]
+        fn drag_preview(self: &DirModel, row: i32, mode: i32) -> QString;
+        #[qinvokable]
+        fn drag_drop_on_row(self: Pin<&mut DirModel>, row: i32, mode: i32) -> QString;
+        /// The same, onto an absolute folder outside this view: a sidebar
+        /// place, a path-bar crumb, or a folder in the other pane.
+        #[qinvokable]
+        fn drag_preview_into(self: &DirModel, dest: &QString, mode: i32) -> QString;
+        #[qinvokable]
+        fn drag_drop_into(self: Pin<&mut DirModel>, dest: &QString, mode: i32) -> QString;
         /// Perform a drop of the current selection onto `row`. Returns ""
         /// on success, or the reason it was refused.
         #[qinvokable]
@@ -915,6 +928,9 @@ pub struct DirModelRust {
     size_cancel: CancelToken,
     /// What the in-flight drag carries, captured when it started.
     drag_payload: Vec<PathBuf>,
+    /// The mount table as it was when the drag started: decides whether a
+    /// plain drop moves (same drive) or copies (another one).
+    drag_mounts: Vec<PathBuf>,
     /// True while a find is running or its results are shown.
     finding: bool,
     find_needle: QString,
@@ -1154,6 +1170,7 @@ impl DirModelRust {
             dir_sizes: std::collections::HashMap::new(),
             size_cancel: CancelToken::new(),
             drag_payload: Vec::new(),
+            drag_mounts: Vec::new(),
             finding: false,
             find_needle: QString::from(""),
             place_busy: false,
@@ -5907,6 +5924,9 @@ impl qobject::DirModel {
             None => Vec::new(),
         };
         self.as_mut().rust_mut().drag_payload = sources;
+        // /proc answers from the kernel's tables: no file is touched here.
+        let mounts = std::fs::read_to_string("/proc/self/mounts").unwrap_or_default();
+        self.as_mut().rust_mut().drag_mounts = gust_core::drop::mount_points(&mounts);
     }
 
     fn drag_count(&self) -> i32 {
@@ -5935,16 +5955,79 @@ impl qobject::DirModel {
     }
 
     fn plan_for(&self, row: i32, as_move: bool) -> gust_core::drop::DropPlan {
-        use gust_core::drop::{plan_drop, DropAction};
-        let Some((target, is_dir)) = self.drop_target(row) else {
-            return gust_core::drop::DropPlan::Refused("cannot drop here".into());
-        };
+        use gust_core::drop::DropAction;
         let action = if as_move {
             DropAction::Move
         } else {
             DropAction::Copy
         };
-        plan_drop(&self.drag_sources(row), &target, is_dir, action)
+        self.plan_drag(row, None, Some(action))
+    }
+
+    /// Plan a drop of the in-flight drag onto `row` of this view, or onto
+    /// the absolute folder `dest`. `forced` is None for "whatever suits
+    /// where it lands": Move within one drive, Copy across drives.
+    fn plan_drag(
+        &self,
+        row: i32,
+        dest: Option<PathBuf>,
+        forced: Option<gust_core::drop::DropAction>,
+    ) -> gust_core::drop::DropPlan {
+        use gust_core::drop::{default_action, plan_drop, DropPlan};
+        let (target, is_dir) = match dest {
+            Some(d) => (d, true),
+            None => match self.drop_target(row) {
+                Some(t) => t,
+                None => return DropPlan::Refused("cannot drop here".into()),
+            },
+        };
+        let sources = self.drag_sources(row);
+        let folder = if is_dir {
+            target.clone()
+        } else {
+            target.parent().map(|p| p.to_path_buf()).unwrap_or_default()
+        };
+        let action = forced.unwrap_or_else(|| default_action(&self.drag_mounts, &sources, &folder));
+        plan_drop(&sources, &target, is_dir, action)
+    }
+
+    fn drag_mode(mode: i32) -> Option<gust_core::drop::DropAction> {
+        match mode {
+            1 => Some(gust_core::drop::DropAction::Copy),
+            2 => Some(gust_core::drop::DropAction::Move),
+            _ => None,
+        }
+    }
+
+    fn describe_plan(plan: gust_core::drop::DropPlan) -> QString {
+        use gust_core::drop::DropPlan;
+        match plan {
+            DropPlan::Perform { description, .. } => QString::from(&description),
+            DropPlan::Refused(why) => QString::from(&why),
+            DropPlan::Nothing => QString::default(),
+        }
+    }
+
+    fn drag_preview(&self, row: i32, mode: i32) -> QString {
+        Self::describe_plan(self.plan_drag(row, None, Self::drag_mode(mode)))
+    }
+
+    fn drag_preview_into(&self, dest: &QString, mode: i32) -> QString {
+        let d = PathBuf::from(dest.to_string());
+        Self::describe_plan(self.plan_drag(-1, Some(d), Self::drag_mode(mode)))
+    }
+
+    fn drag_drop_on_row(self: Pin<&mut Self>, row: i32, mode: i32) -> QString {
+        let plan = self.as_ref().plan_drag(row, None, Self::drag_mode(mode));
+        self.perform_drop(plan)
+    }
+
+    fn drag_drop_into(self: Pin<&mut Self>, dest: &QString, mode: i32) -> QString {
+        // No is_dir() here: the UI thread never touches the filesystem. A
+        // folder that has gone away fails in the job, which says so.
+        let d = PathBuf::from(dest.to_string());
+        let plan = self.as_ref().plan_drag(-1, Some(d), Self::drag_mode(mode));
+        self.perform_drop(plan)
     }
 
     /// Describe the drop without doing it, so the user is told the
@@ -5958,12 +6041,17 @@ impl qobject::DirModel {
         }
     }
 
-    fn drop_on_row(mut self: Pin<&mut Self>, row: i32, as_move: bool) -> QString {
+    fn drop_on_row(self: Pin<&mut Self>, row: i32, as_move: bool) -> QString {
+        let plan = self.as_ref().plan_for(row, as_move);
+        self.perform_drop(plan)
+    }
+
+    /// Run a planned drop through the transfer engine (journal, undo).
+    fn perform_drop(mut self: Pin<&mut Self>, plan: gust_core::drop::DropPlan) -> QString {
         use gust_core::drop::{DropAction, DropPlan};
         if self.as_ref().job.is_some() {
             return QString::from("another operation is still running");
         }
-        let plan = self.as_ref().plan_for(row, as_move);
         let (action, sources, destination) = match plan {
             DropPlan::Perform {
                 action,

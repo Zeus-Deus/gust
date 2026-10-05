@@ -109,10 +109,11 @@ if [[ "$MOUSE_OK" == 1 ]]; then
   mouse rdrag $((WX + ax)) $((WY + ay)) $((WX + bx)) $((WY + by)); sleep 0.8
   key Escape; sleep 0.5
   [[ -z "$(ls "$d30c/shelf")" ]] && ok "Escape on the drop menu changes nothing" || bad "something landed: $(ls "$d30c/shelf")"
-  # A plain left drag is unchanged: it still copies.
+  # A plain left drag on the same drive moves (D60).
   read -r ax ay <<<"$(pt_of rowPoints note.txt)"; read -r bx by <<<"$(pt_of rowPoints shelf)"
   mouse drag $((WX + ax)) $((WY + ay)) $((WX + bx)) $((WY + by)); sleep 1.5
-  [[ -f "$d30c/shelf/note.txt" && ! -L "$d30c/shelf/note.txt" ]] && ok "a left drag still copies" || bad "left drag: $(ls -la "$d30c/shelf")"
+  [[ -f "$d30c/shelf/note.txt" && ! -L "$d30c/shelf/note.txt" && ! -e "$d30c/note.txt" ]] \
+    && ok "a left drag on one drive moves" || bad "left drag: $(ls -la "$d30c" "$d30c/shelf")"
 else
   bad "no pointer injection: Link here did NOT run"
 fi

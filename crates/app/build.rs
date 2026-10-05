@@ -32,6 +32,7 @@ fn main() {
         "ui/WheelScroll.qml",
         "ui/FileIcon.qml",
         "ui/Emblem.qml",
+        "ui/DragTarget.qml",
     ];
 
     let mut module = QmlModule::new("com.gust.app").qml_files(views);

@@ -7,6 +7,10 @@ Rectangle {
     id: root
     property var model
     signal placeChosen(string path)
+    /// A drag is over a place: what releasing would do ("" = left).
+    signal dragHover(string text)
+    /// Something was dropped on a place, through `model`.
+    signal dragLanded(var model, string err)
 
     color: Tokens.backgroundDark
 
@@ -43,6 +47,12 @@ Rectangle {
             if (!it) continue
             const p = it.mapToItem(null, it.width / 2, it.height / 2)
             out[places.get(i).label] = [Math.round(p.x), Math.round(p.y)]
+        }
+        for (let i = 0; i < bookmarkRepeater.count; i++) {
+            const it = bookmarkRepeater.itemAt(i)
+            if (!it) continue
+            const p = it.mapToItem(null, it.width / 2, it.height / 2)
+            out["bookmark:" + root.bookmarks[i].label] = [Math.round(p.x), Math.round(p.y)]
         }
         return out
     }
@@ -126,6 +136,12 @@ Rectangle {
                     cursorShape: Qt.PointingHandCursor
                     onClicked: root.placeChosen(model.path)
                 }
+                DragTarget {
+                    anchors.fill: parent
+                    path: model.path
+                    onHover: (t) => root.dragHover(t)
+                    onLanded: (m, e) => root.dragLanded(m, e)
+                }
 
                 Accessible.role: Accessible.Button
                 Accessible.name: "Go to " + model.label
@@ -194,6 +210,7 @@ Rectangle {
             visible: root.bookmarks.length > 0
         }
         Repeater {
+            id: bookmarkRepeater
             model: root.bookmarks
             delegate: Rectangle {
                 required property var modelData
@@ -211,6 +228,13 @@ Rectangle {
                     font.family: Tokens.fontFamily
                     font.pixelSize: Tokens.fontBody
                     elide: Text.ElideRight
+                }
+                DragTarget {
+                    anchors.fill: parent
+                    z: 1
+                    path: modelData.exists ? modelData.path : ""
+                    onHover: (t) => root.dragHover(t)
+                    onLanded: (m, e) => root.dragLanded(m, e)
                 }
                 MouseArea {
                     id: bmMouse
@@ -294,6 +318,13 @@ Rectangle {
                     }
                 }
 
+                DragTarget {
+                    anchors.fill: parent
+                    z: 1
+                    path: modelData.mounted && !modelData.empty ? modelData.path : ""
+                    onHover: (t) => root.dragHover(t)
+                    onLanded: (m, e) => root.dragLanded(m, e)
+                }
                 MouseArea {
                     id: deviceMouse
                     anchors.fill: parent

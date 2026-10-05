@@ -65,15 +65,18 @@ Item {
         onDragStarted: (r) => {
             rowsView.dragActive = true
             if (pane.model) pane.model.drag_begin(r)
+            outward.handedOff = false
             ghost.begin(r)
             pane.dragBegan()
         }
         // Say what a drop would do BEFORE the button is released, so the
         // operation and destination are never a surprise.
         onDropMovedOver: (r) => {
-            if (pane.model)
-                pane.dropPreview(rowsView.dragRight ? qsTr("Release to choose: Copy, Move or Link here")
-                                 : pane.model.drop_preview(r, pane.dropAsMove))
+            if (!pane.model) return
+            const t = rowsView.dragRight ? qsTr("Release to choose: Copy, Move or Link here")
+                                    : pane.model.drag_preview(r, pane.dragMode(rowsView))
+            ghost.action = t
+            pane.dropPreview(t)
         }
         onDropReleased: (r) => pane.finishDrop(r)
         onDropMenuRequested: (r, x, y) => pane.requestDropMenu(r, x, y)
@@ -92,13 +95,16 @@ Item {
         onDragStarted: (r) => {
             gridView.dragActive = true
             if (pane.model) pane.model.drag_begin(r)
+            outward.handedOff = false
             ghost.begin(r)
             pane.dragBegan()
         }
         onDropMovedOver: (r) => {
-            if (pane.model)
-                pane.dropPreview(gridView.dragRight ? qsTr("Release to choose: Copy, Move or Link here")
-                                 : pane.model.drop_preview(r, pane.dropAsMove))
+            if (!pane.model) return
+            const t = gridView.dragRight ? qsTr("Release to choose: Copy, Move or Link here")
+                                    : pane.model.drag_preview(r, pane.dragMode(gridView))
+            ghost.action = t
+            pane.dropPreview(t)
         }
         onDropReleased: (r) => pane.finishDrop(r)
         onDropMenuRequested: (r, x, y) => pane.requestDropMenu(r, x, y)
@@ -117,13 +123,16 @@ Item {
         onDragStarted: (r) => {
             columnsView.dragActive = true
             if (pane.model) pane.model.drag_begin(r)
+            outward.handedOff = false
             ghost.begin(r)
             pane.dragBegan()
         }
         onDropMovedOver: (r) => {
-            if (pane.model)
-                pane.dropPreview(columnsView.dragRight ? qsTr("Release to choose: Copy, Move or Link here")
-                                 : pane.model.drop_preview(r, pane.dropAsMove))
+            if (!pane.model) return
+            const t = columnsView.dragRight ? qsTr("Release to choose: Copy, Move or Link here")
+                                    : pane.model.drag_preview(r, pane.dragMode(columnsView))
+            ghost.action = t
+            pane.dropPreview(t)
         }
         onDropReleased: (r) => pane.finishDrop(r)
         onDropMenuRequested: (r, x, y) => pane.requestDropMenu(r, x, y)
@@ -154,10 +163,18 @@ Item {
         return v.iconInfo ? v.iconInfo() : []
     }
 
+    /// What a release does (DESIGN §6.1): 0 = what suits where it lands
+    /// (Move on the same drive, Copy onto another), 1 = Copy (Ctrl),
+    /// 2 = Move (Shift).
+    function dragMode(view) {
+        if (view.dragMods & Qt.ShiftModifier) return 2
+        if (view.dragMods & Qt.ControlModifier) return 1
+        return pane.dropAsMove ? 2 : 0
+    }
     function finishDrop(row) {
         if (!pane.model) return
         if (outward.handedOff) { outward.handedOff = false; return }
-        const err = pane.model.drop_on_row(row, pane.dropAsMove)
+        const err = pane.model.drag_drop_on_row(row, pane.dragMode(pane.currentView()))
         if (err !== "") pane.dropFailed(err)
         else pane.dropDone()
     }
@@ -176,7 +193,10 @@ Item {
         property string name: ""
         property string look: ""
         property int count: 0
+        /// What releasing here would do: "Move 1 item to inbox".
+        property string action: ""
         function begin(row) {
+            ghost.action = ""
             if (!pane.model) return
             ghost.name = pane.model.entry_name(row)
             ghost.look = Tokens.iconLook(pane.model.entry_icon_key(row))
@@ -203,15 +223,28 @@ Item {
                 look: ghost.look
                 anchors.verticalCenter: parent.verticalCenter
             }
-            Text {
+            Column {
                 anchors.verticalCenter: parent.verticalCenter
-                text: ghost.count > 1 ? qsTr("%1 items").arg(ghost.count) : ghost.name
-                color: Tokens.foregroundBright
-                font.family: Tokens.fontFamily
-                font.pixelSize: Tokens.fontSmall
-                textFormat: Text.PlainText
-                elide: Text.ElideMiddle
-                width: Math.min(implicitWidth, Tokens.rowHeight * 10)
+                Text {
+                    text: ghost.count > 1 ? qsTr("%1 items").arg(ghost.count) : ghost.name
+                    color: Tokens.foregroundBright
+                    font.family: Tokens.fontFamily
+                    font.pixelSize: Tokens.fontSmall
+                    textFormat: Text.PlainText
+                    elide: Text.ElideMiddle
+                    width: Math.min(implicitWidth, Tokens.rowHeight * 10)
+                }
+                // Move or Copy, and where: known before the button is let go.
+                Text {
+                    visible: ghost.action !== ""
+                    text: ghost.action
+                    color: ghost.action.indexOf("Move") === 0 ? Tokens.accent : Tokens.foregroundDim
+                    font.family: Tokens.fontFamily
+                    font.pixelSize: Tokens.fontCaption
+                    textFormat: Text.PlainText
+                    elide: Text.ElideMiddle
+                    width: Math.min(implicitWidth, Tokens.rowHeight * 10)
+                }
             }
         }
     }
@@ -245,12 +278,27 @@ Item {
     }
     Item {
         id: outward
+        // The sidebar and the path bar take Gust's own drag by this name;
+        // a drop from another application never carries it.
+        objectName: "gustDragProxy"
         property bool handedOff: false
+        /// The model the drag came from, for drop targets outside the view.
+        readonly property var paneModel: pane.model
         width: 1; height: 1
         Drag.dragType: Drag.Automatic
         Drag.supportedActions: Qt.CopyAction
         Drag.proposedAction: Qt.CopyAction
-        Drag.onDragFinished: (action) => { outward.Drag.active = false }
+        Drag.onDragFinished: (action) => { outward.Drag.active = false; outward.handedOff = false }
+    }
+
+    /// The model a drag came from when it is Gust's own, else null.
+    function gustSource(d) {
+        return d && d.source && d.source.objectName === "gustDragProxy" ? d.source.paneModel : null
+    }
+    /// The folder a drop on `row` lands in: that folder, or this one.
+    function folderAt(row) {
+        if (!pane.model) return ""
+        return row >= 0 && pane.model.is_dir(row) ? pane.model.entry_path(row) : pane.model.location
     }
 
     // --- dropping IN from other applications -----------------------------
@@ -265,17 +313,30 @@ Item {
         // Gust's own internal gesture never produces a platform drag inside
         // its window, so anything arriving here came from outside — except
         // the outward proxy, which is ignored.
-        onEntered: (drag) => {
-            if (drag.source === outward) { drag.accepted = false; return }
-            drag.accept(Qt.CopyAction)
-        }
+        onEntered: (drag) => { drag.accept(Qt.CopyAction) }
         onPositionChanged: (drag) => {
             if (!pane.model) return
             const row = pane.currentView().rowAt ? pane.currentView().rowAt(drag.x, drag.y) : -1
-            pane.dropPreview(pane.model.drop_preview(row, false))
+            const src = pane.gustSource(drag)
+            pane.dropPreview(src === pane.model ? pane.model.drag_preview(row, 0)
+                             : src ? src.drag_preview_into(pane.folderAt(row), 0)
+                             : pane.model.drop_preview(row, false))
         }
         onDropped: (drop) => {
-            if (!pane.model || drop.source === outward) return
+            if (!pane.model) return
+            // Gust's own drag that left the view and came back, or came
+            // from the other pane: the same planner as a drop in the list
+            // (Move on one drive, Copy across), not an outside paste.
+            const src = pane.gustSource(drop)
+            if (src) {
+                const row = pane.currentView().rowAt ? pane.currentView().rowAt(drop.x, drop.y) : -1
+                drop.accept(Qt.CopyAction)
+                const e = src === pane.model ? pane.model.drag_drop_on_row(row, 0)
+                                             : src.drag_drop_into(pane.folderAt(row), 0)
+                if (e !== "") pane.dropFailed(e)
+                else pane.dropDone()
+                return
+            }
             const uris = drop.hasUrls ? drop.urls.map(u => u.toString()).join("\r\n") + "\r\n"
                                       : (drop.getDataAsString("text/uri-list") || "")
             const row = pane.currentView().rowAt ? pane.currentView().rowAt(drop.x, drop.y) : -1

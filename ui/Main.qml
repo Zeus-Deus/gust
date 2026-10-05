@@ -1880,6 +1880,8 @@ Window {
 
                 Breadcrumbs {
                     id: crumbs
+                    onDragHover: (t) => { hints.status = t; win.qaDump("drag-hover") }
+                    onDragLanded: (m, e) => { hints.status = ""; win.transferStarted(m, e, "drop") }
                     model: dirModel
                     anchors.verticalCenter: parent.verticalCenter
                     onPathChosen: (p) => { dirModel.navigate(p); win.focusList() }
@@ -2009,6 +2011,8 @@ Window {
                 visible: win.sidebarVisible
                 model: dirModel
                 onPlaceChosen: (p) => { dirModel.navigate(p); win.focusList() }
+                onDragHover: (t) => { hints.status = t; win.qaDump("drag-hover") }
+                onDragLanded: (m, e) => { hints.status = ""; win.transferStarted(m, e, "drop") }
                 remotePlaces: win.connectedPlaces
                 lostPlaces: win.lostPlaces
                 devices: win.deviceList
@@ -3024,6 +3028,7 @@ Window {
             jobPausePoint: jobDrawer.pausePoint(),
             menuPoints: contextMenu.open ? contextMenu.itemPoints() : ({}),
             placePoints: sidebar.placePoints(),
+            crumbPoints: crumbs.crumbPoints(),
             rowPoints: (function () {
                 const it = win.activePaneItem()
                 return it && it.rowPoints ? it.rowPoints() : ({})

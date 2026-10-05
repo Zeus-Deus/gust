@@ -6,6 +6,20 @@ Item {
     id: root
     required property var model
     signal pathChosen(string path)
+    signal dragHover(string text)
+    signal dragLanded(var model, string err)
+
+    /// Centre of each crumb by its path, in window coordinates (qa).
+    function crumbPoints() {
+        const out = {}
+        for (let i = 0; i < crumbRow.children.length; i++) {
+            const d = crumbRow.children[i]
+            if (!d.crumbPath) continue
+            const p = d.mapToItem(null, d.width - d.crumbWidth / 2, d.height / 2)
+            out[d.crumbPath] = [Math.round(p.x), Math.round(p.y)]
+        }
+        return out
+    }
 
     // BOTH dimensions must be declared. An Item defaults to zero width, and a
     // zero-width item inside a Row simply does not appear — the crumbs existed
@@ -42,6 +56,8 @@ Item {
                 spacing: 0
                 readonly property bool sepShown: sep.visible
                 readonly property string crumbLabel: crumbText.text
+                readonly property string crumbPath: modelData
+                readonly property real crumbWidth: crumbBox.width
                 Text {
                     id: sep
                     // The root crumb is itself "/", so the crumb after it
@@ -54,6 +70,7 @@ Item {
                     anchors.verticalCenter: parent.verticalCenter
                 }
                 Rectangle {
+                    id: crumbBox
                     width: crumbText.implicitWidth + Tokens.spaceLg
                     height: Tokens.controlHeight - Tokens.spaceSm
                     color: hover.hovered ? Tokens.withAlpha(Tokens.foreground, 0.08) : "transparent"
@@ -81,6 +98,14 @@ Item {
                         anchors.fill: parent
                         cursorShape: Qt.PointingHandCursor
                         onClicked: root.pathChosen(modelData)
+                    }
+
+                    // Drop onto a crumb: into that parent folder.
+                    DragTarget {
+                        anchors.fill: parent
+                        path: modelData
+                        onHover: (t) => root.dragHover(t)
+                        onLanded: (m, e) => root.dragLanded(m, e)
                     }
 
                     Accessible.role: Accessible.Button

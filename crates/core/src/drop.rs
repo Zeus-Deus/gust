@@ -124,6 +124,57 @@ pub fn plan_drop(
     }
 }
 
+/// The mount points listed in a `/proc/self/mounts` text, longest first.
+///
+/// Read once when a drag starts. `/proc` answers from the kernel's own
+/// tables, so this never touches (or stalls on) the files being dragged.
+pub fn mount_points(mounts: &str) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = mounts
+        .lines()
+        .filter_map(|l| l.split_whitespace().nth(1))
+        .map(|m| PathBuf::from(unescape_mount(m)))
+        .collect();
+    out.sort_by_key(|p| std::cmp::Reverse(p.as_os_str().len()));
+    out.dedup();
+    out
+}
+
+/// `/proc/self/mounts` escapes space, tab, newline and backslash as octal.
+fn unescape_mount(m: &str) -> String {
+    m.replace("\\040", " ")
+        .replace("\\011", "\t")
+        .replace("\\012", "\n")
+        .replace("\\134", "\\")
+}
+
+/// The mount a path lives on: the longest mount point that contains it.
+pub fn mount_of<'a>(mounts: &'a [PathBuf], p: &Path) -> Option<&'a Path> {
+    mounts
+        .iter()
+        .find(|m| p.starts_with(m))
+        .map(|m| m.as_path())
+}
+
+/// What a plain drop (no modifier) does: **Move** when every source is on
+/// the same mount as the target, **Copy** when anything crosses to another
+/// one (a USB stick, a network share, another disk). This is what every
+/// mainstream file manager does, and a move by drop is undoable (Ctrl+Z).
+/// Unknown mounts count as different: the uncertain case copies.
+pub fn default_action(mounts: &[PathBuf], sources: &[PathBuf], target: &Path) -> DropAction {
+    let Some(t) = mount_of(mounts, target) else {
+        return DropAction::Copy;
+    };
+    let same = !sources.is_empty()
+        && sources
+            .iter()
+            .all(|s| mount_of(mounts, s).is_some_and(|m| m == t));
+    if same {
+        DropAction::Move
+    } else {
+        DropAction::Copy
+    }
+}
+
 /// URIs from another application, reduced to paths Gust can actually use.
 ///
 /// Only `file://` URIs are accepted. Text dropped from a browser or an
@@ -210,6 +261,67 @@ mod tests {
 
     fn pb(s: &str) -> PathBuf {
         PathBuf::from(s)
+    }
+
+    fn mounts() -> Vec<PathBuf> {
+        mount_points(
+            "/dev/nvme0n1p2 / btrfs rw 0 0\n\
+             tmpfs /tmp tmpfs rw 0 0\n\
+             /dev/sdb1 /run/media/me/USB\\040STICK vfat rw 0 0\n\
+             /dev/nvme0n1p2 /home btrfs rw 0 0\n",
+        )
+    }
+
+    #[test]
+    fn a_plain_drop_on_the_same_disk_moves() {
+        let m = mounts();
+        assert_eq!(
+            default_action(
+                &m,
+                &[pb("/home/me/a.txt"), pb("/home/me/b")],
+                Path::new("/home/me/Documents")
+            ),
+            DropAction::Move
+        );
+    }
+
+    #[test]
+    fn a_plain_drop_onto_another_disk_copies() {
+        let m = mounts();
+        // The USB stick's mount point has an escaped space in /proc.
+        assert_eq!(
+            default_action(
+                &m,
+                &[pb("/home/me/a.txt")],
+                Path::new("/run/media/me/USB STICK/backup")
+            ),
+            DropAction::Copy
+        );
+        assert_eq!(
+            default_action(&m, &[pb("/tmp/x")], Path::new("/home/me")),
+            DropAction::Copy
+        );
+    }
+
+    #[test]
+    fn one_source_from_elsewhere_makes_the_whole_drop_a_copy() {
+        let m = mounts();
+        assert_eq!(
+            default_action(
+                &m,
+                &[pb("/home/me/a"), pb("/tmp/b")],
+                Path::new("/home/me/c")
+            ),
+            DropAction::Copy
+        );
+    }
+
+    #[test]
+    fn an_unknown_mount_table_copies() {
+        assert_eq!(
+            default_action(&[], &[pb("/a")], Path::new("/b")),
+            DropAction::Copy
+        );
     }
 
     #[test]

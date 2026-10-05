@@ -1291,15 +1291,16 @@ else
   sleep 3
 
   [[ -f "$DD/inbox/alpha.txt" ]] \
-    && ok "dragging a file onto a folder copied it there" \
+    && ok "dragging a file onto a folder put it there" \
     || bad "a drag onto a folder did nothing"
   [[ "$(cat "$DD/inbox/alpha.txt" 2>/dev/null)" == "payload" ]] \
     && ok "the dropped file has the right contents" \
     || bad "the dropped file's contents are wrong"
-  # Copy is the default for a cross-location drop (plan §2).
-  [[ -f "$DD/alpha.txt" ]] \
-    && ok "a drop defaults to COPY: the source is still there" \
-    || bad "a drop moved the file when it should have copied"
+  # On one drive a plain drop MOVES, as in every file manager (D60);
+  # across drives it copies (qa 34). Ctrl+Z puts it back.
+  [[ ! -e "$DD/alpha.txt" ]] \
+    && ok "a drop on the same drive moves: the source is gone" \
+    || bad "a same-drive drop left the source behind"
 
   # Dropping a folder onto itself must not build an infinite tree.
   BEFORE="$(find "$DD/inbox" | wc -l)"
