@@ -2278,6 +2278,26 @@ Window {
                 win.qaDump("hash")
                 event.accepted = true; return
             }
+            // Quick Look's own keys (DESIGN §6.9.1): p / k play and pause a
+            // sound, Left / Right skip five seconds or turn a PDF's page,
+            // Page Up / Page Down turn pages. Anything else falls through.
+            if (quickLook.open && event.modifiers === Qt.NoModifier) {
+                let used = false
+                if (event.key === Qt.Key_P || event.key === Qt.Key_K) used = quickLook.togglePlay()
+                else if (event.key === Qt.Key_Left) used = quickLook.seekBy(-5) || quickLook.turnPage(-1)
+                else if (event.key === Qt.Key_Right) used = quickLook.seekBy(5) || quickLook.turnPage(1)
+                else if (event.key === Qt.Key_PageUp) used = quickLook.turnPage(-1)
+                else if (event.key === Qt.Key_PageDown) used = quickLook.turnPage(1)
+                else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+                    // Enter opens the file in its own application; the
+                    // preview (and any sound it is playing) gets out of the way.
+                    quickLook.hide()
+                    win.activateRow(dirModel.cursor)
+                    win.qaDump("quicklook")
+                    event.accepted = true; return
+                }
+                if (used) { win.qaDump("quicklook-key"); event.accepted = true; return }
+            }
 
             // Preset-aware chords from the shared key table (gust-core
             // keymap.rs), which also renders the ? key map: a shortcut and
@@ -2763,6 +2783,8 @@ Window {
         id: quickLook
         model: dirModel
         onVisualChanged: win.qaDump("quicklook-visual")
+        // Polled player state; dumped so qa can follow playback.
+        onAudioChanged: win.qaDump("quicklook-audio")
         onHashChanged: win.qaDump("hash")
         onClosed: win.focusList()
     }
@@ -3003,7 +3025,14 @@ Window {
             quickLookNoPreview: quickLook.info ? quickLook.info.noPreview : "",
             quickLookFacts: quickLook.info && quickLook.info.facts ? quickLook.info.facts : [],
             quickLookImage: quickLook.open ? quickLook.imageInfo() : null,
-            quickLookVisual: quickLook.visual ? (quickLook.visual.image ? "image" : quickLook.visual.archive ? "archive:" + quickLook.visual.total : "why:" + quickLook.visual.why) : "",
+            quickLookVisual: quickLook.visual ? (quickLook.visual.image ? "image" : quickLook.visual.archive ? "archive:" + quickLook.visual.total
+                             : quickLook.visual.markdown !== undefined ? "markdown"
+                             : quickLook.visual.audio !== undefined ? "audio:" + quickLook.visual.audio : "why:" + quickLook.visual.why) : "",
+            quickLookPage: [quickLook.page, quickLook.pages],
+            quickLookVideo: quickLook.visual !== null && quickLook.visual.video === true,
+            quickLookMarkdown: quickLook.visual && quickLook.visual.markdown !== undefined ? quickLook.visual.markdown : "",
+            quickLookAudio: quickLook.open ? dirModel.audio_status() : "",
+            audioBarPoint: quickLook.open ? quickLook.audioBarPoint() : null,
             tabDropZone: win.tabDropZone,
             paletteOpen: palette.visible,
             paletteResults: palette.visible ? palette.resultLabels() : [],

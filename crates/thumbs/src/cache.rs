@@ -28,7 +28,7 @@ impl ThumbSize {
     }
 }
 
-fn md5_hex(data: &[u8]) -> String {
+pub(crate) fn md5_hex(data: &[u8]) -> String {
     // Minimal MD5 — the freedesktop spec mandates it for cache file names.
     // Used ONLY for cache addressing, never for security.
     let mut msg = data.to_vec();

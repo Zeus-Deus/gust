@@ -429,6 +429,36 @@ answer; a preview that required running the file is not.
 4. **Escape closes it**, before the selection and before the filter, because
    it is the most recently opened thing (§4 Escape ladder).
 
+### 6.9.1 Previews of everyday files
+
+Quick Look shows each everyday kind of file the way a person expects, and
+never decodes an untrusted byte in Gust's own process.
+
+- **Images, PDFs, video frames** are rendered by the sandboxed helpers
+  (§5, D56). A PDF shows every page: Left / Right or Page Up / Page Down
+  turn it, and the page count comes from `pdfinfo` in the same sandbox.
+  Pages are cached under `thumbnails/gust-pages/`, keyed by URI, mtime,
+  page and size; an edited PDF drops its old pages.
+- **Markdown** is rendered (`gust_core::markdown`) to Qt StyledText:
+  headings, paragraphs, lists, task lists, quotes, code, bold, italic.
+  Every character of the file is escaped first, so its own HTML is shown as
+  text. Images are never loaded (a remote image is a tracking pixel) and
+  links are not clickable. 256 KiB and 400 lines at most.
+- **Audio plays** (`gust_thumbs::audio`). `ffmpeg` decodes the file inside
+  the sandbox with no network, no home and no audio socket, and writes raw
+  PCM (s16le, 48 kHz, stereo) to a pipe. Gust paces it into the desktop's
+  own PCM player (`pw-play`, else `paplay`), which only ever sees samples.
+  Gust owns the clock: pause stops the relay, a seek restarts the decoder
+  at the new time; both take effect within the ~0.25 s already queued.
+  `p` / `k` play and pause, Left / Right skip five seconds, the bar seeks
+  by click or drag. Title, artist and album come from the file's tags via
+  sandboxed `ffprobe`, sanitised. Closing Quick Look kills both processes.
+- **Video** shows a frame and says "Enter plays it in your video player".
+  Enter in Quick Look closes the preview and opens the file with its
+  default application, as Enter does in the list.
+- A file named like audio that is not audio says "Cannot play: …" and
+  shows no controls.
+
 ## 6.10 Scoped content search (`:grep`)
 
 `:find` matches names; `:grep` matches *contents* (plan §2, §4). Both are

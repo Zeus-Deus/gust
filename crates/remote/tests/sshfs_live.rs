@@ -192,6 +192,13 @@ fn an_offline_host_times_out_rather_than_hanging() {
 /// Mounting over a folder that already has files is refused.
 #[test]
 fn a_non_empty_folder_is_never_mounted_over() {
+    // Without sshfs, mount() refuses with ToolMissing before it ever looks
+    // at the folder, so there is nothing to test here.
+    gust_testkit::skip_unless!(
+        gust_testkit::have("sshfs"),
+        "SSHFS",
+        "sshfs is not installed"
+    );
     let mp = mount_dir("nonempty");
     let _ = unmount(&mp);
     std::fs::write(mp.join("users-own-file.txt"), b"do not hide me").unwrap();

@@ -261,6 +261,134 @@ pub fn thumbnail(path: &Path, mime: &str, size: ThumbSize) -> Result<PathBuf, Th
     Ok(target)
 }
 
+/// The number of pages in a PDF, from `pdfinfo` run in the sandbox.
+/// At most 64 KiB of its output is read.
+pub fn pdf_pages(path: &Path) -> Result<u32, ThumbError> {
+    let base = cache_base().ok_or_else(|| ThumbError::Cache("no cache dir".into()))?;
+    pdf_pages_in(&base, path)
+}
+
+fn pdf_pages_in(base: &Path, path: &Path) -> Result<u32, ThumbError> {
+    if !sandbox_available() {
+        return Err(ThumbError::SandboxUnavailable);
+    }
+    let md = path
+        .symlink_metadata()
+        .map_err(|e| ThumbError::Source(e.to_string()))?;
+    if !md.is_file() {
+        return Err(ThumbError::Source("not a regular file".into()));
+    }
+    let scratch = base.join(format!(".gust-pdfinfo-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&scratch);
+    std::fs::create_dir_all(&scratch).map_err(|e| ThumbError::Cache(e.to_string()))?;
+    let argv = SandboxSpec::new(path, &scratch).bwrap_argv("pdfinfo", &["/in/input"]);
+    let child = Command::new(&argv[0])
+        .args(&argv[1..])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn();
+    let result = match child {
+        Ok(mut c) => {
+            let mut text = Vec::new();
+            if let Some(out) = c.stdout.take() {
+                use std::io::Read;
+                let _ = out.take(64 * 1024).read_to_end(&mut text);
+            }
+            let _ = c.kill();
+            let _ = c.wait();
+            parse_pdf_pages(&String::from_utf8_lossy(&text))
+                .ok_or_else(|| ThumbError::HelperFailed("pdfinfo gave no page count".into()))
+        }
+        Err(e) => Err(ThumbError::HelperFailed(format!("pdfinfo: {e}"))),
+    };
+    let _ = std::fs::remove_dir_all(&scratch);
+    result
+}
+
+/// `Pages:          12` from pdfinfo's output.
+pub fn parse_pdf_pages(text: &str) -> Option<u32> {
+    text.lines()
+        .find_map(|l| l.strip_prefix("Pages:"))
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .filter(|n| *n > 0)
+}
+
+/// Page `page` (1-based) of a PDF as a PNG at about `px` pixels, rendered
+/// by poppler in the sandbox and validated like every thumbnail. Cached in
+/// Gust's own cache (`…/thumbnails/gust-pages/`), keyed by the file's URI,
+/// its mtime, the page and the size, so an edited PDF never shows old pages.
+pub fn pdf_page(path: &Path, page: u32, px: u32) -> Result<PathBuf, ThumbError> {
+    let base = cache_base().ok_or_else(|| ThumbError::Cache("no cache dir".into()))?;
+    pdf_page_in(&base, path, page, px)
+}
+
+fn pdf_page_in(base: &Path, path: &Path, page: u32, px: u32) -> Result<PathBuf, ThumbError> {
+    if !sandbox_available() {
+        return Err(ThumbError::SandboxUnavailable);
+    }
+    let mtime = source_mtime(path)?;
+    let key = crate::cache::md5_hex(file_uri(path).as_bytes());
+    let dir = base.join("gust-pages");
+    let target = dir.join(format!("{key}-{mtime}-{page}-{px}.png"));
+    if target.is_file() {
+        return Ok(target);
+    }
+    std::fs::create_dir_all(&dir).map_err(|e| ThumbError::Cache(e.to_string()))?;
+    let scratch = base.join(format!(".gust-page-{}-{key}-{page}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&scratch);
+    std::fs::create_dir_all(&scratch).map_err(|e| ThumbError::Cache(e.to_string()))?;
+    let p = page.to_string();
+    let n = px.to_string();
+    let helper = Helper {
+        binary: "pdftoppm",
+        args: [
+            "-png",
+            "-f",
+            &p,
+            "-l",
+            &p,
+            "-singlefile",
+            "-scale-to",
+            &n,
+            "/in/input",
+            "/out/thumb",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect(),
+    };
+    let result = run_helpers(path, &[helper], &scratch);
+    let out = match result {
+        Ok(b) => b,
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&scratch);
+            return Err(e);
+        }
+    };
+    // Earlier versions of this file's pages are dropped as the new ones land.
+    if let Ok(rd) = std::fs::read_dir(&dir) {
+        let stale = format!("{key}-");
+        let current = format!("{key}-{mtime}-");
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            if name.starts_with(&stale) && !name.starts_with(&current) {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    }
+    let stage = dir.join(format!(".staging-{}-{key}-{page}", std::process::id()));
+    let write = std::fs::write(&stage, &out)
+        .and_then(|_| std::fs::rename(&stage, &target))
+        .map_err(|e| ThumbError::Cache(e.to_string()));
+    let _ = std::fs::remove_dir_all(&scratch);
+    if let Err(e) = write {
+        let _ = std::fs::remove_file(&stage);
+        return Err(e);
+    }
+    Ok(target)
+}
+
 /// Try each helper in turn; the first that yields a valid PNG wins.
 fn run_helpers(path: &Path, helpers: &[Helper], scratch: &Path) -> Result<Vec<u8>, ThumbError> {
     let mut last = ThumbError::NoHelper;
@@ -385,6 +513,52 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn pdf_page_counts_are_read_from_pdfinfo() {
+        assert_eq!(
+            parse_pdf_pages("Title: x\nPages:          12\nEncrypted: no\n"),
+            Some(12)
+        );
+        assert_eq!(parse_pdf_pages("Pages: 0\n"), None);
+        assert_eq!(parse_pdf_pages("garbage"), None);
+    }
+
+    /// A real three-page PDF, rendered page by page in the sandbox.
+    #[test]
+    fn every_page_of_a_pdf_renders_in_the_sandbox() {
+        gust_testkit::skip_unless!(
+            sandbox_available()
+                && gust_testkit::have("pdftoppm")
+                && gust_testkit::have("pdfinfo")
+                && gust_testkit::have("magick"),
+            "PDF",
+            "bwrap, poppler or ImageMagick is not installed"
+        );
+        let d = std::env::temp_dir().join(format!("gust-pdf-pages-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let pdf = d.join("three.pdf");
+        let ok = Command::new("magick")
+            .args(["-size", "300x400", "xc:white", "xc:gray", "xc:black"])
+            .arg(&pdf)
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok);
+        let cache = d.join("cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        assert_eq!(pdf_pages_in(&cache, &pdf).unwrap(), 3);
+        let p1 = pdf_page_in(&cache, &pdf, 1, 256).unwrap();
+        let p3 = pdf_page_in(&cache, &pdf, 3, 256).unwrap();
+        assert_ne!(p1, p3);
+        assert!(std::fs::read(&p3)
+            .unwrap()
+            .starts_with(&[0x89, b'P', b'N', b'G']));
+        // Past the end: the helper fails, nothing is cached.
+        assert!(pdf_page_in(&cache, &pdf, 9, 256).is_err());
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

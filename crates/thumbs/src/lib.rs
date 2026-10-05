@@ -4,6 +4,7 @@
 //! parent validates the helper's output through a held descriptor before
 //! trusting it (AGENTS.md, DESIGN.md §11).
 
+pub mod audio;
 pub mod cache;
 pub mod render;
 pub mod sandbox;

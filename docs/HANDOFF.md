@@ -182,7 +182,7 @@ New ideas and newer-Flea features go here instead of into v1.
   short files; rendered Markdown in Quick Look.
 
 - Tree expand in the list view, Miller column count, preview-column toggle.
-- Markdown, audio and PDF previews; a transfer queue; i18n.
+- A transfer queue; i18n.
 - Flea 0.3.7 settings: hidden files last, tight row density, Huge/Largest grid sizes, tint today's dates, columns sized from the window.
 - P4: add-a-place discovery, Tailscale, MTP/AFC, udisks, LocalSend.
 - P5: soak, stall matrix, IME, fractional scaling, AT-SPI.

@@ -490,6 +490,27 @@ pub mod qobject {
         /// as JSON — an image path, or an archive's entry list.
         #[qinvokable]
         fn request_peek_visual(self: Pin<&mut DirModel>, row: i32);
+        /// Quick Look on a PDF: render page `page` (1-based) in the
+        /// sandbox and publish it in `peek_visual` like the first page.
+        #[qinvokable]
+        fn request_peek_page(self: Pin<&mut DirModel>, row: i32, page: i32);
+        /// Quick Look on audio: start playing the row (decoded in the
+        /// sandbox, played through the desktop's PCM player).
+        #[qinvokable]
+        fn audio_play(self: Pin<&mut DirModel>, row: i32);
+        /// Pause or resume; at the end, play again from the start.
+        #[qinvokable]
+        fn audio_toggle(self: Pin<&mut DirModel>);
+        /// Jump to `secs` from the start.
+        #[qinvokable]
+        fn audio_seek(self: Pin<&mut DirModel>, secs: f64);
+        /// Stop and forget the sound (Quick Look closed).
+        #[qinvokable]
+        fn audio_stop(self: Pin<&mut DirModel>);
+        /// The player as JSON {state,pos,duration,title,artist,album,why},
+        /// or "" when nothing is loaded. Quick Look polls it.
+        #[qinvokable]
+        fn audio_status(self: &DirModel) -> QString;
         #[qinvokable]
         fn drag_begin(self: Pin<&mut DirModel>, row: i32);
         #[qinvokable]
@@ -810,6 +831,8 @@ pub struct DirModelRust {
     columns_gen: u64,
     peek_visual: QString,
     peek_gen: u64,
+    /// The sound Quick Look is playing, if any. Dropping it stops it.
+    peek_player: Option<gust_thumbs::audio::Player>,
     delete_total: QString,
     delete_gen: u64,
     location: QString,
@@ -1084,6 +1107,7 @@ impl DirModelRust {
             columns_gen: 0,
             peek_visual: QString::from(""),
             peek_gen: 0,
+            peek_player: None,
             delete_total: QString::from(""),
             delete_gen: 0,
             sort_field: QString::from("name"),
@@ -1782,13 +1806,27 @@ impl qobject::DirModel {
         QString::from(&format!("[{}]", items.join(",")))
     }
 
-    fn request_peek_visual(mut self: Pin<&mut Self>, row: i32) {
+    fn request_peek_visual(self: Pin<&mut Self>, row: i32) {
+        self.peek_visual_for(row, 1);
+    }
+
+    fn request_peek_page(self: Pin<&mut Self>, row: i32, page: i32) {
+        self.peek_visual_for(row, u32::try_from(page).unwrap_or(1).max(1));
+    }
+
+    /// Build Quick Look's visual for a row on a worker (DESIGN §6.9.1):
+    /// an image or PDF page rendered in the sandbox, an archive listing,
+    /// rendered Markdown, or `{"audio":true}` for something to play.
+    fn peek_visual_for(mut self: Pin<&mut Self>, row: i32, page: u32) {
         if admin_session() {
             return;
         }
         let gen = self.as_ref().peek_gen.wrapping_add(1);
         self.as_mut().rust_mut().peek_gen = gen;
-        self.as_mut().set_peek_visual(QString::default());
+        // A page turn keeps the old page up until the new one is ready.
+        if page == 1 {
+            self.as_mut().set_peek_visual(QString::default());
+        }
         let Some(path) = self.as_ref().path_of_row(row) else {
             return;
         };
@@ -1803,38 +1841,7 @@ impl qobject::DirModel {
                 if gust_core::stall::needs_probe(&path) {
                     return;
                 }
-                let is_archive = gust_ops::archive::io::looks_like_archive(&name.to_string_lossy());
-                let json = if let Some(mime) = gust_core::mime::thumbnail_mime(&name) {
-                    match gust_thumbs::render::thumbnail(
-                        &path,
-                        mime,
-                        // Big enough for the panel on a 1440p screen; small
-                        // images keep their own size (never enlarged).
-                        gust_thumbs::cache::ThumbSize::XxLarge,
-                    ) {
-                        Ok(img) => {
-                            format!("{{\"image\":{}}}", Self::json_str(&img.to_string_lossy()))
-                        }
-                        Err(e) => format!("{{\"why\":{}}}", Self::json_str(&e.to_string())),
-                    }
-                } else if is_archive {
-                    match gust_ops::archive::io::list(&path) {
-                        Ok(entries) => {
-                            let total = entries.len();
-                            let shown: Vec<String> = entries
-                                .iter()
-                                .take(200)
-                                .map(|e| {
-                                    Self::json_str(&gust_core::peek::sanitise_line(
-                                        e.name.as_bytes(),
-                                    ))
-                                })
-                                .collect();
-                            format!("{{\"archive\":[{}],\"total\":{}}}", shown.join(","), total)
-                        }
-                        Err(e) => format!("{{\"why\":{}}}", Self::json_str(&e.message())),
-                    }
-                } else {
+                let Some(json) = Self::visual_json(&path, &name, page) else {
                     return;
                 };
                 let _ = thread.queue(move |mut model| {
@@ -1844,6 +1851,132 @@ impl qobject::DirModel {
                 });
             })
             .ok();
+    }
+
+    /// The visual for one file, as JSON. Runs on a worker.
+    fn visual_json(path: &std::path::Path, name: &std::ffi::OsStr, page: u32) -> Option<String> {
+        use gust_core::mime::{category_for_name, Category};
+        let lower = name.to_string_lossy().to_lowercase();
+        let cat = category_for_name(name);
+        if cat == Category::Pdf {
+            let pages = gust_thumbs::render::pdf_pages(path).unwrap_or(1);
+            let page = page.min(pages);
+            return Some(match gust_thumbs::render::pdf_page(path, page, 1024) {
+                Ok(img) => format!(
+                    "{{\"image\":{},\"page\":{page},\"pages\":{pages}}}",
+                    Self::json_str(&img.to_string_lossy())
+                ),
+                Err(e) => format!("{{\"why\":{}}}", Self::json_str(&e.to_string())),
+            });
+        }
+        if cat == Category::Audio {
+            return Some(match gust_thumbs::audio::available() {
+                Ok(()) => "{\"audio\":true}".into(),
+                Err(why) => format!("{{\"audio\":false,\"why\":{}}}", Self::json_str(why)),
+            });
+        }
+        if lower.ends_with(".md") || lower.ends_with(".markdown") {
+            use std::io::Read;
+            let f = std::fs::File::open(path).ok()?;
+            let mut buf = Vec::new();
+            f.take(256 * 1024).read_to_end(&mut buf).ok()?;
+            if buf.contains(&0) {
+                return None; // not text after all: the plain peek says so
+            }
+            let (html, truncated) = gust_core::markdown::to_styled(&String::from_utf8_lossy(&buf));
+            return Some(format!(
+                "{{\"markdown\":{},\"truncated\":{}}}",
+                Self::json_str(&html),
+                truncated || buf.len() >= 256 * 1024
+            ));
+        }
+        if let Some(mime) = gust_core::mime::thumbnail_mime(name) {
+            let video = mime.starts_with("video/");
+            return Some(
+                match gust_thumbs::render::thumbnail(
+                    path,
+                    mime,
+                    // Big enough for the panel on a 1440p screen; small
+                    // images keep their own size (never enlarged).
+                    gust_thumbs::cache::ThumbSize::XxLarge,
+                ) {
+                    Ok(img) => format!(
+                        "{{\"image\":{},\"video\":{video}}}",
+                        Self::json_str(&img.to_string_lossy())
+                    ),
+                    Err(e) => format!(
+                        "{{\"why\":{},\"video\":{video}}}",
+                        Self::json_str(&e.to_string())
+                    ),
+                },
+            );
+        }
+        if gust_ops::archive::io::looks_like_archive(&name.to_string_lossy()) {
+            return Some(match gust_ops::archive::io::list(path) {
+                Ok(entries) => {
+                    let total = entries.len();
+                    let shown: Vec<String> = entries
+                        .iter()
+                        .take(200)
+                        .map(|e| Self::json_str(&gust_core::peek::sanitise_line(e.name.as_bytes())))
+                        .collect();
+                    format!("{{\"archive\":[{}],\"total\":{}}}", shown.join(","), total)
+                }
+                Err(e) => format!("{{\"why\":{}}}", Self::json_str(&e.message())),
+            });
+        }
+        None
+    }
+
+    fn audio_play(mut self: Pin<&mut Self>, row: i32) {
+        self.as_mut().rust_mut().peek_player = None;
+        if admin_session() {
+            return;
+        }
+        let Some(path) = self.as_ref().path_of_row(row) else {
+            return;
+        };
+        if gust_core::stall::needs_probe(&path) {
+            return;
+        }
+        self.as_mut().rust_mut().peek_player = Some(gust_thumbs::audio::Player::start(&path));
+    }
+
+    fn audio_toggle(self: Pin<&mut Self>) {
+        if let Some(p) = self.as_ref().peek_player.as_ref() {
+            p.toggle();
+        }
+    }
+
+    fn audio_seek(self: Pin<&mut Self>, secs: f64) {
+        if let Some(p) = self.as_ref().peek_player.as_ref() {
+            if secs.is_finite() {
+                p.seek(secs);
+            }
+        }
+    }
+
+    fn audio_stop(mut self: Pin<&mut Self>) {
+        self.as_mut().rust_mut().peek_player = None;
+    }
+
+    fn audio_status(&self) -> QString {
+        let Some(p) = self.peek_player.as_ref() else {
+            return QString::default();
+        };
+        let st = p.status();
+        QString::from(&format!(
+            r#"{{"state":"{}","pos":{:.2},"duration":{},"title":{},"artist":{},"album":{},"why":{}}}"#,
+            st.state.as_str(),
+            st.pos,
+            st.duration
+                .map(|d| format!("{d:.2}"))
+                .unwrap_or_else(|| "null".into()),
+            Self::json_str(&st.title),
+            Self::json_str(&st.artist),
+            Self::json_str(&st.album),
+            Self::json_str(&st.why),
+        ))
     }
 
     fn request_delete_total(mut self: Pin<&mut Self>) {

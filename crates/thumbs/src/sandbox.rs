@@ -166,7 +166,8 @@ pub fn sandbox_available() -> bool {
     which("bwrap") && which("prlimit")
 }
 
-fn which(bin: &str) -> bool {
+/// Is `bin` on PATH?
+pub fn which(bin: &str) -> bool {
     std::env::var_os("PATH")
         .map(|p| {
             std::env::split_paths(&p).any(|d| {

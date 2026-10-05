@@ -21,6 +21,7 @@ pub mod jump;
 pub mod keymap;
 pub mod lister;
 pub mod location;
+pub mod markdown;
 pub mod mime;
 pub mod omarchy_keys;
 pub mod open;

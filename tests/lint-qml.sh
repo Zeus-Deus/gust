@@ -110,7 +110,8 @@ SAFE = re.compile(r':\s*(Qt|Math|JSON|String|Number|Boolean|parseInt|parseFloat|
 # first paint, and qa §31 proves the bindings pick them up.
 # wrapName (Tokens) is pure: its only input is the argument, a model role the
 # binding reads (and so tracks) while evaluating the call.
-ALLOW = re.compile(r'\b(columns|pageStep|currentView|withAlpha|color|metric|scaled|indexOf|includes|valueOf|iconLook|wrapName)\s*\(')
+# clock (QuickLook) is pure too: it formats the seconds it is given.
+ALLOW = re.compile(r'\b(columns|pageStep|currentView|withAlpha|color|metric|scaled|indexOf|includes|valueOf|iconLook|wrapName|clock)\s*\(')
 BIND = re.compile(r'^\s*(readonly\s+)?(property\s+[\w<>.]+\s+)?(?!on[A-Z])[a-z][\w.]*\s*:\s+[A-Za-z_][\w.]*\s*\(')
 
 bad = []

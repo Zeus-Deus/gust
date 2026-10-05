@@ -42,7 +42,62 @@ Item {
         }
         root.open = root.info !== null && root.info.ok
         root.row = row === undefined ? -1 : row
+        root.audio = null
         if (root.open && root.model && row !== undefined) root.model.request_peek_visual(row)
+    }
+
+    // --- PDF pages --------------------------------------------------------
+    readonly property int page: root.visual && root.visual.page ? root.visual.page : 0
+    readonly property int pages: root.visual && root.visual.pages ? root.visual.pages : 0
+    /// Turn the page by `d` (Left/Right, PageUp/PageDown). False when this
+    /// is not a document with pages, so the key does what it always does.
+    function turnPage(d) {
+        if (!root.open || root.pages < 2 || !root.model) return false
+        const want = Math.max(1, Math.min(root.pages, root.page + d))
+        if (want !== root.page) root.model.request_peek_page(root.row, want)
+        return true
+    }
+
+    // --- audio ------------------------------------------------------------
+    /// Is there sound to play here? Starts it as soon as it is known.
+    readonly property bool isAudio: root.visual !== null && root.visual.audio === true
+    onIsAudioChanged: if (isAudio && root.model) { root.model.audio_play(root.row); audioPoll.start() }
+    /// The player's state, polled while it plays.
+    property var audio: null
+    Timer {
+        id: audioPoll
+        interval: 200
+        repeat: true
+        running: false
+        onTriggered: {
+            if (!root.open || !root.model) { stop(); return }
+            const s = root.model.audio_status()
+            try { root.audio = s === "" ? null : JSON.parse(s) } catch (e) { root.audio = null }
+        }
+    }
+    /// p / k: play or pause. False when nothing is playing here.
+    function togglePlay() {
+        if (!root.isAudio || !root.model) return false
+        root.model.audio_toggle()
+        return true
+    }
+    /// Left / Right: five seconds back or forward.
+    function seekBy(d) {
+        if (!root.isAudio || !root.model || !root.audio) return false
+        root.model.audio_seek(Math.max(0, root.audio.pos + d))
+        return true
+    }
+    /// A point near the end of the position bar, in window coordinates (qa).
+    function audioBarPoint() {
+        if (!audioPanel.visible || track.width <= 0) return null
+        const p = track.mapToItem(null, track.width * 0.92, track.height / 2)
+        return [Math.round(p.x), Math.round(p.y)]
+    }
+    function clock(t) {
+        if (t === null || t === undefined || !isFinite(t)) return "–:––"
+        t = Math.max(0, Math.floor(t))
+        const h = Math.floor(t / 3600), m = Math.floor(t / 60) % 60, sec = t % 60
+        return (h > 0 ? h + ":" + (m < 10 ? "0" : "") : "") + m + ":" + (sec < 10 ? "0" : "") + sec
     }
     /// Is the close hint inside the panel? (qa)
     /// The preview image: rendered size and drawn size, in pixels (qa).
@@ -59,7 +114,9 @@ Item {
         return b.y <= panel.height
     }
     function hide() {
-        if (root.model) root.model.hash_cancel()
+        audioPoll.stop()
+        if (root.model) { root.model.audio_stop(); root.model.hash_cancel() }
+        root.audio = null
         root.open = false
         root.info = null
         root.closed()
@@ -200,9 +257,12 @@ Item {
                 Image {
                     id: visualImage
                     objectName: "quickLookImage"
-                    anchors.centerIn: parent
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.verticalCenterOffset: videoHint.visible ? -(videoHint.height + Tokens.spaceLg) / 2 : 0
                     width: Math.min(parent.width, implicitWidth)
-                    height: Math.min(parent.height, implicitHeight)
+                    height: Math.min(parent.height - (videoHint.visible ? videoHint.height + Tokens.spaceLg : 0),
+                                     implicitHeight)
                     visible: root.visual && root.visual.image !== undefined
                     source: visible ? "file://" + root.visual.image : ""
                     fillMode: Image.PreserveAspectFit
@@ -210,6 +270,213 @@ Item {
                     cache: false
                     smooth: true
                     mipmap: true
+                }
+
+                // A PDF with more than one page: where we are, and how to move.
+                Rectangle {
+                    objectName: "quickLookPages"
+                    visible: root.pages > 1 && visualImage.visible
+                    anchors.bottom: visualImage.bottom
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    anchors.bottomMargin: Tokens.spaceLg
+                    width: pageText.implicitWidth + Tokens.spaceXl * 2
+                    height: pageText.implicitHeight + Tokens.spaceSm * 2
+                    radius: Tokens.radius
+                    color: Tokens.withAlpha(Tokens.backgroundDark, 0.9)
+                    border.width: Math.max(1, Tokens.borderWidth)
+                    border.color: Tokens.withAlpha(Tokens.border, Tokens.borderAlpha)
+                    Text {
+                        id: pageText
+                        anchors.centerIn: parent
+                        text: qsTr("‹  page %1 of %2  ›").arg(root.page).arg(root.pages)
+                        color: Tokens.foreground
+                        font.family: Tokens.fontFamily
+                        font.pixelSize: Tokens.fontSmall
+                    }
+                    MouseArea {
+                        anchors.fill: parent
+                        onClicked: (m) => root.turnPage(m.x < width / 2 ? -1 : 1)
+                    }
+                }
+
+                // A video: the frame above; playing it is the real player's
+                // job (Enter), with its own window, controls and codecs.
+                Text {
+                    id: videoHint
+                    objectName: "quickLookVideoHint"
+                    visible: root.visual !== null && root.visual.video === true
+                    anchors.bottom: parent.bottom
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    text: qsTr("▶  Enter plays it in your video player")
+                    color: Tokens.foreground
+                    font.family: Tokens.fontFamily
+                    font.pixelSize: Tokens.fontSmall
+                }
+
+                // Markdown, rendered: headings, lists, emphasis and code.
+                // The bridge escaped every character of the file first; the
+                // only markup here is what it added. Images are not loaded
+                // and links lead nowhere.
+                Flickable {
+                    id: mdFlick
+                    objectName: "quickLookMarkdown"
+                    WheelScroll { view: mdFlick }
+                    anchors.fill: parent
+                    visible: root.visual !== null && root.visual.markdown !== undefined
+                    clip: true
+                    contentHeight: mdText.implicitHeight
+                    contentWidth: width
+                    boundsBehavior: Flickable.StopAtBounds
+                    Text {
+                        id: mdText
+                        width: parent.width
+                        text: mdFlick.visible
+                              ? root.visual.markdown.split("\u0001").join(Tokens.accent.toString()) : ""
+                        textFormat: Text.StyledText
+                        color: Tokens.foreground
+                        linkColor: Tokens.accent
+                        font.family: Tokens.fontFamily
+                        font.pixelSize: Tokens.fontSmall
+                        wrapMode: Text.Wrap
+                    }
+                }
+
+                // Audio: decoded in the sandbox, played through the
+                // desktop's own player. p pauses, Left / Right skip.
+                Column {
+                    id: audioPanel
+                    objectName: "quickLookAudio"
+                    visible: root.visual !== null && root.visual.audio !== undefined
+                    anchors.centerIn: parent
+                    width: parent.width
+                    spacing: Tokens.spaceLg
+                    readonly property real dur: root.audio && root.audio.duration ? root.audio.duration : 0
+                    readonly property real pos: root.audio ? root.audio.pos : 0
+                    /// Nothing to play: the sandbox is missing, or the file
+                    /// is not audio after all. Controls would only mislead.
+                    readonly property bool failed: (root.visual && root.visual.audio === false)
+                                                   || (root.audio !== null && root.audio.state === "failed")
+
+                    Text {
+                        width: parent.width
+                        horizontalAlignment: Text.AlignHCenter
+                        text: String.fromCodePoint(0xF0387)
+                        visible: Tokens.nerdGlyphs
+                        color: Tokens.accent
+                        font.family: Tokens.fontFamily
+                        font.pixelSize: Tokens.fontHeading * 3
+                    }
+                    Text {
+                        width: parent.width
+                        horizontalAlignment: Text.AlignHCenter
+                        text: root.audio && root.audio.title !== "" ? root.audio.title
+                              : (root.info ? root.info.name : "")
+                        color: Tokens.foregroundBright
+                        font.family: Tokens.fontFamily
+                        font.pixelSize: Tokens.fontSubtitle
+                        textFormat: Text.PlainText
+                        elide: Text.ElideMiddle
+                    }
+                    Text {
+                        width: parent.width
+                        horizontalAlignment: Text.AlignHCenter
+                        visible: text !== ""
+                        text: root.audio ? [root.audio.artist, root.audio.album].filter(x => x !== "").join("  ·  ") : ""
+                        color: Tokens.foregroundDim
+                        font.family: Tokens.fontFamily
+                        font.pixelSize: Tokens.fontSmall
+                        textFormat: Text.PlainText
+                        elide: Text.ElideRight
+                    }
+                    // Position: click or drag anywhere on the bar to jump.
+                    Item {
+                        width: parent.width
+                        height: Tokens.rowHeight
+                        visible: !audioPanel.failed
+                        Rectangle {
+                            id: track
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: parent.width
+                            height: Math.max(2, Tokens.borderWidth * 3)
+                            radius: Tokens.radius
+                            color: Tokens.withAlpha(Tokens.foreground, 0.15)
+                            Rectangle {
+                                objectName: "quickLookAudioFill"
+                                height: parent.height
+                                radius: Tokens.radius
+                                width: audioPanel.dur > 0 ? parent.width * Math.min(1, audioPanel.pos / audioPanel.dur) : 0
+                                color: Tokens.accent
+                            }
+                        }
+                        MouseArea {
+                            anchors.fill: parent
+                            enabled: audioPanel.dur > 0
+                            cursorShape: Qt.PointingHandCursor
+                            onPressed: (m) => root.model.audio_seek(audioPanel.dur * Math.max(0, Math.min(1, m.x / width)))
+                            onPositionChanged: (m) => { if (pressed) root.model.audio_seek(audioPanel.dur * Math.max(0, Math.min(1, m.x / width))) }
+                        }
+                    }
+                    Item {
+                        width: parent.width
+                        height: playBtn.height
+                        visible: !audioPanel.failed
+                        Text {
+                            anchors.left: parent.left
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: root.clock(audioPanel.pos)
+                            color: Tokens.foregroundDim
+                            font.family: Tokens.fontFamily
+                            font.pixelSize: Tokens.fontSmall
+                        }
+                        Rectangle {
+                            id: playBtn
+                            objectName: "quickLookPlay"
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            width: Tokens.controlHeight * 1.4
+                            height: Tokens.controlHeight
+                            radius: Tokens.radius
+                            color: playMouse.containsMouse ? Tokens.withAlpha(Tokens.accent, 0.22) : "transparent"
+                            border.width: Math.max(1, Tokens.borderWidth)
+                            border.color: Tokens.accent
+                            Text {
+                                anchors.centerIn: parent
+                                text: !root.audio || root.audio.state === "loading" ? "…"
+                                      : root.audio.state === "playing" ? "❚❚"
+                                      : root.audio.state === "ended" ? "↺" : "▶"
+                                color: Tokens.accent
+                                font.family: Tokens.fontFamily
+                                font.pixelSize: Tokens.fontBody
+                            }
+                            MouseArea {
+                                id: playMouse
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.togglePlay()
+                            }
+                        }
+                        Text {
+                            anchors.right: parent.right
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: root.clock(audioPanel.dur > 0 ? audioPanel.dur : null)
+                            color: Tokens.foregroundDim
+                            font.family: Tokens.fontFamily
+                            font.pixelSize: Tokens.fontSmall
+                        }
+                    }
+                    Text {
+                        width: parent.width
+                        horizontalAlignment: Text.AlignHCenter
+                        wrapMode: Text.WordWrap
+                        text: root.visual && root.visual.audio === false ? root.visual.why
+                              : root.audio && root.audio.state === "failed" ? qsTr("Cannot play: %1").arg(root.audio.why)
+                              : qsTr("p play / pause  ·  ← → 5 seconds  ·  Enter opens your music player")
+                        color: audioPanel.failed ? Tokens.danger : Tokens.foregroundDim
+                        font.bold: audioPanel.failed
+                        font.family: Tokens.fontFamily
+                        font.pixelSize: Tokens.fontCaption
+                        textFormat: Text.PlainText
+                    }
                 }
 
                 // Archive: what is inside, listed without extracting.
@@ -245,7 +512,7 @@ Item {
                 // disguised file): say so rather than show an empty frame.
                 Text {
                     anchors.fill: parent
-                    visible: root.visual && root.visual.why !== undefined
+                    visible: root.visual && root.visual.why !== undefined && root.visual.audio === undefined
                     text: visible ? qsTr("No preview: the file could not be read as what its name says (%1)").arg(root.visual.why) : ""
                     color: Tokens.foregroundDim
                     font.family: Tokens.fontFamily
