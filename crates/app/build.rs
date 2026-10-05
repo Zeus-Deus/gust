@@ -33,6 +33,7 @@ fn main() {
         "ui/FileIcon.qml",
         "ui/Emblem.qml",
         "ui/DragTarget.qml",
+        "ui/ConnectPanel.qml",
     ];
 
     let mut module = QmlModule::new("com.gust.app").qml_files(views);

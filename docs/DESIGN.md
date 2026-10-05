@@ -236,6 +236,42 @@ opens a connection on its own (plan §3).
 - Thumbnails and content search are **opt-in per remote place**, never
   automatic.
 
+### 6.4.1 Connect: one list of every place
+
+The sidebar's **Remote** heading carries a **Connect…** button (also `:`
+→ "Connect to a computer or cloud…"). It opens one panel listing:
+
+- **Tailscale devices**, from `tailscale status --json`. That talks to the
+  local tailscaled over its socket and contacts no device. Each row shows
+  the device's short name, its MagicDNS name (or Tailscale address when
+  MagicDNS is off), its OS and whether it is online. This computer is not
+  listed. A stopped or logged-out Tailscale says so in words ("run
+  tailscale up"), never as an empty list.
+- **Computers** from `~/.ssh/config` (§6.4), **cloud storage** from rclone
+  (§6.8), and "Add cloud storage" / "Add a shared folder".
+
+Opening the panel connects nothing. A row's **Connect** is the first
+traffic to that place; a connected row offers **Open** and **Disconnect**.
+
+A Tailscale device connects over ordinary SSH (sshfs) with the user's own
+keys, as a login the user names (remembered per device in
+`$XDG_STATE_HOME/gust/tailnet-users`, 0600, bounded, junk ignored). It is
+mounted at `$XDG_RUNTIME_DIR/gust/tailnet/<name>`, apart from SSH aliases.
+Device names and targets from tailscaled are checked before use: a name
+that could act as an ssh option or leave the mount directory is dropped.
+
+**First connection to a device whose SSH key is not on record shows the
+key's fingerprints and asks.** Tailscale has authenticated the device, but
+the SSH key it serves is a separate thing; it is recorded in
+`~/.ssh/known_hosts` (appended, never rewritten) only when the user
+chooses "Trust and connect", and exactly the keys that were on screen are
+recorded. Cancel records nothing and connects nothing. Checking is never
+turned off; a key that later changes is refused as for any SSH host.
+
+Connected places of every kind appear under Remote in the sidebar: click
+to browse, drop files on them (§6.1, a copy across drives), right-click to
+open in a new tab or disconnect.
+
 ## 6.5 Permanent delete
 
 The one operation with no undo. Reached only where Trash is genuinely

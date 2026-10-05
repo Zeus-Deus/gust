@@ -21,9 +21,15 @@ Rectangle {
         color: Tokens.withAlpha(Tokens.border, Tokens.borderAlpha)
     }
 
-    /// Aliases of places that are connected right now.
+    /// Connected places, each {kind, name, path, lost}. Kept in sync by
+    /// Main from the model's places_json.
     property var remotePlaces: []
-    property var lostPlaces: []
+    /// Open the Connect panel.
+    signal connectChosen()
+    /// A connected place clicked: browse it.
+    signal remoteChosen(string path)
+    /// Right-click on a connected place: Main offers Open / Disconnect.
+    signal remoteMenu(string kind, string name, real x, real y)
 
     /// Pinned folders, shared with every GTK file dialog on the desktop.
     property var bookmarks: []
@@ -54,6 +60,14 @@ Rectangle {
             const p = it.mapToItem(null, it.width / 2, it.height / 2)
             out["bookmark:" + root.bookmarks[i].label] = [Math.round(p.x), Math.round(p.y)]
         }
+        for (let i = 0; i < remoteRepeater.count; i++) {
+            const it = remoteRepeater.itemAt(i)
+            if (!it) continue
+            const p = it.mapToItem(null, it.width / 2, it.height / 2)
+            out["remote:" + root.remotePlaces[i].name] = [Math.round(p.x), Math.round(p.y)]
+        }
+        const c = connectButton.mapToItem(null, connectButton.width / 2, connectButton.height / 2)
+        out["connect"] = [Math.round(c.x), Math.round(c.y)]
         return out
     }
 
@@ -348,35 +362,99 @@ Rectangle {
             visible: remoteBlock.visible
         }
 
-        Text {
-            id: remoteHeader
-            leftPadding: Tokens.rowPaddingX
-            text: "Remote"
-            color: Tokens.foregroundDim
-            font.family: Tokens.fontFamily
-            font.pixelSize: Tokens.fontCaption
-            // Shown when there is either a connected place or the note.
-            visible: remoteBlock.visible || root.remotePlaces.length > 0
+        // "Remote", with the way in: Connect… opens one list of every
+        // computer, Tailscale device and cloud remote Gust knows about.
+        Item {
+            width: column.width
+            height: Tokens.rowHeight
+            Text {
+                id: remoteHeader
+                anchors.verticalCenter: parent.verticalCenter
+                leftPadding: Tokens.rowPaddingX
+                text: qsTr("Remote")
+                color: Tokens.foregroundDim
+                font.family: Tokens.fontFamily
+                font.pixelSize: Tokens.fontCaption
+            }
+            Rectangle {
+                id: connectButton
+                objectName: "sidebarConnect"
+                anchors.right: parent.right
+                anchors.rightMargin: Tokens.rowPaddingX
+                anchors.verticalCenter: parent.verticalCenter
+                width: connectLabel.implicitWidth + Tokens.spaceLg * 2
+                height: Tokens.rowHeight - Tokens.spaceSm
+                radius: Tokens.radius
+                color: connectMouse.containsMouse ? Tokens.withAlpha(Tokens.accent, 0.22) : "transparent"
+                border.width: Math.max(1, Tokens.borderWidth)
+                border.color: Tokens.withAlpha(Tokens.accent, 0.7)
+                Text {
+                    id: connectLabel
+                    anchors.centerIn: parent
+                    text: qsTr("Connect…")
+                    color: Tokens.foreground
+                    font.family: Tokens.fontFamily
+                    font.pixelSize: Tokens.fontCaption
+                }
+                MouseArea {
+                    id: connectMouse
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.connectChosen()
+                }
+                Accessible.role: Accessible.Button
+                Accessible.name: qsTr("Connect to another computer or cloud storage")
+            }
         }
 
-        // Connected places. Kept in sync by Main on every connect/disconnect
-        // rather than polled: a rail that lies about what is mounted is
-        // worse than one that says nothing.
+        // Connected places: click to browse, drop files on them, right-click
+        // to disconnect. Kept in sync by Main after every connect and
+        // disconnect rather than guessed.
         Repeater {
+            id: remoteRepeater
             model: root.remotePlaces
-            delegate: Text {
-                leftPadding: Tokens.rowPaddingX
+            delegate: Rectangle {
+                required property var modelData
                 width: column.width
                 height: Tokens.rowHeight
-                verticalAlignment: Text.AlignVCenter
-                readonly property bool lost: root.lostPlaces.indexOf(modelData) >= 0
-                // Colour alone never carries the state (plan §2 mockup F).
-                text: modelData + (lost ? "  ·  lost" : "  ·  connected")
-                color: lost ? Tokens.danger : Tokens.foreground
-                font.family: Tokens.fontFamily
-                font.pixelSize: Tokens.fontBody
-                elide: Text.ElideRight
-                visible: remoteHeader.visible
+                color: remoteMouse.containsMouse ? Tokens.withAlpha(Tokens.foreground, 0.06) : "transparent"
+                Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    leftPadding: Tokens.rowPaddingX
+                    width: column.width - Tokens.rowPaddingX
+                    // Colour alone never carries the state (plan §2 mockup F).
+                    text: modelData.name + (modelData.lost ? qsTr("  ·  lost") : "")
+                    color: modelData.lost ? Tokens.danger : Tokens.foreground
+                    font.family: Tokens.fontFamily
+                    font.pixelSize: Tokens.fontBody
+                    elide: Text.ElideRight
+                    textFormat: Text.PlainText
+                }
+                DragTarget {
+                    anchors.fill: parent
+                    z: 1
+                    path: modelData.lost ? "" : modelData.path
+                    onHover: (t) => root.dragHover(t)
+                    onLanded: (m, e) => root.dragLanded(m, e)
+                }
+                MouseArea {
+                    id: remoteMouse
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    acceptedButtons: Qt.LeftButton | Qt.RightButton
+                    onClicked: (mouse) => {
+                        if (mouse.button === Qt.RightButton) {
+                            const g = mapToItem(null, mouse.x, mouse.y)
+                            root.remoteMenu(modelData.kind, modelData.name, g.x, g.y)
+                        } else {
+                            root.remoteChosen(modelData.path)
+                        }
+                    }
+                }
+                Accessible.role: Accessible.Button
+                Accessible.name: qsTr("Go to %1").arg(modelData.name)
             }
         }
 
@@ -385,7 +463,7 @@ Rectangle {
             leftPadding: Tokens.rowPaddingX
             rightPadding: Tokens.rowPaddingX
             width: column.width
-            text: "No places added yet. Discovery never connects on its own."
+            text: qsTr("Nothing connected. Connect… lists your computers, Tailscale devices and cloud storage.")
             color: Tokens.foregroundDim
             font.family: Tokens.fontFamily
             font.pixelSize: Tokens.fontCaption

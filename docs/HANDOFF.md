@@ -184,7 +184,7 @@ New ideas and newer-Flea features go here instead of into v1.
 - Tree expand in the list view, Miller column count, preview-column toggle.
 - A transfer queue; i18n.
 - Flea 0.3.7 settings: hidden files last, tight row density, Huge/Largest grid sizes, tint today's dates, columns sized from the window.
-- P4: add-a-place discovery, Tailscale, MTP/AFC, udisks, LocalSend.
+- P4: MTP/AFC, udisks, LocalSend; Tailscale SSH (Tailscale's own SSH server) as an alternative to plain SSH.
 - P5: soak, stall matrix, IME, fractional scaling, AT-SPI.
 - Extra P0 measurements: blank-frame trace, scroll frame times, menu and Quick Look latency, SMB 10k listing, whole-tree PSS.
 - Launch posts, the AUR gust-bin package, the clean-install CI job.

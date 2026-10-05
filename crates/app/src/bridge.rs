@@ -80,6 +80,11 @@ pub mod qobject {
         #[qproperty(i32, jump_rev)]
         /// Tab completion result: "<request>\n<completed text>", or "" .
         #[qproperty(QString, jump_completion)]
+        /// Every place Gust could connect to, as JSON, built on a worker by
+        /// request_places(): SSH config hosts, Tailscale devices and rclone
+        /// remotes, each with whether it is connected. Reading these opens
+        /// no connection to any of them (DESIGN §6.4.1).
+        #[qproperty(QString, places_json)]
         type DirModel = super::DirModelRust;
 
         /// A place operation finished on its worker. `message` is "" on
@@ -319,6 +324,22 @@ pub mod qobject {
         /// Disconnect a remote place.
         #[qinvokable]
         fn remote_disconnect(self: Pin<&mut DirModel>, alias: QString) -> QString;
+        /// Rebuild places_json on a worker.
+        #[qinvokable]
+        fn request_places(self: Pin<&mut DirModel>);
+        /// Connect a Tailscale device as `user` over SSH and browse it. A
+        /// host key not on record comes back as "ASKKEY:{json}" through
+        /// place_done; calling again with `trust` records it and connects.
+        #[qinvokable]
+        fn tailnet_connect(
+            self: Pin<&mut DirModel>,
+            name: QString,
+            target: QString,
+            user: QString,
+            trust: bool,
+        ) -> QString;
+        #[qinvokable]
+        fn tailnet_disconnect(self: Pin<&mut DirModel>, name: QString) -> QString;
         /// Cloud remotes the INSTALLED rclone has configured, as JSON.
         /// Reading a config is not connecting: this opens no socket.
         #[qinvokable]
@@ -940,6 +961,7 @@ pub struct DirModelRust {
     band_base: Vec<std::ffi::OsString>,
     jump_rev: i32,
     jump_completion: QString,
+    places_json: QString,
     jump_cands: Vec<gust_core::jump::Candidate>,
     /// Cancels a running hash (Quick Look closed, another file asked).
     hash_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -1178,6 +1200,7 @@ impl DirModelRust {
             band_base: Vec::new(),
             jump_rev: 0,
             jump_completion: QString::default(),
+            places_json: QString::from("{}"),
             jump_cands: Vec::new(),
             hash_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             find_cancel: CancelToken::new(),
@@ -3626,6 +3649,231 @@ impl qobject::DirModel {
         QString::default()
     }
 
+    // --- every connectable place (DESIGN §6.4.1) --------------------------
+
+    fn request_places(self: Pin<&mut Self>) {
+        let Some(thread) = self.as_ref().qt_thread_handle() else {
+            return;
+        };
+        std::thread::Builder::new()
+            .name("gust-places".into())
+            .spawn(move || {
+                let json = Self::places_snapshot();
+                let _ = thread.queue(move |mut model| {
+                    model.as_mut().set_places_json(QString::from(&json));
+                });
+            })
+            .ok();
+    }
+
+    /// SSH hosts, Tailscale devices and cloud remotes, with their state.
+    /// Runs on a worker. Every source here is local: a config file, the
+    /// local tailscaled socket, rclone's config. No device is contacted
+    /// except mounted places, each probed by a killable child.
+    fn places_snapshot() -> String {
+        use gust_remote::{mount, tailscale};
+        let probe = |p: &std::path::Path| {
+            !gust_core::stall::probe(p, std::time::Duration::from_millis(500)).is_responsive()
+        };
+        let mut ssh = Vec::new();
+        if let Some(cfg) = gust_remote::ssh_config::user_config_path() {
+            for h in gust_remote::ssh_config::parse_ssh_config(&cfg)
+                .iter()
+                .take(50)
+            {
+                let mp = mount::mount_point_for(&h.alias);
+                let on = mp.as_ref().is_some_and(|p| mount::is_mounted(p));
+                let lost = on && mp.as_ref().is_some_and(|p| probe(p));
+                ssh.push(format!(
+                    r#"{{"name":{},"detail":{},"connected":{on},"lost":{lost},"path":{}}}"#,
+                    Self::json_str(&h.alias),
+                    Self::json_str(h.hostname.as_deref().unwrap_or(&h.alias)),
+                    Self::json_str(
+                        &mp.map(|p| p.to_string_lossy().into_owned())
+                            .unwrap_or_default()
+                    ),
+                ));
+            }
+        }
+        let users = tailscale::users_path();
+        let (mut tail, mut tail_err) = (Vec::new(), String::new());
+        match tailscale::peers(std::time::Duration::from_secs(3)) {
+            Ok(peers) => {
+                for p in peers.iter().take(200) {
+                    let mp = tailscale::mount_point(&p.name);
+                    let on = mp.as_ref().is_some_and(|m| mount::is_mounted(m));
+                    let lost = on && mp.as_ref().is_some_and(|m| probe(m));
+                    let user = users
+                        .as_ref()
+                        .and_then(|u| tailscale::remembered_user(u, &p.name))
+                        .unwrap_or_default();
+                    tail.push(format!(
+                        r#"{{"name":{},"detail":{},"os":{},"online":{},"connected":{on},"lost":{lost},"user":{},"path":{}}}"#,
+                        Self::json_str(&p.name),
+                        Self::json_str(&p.target),
+                        Self::json_str(&p.os),
+                        p.online,
+                        Self::json_str(&user),
+                        Self::json_str(&mp.map(|m| m.to_string_lossy().into_owned()).unwrap_or_default()),
+                    ));
+                }
+            }
+            Err(e) => tail_err = e.message(),
+        }
+        let (mut cloud, mut cloud_err) = (Vec::new(), String::new());
+        match gust_remote::cloud::list_remotes(None) {
+            Ok(rs) => {
+                for r in rs.iter().take(50) {
+                    let mp = Self::cloud_mount_point(&r.name);
+                    let on = mp.as_ref().is_some_and(|m| mount::is_mounted(m));
+                    cloud.push(format!(
+                        r#"{{"name":{},"detail":{},"connected":{on},"lost":false,"path":{}}}"#,
+                        Self::json_str(&r.name),
+                        Self::json_str(&r.backend),
+                        Self::json_str(
+                            &mp.map(|m| m.to_string_lossy().into_owned())
+                                .unwrap_or_default()
+                        ),
+                    ));
+                }
+            }
+            Err(e) => cloud_err = e.message(),
+        }
+        let local_user = std::env::var("USER").unwrap_or_default();
+        format!(
+            r#"{{"ssh":[{}],"tailnet":[{}],"tailnetError":{},"cloud":[{}],"cloudError":{},"sshfs":{},"localUser":{}}}"#,
+            ssh.join(","),
+            tail.join(","),
+            Self::json_str(&tail_err),
+            cloud.join(","),
+            Self::json_str(&cloud_err),
+            gust_remote::mount::Backend::Sshfs.available(),
+            Self::json_str(if tailscale::safe_user(&local_user) {
+                &local_user
+            } else {
+                ""
+            }),
+        )
+    }
+
+    /// Host keys shown to the user, by target: a "Trust and connect"
+    /// records exactly these, never a fresh scan that could differ from
+    /// what was on screen.
+    fn pending_host_keys(
+    ) -> &'static std::sync::Mutex<std::collections::HashMap<String, Vec<String>>> {
+        use std::sync::{Mutex, OnceLock};
+        static K: OnceLock<Mutex<std::collections::HashMap<String, Vec<String>>>> = OnceLock::new();
+        K.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+    }
+
+    fn tailnet_connect(
+        self: Pin<&mut Self>,
+        name: QString,
+        target: QString,
+        user: QString,
+        trust: bool,
+    ) -> QString {
+        use gust_remote::{mount, tailscale};
+        let (name, target, user) = (
+            name.to_string(),
+            target.to_string(),
+            user.to_string().trim().to_string(),
+        );
+        let Some(mp) = tailscale::mount_point(&name) else {
+            return QString::from("That name cannot be used for a place.");
+        };
+        if !tailscale::safe_target(&target) {
+            return QString::from("That is not a usable address.");
+        }
+        if !tailscale::safe_user(&user) {
+            return QString::from("That is not a usable login name.");
+        }
+        let Some(kh) = tailscale::known_hosts_path() else {
+            return QString::from("No home folder to keep host keys in.");
+        };
+        self.place_op(
+            "tailnet-connect",
+            name.clone(),
+            format!("Connecting to {name}…"),
+            move || {
+                if mount::is_mounted(&mp) {
+                    return PlaceOutcome::Open { path: mp, status: String::new() };
+                }
+                if !mount::Backend::Sshfs.available() {
+                    return PlaceOutcome::Failed(mount::MountError::ToolMissing("sshfs").message());
+                }
+                // A device whose SSH key is not on record: show its
+                // fingerprint and let the user decide. Never trust silently,
+                // never turn checking off.
+                if !tailscale::host_known(&kh, &target) {
+                    if trust {
+                        let lines = Self::pending_host_keys()
+                            .lock()
+                            .ok()
+                            .and_then(|mut m| m.remove(&target));
+                        let Some(lines) = lines else {
+                            return PlaceOutcome::Failed("Connect again to see the device's key.".into());
+                        };
+                        if let Err(e) = tailscale::trust_host_keys(&kh, &lines) {
+                            return PlaceOutcome::Failed(format!("Could not record the key: {e}"));
+                        }
+                    } else {
+                        return match tailscale::scan_host_keys(&target) {
+                            Ok(keys) => {
+                                if let Ok(mut m) = Self::pending_host_keys().lock() {
+                                    m.insert(target.clone(), keys.lines);
+                                }
+                                let fps: Vec<String> =
+                                    keys.fingerprints.iter().map(|f| Self::json_str(f)).collect();
+                                PlaceOutcome::Failed(format!(
+                                    r#"ASKKEY:{{"name":{},"target":{},"user":{},"fingerprints":[{}]}}"#,
+                                    Self::json_str(&name),
+                                    Self::json_str(&target),
+                                    Self::json_str(&user),
+                                    fps.join(",")
+                                ))
+                            }
+                            Err(why) => PlaceOutcome::Failed(why),
+                        };
+                    }
+                }
+                if let Some(u) = tailscale::users_path() {
+                    let _ = tailscale::remember_user(&u, &name, &user);
+                }
+                let mut spec = mount::RemoteSpec::new(&name, target.clone());
+                spec.user = Some(user.clone());
+                // The same file the key was checked against and recorded in.
+                spec.known_hosts = Some(kh);
+                match mount::mount(&spec, &mp, std::time::Duration::from_secs(20)) {
+                    Ok(()) => PlaceOutcome::Open {
+                        path: mp,
+                        status: format!("Connected to {name}"),
+                    },
+                    Err(e) => PlaceOutcome::Failed(e.message()),
+                }
+            },
+        );
+        QString::default()
+    }
+
+    fn tailnet_disconnect(mut self: Pin<&mut Self>, name: QString) -> QString {
+        let name = name.to_string();
+        let Some(mp) = gust_remote::tailscale::mount_point(&name) else {
+            return QString::from("That name cannot be used for a place.");
+        };
+        self.as_mut().leave_if_inside(&mp);
+        self.place_op(
+            "tailnet-disconnect",
+            name.clone(),
+            format!("Disconnecting {name}…"),
+            move || match gust_remote::mount::unmount(&mp) {
+                Ok(()) => PlaceOutcome::Done(format!("Disconnected from {name}")),
+                Err(e) => PlaceOutcome::Failed(e.message()),
+            },
+        );
+        QString::default()
+    }
+
     /// Start a scoped, cancellable find over the current folder and below.
     ///
     /// Results are a VIEW over the model, not a navigation: `find_clear`
@@ -6047,7 +6295,7 @@ impl qobject::DirModel {
     }
 
     /// Run a planned drop through the transfer engine (journal, undo).
-    fn perform_drop(mut self: Pin<&mut Self>, plan: gust_core::drop::DropPlan) -> QString {
+    fn perform_drop(self: Pin<&mut Self>, plan: gust_core::drop::DropPlan) -> QString {
         use gust_core::drop::{DropAction, DropPlan};
         if self.as_ref().job.is_some() {
             return QString::from("another operation is still running");
@@ -6084,7 +6332,7 @@ impl qobject::DirModel {
     /// comes from the other pane, so it is a real folder the user is looking
     /// at — but it is still checked, because a pane can be showing a place
     /// that has gone away underneath it.
-    fn send_selection_to(mut self: Pin<&mut Self>, dest: &QString, as_move: bool) -> QString {
+    fn send_selection_to(self: Pin<&mut Self>, dest: &QString, as_move: bool) -> QString {
         if self.as_ref().job.is_some() {
             return QString::from("another operation is still running");
         }
@@ -6128,7 +6376,7 @@ impl qobject::DirModel {
         self.send_selection_to(dest, true)
     }
 
-    fn drop_uris(mut self: Pin<&mut Self>, row: i32, uris: &QString, as_move: bool) -> QString {
+    fn drop_uris(self: Pin<&mut Self>, row: i32, uris: &QString, as_move: bool) -> QString {
         use gust_core::drop::{paths_from_uri_list, plan_drop, DropAction, DropPlan};
         if self.as_ref().job.is_some() {
             return QString::from("another operation is still running");

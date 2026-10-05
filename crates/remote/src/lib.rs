@@ -12,6 +12,7 @@ pub mod disconnect;
 pub mod mount;
 pub mod shares;
 pub mod ssh_config;
+pub mod tailscale;
 pub mod upload;
 
 pub use capabilities::probe_from_fsinfo;

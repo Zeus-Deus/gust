@@ -115,6 +115,7 @@ Rectangle {
         { id: "settings",     label: "Settings",              hint: "Ctrl+," },
         { id: "trash-view",   label: "Open the Trash",        hint: "" },
         { id: "recent",       label: "Recent files",          hint: "" },
+        { id: "connect",      label: "Connect to a computer or cloud…", hint: "" },
         { id: "pin-here",     label: "Add this folder to Bookmarks", hint: "Ctrl+B" }
     ]
 
@@ -151,12 +152,6 @@ Rectangle {
         if (t.toLowerCase().startsWith("connect") || t.toLowerCase().startsWith("remote")) {
             let hosts = []
             try { hosts = JSON.parse(root.model.remote_suggestions()) } catch (e) { hosts = [] }
-            if (hosts.length === 0) {
-                results.append({ kind: "action",
-                                 label: "No saved computers found in your SSH config",
-                                 payload: "noop" })
-                return
-            }
             for (let i = 0; i < hosts.length; i++) {
                 const h = hosts[i]
                 results.append({ kind: "action",
@@ -166,6 +161,10 @@ Rectangle {
                                         + (h.lost ? " · connection lost" : ""),
                                  payload: (h.connected ? "remote-off:" : "remote-on:") + h.alias })
             }
+            // The full list: Tailscale devices, computers and cloud storage.
+            results.append({ kind: "action",
+                             label: "Connect… (computers, Tailscale devices, cloud storage)",
+                             payload: "connect" })
             return
         }
 

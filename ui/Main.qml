@@ -281,6 +281,23 @@ Window {
             win.qaDump("paste-image" + (message === "" ? "" : "-failed"))
             return
         }
+        if (op === "tailnet-connect" && message.startsWith("ASKKEY:")) {
+            // First connection to this device: show its SSH key and let the
+            // user decide. Nothing is trusted on their behalf.
+            let k = {}
+            try { k = JSON.parse(message.substring(7)) } catch (e) { k = {} }
+            win.pendingTailnet = { name: k.name, target: k.target }
+            win.pendingTailnetUser = k.user || ""
+            confirm.purpose = "tailnetkey"
+            confirm.open(qsTr("First connection to %1").arg(k.name),
+                         qsTr("Gust has not seen this computer's SSH key before. Tailscale has already checked the device; "
+                              + "if you expect these fingerprints, trust them and connect.\n\n%1")
+                             .arg((k.fingerprints || []).join("\n")),
+                         qsTr("Trust and connect"), false)
+            win.refreshPlaces()
+            win.qaDump("place-tailnet-askkey")
+            return
+        }
         if (op === "cloud-disconnect" && message.startsWith("ASK:")) {
             win.pendingCloudOff = name
             confirm.purpose = "clouddirty"
@@ -526,20 +543,67 @@ Window {
         if (err !== "") win.alertText = err
     }
 
+    /// Ask for a fresh list of every place (on a worker); the sidebar and
+    /// the Connect panel follow from places_json when it arrives.
     function refreshPlaces() {
-        let names = []
-        let lost = []
-        try {
-            const hosts = JSON.parse(dirModel.remote_suggestions())
-            for (let i = 0; i < hosts.length; i++) {
-                if (!hosts[i].connected) continue
-                names.push(hosts[i].alias)
-                if (hosts[i].lost) lost.push(hosts[i].alias)
-            }
-        } catch (e) { names = []; lost = [] }
-        win.connectedPlaces = names
-        win.lostPlaces = lost
+        if (dirModel) dirModel.request_places()
     }
+    /// Every connectable place, parsed (DESIGN §6.4.1).
+    property var placesInfo: ({})
+    function placesArrived() {
+        let info = {}
+        try { info = JSON.parse(dirModel.places_json) } catch (e) { info = {} }
+        win.placesInfo = info
+        const on = []
+        const lost = []
+        for (const kind of ["tailnet", "ssh", "cloud"]) {
+            for (const p of (info[kind] || [])) {
+                if (!p.connected) continue
+                on.push({ kind: kind, name: p.name, path: p.path, lost: p.lost })
+                if (p.lost) lost.push(p.name)
+            }
+        }
+        win.connectedPlaces = on
+        win.lostPlaces = lost
+        win.qaDump("places")
+    }
+    Connections {
+        target: win.dirModel
+        function onPlaces_jsonChanged() { win.placesArrived() }
+    }
+
+    /// Connect a place from the Connect panel. A Tailscale device first
+    /// asks which login to use; the rest connect as configured.
+    property var pendingTailnet: null
+    function connectPlace(kind, name, target, user) {
+        if (kind === "ssh") { win.runAction("remote-on:" + name); return }
+        if (kind === "cloud") { win.runAction("cloud-on:" + name); return }
+        win.pendingTailnet = { name: name, target: target }
+        prompt.mode = "tailnet-user"
+        prompt.secret = false
+        prompt.openWith(qsTr("Log in to %1 as").arg(name), user,
+                        qsTr("Your account on that computer. Your own SSH key is used; no password is asked here."))
+        win.qaDump("tailnet-user-prompt")
+    }
+    function tailnetUserEntered(text) {
+        const t = win.pendingTailnet
+        if (!t) { prompt.close(); return }
+        prompt.close()
+        connectPanel.hide()
+        const err = dirModel.tailnet_connect(t.name, t.target, text, false)
+        win.pendingTailnetUser = text
+        if (err !== "") { win.alertText = err; win.pendingTailnet = null }
+    }
+    property string pendingTailnetUser: ""
+    function disconnectPlace(kind, name) {
+        if (kind === "ssh") win.runAction("remote-off:" + name)
+        else if (kind === "cloud") win.runAction("cloud-off:" + name)
+        else {
+            const e = dirModel.tailnet_disconnect(name)
+            if (e !== "") win.alertText = e
+        }
+    }
+    property var remoteMenuPlace: null
     // Mounted places whose server no longer answers. Still mounted (so
     // Disconnect is what clears them) but never shown as "connected".
     property var lostPlaces: []
@@ -721,6 +785,9 @@ Window {
     // plain property, refreshed whenever the tab set or the active tab
     // changes.
     property var dirModel: null
+    // Each tab has its own model: a newly active one fetches the place list
+    // so the sidebar never shows another tab's stale connections.
+    onDirModelChanged: if (dirModel && dirModel.places_json === "{}") win.refreshPlaces()
 
     // Back/Forward availability. can_go_back() is a call, which QML never
     // re-evaluates on its own: the arrows kept whatever look they had at
@@ -733,7 +800,7 @@ Window {
     // context menu, a confirm or conflict dialog), a file created or deleted
     // by another program must not shift the rows under it: the rename would
     // hit the wrong file. Live updates wait, and land when it closes.
-    readonly property bool liveHold: palette.visible || confirm.visible || settingsPanel.open || trashPanel.open || recentPanel.open
+    readonly property bool liveHold: palette.visible || confirm.visible || settingsPanel.open || trashPanel.open || recentPanel.open || connectPanel.open
                                      || contextMenu.open || conflictDialog.visible
                                      || prompt.visible || prompt.claimingFocus
     onLiveHoldChanged: {
@@ -966,7 +1033,7 @@ Window {
         // window used to steal the keyboard, leaving a prompt on screen that
         // could not be typed into.
         if (palette.visible || confirm.visible || contextMenu.open
-            || conflictDialog.visible || settingsPanel.open || trashPanel.open || recentPanel.open
+            || conflictDialog.visible || settingsPanel.open || trashPanel.open || recentPanel.open || connectPanel.open
             || prompt.visible || prompt.claimingFocus)
             return
         listFocus.forceActiveFocus()
@@ -1165,6 +1232,12 @@ Window {
         else if (a === "settings") win.openSettings()
         else if (a === "trash-view") { trashPanel.show(dirModel.trash_list()); win.qaDump("trash-open") }
         else if (a === "recent") { recentPanel.show(dirModel.recent_list()); win.qaDump("recent-open-panel") }
+        else if (a === "connect") { win.refreshPlaces(); connectPanel.show(); win.qaDump("connect-open") }
+        else if (a === "rp-off" && win.remoteMenuPlace) win.disconnectPlace(win.remoteMenuPlace.kind, win.remoteMenuPlace.name)
+        else if (a === "rp-open-tab" && win.remoteMenuPlace) {
+            const rp = win.connectedPlaces.find(x => x.name === win.remoteMenuPlace.name)
+            if (rp) win.newTab(rp.path)
+        }
         else if (a === "pin-row" || a === "unpin-row") {
             const p = dirModel.entry_path(dirModel.cursor)
             const err = a === "pin-row" ? dirModel.bookmark_add(p) : dirModel.bookmark_remove(p)
@@ -2014,7 +2087,17 @@ Window {
                 onDragHover: (t) => { hints.status = t; win.qaDump("drag-hover") }
                 onDragLanded: (m, e) => { hints.status = ""; win.transferStarted(m, e, "drop") }
                 remotePlaces: win.connectedPlaces
-                lostPlaces: win.lostPlaces
+                onConnectChosen: win.runAction("connect")
+                onRemoteChosen: (p) => { dirModel.navigate(p); win.focusList() }
+                onRemoteMenu: (kind, name, x, y) => {
+                    win.remoteMenuPlace = { kind: kind, name: name }
+                    contextMenu.popup(x, y, [
+                        { label: qsTr("Open in new tab"), hint: "", action: "rp-open-tab" },
+                        { separator: true },
+                        { label: qsTr("Disconnect"), hint: "", action: "rp-off" }
+                    ])
+                    win.qaDump("remote-menu")
+                }
                 devices: win.deviceList
                 bookmarks: win.bookmarkList
                 onDeviceChosen: (path, mounted) => win.openDevice(path, mounted)
@@ -2650,7 +2733,7 @@ Window {
         anchors.fill: parent
         property string mode: ""
         onVisibleChanged: win.qaDump("prompt")
-        onClosed: win.focusList()
+        onClosed: { if (connectPanel.open) connectPanel.refocus(); else win.focusList() }
         onAccepted: (text) => {
             // The share steps chain: each one opens the next rather than
             // finishing, so they return early.
@@ -2660,6 +2743,10 @@ Window {
             }
             if (prompt.mode === "share-address") {
                 win.shareAddressEntered(text)
+                return
+            }
+            if (prompt.mode === "tailnet-user") {
+                win.tailnetUserEntered(text)
                 return
             }
             if (prompt.mode === "share-user") {
@@ -2726,6 +2813,20 @@ Window {
         }
         onRevealRequested: (path) => { recentPanel.hide(); dirModel.reveal(path); win.qaDump("recent-reveal") }
         onClosed: { win.focusList(); win.qaDump("recent-closed") }
+    }
+
+    ConnectPanel {
+        id: connectPanel
+        places: win.placesInfo
+        onConnectRequested: (kind, name, target, user) => {
+            if (kind !== "tailnet") connectPanel.hide()
+            win.connectPlace(kind, name, target, user)
+        }
+        onOpenRequested: (path) => { connectPanel.hide(); dirModel.navigate(path) }
+        onDisconnectRequested: (kind, name) => win.disconnectPlace(kind, name)
+        onActionRequested: (a) => { connectPanel.hide(); win.runAction(a) }
+        onClosed: { win.focusList(); win.qaDump("connect-closed") }
+        onVisibleChanged: win.qaDump("connect")
     }
 
     TrashPanel {
@@ -2846,6 +2947,15 @@ Window {
                 win.bulkApply()
                 return
             }
+            if (confirm.purpose === "tailnetkey") {
+                const t = win.pendingTailnet
+                win.pendingTailnet = null
+                if (!t) return
+                const e = dirModel.tailnet_connect(t.name, t.target, win.pendingTailnetUser, true)
+                if (e !== "") win.alertText = e
+                win.qaDump("tailnet-trusted")
+                return
+            }
             if (confirm.purpose === "clouddirty") {
                 // The user was told exactly how many files are unfinished
                 // and chose to go anyway. Only now is force allowed.
@@ -2908,6 +3018,13 @@ Window {
             if (confirm.purpose === "clouddirty") {
                 win.pendingCloudOff = ""
                 win.qaDump("cloud-disconnect-cancelled")
+                return
+            }
+            if (confirm.purpose === "tailnetkey") {
+                // Cancel: nothing recorded, nothing connected.
+                win.pendingTailnet = null
+                hints.status = qsTr("Not connected")
+                win.qaDump("tailnet-key-cancelled")
                 return
             }
             if (confirm.purpose === "bulk") {
@@ -3109,8 +3226,11 @@ Window {
             jobEta: win.job ? (win.job.eta || "") : "",
             conflictName: conflictDialog.clash ? conflictDialog.clash.name : "",
             devices: win.deviceList.map((x) => x.label + "|" + x.state),
-            connectedPlaces: win.connectedPlaces,
+            connectedPlaces: win.connectedPlaces.map(p => p.name),
             lostPlaces: win.lostPlaces,
+            connectOpen: connectPanel.open,
+            connectPoints: connectPanel.open ? connectPanel.buttonPoints() : ({}),
+            places: win.placesInfo,
             tabCenters: win.tabCenters(),
             confirmTitle: confirm.title,
             confirmBody: confirm.body,
@@ -3215,6 +3335,7 @@ Window {
         // A local read of the kernel's own view: no daemon, no network.
         win.refreshDevices()
         dirModel.watch_devices()
+        win.refreshPlaces()
         win.refreshBookmarks()
         win.applySettings()
         chooserBar.mode = dirModel.chooser_mode()

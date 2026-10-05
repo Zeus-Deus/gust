@@ -43,7 +43,7 @@ that never loses data.
 - Make links. Change permissions and owner/group, for one item or many.
 - Quick Look (Space) for text and images, with SHA-256 on request.
 - Archives: browse, extract and compress, behind traversal and bomb checks.
-- Other computers (SSH), Windows and NFS shares, and rclone cloud remotes.
+- Other computers (SSH), Tailscale devices, Windows and NFS shares, and rclone cloud remotes, all from one Connect… list.
 - Custom actions from `~/.config/gust/actions/*.toml`. These run as argv,
   never through a shell.
 - Open as administrator: a separate window, clearly marked, started through

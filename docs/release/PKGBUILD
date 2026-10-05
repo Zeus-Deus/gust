@@ -46,6 +46,7 @@ optdepends=(
   'sshfs: browse other computers over SSH'
   'fuse3: disconnect SSH and cloud places cleanly (fusermount3)'
   'rclone: cloud storage accounts'
+  'tailscale: list Tailscale devices to connect to'
   'gvfs: network shares (SMB, NFS)'
   'gvfs-smb: Windows and Samba shares'
   'gvfs-nfs: NFS shares'
