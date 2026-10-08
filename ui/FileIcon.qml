@@ -85,6 +85,7 @@ Item {
             PathSvg { path: "M1,5 H18 L22,9 H1 Z" }
         }
         Text {
+            textFormat: Text.PlainText
             anchors.centerIn: parent
             anchors.verticalCenterOffset: parent.height * 0.08
             visible: root.detailed && Tokens.nerdGlyphs && root.glyph !== ""
@@ -122,6 +123,7 @@ Item {
         }
         // The extension, the exact type at a glance.
         Text {
+            textFormat: Text.PlainText
             anchors.horizontalCenter: parent.horizontalCenter
             anchors.bottom: parent.bottom
             anchors.bottomMargin: Math.round(parent.height * 0.14)

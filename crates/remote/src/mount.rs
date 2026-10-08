@@ -357,54 +357,153 @@ pub fn sshfs_args(spec: &RemoteSpec, mount_point: &Path, timeout_s: u32) -> Vec<
 ///
 /// Call this on a worker: it is the one function here that touches a network.
 pub fn mount(spec: &RemoteSpec, mount_point: &Path, timeout: Duration) -> Result<(), MountError> {
+    mount_recovering(spec, mount_point, timeout).map(|_| ())
+}
+
+/// [`mount`], also saying where files stranded in the mount point went.
+///
+/// `Ok(Some(dir))`: the place is connected, and files that were sitting in
+/// the bare mount-point directory were moved to `dir` first (see
+/// [`prepare_mount_point`]). The caller must tell the user.
+pub fn mount_recovering(
+    spec: &RemoteSpec,
+    mount_point: &Path,
+    timeout: Duration,
+) -> Result<Option<PathBuf>, MountError> {
     if !Backend::Sshfs.available() {
         return Err(MountError::ToolMissing("sshfs"));
     }
+    if is_mounted(mount_point) {
+        return Ok(None); // already connected
+    }
+    let recovered = prepare_mount_point(mount_point, &spec.alias)?;
+    mount_prepared(spec, mount_point, timeout)?;
+    Ok(recovered)
+}
+
+/// Make `mount_point` an empty directory a filesystem can be mounted on.
+///
+/// A file written through a place moments before it was disconnected lands
+/// in the bare mount-point directory. It may be the only copy of that work,
+/// so it is NEVER deleted here. In one of Gust's own mount points it is moved
+/// to `$XDG_DATA_HOME/gust/recovered/<place> <time>/` and that folder is
+/// returned; anywhere else the mount is refused and nothing is touched.
+/// Call on a worker.
+pub fn prepare_mount_point(mount_point: &Path, label: &str) -> Result<Option<PathBuf>, MountError> {
+    let Some(runtime) = runtime_base() else {
+        return Err(MountError::BadMountPoint(
+            "no runtime folder to mount in".into(),
+        ));
+    };
+    let Some(recovered_root) = recovered_root() else {
+        return Err(MountError::BadMountPoint(
+            "no folder to keep recovered files in".into(),
+        ));
+    };
+    prepare_mount_point_in(mount_point, &runtime, &recovered_root, label, &stamp_now())
+}
+
+/// [`prepare_mount_point`] with every location passed in, so it is tested
+/// without touching the real runtime or data folders.
+pub fn prepare_mount_point_in(
+    mount_point: &Path,
+    runtime: &Path,
+    recovered_root: &Path,
+    label: &str,
+    stamp: &str,
+) -> Result<Option<PathBuf>, MountError> {
     if let Err(e) = std::fs::create_dir_all(mount_point) {
         return Err(MountError::BadMountPoint(e.to_string()));
     }
-    // Refuse to mount over something that already has content: a failed
-    // unmount would otherwise hide the user's files behind an empty mount.
-    if is_mounted(mount_point) {
-        return Ok(()); // already connected
-    }
-    match std::fs::read_dir(mount_point) {
-        Ok(rd) => {
-            let leftovers: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
-            if !leftovers.is_empty() {
-                // A file written through a place moments before it was
-                // disconnected lands in the bare mount-point directory, and
-                // from then on it silently blocks EVERY future connection
-                // with "not empty". These are Gust's own directories under
-                // the runtime dir, created for exactly one place, so
-                // clearing them is safe — but only there.
-                if is_gust_mount_point(mount_point) {
-                    for p in &leftovers {
-                        let _ = if p.is_dir() {
-                            std::fs::remove_dir_all(p)
-                        } else {
-                            std::fs::remove_file(p)
-                        };
-                    }
-                    // If anything survived, do not mount over it.
-                    if std::fs::read_dir(mount_point)
-                        .map(|mut r| r.next().is_some())
-                        .unwrap_or(true)
-                    {
-                        return Err(MountError::BadMountPoint(
-                            "the folder is not empty".to_string(),
-                        ));
-                    }
-                } else {
-                    return Err(MountError::BadMountPoint(
-                        "the folder is not empty".to_string(),
-                    ));
-                }
-            }
-        }
+    let leftovers: Vec<PathBuf> = match std::fs::read_dir(mount_point) {
+        Ok(rd) => rd.flatten().map(|e| e.path()).collect(),
         Err(e) => return Err(MountError::BadMountPoint(e.to_string())),
+    };
+    if leftovers.is_empty() {
+        return Ok(None);
     }
+    if !is_gust_mount_point_in(mount_point, runtime) {
+        // Somebody else's folder: mounting over it would hide their files.
+        return Err(MountError::BadMountPoint("the folder is not empty".into()));
+    }
+    let safe_label: String = label
+        .chars()
+        .map(|c| if c == '/' || c.is_control() { '_' } else { c })
+        .collect();
+    let mut dest = recovered_root.join(format!("{} {stamp}", safe_label.trim_matches('.')));
+    let mut n = 2;
+    while dest.exists() {
+        dest = recovered_root.join(format!("{} {stamp} ({n})", safe_label.trim_matches('.')));
+        n += 1;
+    }
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        // Owner-only: what somebody was copying to a server is private.
+        if let Err(e) = std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&dest)
+        {
+            return Err(MountError::BadMountPoint(format!(
+                "files were left in the folder and could not be set aside ({e})"
+            )));
+        }
+    }
+    let cancel = gust_core::lister::CancelToken::default();
+    for p in &leftovers {
+        let Some(name) = p.file_name() else { continue };
+        // move_tree renames when it can and otherwise copies, verifies and
+        // only then removes the original: a failure leaves it where it was.
+        if let Err(e) = gust_ops::recursive::move_tree(
+            p,
+            &dest.join(name),
+            gust_ops::ConflictPolicy::KeepBoth,
+            &cancel,
+            &mut |_, _, _, _| {},
+        ) {
+            return Err(MountError::BadMountPoint(format!(
+                "files were left in the folder and could not all be set aside ({e}); \
+                 nothing was deleted, see {}",
+                dest.display()
+            )));
+        }
+    }
+    Ok(Some(dest))
+}
 
+/// Where recovered files are kept: `$XDG_DATA_HOME/gust/recovered`. On disk,
+/// not in the runtime folder, which is emptied at logout.
+pub fn recovered_root() -> Option<PathBuf> {
+    let data = std::env::var_os("XDG_DATA_HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))?;
+    Some(data.join("gust").join("recovered"))
+}
+
+/// Local time as `YYYY-MM-DD HH.MM`, safe in a file name.
+fn stamp_now() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    gust_core::properties::full_time(now, gust_core::properties::local_offset_seconds())
+        .replace(':', ".")
+}
+
+fn runtime_base() -> Option<PathBuf> {
+    mount_point_for("probe")?
+        .parent()?
+        .parent()?
+        .parent()
+        .map(Path::to_path_buf)
+}
+
+fn mount_prepared(
+    spec: &RemoteSpec,
+    mount_point: &Path,
+    timeout: Duration,
+) -> Result<(), MountError> {
     let args = sshfs_args(spec, mount_point, timeout.as_secs().max(1) as u32);
     let mut child = Command::new("sshfs")
         .args(&args)
@@ -502,20 +601,23 @@ pub fn unmount(mount_point: &Path) -> Result<(), MountError> {
 
 /// Is this one of Gust's own mount-point directories?
 ///
-/// Only `<runtime>/gust/places/<name>` qualifies. Anywhere else — a folder
-/// the user chose, a home directory — is never cleared automatically.
+/// `<runtime>/gust/{places,tailnet,cloud}/<name>` qualify. Anywhere else — a
+/// folder the user chose, a home directory — is never touched.
+#[cfg(test)]
 fn is_gust_mount_point(path: &Path) -> bool {
+    runtime_base().is_some_and(|rt| is_gust_mount_point_in(path, &rt))
+}
+
+fn is_gust_mount_point_in(path: &Path, runtime: &Path) -> bool {
     let Some(parent) = path.parent() else {
         return false;
     };
-    if !parent.ends_with("gust/places") {
+    if path.file_name().is_none() || path.components().any(|c| c.as_os_str() == "..") {
         return false;
     }
-    // And it must be under the base we would have chosen ourselves.
-    match mount_point_for("probe").and_then(|p| p.parent().map(|q| q.to_path_buf())) {
-        Some(base) => parent == base,
-        None => false,
-    }
+    ["places", "tailnet", "cloud"]
+        .iter()
+        .any(|kind| parent == runtime.join("gust").join(kind))
 }
 
 /// Where a place's mount point lives: under the user's runtime dir, never
@@ -745,6 +847,83 @@ mod tests {
                 p.display()
             );
         }
+    }
+
+    fn scratch(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("gust-prep-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn files_stranded_in_a_mount_point_are_set_aside_never_deleted() {
+        // RED on the old code: mount() removed these with remove_dir_all.
+        for kind in ["places", "tailnet", "cloud"] {
+            let root = scratch(kind);
+            let runtime = root.join("run");
+            let rec = root.join("data/gust/recovered");
+            let mp = runtime.join("gust").join(kind).join("nas");
+            std::fs::create_dir_all(mp.join("half-sent")).unwrap();
+            std::fs::write(mp.join("report.odt"), b"the only copy").unwrap();
+            std::fs::write(mp.join("half-sent/a.txt"), b"a").unwrap();
+
+            let got = prepare_mount_point_in(&mp, &runtime, &rec, "nas", "2026-10-08 10.00")
+                .expect("prepare");
+            let dir = got.expect("a recovered folder is reported");
+            assert_eq!(dir, rec.join("nas 2026-10-08 10.00"));
+            assert_eq!(
+                std::fs::read(dir.join("report.odt")).unwrap(),
+                b"the only copy"
+            );
+            assert_eq!(std::fs::read(dir.join("half-sent/a.txt")).unwrap(), b"a");
+            assert_eq!(
+                std::fs::read_dir(&mp).unwrap().count(),
+                0,
+                "{kind}: mount point empty"
+            );
+            let mode = std::os::unix::fs::PermissionsExt::mode(
+                &std::fs::metadata(&dir).unwrap().permissions(),
+            );
+            assert_eq!(mode & 0o777, 0o700);
+
+            // A second stranding the same minute gets its own folder.
+            std::fs::write(mp.join("report.odt"), b"second").unwrap();
+            let again = prepare_mount_point_in(&mp, &runtime, &rec, "nas", "2026-10-08 10.00")
+                .unwrap()
+                .unwrap();
+            assert_eq!(again, rec.join("nas 2026-10-08 10.00 (2)"));
+            assert_eq!(
+                std::fs::read(dir.join("report.odt")).unwrap(),
+                b"the only copy"
+            );
+            let _ = std::fs::remove_dir_all(&root);
+        }
+    }
+
+    #[test]
+    fn an_empty_mount_point_reports_nothing_and_a_foreign_folder_is_refused_untouched() {
+        let root = scratch("foreign");
+        let runtime = root.join("run");
+        let rec = root.join("rec");
+        let mp = runtime.join("gust/places/box");
+        assert_eq!(
+            prepare_mount_point_in(&mp, &runtime, &rec, "box", "t").unwrap(),
+            None
+        );
+        assert!(!rec.exists(), "nothing recovered, nothing created");
+
+        let theirs = root.join("Documents");
+        std::fs::create_dir_all(&theirs).unwrap();
+        std::fs::write(theirs.join("keep.txt"), b"k").unwrap();
+        let err = prepare_mount_point_in(&theirs, &runtime, &rec, "x", "t").unwrap_err();
+        assert!(matches!(err, MountError::BadMountPoint(_)));
+        assert_eq!(std::fs::read(theirs.join("keep.txt")).unwrap(), b"k");
+        // Nested or traversing paths are not Gust's either.
+        for p in ["gust/places/a/b", "gust/places/../places/a", "gust/other/a"] {
+            assert!(!is_gust_mount_point_in(&runtime.join(p), &runtime), "{p}");
+        }
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

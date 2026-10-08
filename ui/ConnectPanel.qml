@@ -153,12 +153,14 @@ Item {
             anchors.margins: Tokens.spaceXl
             spacing: Tokens.spaceSm
             Text {
+                textFormat: Text.PlainText
                 text: qsTr("Connect")
                 color: Tokens.foregroundBright
                 font.family: Tokens.fontFamily
                 font.pixelSize: Tokens.fontSubtitle
             }
             Text {
+                textFormat: Text.PlainText
                 width: parent.width
                 text: qsTr("Browse another computer or your cloud storage like a folder. Nothing connects until you choose Connect.")
                 color: Tokens.foregroundDim
@@ -209,6 +211,7 @@ Item {
 
                 // Section heading.
                 Text {
+                    textFormat: Text.PlainText
                     visible: row.modelData.type === "head"
                     anchors.left: parent.left
                     anchors.leftMargin: Tokens.rowPaddingX
@@ -286,6 +289,7 @@ Item {
                         border.color: Tokens.withAlpha(Tokens.border, Tokens.borderAlpha)
                         border.width: Tokens.borderWidth
                         Text {
+                            textFormat: Text.PlainText
                             id: offLabel
                             anchors.centerIn: parent
                             text: qsTr("Disconnect")
@@ -313,6 +317,7 @@ Item {
                         border.color: Tokens.accent
                         border.width: Tokens.borderWidth
                         Text {
+                            textFormat: Text.PlainText
                             id: mainLabel
                             anchors.centerIn: parent
                             text: row.isAction ? qsTr("Set up")
@@ -336,6 +341,7 @@ Item {
         }
 
         Text {
+            textFormat: Text.PlainText
             id: foot
             anchors.right: parent.right
             anchors.bottom: parent.bottom

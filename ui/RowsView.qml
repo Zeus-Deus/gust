@@ -140,6 +140,7 @@ FocusScope {
                         width: parent.width - kindCol.width - sizeCol.width - modCol.width
                         height: parent.height
                         Text {
+                            textFormat: Text.PlainText
                             anchors.verticalCenter: parent.verticalCenter
                             id: nameHeaderText
                             text: "Name" + ((root.model ? root.model.sort_field : "") === "name"
@@ -161,6 +162,7 @@ FocusScope {
                         width: Math.round(list.width * 0.10)
                         height: parent.height
                         Text {
+                            textFormat: Text.PlainText
                             anchors.left: parent.left
                             anchors.verticalCenter: parent.verticalCenter
                             id: kindHeaderText
@@ -183,6 +185,7 @@ FocusScope {
                         width: Math.round(list.width * 0.16)
                         height: parent.height
                         Text {
+                            textFormat: Text.PlainText
                             anchors.right: parent.right
                             anchors.rightMargin: Tokens.spaceLg
                             anchors.verticalCenter: parent.verticalCenter
@@ -206,6 +209,7 @@ FocusScope {
                         width: Math.round(list.width * 0.22)
                         height: parent.height
                         Text {
+                            textFormat: Text.PlainText
                             anchors.right: parent.right
                             anchors.verticalCenter: parent.verticalCenter
                             id: modHeaderText
@@ -301,6 +305,7 @@ FocusScope {
                                     opacity: clipMark === "cut" || isHidden ? 0.55 : 1
                                 }
                                 Text {
+                                    textFormat: Text.PlainText
                                     text: name
                                     // A cut row is dimmed: it is about to leave.
                                     color: clipMark === "cut" || isHidden ? Tokens.foregroundDim
@@ -327,6 +332,7 @@ FocusScope {
                                 }
                                 // Copied / cut, after the name (Flea #169).
                                 Text {
+                                    textFormat: Text.PlainText
                                     visible: clipMark !== ""
                                     anchors.verticalCenter: parent.verticalCenter
                                     text: clipMark === "cut" ? qsTr("cut") : qsTr("copied")
@@ -335,6 +341,7 @@ FocusScope {
                                     font.pixelSize: Tokens.fontCaption
                                 }
                                 Text {
+                                    textFormat: Text.PlainText
                                     visible: isSymlink && !linkOk
                                     text: "(broken link)"
                                     color: Tokens.danger
@@ -344,6 +351,7 @@ FocusScope {
                             }
                         }
                         Text {
+                            textFormat: Text.PlainText
                             id: kindText
                             width: Math.round(list.width * 0.10)
                             anchors.verticalCenter: parent.verticalCenter
@@ -354,6 +362,7 @@ FocusScope {
                             elide: Text.ElideRight
                         }
                         Text {
+                            textFormat: Text.PlainText
                             id: sizeText
                             width: Math.round(list.width * 0.16)
                             horizontalAlignment: Text.AlignRight
@@ -366,6 +375,7 @@ FocusScope {
                             font.pixelSize: Tokens.fontSmall
                         }
                         Text {
+                            textFormat: Text.PlainText
                             id: modText
                             width: Math.round(list.width * 0.22)
                             horizontalAlignment: Text.AlignRight
@@ -474,6 +484,7 @@ FocusScope {
 
                 // Empty state — never a blank void.
                 Text {
+                    textFormat: Text.PlainText
                     anchors.centerIn: parent
                     visible: list.count === 0
                     text: (root.model && root.model.empty_reason !== "") ? root.model.empty_reason

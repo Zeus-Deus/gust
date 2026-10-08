@@ -344,6 +344,7 @@ Rectangle {
                 spacing: Tokens.spaceLg
                 width: parent.width
                 Text {
+                    textFormat: Text.PlainText
                     text: ":"
                     color: Tokens.accent
                     font.family: Tokens.fontFamily
@@ -417,6 +418,7 @@ Rectangle {
                         anchors.rightMargin: Tokens.spaceLg
 
                         Text {
+                            textFormat: Text.PlainText
                             anchors.verticalCenter: parent.verticalCenter
                             width: parent.width - hintText.implicitWidth - Tokens.spaceLg
                             text: model.label
@@ -426,6 +428,7 @@ Rectangle {
                             elide: Text.ElideRight
                         }
                         Text {
+                            textFormat: Text.PlainText
                             id: hintText
                             anchors.verticalCenter: parent.verticalCenter
                             text: model.hint

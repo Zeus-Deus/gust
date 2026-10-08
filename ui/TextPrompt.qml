@@ -103,6 +103,7 @@ FocusScope {
             spacing: Tokens.spaceMd
 
             Text {
+                textFormat: Text.PlainText
                 text: root.title
                 color: Tokens.foreground
                 font.family: Tokens.fontFamily
@@ -154,6 +155,7 @@ FocusScope {
             }
 
             Text {
+                textFormat: Text.PlainText
                 width: parent.width
                 text: root.errorText !== "" ? root.errorText : root.hint
                 color: root.errorText !== "" ? Tokens.danger : Tokens.muted
@@ -175,6 +177,7 @@ FocusScope {
                     border.width: Tokens.borderWidth
                     radius: Tokens.radius
                     Text {
+                        textFormat: Text.PlainText
                         id: cancelLabel
                         anchors.centerIn: parent
                         text: qsTr("Cancel")
@@ -199,6 +202,7 @@ FocusScope {
                     border.width: Tokens.borderWidth
                     radius: Tokens.radius
                     Text {
+                        textFormat: Text.PlainText
                         id: okLabel
                         anchors.centerIn: parent
                         text: qsTr("OK")

@@ -92,12 +92,14 @@ Rectangle {
                 // its place so the Row's layout does not depend on itself.
                 opacity: x + width <= hintRow.width ? 1 : 0
                 Text {
+                    textFormat: Text.PlainText
                     text: modelData.k
                     color: Tokens.accent
                     font.family: Tokens.fontFamily
                     font.pixelSize: Tokens.fontCaption
                 }
                 Text {
+                    textFormat: Text.PlainText
                     text: modelData.d
                     color: Tokens.foregroundDim
                     font.family: Tokens.fontFamily
@@ -108,6 +110,7 @@ Rectangle {
     }
 
     Text {
+        textFormat: Text.PlainText
         id: statusText
         anchors.right: parent.right
         anchors.rightMargin: Tokens.rowPaddingX

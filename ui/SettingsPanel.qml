@@ -123,6 +123,7 @@ Item {
             spacing: Tokens.spaceSm
 
             Text {
+                textFormat: Text.PlainText
                 text: qsTr("Settings")
                 color: Tokens.foregroundBright
                 font.family: Tokens.fontFamily
@@ -149,6 +150,7 @@ Item {
                     }
 
                     Text {
+                        textFormat: Text.PlainText
                         id: title
                         x: Tokens.spaceSm
                         y: Math.round((Tokens.controlHeight - height) / 2)
@@ -159,6 +161,7 @@ Item {
                         font.pixelSize: Tokens.fontBody
                     }
                     Text {
+                        textFormat: Text.PlainText
                         x: Tokens.spaceSm
                         y: Tokens.controlHeight - Tokens.spaceXs
                         visible: modelData.note !== ""
@@ -187,6 +190,7 @@ Item {
                                 border.color: chosen ? Tokens.accent : Tokens.withAlpha(Tokens.border, Tokens.borderAlpha)
                                 border.width: Tokens.borderWidth
                                 Text {
+                                    textFormat: Text.PlainText
                                     id: optLabel
                                     anchors.centerIn: parent
                                     text: modelData[1]
@@ -213,6 +217,7 @@ Item {
 
             Item { width: 1; height: Tokens.spaceSm }
             Text {
+                textFormat: Text.PlainText
                 width: col.width
                 horizontalAlignment: Text.AlignRight
                 text: qsTr("↑↓ choose · ←→ change · Escape to close")

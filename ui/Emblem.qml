@@ -27,6 +27,7 @@ Rectangle {
     })
 
     Text {
+        textFormat: Text.PlainText
         anchors.centerIn: parent
         text: Tokens.nerdGlyphs && root.glyphs[root.kind] !== undefined
               ? String.fromCodePoint(root.glyphs[root.kind]) : (root.plain[root.kind] || "")

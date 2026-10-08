@@ -1014,6 +1014,13 @@ enum PlaceOutcome {
     },
     /// Report success with a status line.
     Done(String),
+    /// Browse this folder, and tell the user something they must not miss
+    /// (files that were set aside to make the connection possible).
+    OpenNotice {
+        path: std::path::PathBuf,
+        status: String,
+        notice: String,
+    },
     /// Report a failure the user must read.
     Failed(String),
     /// Continue on the GUI thread (e.g. leave a mount, then unmount it).
@@ -1378,6 +1385,26 @@ impl qobject::DirModel {
                             model.as_mut().set_status(QString::from(&status));
                             model.as_mut().place_done(opq, nameq, QString::default());
                         }
+                        PlaceOutcome::OpenNotice {
+                            path,
+                            status,
+                            notice,
+                        } => {
+                            if model.as_ref().generation == gen {
+                                model
+                                    .as_mut()
+                                    .navigate(&QString::from(path.to_string_lossy().as_ref()));
+                            }
+                            model.as_mut().set_status(QString::from(&status));
+                            model
+                                .as_mut()
+                                .place_done(opq, nameq.clone(), QString::default());
+                            model.as_mut().place_done(
+                                QString::from("recovered"),
+                                nameq,
+                                QString::from(&notice),
+                            );
+                        }
                         PlaceOutcome::Failed(msg) => {
                             model.as_mut().set_status(QString::from(""));
                             model.as_mut().place_done(opq, nameq, QString::from(&msg));
@@ -1720,6 +1747,28 @@ impl qobject::DirModel {
     }
 
     // --- cloud remotes (DESIGN §6.8) -------------------------------------
+
+    /// The outcome of a connection that worked, naming any files that had
+    /// to be set aside from the mount point first.
+    fn opened(
+        path: std::path::PathBuf,
+        status: String,
+        place: &str,
+        recovered: Option<std::path::PathBuf>,
+    ) -> PlaceOutcome {
+        match recovered {
+            None => PlaceOutcome::Open { path, status },
+            Some(dir) => PlaceOutcome::OpenNotice {
+                path,
+                status,
+                notice: format!(
+                    "Files were left in {place}'s folder from an earlier connection. \
+                     Nothing was deleted: they are in {}",
+                    dir.display()
+                ),
+            },
+        }
+    }
 
     /// Where a cloud remote is mounted. Under the runtime dir, never in the
     /// user's home, and separate from SSH places so the two cannot collide.
@@ -3348,9 +3397,12 @@ impl qobject::DirModel {
             if gust_remote::mount::is_mounted(&mp) {
                 return PlaceOutcome::Open { path: mp, status: String::new() };
             }
-            if std::fs::create_dir_all(&mp).is_err() {
-                return PlaceOutcome::Failed("Could not prepare a place for that remote.".into());
-            }
+            // Never mount over files left in the folder: they are set aside
+            // first, and the user is told where.
+            let recovered = match gust_remote::mount::prepare_mount_point(&mp, &name) {
+                Ok(r) => r,
+                Err(e) => return PlaceOutcome::Failed(e.message()),
+            };
             if let Some(sock) = &sock {
                 if let Some(dir) = sock.parent() {
                     use std::os::unix::fs::DirBuilderExt;
@@ -3406,7 +3458,7 @@ impl qobject::DirModel {
                     std::thread::spawn(move || {
                         let _ = child.wait();
                     });
-                    return PlaceOutcome::Open { path: mp, status: format!("Connected to {label}") };
+                    return Self::opened(mp, format!("Connected to {label}"), &label, recovered);
                 }
                 if let Ok(Some(status)) = child.try_wait() {
                     let _ = std::fs::remove_dir(&mp);
@@ -3617,11 +3669,12 @@ impl qobject::DirModel {
                 // lands in the login directory, which is that account's home.
                 spec.remote_path = h.remote_path.clone();
                 // Bounded: sshfs is given a connect timeout.
-                match gust_remote::mount::mount(&spec, &mp, std::time::Duration::from_secs(20)) {
-                    Ok(()) => PlaceOutcome::Open {
-                        path: mp,
-                        status: format!("Connected to {alias}"),
-                    },
+                match gust_remote::mount::mount_recovering(
+                    &spec,
+                    &mp,
+                    std::time::Duration::from_secs(20),
+                ) {
+                    Ok(rec) => Self::opened(mp, format!("Connected to {alias}"), &alias, rec),
                     Err(e) => PlaceOutcome::Failed(e.message()),
                 }
             },
@@ -3844,11 +3897,8 @@ impl qobject::DirModel {
                 spec.user = Some(user.clone());
                 // The same file the key was checked against and recorded in.
                 spec.known_hosts = Some(kh);
-                match mount::mount(&spec, &mp, std::time::Duration::from_secs(20)) {
-                    Ok(()) => PlaceOutcome::Open {
-                        path: mp,
-                        status: format!("Connected to {name}"),
-                    },
+                match mount::mount_recovering(&spec, &mp, std::time::Duration::from_secs(20)) {
+                    Ok(rec) => Self::opened(mp, format!("Connected to {name}"), &name, rec),
                     Err(e) => PlaceOutcome::Failed(e.message()),
                 }
             },

@@ -117,6 +117,7 @@ Rectangle {
         spacing: Tokens.spaceSm
 
         Text {
+            textFormat: Text.PlainText
             leftPadding: Tokens.rowPaddingX
             text: "Places"
             color: Tokens.foregroundDim
@@ -135,6 +136,7 @@ Rectangle {
                 HoverHandler { id: hover }
 
                 Text {
+                    textFormat: Text.PlainText
                     anchors.verticalCenter: parent.verticalCenter
                     leftPadding: Tokens.rowPaddingX
                     text: model.label
@@ -169,6 +171,7 @@ Rectangle {
             color: recentHover.hovered ? Tokens.withAlpha(Tokens.foreground, 0.06) : "transparent"
             HoverHandler { id: recentHover }
             Text {
+                textFormat: Text.PlainText
                 anchors.verticalCenter: parent.verticalCenter
                 leftPadding: Tokens.rowPaddingX
                 text: qsTr("Recent")
@@ -192,6 +195,7 @@ Rectangle {
             color: trashHover.hovered ? Tokens.withAlpha(Tokens.foreground, 0.06) : "transparent"
             HoverHandler { id: trashHover }
             Text {
+                textFormat: Text.PlainText
                 anchors.verticalCenter: parent.verticalCenter
                 leftPadding: Tokens.rowPaddingX
                 text: qsTr("Trash")
@@ -216,6 +220,7 @@ Rectangle {
             visible: root.bookmarks.length > 0
         }
         Text {
+            textFormat: Text.PlainText
             leftPadding: Tokens.rowPaddingX
             text: qsTr("Bookmarks")
             color: Tokens.foregroundDim
@@ -232,6 +237,7 @@ Rectangle {
                 height: Tokens.rowHeight
                 color: bmMouse.containsMouse ? Tokens.withAlpha(Tokens.foreground, 0.06) : "transparent"
                 Text {
+                    textFormat: Text.PlainText
                     anchors.verticalCenter: parent.verticalCenter
                     leftPadding: Tokens.rowPaddingX
                     width: column.width - Tokens.rowPaddingX
@@ -285,6 +291,7 @@ Rectangle {
         }
 
         Text {
+            textFormat: Text.PlainText
             id: devicesHeader
             leftPadding: Tokens.rowPaddingX
             text: qsTr("Devices")
@@ -313,6 +320,7 @@ Rectangle {
                     spacing: 0
 
                     Text {
+                        textFormat: Text.PlainText
                         width: parent.width
                         text: modelData.label
                         color: Tokens.foreground
@@ -323,6 +331,7 @@ Rectangle {
                     // State in WORDS as well as position: colour alone is
                     // not enough to say connected (plan §2 mockup F).
                     Text {
+                        textFormat: Text.PlainText
                         width: parent.width
                         text: modelData.state
                         color: Tokens.foregroundDim
@@ -368,6 +377,7 @@ Rectangle {
             width: column.width
             height: Tokens.rowHeight
             Text {
+                textFormat: Text.PlainText
                 id: remoteHeader
                 anchors.verticalCenter: parent.verticalCenter
                 leftPadding: Tokens.rowPaddingX
@@ -389,6 +399,7 @@ Rectangle {
                 border.width: Math.max(1, Tokens.borderWidth)
                 border.color: Tokens.withAlpha(Tokens.accent, 0.7)
                 Text {
+                    textFormat: Text.PlainText
                     id: connectLabel
                     anchors.centerIn: parent
                     text: qsTr("Connect…")
@@ -459,6 +470,7 @@ Rectangle {
         }
 
         Text {
+            textFormat: Text.PlainText
             id: remoteBlock
             leftPadding: Tokens.rowPaddingX
             rightPadding: Tokens.rowPaddingX

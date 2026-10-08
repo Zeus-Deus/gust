@@ -67,6 +67,7 @@ Rectangle {
             spacing: Tokens.spaceXl
 
             Text {
+                textFormat: Text.PlainText
                 width: parent.width
                 text: root.title
                 color: root.dangerous ? Tokens.danger : Tokens.foregroundBright
@@ -78,6 +79,7 @@ Rectangle {
             }
 
             Text {
+                textFormat: Text.PlainText
                 width: parent.width
                 text: root.body
                 color: Tokens.foreground
@@ -105,6 +107,7 @@ Rectangle {
                     objectName: "cancelButton"
 
                     Text {
+                        textFormat: Text.PlainText
                         id: cancelLabel
                         anchors.centerIn: parent
                         text: "Cancel"
@@ -136,6 +139,7 @@ Rectangle {
                     objectName: "confirmButton"
 
                     Text {
+                        textFormat: Text.PlainText
                         id: confirmLabel
                         anchors.centerIn: parent
                         text: root.confirmText

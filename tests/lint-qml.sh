@@ -144,6 +144,42 @@ else
 fi
 
 echo
+echo "== every Text says how to read its text =="
+# A Text with the default format reads markup in its text as markup, so a
+# file named 'invoice.pdf<font size=1>.sh</font>' showed as 'invoice.pdf' in
+# the list AND in the Run…? confirmation. Every Text must say textFormat:
+# PlainText for names and messages, StyledText only where Gust built the
+# markup itself (and escaped everything else).
+if ! python3 - "$UI"/*.qml <<'PYFMT'
+import re, sys
+bad = []
+for path in sys.argv[1:]:
+    lines = open(path).read().split('\n')
+    for s, l in enumerate(lines):
+        if not re.match(r'^\s*Text\s*\{\s*(//.*)?$', l):
+            continue
+        depth, has = 0, False
+        for j in range(s, len(lines)):
+            t = re.sub(r'"([^"\\]|\\.)*"', '""', lines[j]).split('//')[0]
+            if j > s and depth == 1 and re.match(r'^\s*textFormat\s*:', lines[j]):
+                has = True
+            depth += t.count('{') - t.count('}')
+            if depth <= 0:
+                break
+        if not has:
+            bad.append("%s:%d" % (path, s + 1))
+for b in bad:
+    print("    no textFormat: " + b)
+sys.exit(1 if bad else 0)
+PYFMT
+then
+  echo "    ^ add textFormat: Text.PlainText (names, paths and messages are never markup)"
+  FAIL=1
+else
+  echo "  ok: every Text declares its format"
+fi
+
+echo
 if [[ "$FAIL" == 0 ]]; then
   echo "QML lint: PASS"
 else

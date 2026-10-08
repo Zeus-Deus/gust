@@ -82,6 +82,7 @@ Item {
             Row {
                 spacing: Tokens.spaceLg
                 Text {
+                    textFormat: Text.PlainText
                     text: qsTr("Keys")
                     color: Tokens.foregroundBright
                     font.family: Tokens.fontFamily
@@ -89,6 +90,7 @@ Item {
                     font.bold: true
                 }
                 Text {
+                    textFormat: Text.PlainText
                     anchors.baseline: parent.children[0].baseline
                     text: qsTr("preset: ") + root.preset + qsTr("  ·  ? or F1 opens this  ·  Settings changes the preset")
                     color: Tokens.foregroundDim
@@ -124,6 +126,7 @@ Item {
                                 required property var modelData
                                 spacing: Tokens.spaceXs
                                 Text {
+                                    textFormat: Text.PlainText
                                     text: modelData.name
                                     font.capitalization: Font.AllUppercase
                                     color: Tokens.accent
@@ -142,6 +145,7 @@ Item {
                                         // brightest and bold. What it does is
                                         // secondary text.
                                         Text {
+                                            textFormat: Text.PlainText
                                             width: column.keyWidth
                                             text: modelData.keys
                                             color: Tokens.foregroundBright
@@ -151,6 +155,7 @@ Item {
                                             wrapMode: Text.WordWrap
                                         }
                                         Text {
+                                            textFormat: Text.PlainText
                                             width: flow.doesWidth
                                             text: modelData.does
                                             color: Tokens.foreground

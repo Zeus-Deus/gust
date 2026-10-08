@@ -88,6 +88,7 @@ Rectangle {
             height: Math.max(Tokens.controlHeight, stateText.implicitHeight)
 
             Text {
+                textFormat: Text.PlainText
                 id: stateText
                 anchors.verticalCenter: parent.verticalCenter
                 text: root.stateText
@@ -100,6 +101,7 @@ Rectangle {
             }
 
             Text {
+                textFormat: Text.PlainText
                 id: messageText
                 anchors.left: stateText.right
                 anchors.right: detailText.left
@@ -119,6 +121,7 @@ Rectangle {
 
             // Bytes · speed · time left — the facts that answer "how long?".
             Text {
+                textFormat: Text.PlainText
                 id: detailText
                 objectName: "jobDetail"
                 anchors.right: pauseButton.visible ? pauseButton.left : (cancelButton.visible ? cancelButton.left : parent.right)
@@ -165,6 +168,7 @@ Rectangle {
                 border.width: Math.max(1, Tokens.borderWidth)
                 radius: Tokens.radius
                 Text {
+                    textFormat: Text.PlainText
                     id: pauseText
                     anchors.centerIn: parent
                     text: root.paused ? qsTr("Resume") : qsTr("Pause")
@@ -196,6 +200,7 @@ Rectangle {
                 border.width: Math.max(1, Tokens.borderWidth)
                 radius: Tokens.radius
                 Text {
+                    textFormat: Text.PlainText
                     id: cancelText
                     anchors.centerIn: parent
                     text: qsTr("Cancel")

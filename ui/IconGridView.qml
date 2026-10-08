@@ -220,6 +220,7 @@ FocusScope {
                     }
 
                     Text {
+                        textFormat: Text.PlainText
                         anchors.top: preview.bottom
                         anchors.topMargin: Tokens.spaceSm
                         anchors.left: parent.left
@@ -242,6 +243,7 @@ FocusScope {
 
                     // Copied / cut, on the tile's corner (Flea #169).
                     Text {
+                        textFormat: Text.PlainText
                         visible: clipMark !== ""
                         anchors.top: parent.top
                         anchors.right: parent.right
@@ -328,6 +330,7 @@ FocusScope {
             }
 
             Text {
+                textFormat: Text.PlainText
                 anchors.centerIn: parent
                 visible: grid.count === 0
                 text: (root.model && root.model.empty_reason !== "") ? root.model.empty_reason

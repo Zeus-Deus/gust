@@ -182,6 +182,7 @@ Item {
                     }
 
                     Text {
+                        textFormat: Text.PlainText
                         visible: !modelData.separator
                         anchors.verticalCenter: parent.verticalCenter
                         x: Tokens.rowPaddingX
@@ -194,6 +195,7 @@ Item {
                              : Tokens.foreground
                     }
                     Text {
+                        textFormat: Text.PlainText
                         visible: !modelData.separator && (modelData.hint || "") !== ""
                         anchors.verticalCenter: parent.verticalCenter
                         anchors.right: parent.right

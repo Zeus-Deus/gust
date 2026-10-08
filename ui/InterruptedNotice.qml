@@ -33,6 +33,7 @@ Rectangle {
         spacing: Tokens.spaceSm
 
         Text {
+            textFormat: Text.PlainText
             text: root.items.length === 1
                   ? qsTr("Gust closed unexpectedly while it was working")
                   : qsTr("Gust closed unexpectedly while %1 operations were running").arg(root.items.length)
@@ -50,6 +51,7 @@ Rectangle {
                 height: Tokens.controlHeight
 
                 Text {
+                    textFormat: Text.PlainText
                     anchors.left: parent.left
                     anchors.right: openBtn.left
                     anchors.rightMargin: Tokens.spaceLg
@@ -74,6 +76,7 @@ Rectangle {
                     border.color: Tokens.accent
                     border.width: Math.max(1, Tokens.borderWidth)
                     Text {
+                        textFormat: Text.PlainText
                         id: openLabel
                         anchors.centerIn: parent
                         text: qsTr("Open destination")
@@ -99,6 +102,7 @@ Rectangle {
             width: col.width
             height: Tokens.controlHeight
             Text {
+                textFormat: Text.PlainText
                 anchors.left: parent.left
                 anchors.verticalCenter: parent.verticalCenter
                 text: qsTr("Partial files were cleaned up. Check what arrived, then run it again.")
@@ -118,6 +122,7 @@ Rectangle {
                 border.color: dismissArea.containsMouse ? Tokens.border : "transparent"
                 border.width: Tokens.borderWidth
                 Text {
+                    textFormat: Text.PlainText
                     id: dismissLabel
                     anchors.centerIn: parent
                     text: qsTr("Dismiss")

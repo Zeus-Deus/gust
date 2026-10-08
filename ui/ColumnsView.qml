@@ -165,6 +165,7 @@ FocusScope {
                                                               : "f:" + modelData.n.toLowerCase())
                         }
                         Text {
+                            textFormat: Text.PlainText
                             anchors.verticalCenter: parent.verticalCenter
                             anchors.left: pIcon.right
                             anchors.leftMargin: Tokens.spaceLg
@@ -253,6 +254,7 @@ FocusScope {
                             }
 
                             Text {
+                                textFormat: Text.PlainText
                                 anchors.verticalCenter: parent.verticalCenter
                                 text: name
                                 // Hidden and cut files dimmed; copied ones in the accent.
@@ -266,6 +268,7 @@ FocusScope {
                                        - (colIcon.visible ? colIcon.width + Tokens.spaceLg : 0)
                             }
                             Text {
+                                textFormat: Text.PlainText
                                 id: chevron
                                 anchors.verticalCenter: parent.verticalCenter
                                 text: isDir ? "›" : ""
@@ -363,6 +366,7 @@ FocusScope {
                     anchors.margins: Tokens.spaceXl
                     spacing: Tokens.spaceSm
                     Text {
+                        textFormat: Text.PlainText
                         width: parent.width
                         text: parent.parent.peek ? parent.parent.peek.name : ""
                         color: Tokens.foregroundBright
@@ -371,6 +375,7 @@ FocusScope {
                         wrapMode: Text.WrapAnywhere
                     }
                     Text {
+                        textFormat: Text.PlainText
                         width: parent.width
                         readonly property var p: parent.parent.peek
                         text: !p ? qsTr("Nothing selected")
@@ -420,6 +425,7 @@ FocusScope {
                                                               : "f:" + modelData.n.toLowerCase())
                         }
                         Text {
+                            textFormat: Text.PlainText
                             anchors.verticalCenter: parent.verticalCenter
                             anchors.left: kIcon.right
                             anchors.leftMargin: Tokens.spaceLg

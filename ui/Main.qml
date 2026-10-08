@@ -1738,6 +1738,7 @@ Window {
                 color: Tokens.danger
             }
             Text {
+                textFormat: Text.PlainText
                 anchors.verticalCenter: parent.verticalCenter
                 x: Tokens.rowPaddingX
                 width: parent.width - Tokens.rowPaddingX * 2
@@ -1807,6 +1808,7 @@ Window {
                         border.color: Tokens.withAlpha(Tokens.border, Tokens.borderAlpha)
 
                         Text {
+                            textFormat: Text.PlainText
                             id: tabText
                             anchors.centerIn: parent
                             width: parent.width - Tokens.spaceLg
@@ -1895,6 +1897,7 @@ Window {
                     objectName: "sidebarToggle"
                     HoverHandler { id: sbHover }
                     Text {
+                        textFormat: Text.PlainText
                         anchors.centerIn: parent
                         text: "☰"
                         color: Tokens.foreground
@@ -1928,6 +1931,7 @@ Window {
                                ? Tokens.withAlpha(Tokens.foreground, 0.1) : "transparent"
                         HoverHandler { id: navHover }
                         Text {
+                            textFormat: Text.PlainText
                             anchors.centerIn: parent
                             text: modelData.glyph
                             color: parent.enabledAct ? Tokens.foreground : Tokens.withAlpha(Tokens.foreground, 0.3)
@@ -1987,6 +1991,7 @@ Window {
                     }
                     HoverHandler { id: sortHover }
                     Text {
+                        textFormat: Text.PlainText
                         id: sortText
                         anchors.centerIn: parent
                         text: sortButton.word
@@ -2026,6 +2031,7 @@ Window {
                         HoverHandler { id: vsHover }
 
                         Text {
+                            textFormat: Text.PlainText
                             anchors.centerIn: parent
                             text: modelData.glyph
                             color: win.viewMode === modelData.m ? Tokens.foregroundBright : Tokens.foreground
@@ -2053,6 +2059,7 @@ Window {
                     radius: Tokens.radius
                     HoverHandler { id: setHover }
                     Text {
+                        textFormat: Text.PlainText
                         anchors.centerIn: parent
                         text: "⛭"
                         color: Tokens.foreground
@@ -2202,6 +2209,7 @@ Window {
                     border.color: Tokens.accent
 
                     Text {
+                        textFormat: Text.PlainText
                         anchors.centerIn: parent
                         text: win.tabDropZone === "left" ? qsTr("Left pane")
                                                          : qsTr("Right pane")
@@ -2244,6 +2252,7 @@ Window {
                 spacing: Tokens.spaceLg
 
                 Text {
+                    textFormat: Text.PlainText
                     anchors.verticalCenter: parent.verticalCenter
                     text: "/"
                     color: Tokens.accent

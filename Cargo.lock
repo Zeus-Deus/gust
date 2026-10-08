@@ -369,6 +369,7 @@ name = "gust-remote"
 version = "0.1.0"
 dependencies = [
  "gust-core",
+ "gust-ops",
  "gust-testkit",
  "serde",
  "serde_json",

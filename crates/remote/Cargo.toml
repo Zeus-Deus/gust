@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 gust-core.workspace = true
+gust-ops.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 

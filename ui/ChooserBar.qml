@@ -41,6 +41,7 @@ Rectangle {
         height: Tokens.controlHeight
 
         Text {
+            textFormat: Text.PlainText
             id: label
             anchors.verticalCenter: parent.verticalCenter
             width: Math.min(implicitWidth, Math.round(row.width * 0.35))
@@ -96,6 +97,7 @@ Rectangle {
             border.color: Tokens.withAlpha(Tokens.border, Tokens.borderAlpha)
             border.width: Tokens.borderWidth
             Text {
+                textFormat: Text.PlainText
                 id: cancelLabel
                 anchors.centerIn: parent
                 text: qsTr("Cancel")
@@ -124,6 +126,7 @@ Rectangle {
             border.color: Tokens.accent
             border.width: Tokens.borderWidth
             Text {
+                textFormat: Text.PlainText
                 id: okLabel
                 anchors.centerIn: parent
                 text: root.primaryLabel
@@ -145,6 +148,7 @@ Rectangle {
     }
 
     Text {
+        textFormat: Text.PlainText
         anchors.left: parent.left
         anchors.leftMargin: Tokens.spaceLg
         anchors.top: row.bottom

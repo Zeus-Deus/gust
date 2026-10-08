@@ -64,12 +64,14 @@ Item {
             anchors.margins: Tokens.spaceXl
             spacing: Tokens.spaceSm
             Text {
+                textFormat: Text.PlainText
                 text: qsTr("Trash")
                 color: Tokens.foregroundBright
                 font.family: Tokens.fontFamily
                 font.pixelSize: Tokens.fontSubtitle
             }
             Text {
+                textFormat: Text.PlainText
                 text: root.items.length === 0 ? qsTr("The Trash is empty")
                       : root.items.length === 1 ? qsTr("1 item") : qsTr("%1 items").arg(root.items.length)
                 color: Tokens.foregroundDim
@@ -77,6 +79,7 @@ Item {
                 font.pixelSize: Tokens.fontSmall
             }
             Text {
+                textFormat: Text.PlainText
                 visible: root.error !== ""
                 width: parent.width
                 text: root.error
@@ -123,6 +126,7 @@ Item {
                     anchors.rightMargin: Tokens.spaceLg
                     anchors.verticalCenter: parent.verticalCenter
                     Text {
+                        textFormat: Text.PlainText
                         width: parent.width
                         text: row.modelData.shown
                         color: Tokens.foreground
@@ -131,6 +135,7 @@ Item {
                         elide: Text.ElideMiddle
                     }
                     Text {
+                        textFormat: Text.PlainText
                         width: parent.width
                         text: qsTr("from %1 · %2").arg(row.modelData.from).arg(row.modelData.when)
                         color: Tokens.foregroundDim
@@ -155,6 +160,7 @@ Item {
                             border.color: modelData[0] === "restore" ? Tokens.accent : Tokens.withAlpha(Tokens.border, Tokens.borderAlpha)
                             border.width: Tokens.borderWidth
                             Text {
+                                textFormat: Text.PlainText
                                 id: bl
                                 anchors.centerIn: parent
                                 text: modelData[1]
@@ -182,6 +188,7 @@ Item {
         }
 
         Text {
+            textFormat: Text.PlainText
             id: foot
             anchors.right: parent.right
             anchors.bottom: parent.bottom

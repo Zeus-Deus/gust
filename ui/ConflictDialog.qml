@@ -68,6 +68,7 @@ Rectangle {
             spacing: Tokens.spaceXl
 
             Text {
+                textFormat: Text.PlainText
                 width: parent.width
                 objectName: "conflictTitle"
                 text: root.clash
@@ -92,6 +93,7 @@ Rectangle {
                         root.clash.incomingSize, root.clash.incomingTime
                     ] : []
                     Text {
+                        textFormat: Text.PlainText
                         text: modelData
                         color: index % 3 === 0 ? Tokens.foregroundDim : Tokens.foreground
                         font.family: Tokens.fontFamily
@@ -101,6 +103,7 @@ Rectangle {
             }
 
             Text {
+                textFormat: Text.PlainText
                 width: parent.width
                 visible: root.clash && !root.clash.canReplace
                 text: qsTr("Replace is off here: this place has no Trash, so the old item could not be brought back.")
@@ -127,6 +130,7 @@ Rectangle {
                         border.width: Math.max(1, Tokens.borderWidth)
                         border.color: root.applyAll ? Tokens.accent : Tokens.foregroundDim
                         Text {
+                            textFormat: Text.PlainText
                             anchors.centerIn: parent
                             visible: root.applyAll
                             text: "\u2713"
@@ -136,6 +140,7 @@ Rectangle {
                         }
                     }
                     Text {
+                        textFormat: Text.PlainText
                         text: qsTr("Do this for all %1 clashes").arg(root.remaining)
                         color: Tokens.foreground
                         font.family: Tokens.fontFamily
@@ -179,6 +184,7 @@ Rectangle {
                         Component.onCompleted: if (modelData.id === "keep-both") keepButton.target = btn
 
                         Text {
+                            textFormat: Text.PlainText
                             id: lbl
                             anchors.centerIn: parent
                             text: modelData.label
@@ -202,6 +208,7 @@ Rectangle {
             }
 
             Text {
+                textFormat: Text.PlainText
                 anchors.right: parent.right
                 text: qsTr("R replace · K keep both · S skip · A all · Esc cancel")
                 color: Tokens.foregroundDim

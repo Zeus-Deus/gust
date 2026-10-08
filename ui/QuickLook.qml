@@ -159,6 +159,7 @@ Item {
             spacing: Tokens.spaceLg
 
             Text {
+                textFormat: Text.PlainText
                 id: qlName
                 width: parent.width
                 text: root.info ? root.info.name : ""
@@ -171,6 +172,7 @@ Item {
             // Kind, size and mode on one honest line. The kind is words
             // ("PNG image"), never a MIME type.
             Text {
+                textFormat: Text.PlainText
                 id: qlKind
                 width: parent.width
                 text: root.info
@@ -286,6 +288,7 @@ Item {
                     border.width: Math.max(1, Tokens.borderWidth)
                     border.color: Tokens.withAlpha(Tokens.border, Tokens.borderAlpha)
                     Text {
+                        textFormat: Text.PlainText
                         id: pageText
                         anchors.centerIn: parent
                         text: qsTr("‹  page %1 of %2  ›").arg(root.page).arg(root.pages)
@@ -302,6 +305,7 @@ Item {
                 // A video: the frame above; playing it is the real player's
                 // job (Enter), with its own window, controls and codecs.
                 Text {
+                    textFormat: Text.PlainText
                     id: videoHint
                     objectName: "quickLookVideoHint"
                     visible: root.visual !== null && root.visual.video === true
@@ -358,6 +362,7 @@ Item {
                                                    || (root.audio !== null && root.audio.state === "failed")
 
                     Text {
+                        textFormat: Text.PlainText
                         width: parent.width
                         horizontalAlignment: Text.AlignHCenter
                         text: String.fromCodePoint(0xF0387)
@@ -421,6 +426,7 @@ Item {
                         height: playBtn.height
                         visible: !audioPanel.failed
                         Text {
+                            textFormat: Text.PlainText
                             anchors.left: parent.left
                             anchors.verticalCenter: parent.verticalCenter
                             text: root.clock(audioPanel.pos)
@@ -439,6 +445,7 @@ Item {
                             border.width: Math.max(1, Tokens.borderWidth)
                             border.color: Tokens.accent
                             Text {
+                                textFormat: Text.PlainText
                                 anchors.centerIn: parent
                                 text: !root.audio || root.audio.state === "loading" ? "…"
                                       : root.audio.state === "playing" ? "❚❚"
@@ -456,6 +463,7 @@ Item {
                             }
                         }
                         Text {
+                            textFormat: Text.PlainText
                             anchors.right: parent.right
                             anchors.verticalCenter: parent.verticalCenter
                             text: root.clock(audioPanel.dur > 0 ? audioPanel.dur : null)
@@ -511,6 +519,7 @@ Item {
                 // The sandboxed helper could not render it (a damaged or
                 // disguised file): say so rather than show an empty frame.
                 Text {
+                    textFormat: Text.PlainText
                     anchors.fill: parent
                     visible: root.visual && root.visual.why !== undefined && root.visual.audio === undefined
                     text: visible ? qsTr("No preview: the file could not be read as what its name says (%1)").arg(root.visual.why) : ""
@@ -521,6 +530,7 @@ Item {
                 }
 
                 Text {
+                    textFormat: Text.PlainText
                     anchors.fill: parent
                     visible: root.info && root.info.noPreview !== "" && !root.visual
                     text: root.info ? root.info.noPreview : ""
@@ -558,6 +568,7 @@ Item {
             }
 
             Text {
+                textFormat: Text.PlainText
                 id: qlTrunc
                 visible: text !== ""
                 width: parent.width
@@ -570,6 +581,7 @@ Item {
             }
 
             Text {
+                textFormat: Text.PlainText
                 id: qlClose
                 width: parent.width
                 horizontalAlignment: Text.AlignRight

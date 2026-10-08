@@ -59,6 +59,7 @@ Item {
                 readonly property string crumbPath: modelData
                 readonly property real crumbWidth: crumbBox.width
                 Text {
+                    textFormat: Text.PlainText
                     id: sep
                     // The root crumb is itself "/", so the crumb after it
                     // needs no separator ("/ tmp", not "/ / tmp").
@@ -79,6 +80,7 @@ Item {
                     HoverHandler { id: hover }
 
                     Text {
+                        textFormat: Text.PlainText
                         id: crumbText
                         anchors.centerIn: parent
                         // Last crumb is the current folder: brighter, bolder.
