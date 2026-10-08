@@ -56,14 +56,18 @@ Item {
                 spacing: 0
                 readonly property bool sepShown: sep.visible
                 readonly property string crumbLabel: crumbText.text
-                readonly property string crumbPath: modelData
+                // Each crumb is "path\tlabel" (a mounted place is named by
+                // what it is, not by its mount path).
+                readonly property string crumbPath: modelData.split("\t")[0]
+                readonly property string crumbName: modelData.split("\t").slice(1).join("\t")
                 readonly property real crumbWidth: crumbBox.width
                 Text {
                     textFormat: Text.PlainText
                     id: sep
                     // The root crumb is itself "/", so the crumb after it
-                    // needs no separator ("/ tmp", not "/ / tmp").
-                    visible: index > 1
+                    // needs no separator ("/ tmp", not "/ / tmp"). A place's
+                    // name is not a separator: "nas / Shared".
+                    visible: index > 1 || (index === 1 && root.fromPlace)
                     text: "/"
                     color: Tokens.foregroundDim
                     font.family: Tokens.fontFamily
@@ -84,12 +88,7 @@ Item {
                         id: crumbText
                         anchors.centerIn: parent
                         // Last crumb is the current folder: brighter, bolder.
-                        text: {
-                            const p = modelData
-                            if (p === "/") return "/"
-                            const parts = p.split("/")
-                            return parts[parts.length - 1]
-                        }
+                        text: crumbName
                         color: index === rep.count - 1 ? Tokens.foregroundBright : Tokens.foreground
                         font.family: Tokens.fontFamily
                         font.pixelSize: Tokens.fontBody
@@ -99,19 +98,20 @@ Item {
                     MouseArea {
                         anchors.fill: parent
                         cursorShape: Qt.PointingHandCursor
-                        onClicked: root.pathChosen(modelData)
+                        onClicked: root.pathChosen(crumbPath)
                     }
 
                     // Drop onto a crumb: into that parent folder.
                     DragTarget {
+                        receiver: root.model
                         anchors.fill: parent
-                        path: modelData
+                        path: crumbPath
                         onHover: (t) => root.dragHover(t)
                         onLanded: (m, e) => root.dragLanded(m, e)
                     }
 
                     Accessible.role: Accessible.Button
-                    Accessible.name: "Go to " + modelData
+                    Accessible.name: qsTr("Go to %1").arg(crumbName)
                 }
             }
         }
@@ -122,6 +122,12 @@ Item {
     // current at the time — switching panes swaps the model without a
     // locationChanged, and the crumbs kept the other pane's path.
     property int revision: 0
+    /// The first crumb is a place's name, not "/": the crumb after it needs
+    /// a separator ("nas / Shared").
+    readonly property bool fromPlace: {
+        const m = rep.model
+        return m && m.length > 0 && m[0].split("\t").slice(1).join("\t") !== "/"
+    }
     Connections {
         target: root.model
         function onLocationChanged() { root.revision++ }

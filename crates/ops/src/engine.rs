@@ -185,6 +185,71 @@ pub fn copy_regular_file_with(
     cancel: &CancelToken,
     on_bytes: &mut dyn FnMut(u64),
 ) -> OpResult<u64> {
+    match stage_regular_file(
+        src_dir, src_name, dst_dir, dst_name, policy, cancel, on_bytes, true,
+    )? {
+        None => Ok(0),
+        Some(staged) => staged.commit(dst_dir, dst_name),
+    }
+}
+
+/// A copied file still under its private staging name, waiting for
+/// [`Staged::commit`]. Until then a crash leaves only claimed staging debris,
+/// never a partial file under the real name.
+#[derive(Debug)]
+pub(crate) struct Staged {
+    stage: OsString,
+    staged_abs: PathBuf,
+    claim: Option<PathBuf>,
+    pub(crate) written: u64,
+}
+
+impl Staged {
+    /// Give the staged file its real name. The caller has made its bytes
+    /// durable first (per file, or for a whole batch with one `syncfs`).
+    pub(crate) fn commit(self, dst_dir: &DirHandle, dst_name: &OsStr) -> OpResult<u64> {
+        if let Err(e) =
+            rustix::fs::renameat(dst_dir.as_fd(), &self.stage, dst_dir.as_fd(), dst_name)
+        {
+            // Even the final rename can fail (a full directory, a vanished
+            // parent). The staging file is ours; do not abandon it.
+            self.discard(dst_dir);
+            return Err(e.into());
+        }
+        // Committed under its real name: the claim no longer describes anything.
+        if let Some(c) = &self.claim {
+            crate::staging::release(c);
+        }
+        Ok(self.written)
+    }
+
+    /// Remove the staged file (a batch that will not be committed).
+    pub(crate) fn discard(self, dst_dir: &DirHandle) {
+        discard_staged(dst_dir, &self.stage, &self.claim, self.written);
+    }
+}
+
+impl Drop for Staged {
+    fn drop(&mut self) {
+        // No longer being written, whatever happened to it.
+        crate::staging::end(&self.staged_abs);
+    }
+}
+
+/// Copy a regular file to a staging name in `dst_dir`. With `durable` the
+/// bytes are fsynced before returning; without, the caller must make them
+/// durable (`syncfs`) before committing. `None`: skipped by policy.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn stage_regular_file(
+    src_dir: &DirHandle,
+    src_name: &OsStr,
+    dst_dir: &DirHandle,
+    dst_name: &OsStr,
+    policy: ConflictPolicy,
+    cancel: &CancelToken,
+    on_bytes: &mut dyn FnMut(u64),
+    durable: bool,
+) -> OpResult<Option<Staged>> {
     let st = src_dir.stat_child(src_name)?;
     match classify(&st) {
         FileClass::Regular => {}
@@ -202,7 +267,7 @@ pub fn copy_regular_file_with(
     // Conflict check before doing any work.
     if dst_dir.stat_child(dst_name).is_ok() {
         match policy {
-            ConflictPolicy::Skip => return Ok(0),
+            ConflictPolicy::Skip => return Ok(None),
             // KeepBoth is resolved by the caller choosing a free name; if a
             // name is taken here anyway, it was taken by someone else in the
             // meantime and is theirs.
@@ -225,16 +290,19 @@ pub fn copy_regular_file_with(
     // never reclaimed by the sweep, so the claim must be durable first.
     let staged_abs = PathBuf::from(dst_dir.display()).join(&stage);
     // Registered as in flight BEFORE the claim exists and for exactly as
-    // long as this function holds the file, so no sweep — not even one in
-    // this process — can take a copy that is still being written.
-    struct Active<'a>(&'a Path);
-    impl Drop for Active<'_> {
+    // long as the file is held (until `Staged` is committed or discarded),
+    // so no sweep — not even one in this process — can take a copy that is
+    // still being written.
+    crate::staging::begin(&staged_abs);
+    struct Active(Option<PathBuf>);
+    impl Drop for Active {
         fn drop(&mut self) {
-            crate::staging::end(self.0);
+            if let Some(p) = &self.0 {
+                crate::staging::end(p);
+            }
         }
     }
-    crate::staging::begin(&staged_abs);
-    let _active = Active(&staged_abs);
+    let mut active = Active(Some(staged_abs.clone()));
     let claim = crate::staging::claim(&staged_abs).ok();
     // Create with the source's permission bits masked to owner-only first;
     // widened at the end. Never world-readable in between.
@@ -297,8 +365,10 @@ pub fn copy_regular_file_with(
         rustix::fs::fchmod(&dst, Mode::from_bits_truncate(safe_mode))?;
         // Durability before the destination name exists. fsync can itself
         // fail on a full filesystem, which is exactly when the staging file
-        // must not be left behind.
-        rustix::fs::fsync(&dst)?;
+        // must not be left behind. A batch defers this to one syncfs.
+        if durable {
+            rustix::fs::fsync(&dst)?;
+        }
         Ok(())
     })();
 
@@ -308,17 +378,14 @@ pub fn copy_regular_file_with(
         discard_staged(dst_dir, &stage, &claim, written);
         return Err(e);
     }
-
-    rustix::fs::renameat(dst_dir.as_fd(), &stage, dst_dir.as_fd(), dst_name).inspect_err(|_| {
-        // Even the final rename can fail (a full directory, a vanished
-        // parent). The staging file is ours; do not abandon it.
-        discard_staged(dst_dir, &stage, &claim, written);
-    })?;
-    // Committed under its real name: the claim no longer describes anything.
-    if let Some(c) = &claim {
-        crate::staging::release(c);
-    }
-    Ok(written)
+    // From here `Staged` owns the in-flight mark.
+    active.0 = None;
+    Ok(Some(Staged {
+        stage,
+        staged_abs,
+        claim,
+        written,
+    }))
 }
 
 /// Copy a symlink as a symlink — never by following it.

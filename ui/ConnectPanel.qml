@@ -72,6 +72,16 @@ Item {
         out.push({ type: "action", action: "share-add", text: qsTr("Add a shared folder (Windows or NFS)") })
         return out
     }
+    /// The height of the rows, summed by type, BEFORE any delegate exists
+    /// (a note's text is assumed to fit on two lines at most).
+    readonly property real rowsHeight: {
+        let h = 0
+        for (const r of root.rows)
+            h += r.type === "head" ? Tokens.rowHeight * 1.4
+               : r.type === "note" ? Math.max(Tokens.rowHeight, Tokens.fontSmall * 2.8 + Tokens.spaceSm)
+               : r.type === "place" ? Tokens.rowHeight * 1.7 : Tokens.rowHeight * 1.3
+        return h
+    }
     /// Rows that Enter can act on.
     function actionable(i) { return i >= 0 && i < rows.length && (rows[i].type === "place" || rows[i].type === "action") }
     function step(d) {
@@ -139,7 +149,13 @@ Item {
         objectName: "connectPanel"
         anchors.centerIn: parent
         width: Math.min(parent.width - Tokens.spaceXl * 4, Math.round(Tokens.rowHeight * 30))
-        height: Math.min(parent.height - Tokens.spaceXl * 4, Math.round(Tokens.rowHeight * 24))
+        // Sized from what it lists: the title block, every row at its own
+        // height, and the footer, so a short list is a short card (it was a
+        // fixed 24 rows tall, mostly empty). A long list scrolls.
+        height: Math.min(parent.height - Tokens.spaceXl * 4,
+                         Math.round(head.implicitHeight + Tokens.spaceXl + Tokens.spaceLg
+                                    + root.rowsHeight + Tokens.spaceSm * 2
+                                    + foot.implicitHeight + Tokens.spaceXl * 2))
         color: Tokens.backgroundDark
         border.width: Math.max(1, Tokens.borderWidth)
         border.color: Tokens.withAlpha(Tokens.border, Tokens.borderAlpha)

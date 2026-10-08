@@ -173,6 +173,17 @@ undo as any other — never a shortcut around them.
   nothing was happening and read as "drag does not work".
 - Text dropped from another application is not a file operation. Only URIs
   Gust can resolve to real paths are accepted.
+- **Two Gust windows work together** (D62). A drag from another Gust
+  window is planned by the same rule as one inside a window: Move on the
+  same drive, Copy onto another, Ctrl copies, Shift moves; the target names
+  the operation and rings the folder while it is held. Gust recognises its
+  own drags by a private MIME type built in Rust; drags from other
+  applications still copy. Each network share is its own drive, so a drop
+  between two servers copies.
+- **The clipboard is shared through the system clipboard.** Paste reads it
+  first; Gust's own record of a cut is used only while the system clipboard
+  still holds that same cut, so a newer copy made in another window or
+  another app wins over an older cut.
 
 ## 6.2 Becoming the default file manager
 
@@ -650,13 +661,44 @@ remote place is. Eject refuses while a transfer is running and says which
 one — pulling a filesystem out from under a copy is how people lose data,
 and a file manager that allows it has not done its job.
 
-### What is deliberately not claimed
+### 6.13.1 Phones and cameras
 
-Phones over MTP need GVfs and per-device Trust prompts, and NAS/SMB needs a
-GIO mount. Neither is implemented. The plan is explicit that discovery
-"can be unavailable or incomplete" and that showing a device is not a claim
-that it will work — so Gust lists what the kernel reports and does not invent
-support it has not got.
+An iPhone, iPad or Android phone is not a block device, so `lsblk` never
+lists it. Gust reads what the kernel and udev already wrote — sysfs
+attributes and the udev database entry for the USB device
+(`/run/udev/data/c189:<minor>`) — and contacts nothing to find it. A watch
+on `/dev/bus/usb/<bus>/` says when something was plugged in or pulled.
+
+| Kind | Recognised by | Opened through |
+|---|---|---|
+| iPhone, iPad, iPod touch | Apple vendor id and `USBMUX_SUPPORTED=1` (or an iOS model name) | `gio mount afc://<udid>/`; app files at `afc://<udid>:3/` |
+| Android in File transfer mode | `ID_MTP_DEVICE=1` | `gio mount mtp://<ID_SERIAL>/` |
+| Camera, or a phone set to PTP | `ID_GPHOTO2` | `gio mount gphoto2://<ID_SERIAL>/` |
+
+- The row is named by the device itself ("Alex's iPhone") from
+  `gio mount -li`, which reads the volume monitors' state and does not talk
+  to the phone; the USB model name is the fallback. The path bar and title
+  use the same name, never the `afc:host=<udid>` folder.
+- A serial goes into a URI only if it is plain hex (Apple) or letters,
+  digits and `_ - .` (MTP); anything else is not listed.
+- **Nothing is mounted until the user clicks.** Then the phone is reached
+  only through GVfs, the layer Nautilus uses, so one program owns the USB
+  device. GVfs asks "Try again / Cancel" on gio's stdin while an iPhone is
+  untrusted or locked; Gust answers Try again every three seconds and says
+  in the row what the person has to do ("Unlock your iPhone and tap
+  Trust"). A second click stops waiting and answers Cancel. "Don't Trust"
+  is told plainly, with how to be asked again.
+- A missing backend is named with its command (`Needs gvfs-afc — sudo
+  pacman -S gvfs-afc`). Gust never installs packages itself. Android needs
+  `gvfs-mtp` (on Omarchy by default); iPhone needs `gvfs-afc`, which pulls
+  in `usbmuxd`.
+- Eject leaves every folder of the phone the window is in, unmounts photos
+  and app files, and is never forced; it refuses while a transfer runs.
+
+**Proven with stand-ins, not with a phone.** `just qa` §37 replaces sysfs,
+the udev database and `gio` with a fake tree and a script that speaks gio's
+own question protocol; everything from detection to eject is Gust's real
+code. A physical iPhone/iPad/Android round trip is still the owner's to do.
 
 **This has not been qualified against physical hardware.** The VM used for
 qualification has no USB device: its only removable block device is an empty

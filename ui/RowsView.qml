@@ -23,6 +23,9 @@ FocusScope {
     /// Keyboard modifiers held during the drag: Ctrl copies, Shift moves.
     property int dragMods: 0
     property int dropRow: -1
+    /// A drag from another window or application is over this view; the
+    /// ring then shows on `dropRow` without an in-view drag (Pane sets it).
+    property bool platformDrop: false
     /// A drag made with the right button ends in a Copy/Move/Link menu.
     property bool dragRight: false
     /// The click that ends a right-button drag must not also open the menu.
@@ -397,7 +400,7 @@ FocusScope {
                         color: "transparent"
                         border.width: visible ? Math.max(2, Tokens.borderWidth * 2) : 0
                         border.color: Tokens.accent
-                        visible: root.dropRow === index && root.dragActive
+                        visible: root.dropRow === index && (root.dragActive || root.platformDrop)
                         z: 5
                     }
 

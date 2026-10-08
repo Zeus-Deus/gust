@@ -175,6 +175,7 @@ Item {
         if (!pane.model) return
         if (outward.handedOff) { outward.handedOff = false; return }
         const err = pane.model.drag_drop_on_row(row, pane.dragMode(pane.currentView()))
+        pane.model.drag_end()
         if (err !== "") pane.dropFailed(err)
         else pane.dropDone()
     }
@@ -262,17 +263,27 @@ Item {
         if (outward.handedOff || !pane.model) return
         const p = viewItem.mapToItem(pane, x, y)
         if (p.x >= 0 && p.y >= 0 && p.x < pane.width && p.y < pane.height) return
-        const uris = pane.model.drag_uri_list()
-        if (uris === "") return
+        let m = null
+        try { m = JSON.parse(pane.model.drag_mime_json()) } catch (e) { m = null }
+        if (!m || m.uris === "") return
+        // Ctrl or Shift held as the drag leaves decides what another Gust
+        // window does with it, as it would here (D60).
+        const mode = pane.dragMode(viewItem)
         outward.handedOff = true
         rowsView.dragActive = false
         gridView.dragActive = false
         columnsView.dragActive = false
         outward.Drag.mimeData = {
-            "text/uri-list": uris,
-            "text/plain": uris.split("\r\n").filter(u => u !== "").map(u => decodeURIComponent(u.replace("file://", ""))).join("\n"),
-            "x-special/gnome-copied-files": "copy\n" + uris.split("\r\n").filter(u => u !== "").join("\n")
+            "text/uri-list": m.uris,
+            "text/plain": m.text,
+            "x-special/gnome-copied-files": m.gnome,
+            // Marks the drag as Gust's own for another Gust window:
+            // "gust\n<mode>". Other applications ignore the type.
+            "application/x-gust-drag": "gust\n" + mode
         }
+        // Offer Move only when the user asked for it (Shift); otherwise a
+        // drop in another application is a copy and the original stays.
+        outward.Drag.proposedAction = mode === 2 ? Qt.MoveAction : Qt.CopyAction
         outward.Drag.active = true
         pane.handedOff()
     }
@@ -286,9 +297,13 @@ Item {
         readonly property var paneModel: pane.model
         width: 1; height: 1
         Drag.dragType: Drag.Automatic
-        Drag.supportedActions: Qt.CopyAction
+        Drag.supportedActions: Qt.CopyAction | Qt.MoveAction
         Drag.proposedAction: Qt.CopyAction
-        Drag.onDragFinished: (action) => { outward.Drag.active = false; outward.handedOff = false }
+        Drag.onDragFinished: (action) => {
+            outward.Drag.active = false
+            outward.handedOff = false
+            if (pane.model) pane.model.drag_end()
+        }
     }
 
     /// The model a drag came from when it is Gust's own, else null.
@@ -301,28 +316,67 @@ Item {
         return row >= 0 && pane.model.is_dir(row) ? pane.model.entry_path(row) : pane.model.location
     }
 
-    // --- dropping IN from other applications -----------------------------
+    // --- dropping IN from other windows and applications ----------------
     //
-    // Files dragged from a browser download bar, another file manager or a
-    // chat app land here as text/uri-list and go through the same planner
-    // and engine as Gust's own drops: copy by default, conflicts asked,
-    // refusals explained.
+    // Files dragged from another Gust window, a browser download bar,
+    // another file manager or a chat app land here as text/uri-list and go
+    // through the same planner and engine as Gust's own drops. Another Gust
+    // window's drag follows the same rule as a drop inside one (D60: Move on
+    // one drive, Copy across; Ctrl copies, Shift moves). Anything else
+    // copies. The folder under the pointer is ringed, and the hint strip
+    // says what releasing will do, before anything happens.
+    /// The view whose folder ring a platform drag is lighting.
+    function setDropRing(row) {
+        for (const v of [rowsView, gridView, columnsView]) {
+            v.platformDrop = row >= -1 && v === pane.currentView()
+            v.dropRow = v === pane.currentView() ? row : -1
+        }
+    }
+    function clearDropRing() {
+        for (const v of [rowsView, gridView, columnsView]) { v.platformDrop = false; v.dropRow = -1 }
+    }
     DropArea {
+        id: inbound
         anchors.fill: parent
         keys: ["text/uri-list"]
-        // Gust's own internal gesture never produces a platform drag inside
-        // its window, so anything arriving here came from outside — except
-        // the outward proxy, which is ignored.
-        onEntered: (drag) => { drag.accept(Qt.CopyAction) }
+        /// The drag in flight, read once when it enters (qa reads them too).
+        property string uris: ""
+        property bool fromGust: false
+        property int mode: 0
+        function read(d) {
+            inbound.uris = d.hasUrls ? d.urls.map(u => u.toString()).join("\r\n") + "\r\n"
+                                     : (d.getDataAsString("text/uri-list") || "")
+            const mark = d.formats.indexOf("application/x-gust-drag") >= 0
+                         ? (d.getDataAsString("application/x-gust-drag") || "") : ""
+            inbound.fromGust = mark.indexOf("gust\n") === 0
+            inbound.mode = inbound.fromGust ? (parseInt(mark.split("\n")[1]) || 0) : 0
+        }
+        onEntered: (drag) => {
+            drag.accept(Qt.CopyAction)
+            if (!pane.model || pane.gustSource(drag)) return
+            pane.model.drop_enter()
+            inbound.read(drag)
+        }
+        onExited: {
+            pane.clearDropRing()
+            pane.dropPreview("")
+        }
         onPositionChanged: (drag) => {
             if (!pane.model) return
             const row = pane.currentView().rowAt ? pane.currentView().rowAt(drag.x, drag.y) : -1
             const src = pane.gustSource(drag)
-            pane.dropPreview(src === pane.model ? pane.model.drag_preview(row, 0)
-                             : src ? src.drag_preview_into(pane.folderAt(row), 0)
-                             : pane.model.drop_preview(row, false))
+            if (src) {
+                pane.dropPreview(src === pane.model ? pane.model.drag_preview(row, 0)
+                                 : src.drag_preview_into(pane.folderAt(row), 0))
+                return
+            }
+            // Ring the folder that would receive the drop.
+            pane.setDropRing(row >= 0 && pane.model.is_dir(row) ? row : -1)
+            const t = pane.model.uri_preview(row, "", inbound.uris, inbound.mode, inbound.fromGust)
+            pane.dropPreview(t)
         }
         onDropped: (drop) => {
+            pane.clearDropRing()
             if (!pane.model) return
             // Gust's own drag that left the view and came back, or came
             // from the other pane: the same planner as a drop in the list
@@ -337,11 +391,12 @@ Item {
                 else pane.dropDone()
                 return
             }
-            const uris = drop.hasUrls ? drop.urls.map(u => u.toString()).join("\r\n") + "\r\n"
-                                      : (drop.getDataAsString("text/uri-list") || "")
+            inbound.read(drop)
             const row = pane.currentView().rowAt ? pane.currentView().rowAt(drop.x, drop.y) : -1
-            const err = pane.model.drop_uris(row, uris, false)
+            // The receiver does the move itself (journaled, undoable); the
+            // source never deletes anything because of a drop.
             drop.accept(Qt.CopyAction)
+            const err = pane.model.uri_drop(row, "", inbound.uris, inbound.mode, inbound.fromGust)
             if (err !== "") pane.dropFailed(err)
             else pane.dropDone()
         }

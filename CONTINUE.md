@@ -27,6 +27,11 @@ Updated after every commit. Read this first after a realm replacement.
   a polkit rule letting the test user pkexec exactly this checkout's Gust builds.
 
 ## State
+- v2 (2026-10-08, branch `v2`): mount-point leftovers quarantined (D63), PlainText
+  everywhere (D64), two windows (D62, qa §36), phones (D65, qa §37), batched flush
+  to local disks (D66), Markdown tables/footnotes (D67). qa §37 needs no hardware;
+  a real phone round trip is still open. Next: shared undo across windows,
+  LocalSend via `localsend-cli`, Trash on USB drives, memory (compact names).
 See `docs/HANDOFF.md` for the full picture (what is built, bench table, what is not done).
 - Gates at the custom-actions commit: test 719/0 (41 named skips), lint green, qa 410/0, theme matrix 22/22.
 - Uncommitted work: none.

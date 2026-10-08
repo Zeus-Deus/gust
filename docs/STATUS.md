@@ -69,7 +69,7 @@ Rust 1.98.1, cxx-qt 0.10.0, Mesa llvmpipe (software rendering, Virtio GPU),
 | Vim preset | proven by hand | selectable in Settings; `j` moves the cursor; persists across restarts |
 | **Per-location view memory** | **proven** | `views::tests` + `just qa` §10r; survives a restart |
 | Tabs | **proven** | per-tab location, history, selection, filter and view; Ctrl+T/W/Tab/1-9 (1-9 was claimed here before it existed; implemented and qa §20a on 2026-09-30); middle-click a folder opens a background tab (§20g); last tab cannot be closed; a tab with a running job asks before closing |
-| "Send with LocalSend" (mockup C) | **not possible** | LocalSend's desktop entry is `Exec=localsend` with no `%F` and no `MimeType`, it has no CLI, and it registers no D-Bus service. There is no supported way to hand it files. Recorded as unbuildable rather than pending. |
+| "Send with LocalSend" (mockup C) | **not started** | The desktop app takes no files, but `localsend-cli` (AUR) can send them; Flea drives it through a pty. Not built yet (this row said "not possible" until 2026-10-08; corrected). |
 | **One copy, every format** | **proven** | `clipboard_live` 9/9 (the new check failed on the old code, which offered only the GNOME type): a copy is readable as files by other file managers, as `text/uri-list` by browsers and chat apps, and as plain text by terminals — and it survives closing the Gust window (held by `gust --clip-serve`, which exits when another app copies) |
 | System clipboard interop | **proven** | 12 unit + 8 live tests: a copy in Gust is readable by another file manager, a cut survives as a cut, and what Nautilus leaves is pasteable in Gust. `x-special/gnome-copied-files` with percent-encoded URIs; an http:// URI and ordinary prose are both refused as file lists; no path reaches a command line. Degrades to an internal clipboard, saying so, when wl-copy is absent. |
 | Multi-file open | **proven** | 7 unit tests + live: three text files open ONE editor, not three. Respects the freedesktop distinction — `%F`/`%U` take a list, `%f`/`%u` are launched per file — because passing five paths to a `%f` program opens the first and silently drops four. Bounded at 50; a folder or executable in the selection falls back to single-row activation. |
@@ -188,6 +188,20 @@ Filter, scoped find, palette actions, archives, packaging and `--default` are
 proven (see the tables above), as are the Omarchy hooks: Super+Shift+F,
 "Show in folder" and other apps' Open/Save dialogs.
 
+## v2 · ahead of Flea 0.3.8
+
+| Feature | State | Evidence |
+|---|---|---|
+| Files stranded in a mount point are set aside, never deleted (D63) | proven | unit `files_stranded_in_a_mount_point_are_set_aside_never_deleted` |
+| File names never read as markup (D64) | proven | lint `every Text says how to read its text`; showcase shot of `invoice.pdf<font…>.sh` in the list and Trash dialog |
+| Two windows: drag moves on one drive, Ctrl/Shift, sidebar drop, ring, hint (D62) | proven | `just qa` §36: 18/0, real Wayland drags between two processes |
+| Two windows: cut in one, paste in the other; newer copy wins | proven | `just qa` §36f–g |
+| Path bar and title name the place (`nas/…`, `photos on server`, phone name) | proven | unit `place_root`; `just qa` §37 titles |
+| Device list read off the UI thread | built | `request_devices` worker; §37 hot-plug |
+| Phones: iPhone/iPad/Android/camera detection, Trust, browse, eject (D65) | proven with stand-ins | `just qa` §37: 28/0; unit tests in `crates/remote/src/phones.rs` |
+| Faster copies to USB: one flush per batch (D66) | proven | unit tests in `recursive.rs`; bench 20.1 s → 13.8 s for 1000 files on a FAT image |
+| Markdown tables, footnotes, strikethrough (D67) | proven | unit tests in `crates/core/src/markdown.rs` |
+
 ## v1 · everyday features and Flea 0.3.7 bug checks
 
 | Feature | State | Evidence |
@@ -223,12 +237,13 @@ list is worse than none, because it makes working features look broken.
    formatting is blocked for the agent. The udisksctl argv is tested; the
    round trip is not. To close it: `mkfs.vfat` on that disk by hand, then
    click it in the sidebar and Eject.
-2. **Tailscale is not built.** There is no tailnet here, so peer discovery
-   could not be qualified even if written; the plan is explicit that online
-   status grants neither SSH access nor a username, so the interesting part
-   is the authorisation check, which is exactly what cannot be tested.
-   Phones over MTP need GVfs and per-device Trust prompts and are unbuilt
-   for the same reason: no phone.
+2. **Phones are proven with stand-ins, not with a phone.** `just qa` §37
+   drives detection, Trust, browsing, copying off, app files, Cancel,
+   "Don't Trust", Android and eject against a fake sysfs/udev tree and a
+   gio stand-in that speaks gio's question protocol. A real iPhone, iPad or
+   Android round trip has not run: the VM has no USB phone. Tailscale is
+   built and proven against a private headscale tailnet (`just qa` §35),
+   not against a real Tailscale account.
 3. **Cloud is proven mechanically, not per provider.** The rclone integration
    is tested end to end against a local WebDAV backend. Drive, Dropbox,
    Proton and Filen each have their own auth and capability quirks; a fixture

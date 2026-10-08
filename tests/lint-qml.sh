@@ -111,7 +111,9 @@ SAFE = re.compile(r':\s*(Qt|Math|JSON|String|Number|Boolean|parseInt|parseFloat|
 # wrapName (Tokens) is pure: its only input is the argument, a model role the
 # binding reads (and so tracks) while evaluating the call.
 # clock (QuickLook) is pure too: it formats the seconds it is given.
-ALLOW = re.compile(r'\b(columns|pageStep|currentView|withAlpha|color|metric|scaled|indexOf|includes|valueOf|iconLook|wrapName|clock)\s*\(')
+# split is a String method on a delegate role (Breadcrumbs' "path\tlabel"):
+# the role is the binding's dependency, so it re-runs when the role changes.
+ALLOW = re.compile(r'\b(columns|pageStep|currentView|withAlpha|color|metric|scaled|indexOf|includes|valueOf|iconLook|wrapName|clock|split)\s*\(')
 BIND = re.compile(r'^\s*(readonly\s+)?(property\s+[\w<>.]+\s+)?(?!on[A-Z])[a-z][\w.]*\s*:\s+[A-Za-z_][\w.]*\s*\(')
 
 bad = []

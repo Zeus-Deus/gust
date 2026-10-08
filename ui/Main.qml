@@ -181,7 +181,7 @@ Window {
                 for (let i = 0; i < tabList.count; i++) {
                     if (tabs.objectAt(i) === m) { win.closeTab(i); break }
                 }
-                hints.status = qsTr("Opened in a new window")
+                hints.message = qsTr("Opened in a new window")
                 win.qaDump("tab-detached")
             } else {
                 win.alertText = r
@@ -277,7 +277,7 @@ Window {
     function placeDone(op, name, message) {
         if (op === "paste-image") {
             if (message !== "") win.alertText = message
-            else { win.alertText = ""; hints.status = name }
+            else { win.alertText = ""; hints.message = name }
             win.qaDump("paste-image" + (message === "" ? "" : "-failed"))
             return
         }
@@ -292,7 +292,7 @@ Window {
             confirm.open(qsTr("First connection to %1").arg(k.name),
                          qsTr("Gust has not seen this computer's SSH key before. Tailscale has already checked the device; "
                               + "if you expect these fingerprints, trust them and connect.\n\n%1")
-                             .arg((k.fingerprints || []).join("\n")),
+                             .arg((k.fingerprints || []).join("\n\n")),
                          qsTr("Trust and connect"), false)
             win.refreshPlaces()
             win.qaDump("place-tailnet-askkey")
@@ -307,7 +307,7 @@ Window {
         } else if (message !== "") {
             win.alertText = message
         }
-        if (op.startsWith("device")) win.refreshDevices()
+        if (op.startsWith("device") || op.startsWith("phone")) dirModel.request_devices()
         win.refreshPlaces()
         win.qaDump("place-" + op + (message === "" ? "" : "-failed"))
     }
@@ -357,7 +357,7 @@ Window {
         win.tabDragLeft = (zone === "outside")
         if (zone !== win.tabDropZone) {
             win.tabDropZone = zone
-            hints.status = zone === "outside"
+            hints.message = zone === "outside"
                 ? qsTr("Release to open in a new window")
                 : zone === "" ? ""
                 : qsTr("Release to put this tab on the ") + zone
@@ -369,7 +369,7 @@ Window {
         win.tabDropZone = ""
         win.tabDragIndex = -1
         win.tabDragLeft = false
-        hints.status = ""
+        hints.message = ""
     }
 
     function tabDragDropped(index, x, y) {
@@ -383,7 +383,7 @@ Window {
             // The last tab detaching would close the window it came from,
             // which is a window-close gesture wearing a tab-drag costume.
             if (win.tabCount <= 1) {
-                hints.status = qsTr("This is the only tab")
+                hints.message = qsTr("This is the only tab")
                 win.qaDump("tab-detach-refused")
                 return
             }
@@ -397,7 +397,7 @@ Window {
             }
             // The tab closes only once the new window says it is on screen:
             // a window that fails to start must not take the tab with it.
-            hints.status = qsTr("Opening in a new window…")
+            hints.message = qsTr("Opening in a new window…")
             win.detachModel = m
             detachTimer.start()
             win.qaDump("tab-detach-waiting")
@@ -412,7 +412,7 @@ Window {
             // calling it first sent two tabs right and left pane 0 empty.
             if (win.paneCount < 2) {
                 if (win.tabCount <= 1) {
-                    hints.status = qsTr("Open another tab first")
+                    hints.message = qsTr("Open another tab first")
                     win.qaDump("tab-split-refused")
                     return
                 }
@@ -439,7 +439,7 @@ Window {
             win.activateTab(index)
             win.refreshPaneTabCount()
             win.refreshPanes()
-            hints.status = qsTr("Moved to the ") + zone + qsTr(" pane")
+            hints.message = qsTr("Moved to the ") + zone + qsTr(" pane")
             win.qaDump("tab-split-drop")
         }
     }
@@ -528,6 +528,26 @@ Window {
     function ejectDevice(path) {
         const err = dirModel.device_unmount(path)
         if (err !== "") win.alertText = err
+    }
+
+    /// The phone a sidebar menu was opened on.
+    property string phoneMenuId: ""
+    /// A phone row was clicked: browse it if it is open; while it waits for
+    /// Trust, a second click stops waiting; otherwise open it (gio asks the
+    /// phone; Gust answers the Trust question until the person taps it).
+    function openPhone(id, stateKey) {
+        const d = win.deviceList.find((x) => x.name === id)
+        if (stateKey === "open" && d && d.mountPoint) { dirModel.navigate(d.mountPoint); return }
+        if (stateKey === "trust" || stateKey === "unlock" || stateKey === "opening") {
+            dirModel.phone_cancel(id)
+            hints.message = qsTr("Stopped waiting for the phone")
+            return
+        }
+        // Everything else (ready, needs a package, said no, failed) tries
+        // again: a package installed since is found, and the reason is
+        // told again if it still does not open.
+        dirModel.phone_open(id, false)
+        win.qaDump("phone-open")
     }
 
     /// A device row was clicked: browse it if it is mounted, otherwise
@@ -683,7 +703,7 @@ Window {
     /// more than one to spare, or opening a fresh tab there when there is not.
     function splitPane() {
         if (win.paneCount > 1) {
-            hints.status = qsTr("Already two panes")
+            hints.message = qsTr("Already two panes")
             return
         }
         win.paneCount = 2
@@ -714,7 +734,7 @@ Window {
     /// location, still less a running job (DESIGN §6.7 rule 2).
     function closePane(p) {
         if (win.paneCount < 2) {
-            hints.status = qsTr("This is the only pane")
+            hints.message = qsTr("This is the only pane")
             return
         }
         const keep = p === 0 ? 1 : 0
@@ -773,7 +793,7 @@ Window {
         }
         // A job nobody polls never finishes, and then every later operation
         // is refused because one is "still running".
-        hints.status = (asMove ? qsTr("Moving to ") : qsTr("Copying to "))
+        hints.message = (asMove ? qsTr("Moving to ") : qsTr("Copying to "))
                      + win.lastSegment(dest.location)
         jobTimer.start()
         win.qaDump("pane-send")
@@ -787,7 +807,10 @@ Window {
     property var dirModel: null
     // Each tab has its own model: a newly active one fetches the place list
     // so the sidebar never shows another tab's stale connections.
-    onDirModelChanged: if (dirModel && dirModel.places_json === "{}") win.refreshPlaces()
+    onDirModelChanged: {
+        if (dirModel && dirModel.places_json === "{}") win.refreshPlaces()
+        hints.message = ""
+    }
 
     // Back/Forward availability. can_go_back() is a call, which QML never
     // re-evaluates on its own: the arrows kept whatever look they had at
@@ -893,7 +916,7 @@ Window {
     function closeTab(i) {
         if (tabList.count <= 1) {
             // A file manager with no tab has nothing to show.
-            hints.status = qsTr("This is the last tab")
+            hints.message = qsTr("This is the last tab")
             return
         }
         const m = tabModelAt(i)
@@ -984,7 +1007,7 @@ Window {
         if (win.activeTab >= 0) win.tabViews[win.activeTab] = m
         win.refreshPanes()
         // Transient feedback must not outlive what it describes.
-        hints.status = ""
+        hints.message = ""
         // An EXPLICIT choice, so it is remembered for this location.
         // applyRememberedView() must never call this.
         dirModel.remember_view(m)
@@ -1086,7 +1109,7 @@ Window {
         if (dirModel.sel_count() > 1) {
             const many = dirModel.activate_selection()
             if (many.startsWith("OK:")) {
-                hints.status = many.substring(3)
+                hints.message = many.substring(3)
                 win.qaDump("activate-many")
                 return
             }
@@ -1098,9 +1121,9 @@ Window {
         }
         const r = dirModel.activate(row)
         if (r.startsWith("blocked:"))
-            hints.status = r.substring(8)
+            hints.message = r.substring(8)
         else if (r === "file")
-            hints.status = qsTr("Opened ") + dirModel.entry_name(row)
+            hints.message = qsTr("Opened ") + dirModel.entry_name(row)
         win.qaDump("activate")
     }
 
@@ -1111,7 +1134,7 @@ Window {
             const n = parseInt(a.substring(4))
             const mine = win.paneTabs(win.activePane)
             if (n >= 1 && n <= mine.length) activateTab(mine[n - 1])
-            else hints.status = qsTr("There is no tab ") + n
+            else hints.message = qsTr("There is no tab ") + n
             win.qaDump("tab-number")
             return true
         }
@@ -1136,7 +1159,7 @@ Window {
         if (a === "jump") { palette.openJump(); return true }
         if (a === "eject") {
             const dev = dirModel.device_here()
-            if (dev === "") hints.status = qsTr("This folder is not on a removable drive")
+            if (dev === "") hints.message = qsTr("This folder is not on a removable drive")
             else {
                 const err = dirModel.device_unmount(dev)
                 if (err !== "") win.alertText = err
@@ -1162,7 +1185,7 @@ Window {
             if (a === "zoom-in") g.zoomIn()
             else if (a === "zoom-out") g.zoomOut()
             else g.zoomReset()
-            hints.status = qsTr("Tile size ") + g.tileSize
+            hints.message = qsTr("Tile size ") + g.tileSize
         } else {
             const steps = [0.8, 0.9, 1.0, 1.1, 1.25, 1.4, 1.6]
             let i = steps.indexOf(Tokens.zoom)
@@ -1171,7 +1194,7 @@ Window {
             else if (a === "zoom-out") i = Math.max(0, i - 1)
             else i = 2
             Tokens.zoom = steps[i]
-            hints.status = qsTr("Zoom ") + Math.round(Tokens.zoom * 100) + "%"
+            hints.message = qsTr("Zoom ") + Math.round(Tokens.zoom * 100) + "%"
         }
         win.qaDump("zoom")
     }
@@ -1220,7 +1243,7 @@ Window {
                          pane: win.activePane })
         tabViews.push("rows")
         win.refreshPaneTabCount()
-        hints.status = qsTr("Opened in a new tab: ") + model.entry_name(row) + qsTr("  ·  Ctrl+Tab to go there")
+        hints.message = qsTr("Opened in a new tab: ") + model.entry_name(row) + qsTr("  ·  Ctrl+Tab to go there")
         win.qaDump("tab-new-background")
     }
 
@@ -1233,6 +1256,12 @@ Window {
         else if (a === "trash-view") { trashPanel.show(dirModel.trash_list()); win.qaDump("trash-open") }
         else if (a === "recent") { recentPanel.show(dirModel.recent_list()); win.qaDump("recent-open-panel") }
         else if (a === "connect") { win.refreshPlaces(); connectPanel.show(); win.qaDump("connect-open") }
+        else if (a === "ph-open") dirModel.phone_open(win.phoneMenuId, false)
+        else if (a === "ph-apps") dirModel.phone_open(win.phoneMenuId, true)
+        else if (a === "ph-eject") {
+            const err = dirModel.phone_eject(win.phoneMenuId)
+            if (err !== "") win.alertText = err
+        }
         else if (a === "rp-off" && win.remoteMenuPlace) win.disconnectPlace(win.remoteMenuPlace.kind, win.remoteMenuPlace.name)
         else if (a === "rp-open-tab" && win.remoteMenuPlace) {
             const rp = win.connectedPlaces.find(x => x.name === win.remoteMenuPlace.name)
@@ -1242,7 +1271,7 @@ Window {
             const p = dirModel.entry_path(dirModel.cursor)
             const err = a === "pin-row" ? dirModel.bookmark_add(p) : dirModel.bookmark_remove(p)
             if (err !== "") win.alertText = err
-            else hints.status = (a === "pin-row" ? qsTr("Added to Bookmarks: ") : qsTr("Removed from Bookmarks: ")) + p
+            else hints.message = (a === "pin-row" ? qsTr("Added to Bookmarks: ") : qsTr("Removed from Bookmarks: ")) + p
             win.refreshBookmarks()
             win.qaDump(a)
         }
@@ -1250,7 +1279,7 @@ Window {
             const err = a === "pin-here" ? dirModel.bookmark_add(dirModel.location)
                                          : dirModel.bookmark_remove(dirModel.location)
             if (err !== "") win.alertText = err
-            else hints.status = (a === "pin-here" ? qsTr("Added to Bookmarks: ") : qsTr("Removed from Bookmarks: ")) + dirModel.location
+            else hints.message = (a === "pin-here" ? qsTr("Added to Bookmarks: ") : qsTr("Removed from Bookmarks: ")) + dirModel.location
             win.refreshBookmarks()
             win.qaDump(a)
         }
@@ -1259,14 +1288,14 @@ Window {
         else if (a === "bm-remove") {
             const err = dirModel.bookmark_remove(win.bookmarkMenuPath)
             if (err !== "") win.alertText = err
-            else hints.status = qsTr("Removed from Bookmarks: ") + win.bookmarkMenuPath
+            else hints.message = qsTr("Removed from Bookmarks: ") + win.bookmarkMenuPath
             win.refreshBookmarks()
             win.qaDump(a)
         }
         else if (a === "open-with") { palette.openWith("open with "); return }
         else if (a === "open-tab") win.newTab(dirModel.entry_path(dirModel.cursor))
-        else if (a === "copy-path") hints.status = dirModel.copy_path(dirModel.cursor)
-        else if (a === "copy-path-folder") hints.status = dirModel.copy_path(-1)
+        else if (a === "copy-path") hints.message = dirModel.copy_path(dirModel.cursor)
+        else if (a === "copy-path-folder") hints.message = dirModel.copy_path(-1)
         else if (a === "paste-into") {
             win.transferStarted(dirModel, dirModel.clip_paste_into(dirModel.cursor), "paste")
         }
@@ -1284,10 +1313,10 @@ Window {
         else if (a === "new-folder") win.askNewFolder()
         else if (a === "rename") win.askRename()
         else if (a === "duplicate") win.doDuplicate()
-        else if (a === "copy") hints.status = dirModel.clip_copy(dirModel.cursor)
-        else if (a === "cut") hints.status = dirModel.clip_cut(dirModel.cursor)
+        else if (a === "copy") hints.message = dirModel.clip_copy(dirModel.cursor)
+        else if (a === "cut") hints.message = dirModel.clip_cut(dirModel.cursor)
         else if (a === "paste") win.doPaste()
-        else if (a === "terminal") hints.status = dirModel.open_terminal()
+        else if (a === "terminal") hints.message = dirModel.open_terminal()
         else if (a === "keys") win.showKeyMap()
         else if (a === "run") win.askRun(dirModel.cursor)
         else if (a.startsWith("custom:")) {
@@ -1319,7 +1348,7 @@ Window {
         else if (a === "open-admin") {
             const e = dirModel.open_as_admin()
             if (e !== "") win.alertText = e
-            else hints.status = qsTr("Asked for administrator rights")
+            else hints.message = qsTr("Asked for administrator rights")
             win.qaDump("open-admin")
         }
         else if (a === "drop-copy" || a === "drop-move") {
@@ -1339,7 +1368,7 @@ Window {
             const msg = dirModel.open_with_id(dirModel.cursor, a.substring(9))
             // "OK:" marks success: the window does not change, so
             // without a line here nothing appears to have happened.
-            if (msg.startsWith("OK:")) hints.status = msg.substring(3)
+            if (msg.startsWith("OK:")) hints.message = msg.substring(3)
             else if (msg !== "") win.alertText = msg
             win.qaDump("open-with")
         }
@@ -1395,7 +1424,7 @@ Window {
             // for a cloud password and never sees one.
             const serr = dirModel.cloud_setup()
             if (serr !== "") win.alertText = serr
-            else hints.status = qsTr("Set up your storage in the terminal, "
+            else hints.message = qsTr("Set up your storage in the terminal, "
                                      + "then run :cloud again")
             win.qaDump("cloud-setup")
         }
@@ -1418,7 +1447,7 @@ Window {
             filterBar.filterActive = true
             filterInput.text = a.substring(7)
         }
-        else hints.status = a + " is not wired up yet"
+        else hints.message = a + " is not wired up yet"
         win.qaDump("action")
         win.focusList()
     }
@@ -1539,7 +1568,7 @@ Window {
     function askRename() {
         const row = dirModel.cursor
         const name = dirModel.entry_name(row)
-        if (name === "") { hints.status = "Nothing selected"; return }
+        if (name === "") { hints.message = "Nothing selected"; return }
         prompt.mode = "rename"
         prompt.openWith(qsTr("Rename"), name,
                         qsTr("The extension is kept unless you edit it."), row)
@@ -1561,7 +1590,7 @@ Window {
     function pasteImage() {
         const e = dirModel.paste_image()
         if (e !== "") { win.alertText = e; return }
-        hints.status = qsTr("Pasting the image…")
+        hints.message = qsTr("Pasting the image…")
         win.qaDump("paste-image-started")
     }
 
@@ -1587,7 +1616,7 @@ Window {
             { separator: true },
             { label: qsTr("Cancel"), hint: "Esc", action: "noop" }
         ])
-        hints.status = qsTr("Choose Copy, Move or Link · Esc cancels")
+        hints.message = qsTr("Choose Copy, Move or Link · Esc cancels")
         win.qaDump("drop-menu")
     }
 
@@ -1625,7 +1654,7 @@ Window {
         win.refreshPaneTabCount()
         if (s.active > 0 && s.active < tabList.count) Qt.callLater(() => win.activateTab(s.active))
         else { win.viewMode = win.tabViews[0]; win.refreshPanes() }
-        hints.status = qsTr("Reopened ") + s.tabs.length + qsTr(" tabs from last time")
+        hints.message = qsTr("Reopened ") + s.tabs.length + qsTr(" tabs from last time")
         return true
     }
 
@@ -1639,7 +1668,7 @@ Window {
             return
         }
         if (err !== "") { win.alertText = err; win.qaDump(tag + "-refused"); return }
-        hints.status = qsTr("Started")
+        hints.message = qsTr("Started")
         jobTimer.start()
         win.qaDump(tag + "-started")
     }
@@ -1657,7 +1686,7 @@ Window {
     function doDuplicate() {
         const err = dirModel.duplicate_row(dirModel.cursor)
         if (err !== "") { win.alertText = err; win.qaDump("dup-refused"); return }
-        hints.status = qsTr("Duplicating…")
+        hints.message = qsTr("Duplicating…")
         jobTimer.start()
         win.qaDump("dup-started")
     }
@@ -1957,8 +1986,8 @@ Window {
 
                 Breadcrumbs {
                     id: crumbs
-                    onDragHover: (t) => { hints.status = t; win.qaDump("drag-hover") }
-                    onDragLanded: (m, e) => { hints.status = ""; win.transferStarted(m, e, "drop") }
+                    onDragHover: (t) => { hints.message = t; win.qaDump("drag-hover") }
+                    onDragLanded: (m, e) => { hints.message = ""; win.transferStarted(m, e, "drop") }
                     model: dirModel
                     anchors.verticalCenter: parent.verticalCenter
                     onPathChosen: (p) => { dirModel.navigate(p); win.focusList() }
@@ -2091,8 +2120,8 @@ Window {
                 visible: win.sidebarVisible
                 model: dirModel
                 onPlaceChosen: (p) => { dirModel.navigate(p); win.focusList() }
-                onDragHover: (t) => { hints.status = t; win.qaDump("drag-hover") }
-                onDragLanded: (m, e) => { hints.status = ""; win.transferStarted(m, e, "drop") }
+                onDragHover: (t) => { hints.message = t; win.qaDump("drag-hover") }
+                onDragLanded: (m, e) => { hints.message = ""; win.transferStarted(m, e, "drop") }
                 remotePlaces: win.connectedPlaces
                 onConnectChosen: win.runAction("connect")
                 onRemoteChosen: (p) => { dirModel.navigate(p); win.focusList() }
@@ -2108,6 +2137,16 @@ Window {
                 devices: win.deviceList
                 bookmarks: win.bookmarkList
                 onDeviceChosen: (path, mounted) => win.openDevice(path, mounted)
+                onPhoneChosen: (id, stateKey) => win.openPhone(id, stateKey)
+                onPhoneMenu: (id, apps, open, x, y) => {
+                    win.phoneMenuId = id
+                    const items = [{ label: qsTr("Open photos and files"), hint: "", action: "ph-open" }]
+                    if (apps) items.push({ label: qsTr("Open app files"), hint: "", action: "ph-apps" })
+                    items.push({ separator: true })
+                    items.push({ label: qsTr("Eject"), hint: "", action: "ph-eject" })
+                    contextMenu.popup(x, y, items)
+                    win.qaDump("phone-menu")
+                }
                 onTrashChosen: win.runAction("trash-view")
                 onRecentChosen: win.runAction("recent")
                 onBookmarkMenu: (path, x, y) => {
@@ -2148,10 +2187,10 @@ Window {
                     // field such as the Save name).
                     onSelectionTouched: { win.focusPane(0); win.focusList(); win.qaDump("select") }
                     onDragBegan: { win.focusPane(0); win.qaDump("drag-begin") }
-                    onDropPreview: (t) => { hints.status = t }
+                    onDropPreview: (t) => { hints.message = t }
                     onDropFailed: (m) => { win.transferStarted(win.paneAModel, m, "drop") }
                     onDropMenu: (r, x, y) => { win.focusPane(0); win.openDropMenu(win.paneAModel, r, x, y) }
-                    onDropDone: { hints.status = ""; jobTimer.start(); win.qaDump("drop") }
+                    onDropDone: { hints.message = ""; jobTimer.start(); win.qaDump("drop") }
                     onContextRequested: (r, x, y) => { win.focusPane(0); win.openContextMenu(r, x, y) }
                 }
 
@@ -2184,10 +2223,10 @@ Window {
                     onOpenInNewTab: (r) => win.openRowInBackgroundTab(win.paneBModel, r)
                         onSelectionTouched: { win.focusPane(1); win.focusList(); win.qaDump("select") }
                         onDragBegan: { win.focusPane(1); win.qaDump("drag-begin") }
-                        onDropPreview: (t) => { hints.status = t }
+                        onDropPreview: (t) => { hints.message = t }
                         onDropFailed: (m) => { win.transferStarted(win.paneBModel, m, "drop") }
                         onDropMenu: (r, x, y) => { win.focusPane(1); win.openDropMenu(win.paneBModel, r, x, y) }
-                        onDropDone: { hints.status = ""; jobTimer.start(); win.qaDump("drop") }
+                        onDropDone: { hints.message = ""; jobTimer.start(); win.qaDump("drop") }
                         onContextRequested: (r, x, y) => { win.focusPane(1); win.openContextMenu(r, x, y) }
                     }
                 }
@@ -2315,14 +2354,14 @@ Window {
             job: win.job
             onRequestPause: {
                 dirModel.pause_job()
-                hints.status = qsTr("Paused · Resume carries on, Cancel stops")
+                hints.message = qsTr("Paused · Resume carries on, Cancel stops")
                 const raw = dirModel.poll_job()
                 if (raw !== "") { try { win.job = JSON.parse(raw) } catch (e) {} }
                 win.qaDump("job-pause")
             }
             onRequestResume: {
                 dirModel.resume_job()
-                hints.status = qsTr("Resumed")
+                hints.message = qsTr("Resumed")
                 const raw = dirModel.poll_job()
                 if (raw !== "") { try { win.job = JSON.parse(raw) } catch (e) {} }
                 win.qaDump("job-resume")
@@ -2340,6 +2379,10 @@ Window {
             id: hints
             width: parent.width
             preset: win.keyPreset
+            // Bound for good: transient messages go to `message`, which
+            // gives way when the folder, tab or pane changes. Writing
+            // to `status` here destroyed this binding after the first action
+            // ("12 items" and "reading…" never reached the strip again).
             status: dirModel.status
             // Bound, not assigned: a selection is live state and must not go
             // stale behind a message some earlier keystroke left here.
@@ -2347,6 +2390,13 @@ Window {
             alert: win.alertText !== "" ? win.alertText : dirModel.notice
             dialog: confirm.visible
             onStatusChanged: win.qaDump("hint")
+            onMessageChanged: win.qaDump("hint")
+            // A message belongs to the folder it was said in: leaving it, or
+            // switching tab or pane, brings the folder's own status back.
+            Connections {
+                target: dirModel
+                function onLocationChanged() { hints.message = "" }
+            }
         }
     }
 
@@ -2524,7 +2574,7 @@ Window {
                 }
                 if (dirModel.job_running()) {
                     dirModel.cancel_job()
-                    hints.status = qsTr("Cancelling…")
+                    hints.message = qsTr("Cancelling…")
                     win.qaDump("job-cancel")
                     event.accepted = true; return
                 }
@@ -2549,7 +2599,7 @@ Window {
                     filterInput.text = ""
                     dirModel.set_filter_text("")
                     filterBar.filterActive = false
-                    hints.status = ""
+                    hints.message = ""
                     win.qaDump("filter-cleared")
                     event.accepted = true; return
                 }
@@ -2558,7 +2608,7 @@ Window {
                 // and clip_clear() had no caller anywhere in the UI.
                 if (dirModel.clip_summary() !== "") {
                     dirModel.clip_clear()
-                    hints.status = qsTr("Clipboard cleared")
+                    hints.message = qsTr("Clipboard cleared")
                     win.qaDump("clip-cleared")
                     event.accepted = true; return
                 }
@@ -2610,7 +2660,7 @@ Window {
                     const err = dirModel.undo_last()
                     if (err === "") {
                         win.alertText = ""
-                        hints.status = label === "Undo: remove the link" ? qsTr("Removed the link")
+                        hints.message = label === "Undo: remove the link" ? qsTr("Removed the link")
                                      : label === "Undo: remove the links" ? qsTr("Removed the links")
                                      : label === "Undo: put owners back" ? qsTr("Owners put back")
                                      : label === "Undo: remove the pasted image" ? qsTr("Removed the pasted image")
@@ -2625,15 +2675,15 @@ Window {
                     event.accepted = true; return
                 }
                 if (event.key === Qt.Key_C && (event.modifiers & Qt.ShiftModifier)) {
-                    hints.status = dirModel.copy_path(dirModel.cursor)
+                    hints.message = dirModel.copy_path(dirModel.cursor)
                     win.qaDump("copy-path"); event.accepted = true; return
                 }
                 if (event.key === Qt.Key_C) {
-                    hints.status = dirModel.clip_copy(dirModel.cursor)
+                    hints.message = dirModel.clip_copy(dirModel.cursor)
                     win.qaDump("clip"); event.accepted = true; return
                 }
                 if (event.key === Qt.Key_X) {
-                    hints.status = dirModel.clip_cut(dirModel.cursor)
+                    hints.message = dirModel.clip_cut(dirModel.cursor)
                     win.qaDump("clip"); event.accepted = true; return
                 }
                 if (event.key === Qt.Key_V) { win.doPaste(); event.accepted = true; return }
@@ -2668,9 +2718,9 @@ Window {
                     event.accepted = true; return
                 case Qt.Key_X: dirModel.sel_toggle(dirModel.cursor)
                                win.qaDump("select"); event.accepted = true; return
-                case Qt.Key_Y: hints.status = dirModel.clip_copy(dirModel.cursor)
+                case Qt.Key_Y: hints.message = dirModel.clip_copy(dirModel.cursor)
                                win.qaDump("clip"); event.accepted = true; return
-                case Qt.Key_D: hints.status = dirModel.clip_cut(dirModel.cursor)
+                case Qt.Key_D: hints.message = dirModel.clip_cut(dirModel.cursor)
                                win.qaDump("clip"); event.accepted = true; return
                 case Qt.Key_P: win.doPaste(); event.accepted = true; return
                 }
@@ -2681,7 +2731,7 @@ Window {
             // folder. They never start a search (Nautilus #1157).
             if (event.text.length === 1 && event.text >= " ") {
                 const row = dirModel.type_ahead(event.text)
-                hints.status = row >= 0
+                hints.message = row >= 0
                     ? "Selected " + dirModel.entry_name(row)
                     : "No file starting with \"" + event.text + "\""
                 event.accepted = true
@@ -2727,7 +2777,7 @@ Window {
                 win.qaDump("job-progress")
             if (win.job && win.job.state !== "Running") {
                 if (win.runningJobModels().length === 0) jobTimer.stop()
-                hints.status = win.job.message
+                hints.message = win.job.message
                 // A failed transfer is often a place that went away: say so
                 // in the sidebar at once rather than still showing it
                 // "connected".
@@ -2785,7 +2835,7 @@ Window {
             }
 
             if (err === "") {
-                hints.status = prompt.mode === "rename"
+                hints.message = prompt.mode === "rename"
                     ? qsTr("Renamed to ") + text
                     : qsTr("Created ") + text
                 prompt.close()
@@ -2817,7 +2867,7 @@ Window {
         onOpenRequested: (path) => {
             const err = dirModel.open_path(path)
             recentPanel.error = err
-            if (err === "") { hints.status = qsTr("Opened ") + path; recentPanel.hide() }
+            if (err === "") { hints.message = qsTr("Opened ") + path; recentPanel.hide() }
             win.qaDump("recent-open")
         }
         onRevealRequested: (path) => { recentPanel.hide(); dirModel.reveal(path); win.qaDump("recent-reveal") }
@@ -2844,7 +2894,7 @@ Window {
             const err = dirModel.trash_restore(name)
             trashPanel.error = err
             if (err === "") {
-                hints.status = qsTr("Restored ") + name
+                hints.message = qsTr("Restored ") + name
                 trashPanel.items = JSON.parse(dirModel.trash_list())
                 trashPanel.current = Math.min(trashPanel.current, trashPanel.items.length - 1)
             }
@@ -2921,14 +2971,14 @@ Window {
             win.conflictModel = null
             conflictDialog.close()
             if (err !== "") { win.alertText = err; win.qaDump("conflict-refused"); return }
-            hints.status = qsTr("Started")
+            hints.message = qsTr("Started")
             jobTimer.start()
             win.qaDump("conflict-resolved")
         }
         onCancelled: {
             if (win.conflictModel) win.conflictModel.conflict_cancel()
             win.conflictModel = null
-            hints.status = qsTr("Cancelled — nothing was changed")
+            hints.message = qsTr("Cancelled — nothing was changed")
             win.qaDump("conflict-cancelled")
         }
         onClosed: win.focusList()
@@ -3014,7 +3064,7 @@ Window {
             }
             const err = dirModel.trash_row(win.pendingTrashRow)
             win.pendingTrashRow = -1
-            hints.status = err === ""
+            hints.message = err === ""
                 ? dirModel.undo_label() + "  (Ctrl+Z)"
                 : "Could not move to Trash: " + err
             win.qaDump("trashed")
@@ -3032,7 +3082,7 @@ Window {
             if (confirm.purpose === "tailnetkey") {
                 // Cancel: nothing recorded, nothing connected.
                 win.pendingTailnet = null
-                hints.status = qsTr("Not connected")
+                hints.message = qsTr("Not connected")
                 win.qaDump("tailnet-key-cancelled")
                 return
             }
@@ -3044,18 +3094,18 @@ Window {
             if (confirm.purpose === "closetab") {
                 // Keep the tab AND its transfer: that is what Cancel means.
                 win.pendingCloseTab = -1
-                hints.status = qsTr("Transfer continues")
+                hints.message = qsTr("Transfer continues")
                 win.qaDump("tab-close-cancelled")
                 return
             }
             if (confirm.purpose === "close") {
                 confirm.purpose = "trash"
-                hints.status = qsTr("Transfer continues")
+                hints.message = qsTr("Transfer continues")
                 win.qaDump("close-cancelled")
                 win.focusList()
                 return
             }
-            hints.status = "Cancelled — nothing was changed"
+            hints.message = "Cancelled — nothing was changed"
             win.pendingTrashRow = -1
             win.focusList()
         }
@@ -3083,6 +3133,12 @@ Window {
                 const it = win.activePaneItem()
                 const v = it && it.currentView ? it.currentView() : null
                 return v ? !!v.dragActive : false
+            })(),
+            // The row ringed for a drag from another window, -1 if none (qa).
+            dropRing: (function () {
+                const it = win.activePaneItem()
+                const v = it && it.currentView ? it.currentView() : null
+                return v && v.platformDrop ? v.dropRow : -1
             })(),
             // The name riding under the pointer during a drag, "" if none (qa).
             dragGhost: (function () {
@@ -3245,7 +3301,7 @@ Window {
             confirmBody: confirm.body,
             confirmButtons: confirm.visible ? confirm.buttonCenters() : null,
             confirmIsDangerous: confirm.dangerous,
-            hintStatus: hints.status,
+            hintStatus: hints.message !== "" ? hints.message : hints.status,
             hintAlert: hints.alert,
             notice: dirModel.notice,
             undoLabel: dirModel.undo_label(),
@@ -3307,8 +3363,8 @@ Window {
     Connections {
         target: dirModel
         function onLocationChanged() {
-            if (hints.status.startsWith("Selected ") || hints.status.startsWith("No file starting"))
-                hints.status = ""
+            if (hints.message.startsWith("Selected ") || hints.message.startsWith("No file starting"))
+                hints.message = ""
             win.refreshTabLabels()
             // A tab's view follows the location it is showing.
             if (win.activeTab >= 0) win.tabViews[win.activeTab] = win.viewMode
@@ -3342,7 +3398,7 @@ Window {
         // The folder Gust opens with gets its remembered view too.
         applyRememberedView()
         // A local read of the kernel's own view: no daemon, no network.
-        win.refreshDevices()
+        dirModel.request_devices()
         dirModel.watch_devices()
         win.refreshPlaces()
         win.refreshBookmarks()

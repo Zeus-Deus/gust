@@ -148,6 +148,9 @@ export GUST_QA_STATE="$STATE"
 # A section may put stand-ins for desktop programs first on PATH (28-run
 # replaces the terminal launcher so no window takes the keyboard).
 ${QA_PATH_PREPEND:+export PATH="$QA_PATH_PREPEND:\$PATH"}
+# ...and stand-ins for what the system reports (37-phones points sysfs, the
+# udev database and the GVfs backend list at a fake tree).
+${QA_ENV:+export $QA_ENV}
 exec "$BIN"
 EOF
   chmod +x /tmp/gust-qa-run.sh

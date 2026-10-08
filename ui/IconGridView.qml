@@ -24,6 +24,8 @@ FocusScope {
     /// Keyboard modifiers held during the drag: Ctrl copies, Shift moves.
     property int dragMods: 0
     property int dropRow: -1
+    /// A drag from another window or application is over this view.
+    property bool platformDrop: false
     /// A drag made with the right button ends in a Copy/Move/Link menu.
     property bool dragRight: false
     /// The click that ends a right-button drag must not also open the menu.
@@ -147,6 +149,17 @@ FocusScope {
                     radius: Tokens.radius
 
                     HoverHandler { id: hover }
+
+                    // The folder a held drag would land in (DESIGN §6.1).
+                    Rectangle {
+                        anchors.fill: parent
+                        color: "transparent"
+                        radius: Tokens.radius
+                        border.width: visible ? Math.max(2, Tokens.borderWidth * 2) : 0
+                        border.color: Tokens.accent
+                        visible: root.dropRow === index && (root.dragActive || root.platformDrop) && isDir
+                        z: 5
+                    }
 
                     // Placeholder tile: real thumbnails arrive through the
                     // sandboxed thumbnailer, never decoded in this process.

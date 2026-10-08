@@ -5,7 +5,10 @@
 //! the traversal (DESIGN.md §6). Nothing here resolves a path string twice.
 
 use crate::anchor::{resolve_parent, DirHandle, FileIdentity};
-use crate::engine::{classify, copy_regular_file_with, copy_symlink, FileClass, OpError, OpResult};
+use crate::engine::{
+    classify, copy_regular_file_with, copy_symlink, stage_regular_file, FileClass, OpError,
+    OpResult, Staged,
+};
 use crate::journal::ConflictPolicy;
 use gust_core::lister::CancelToken;
 use rustix::fs::Mode;
@@ -200,19 +203,59 @@ pub fn copy_tree_opts(
             done += 1;
             progress(done, total, bytes_done, plan.total_bytes);
         }
-        for (rel, size) in &plan.files {
-            if cancel.checkpoint() {
-                return Err(OpError::Cancelled);
+        // On a local disk (a USB stick above all) one flush per file is
+        // what makes copying many small files slow. There, files are staged
+        // in batches, the batch is flushed with one syncfs, and only then
+        // does each file get its real name: the same guarantee (no name ever
+        // points at bytes that are not on the disk) for one flush per batch.
+        // A network or FUSE place may not implement syncfs, so it keeps the
+        // per-file flush.
+        let batched = batch_durability(dst_root);
+        let mut batch: Vec<(Staged, DirHandle, OsString)> = Vec::new();
+        let mut batch_bytes = 0u64;
+        let result = (|| -> OpResult<()> {
+            for (rel, size) in &plan.files {
+                if cancel.checkpoint() {
+                    return Err(OpError::Cancelled);
+                }
+                let (sd, sn) = resolve_parent(&src_root.join(rel))?;
+                let (dd, dn) = resolve_parent(&out(rel))?;
+                let before = bytes_done;
+                let mut on_bytes =
+                    |w: u64| progress(done, total, before.saturating_add(w), plan.total_bytes);
+                if batched {
+                    if let Some(st) = stage_regular_file(
+                        &sd,
+                        &sn,
+                        &dd,
+                        &dn,
+                        policy,
+                        cancel,
+                        &mut on_bytes,
+                        false,
+                    )? {
+                        batch_bytes = batch_bytes.saturating_add(st.written);
+                        batch.push((st, dd, dn));
+                    }
+                    if batch.len() >= BATCH_FILES || batch_bytes >= BATCH_BYTES {
+                        commit_batch(&mut batch)?;
+                        batch_bytes = 0;
+                    }
+                } else {
+                    copy_regular_file_with(&sd, &sn, &dd, &dn, policy, cancel, &mut on_bytes)?;
+                }
+                done += 1;
+                bytes_done = bytes_done.saturating_add(*size);
+                progress(done, total, bytes_done, plan.total_bytes);
             }
-            let (sd, sn) = resolve_parent(&src_root.join(rel))?;
-            let (dd, dn) = resolve_parent(&out(rel))?;
-            let before = bytes_done;
-            copy_regular_file_with(&sd, &sn, &dd, &dn, policy, cancel, &mut |w| {
-                progress(done, total, before.saturating_add(w), plan.total_bytes)
-            })?;
-            done += 1;
-            bytes_done = bytes_done.saturating_add(*size);
-            progress(done, total, bytes_done, plan.total_bytes);
+            commit_batch(&mut batch)
+        })();
+        if let Err(e) = result {
+            // The files finished before the failure are kept, as they always
+            // were: flushed and named. If even that fails they are removed,
+            // claims and all; a partial file is never left under a real name.
+            let _ = commit_batch(&mut batch);
+            return Err(e);
         }
         for rel in &plan.symlinks {
             if cancel.checkpoint() {
@@ -243,6 +286,65 @@ pub fn copy_tree_opts(
     }
 
     Ok(plan)
+}
+
+/// Files staged before one flush, and bytes.
+const BATCH_FILES: usize = 256;
+const BATCH_BYTES: u64 = 64 * 1024 * 1024;
+
+/// May copies into `dst` share one flush per batch? Only on a local disk
+/// filesystem, where syncfs flushes everything written to it.
+fn batch_durability(dst: &Path) -> bool {
+    if std::env::var_os("GUST_FSYNC_PER_FILE").is_some() {
+        return false;
+    }
+    let probe = dst.parent().unwrap_or(dst);
+    match gust_core::stall::fstype_for(probe) {
+        Some(t) => !gust_core::stall::can_stall(&t),
+        None => false,
+    }
+}
+
+/// Make every staged file in `batch` durable with one syncfs per
+/// filesystem, then give each its real name.
+fn commit_batch(batch: &mut Vec<(Staged, DirHandle, OsString)>) -> OpResult<()> {
+    if batch.is_empty() {
+        return Ok(());
+    }
+    // One descriptor per filesystem in the batch.
+    let mut fss: Vec<(u64, rustix::fd::OwnedFd)> = Vec::new();
+    for (_, dd, _) in batch.iter() {
+        let dev = dd.stat_self()?.st_dev;
+        if !fss.iter().any(|(d, _)| *d == dev) {
+            fss.push((dev, rustix::io::fcntl_dupfd_cloexec(dd.as_fd(), 0)?));
+        }
+    }
+    let flush = |fss: &[(u64, rustix::fd::OwnedFd)]| -> OpResult<()> {
+        for (_, fd) in fss {
+            // Since Linux 5.8 syncfs reports write-back errors, so a disk
+            // that failed to take the bytes stops the batch here.
+            rustix::fs::syncfs(fd)?;
+        }
+        Ok(())
+    };
+    if let Err(e) = flush(&fss) {
+        for (st, dd, _) in batch.drain(..) {
+            st.discard(&dd);
+        }
+        return Err(e);
+    }
+    let mut items = std::mem::take(batch).into_iter();
+    while let Some((st, dd, dn)) = items.next() {
+        if let Err(e) = st.commit(&dd, &dn) {
+            for (rest, rd, _) in items {
+                rest.discard(&rd);
+            }
+            return Err(e);
+        }
+    }
+    // The names themselves, durable before anyone relies on them (a move
+    // removes its source next).
+    flush(&fss)
 }
 
 /// Create one directory through its parent's descriptor. Existing is fine.
@@ -582,6 +684,146 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, OpError::Cancelled));
+        fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn a_batched_copy_names_every_file_and_leaves_no_staging() {
+        let d = tmp("batch");
+        fs::create_dir_all(d.join("src/sub")).unwrap();
+        // More than one batch, and a file in a subfolder of each.
+        for i in 0..(BATCH_FILES * 2 + 7) {
+            let dir = if i % 3 == 0 { "src/sub" } else { "src" };
+            fs::write(d.join(format!("{dir}/f{i}")), format!("{i}")).unwrap();
+        }
+        assert!(batch_durability(&d.join("dst")), "a local disk batches");
+        let plan = copy_tree(
+            &d.join("src"),
+            &d.join("dst"),
+            ConflictPolicy::Replace,
+            &CancelToken::new(),
+            &mut noop,
+        )
+        .unwrap();
+        assert_eq!(plan.files.len(), BATCH_FILES * 2 + 7);
+        for i in 0..(BATCH_FILES * 2 + 7) {
+            let dir = if i % 3 == 0 { "dst/sub" } else { "dst" };
+            assert_eq!(
+                fs::read_to_string(d.join(format!("{dir}/f{i}"))).unwrap(),
+                format!("{i}")
+            );
+        }
+        let debris = |p: &Path| {
+            fs::read_dir(p)
+                .unwrap()
+                .flatten()
+                .filter(|e| {
+                    e.file_name()
+                        .to_string_lossy()
+                        .starts_with(".gust-staging-")
+                })
+                .count()
+        };
+        assert_eq!(debris(&d.join("dst")) + debris(&d.join("dst/sub")), 0);
+        fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn a_batch_that_fails_keeps_what_finished_and_names_nothing_partial() {
+        let d = tmp("batchfail");
+        fs::create_dir_all(d.join("src")).unwrap();
+        for i in 0..10 {
+            fs::write(d.join(format!("src/f{i}")), b"x").unwrap();
+        }
+        // f5 is already taken at the destination: Ask stops the copy there.
+        fs::create_dir_all(d.join("dst")).unwrap();
+        fs::write(d.join("dst/f5"), b"theirs").unwrap();
+        let err = copy_tree_opts(
+            &d.join("src"),
+            &d.join("dst"),
+            ConflictPolicy::Ask,
+            &CancelToken::new(),
+            &mut noop,
+            false,
+        );
+        // The root exists, so Ask refuses up front; copy into it instead.
+        assert!(err.is_err());
+        fs::remove_dir_all(d.join("dst")).unwrap();
+        let mut plan_files: Vec<_> = fs::read_dir(d.join("src"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name())
+            .collect();
+        plan_files.sort();
+        // Stop part-way with a cancel after five files.
+        let tok = CancelToken::new();
+        let mut seen = 0usize;
+        let mut cb = |done: usize, _t: usize, _b: u64, _tb: u64| {
+            seen = done;
+            if done >= 5 {
+                tok.cancel();
+            }
+        };
+        let err = copy_tree(
+            &d.join("src"),
+            &d.join("dst"),
+            ConflictPolicy::Replace,
+            &tok,
+            &mut cb,
+        )
+        .unwrap_err();
+        assert!(matches!(err, OpError::Cancelled));
+        let names: Vec<String> = fs::read_dir(d.join("dst"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        assert!(
+            names.iter().all(|n| !n.starts_with(".gust-staging-")),
+            "{names:?}"
+        );
+        assert!(names.len() >= 4, "finished files were kept: {names:?}");
+        for n in &names {
+            assert_eq!(
+                fs::read(d.join("dst").join(n)).unwrap(),
+                b"x",
+                "{n} is whole"
+            );
+        }
+        fs::remove_dir_all(&d).ok();
+    }
+
+    /// Field bench, run by hand on a real disk:
+    /// `GUST_BENCH_DST=/mnt/usb cargo test -p gust-ops --lib -- --ignored copy_1000_small_files`
+    /// (add `GUST_FSYNC_PER_FILE=1` for the old one-flush-per-file behaviour).
+    #[test]
+    #[ignore]
+    fn copy_1000_small_files() {
+        let Some(base) = std::env::var_os("GUST_BENCH_DST").map(PathBuf::from) else {
+            return;
+        };
+        let d = tmp("bench1000");
+        fs::create_dir_all(d.join("src")).unwrap();
+        for i in 0..1000 {
+            fs::write(d.join(format!("src/f{i:04}.txt")), vec![b'x'; 4096]).unwrap();
+        }
+        let dst = base.join(format!("gust-bench-{}", std::process::id()));
+        let t = std::time::Instant::now();
+        copy_tree(
+            &d.join("src"),
+            &dst,
+            ConflictPolicy::Replace,
+            &CancelToken::new(),
+            &mut noop,
+        )
+        .unwrap();
+        let ms = t.elapsed().as_millis();
+        println!(
+            "BENCH copy 1000 x 4 KiB -> {}: {ms} ms (batched={})",
+            base.display(),
+            batch_durability(&dst)
+        );
+        fs::remove_dir_all(&dst).ok();
         fs::remove_dir_all(&d).ok();
     }
 

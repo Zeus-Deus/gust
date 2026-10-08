@@ -6,7 +6,11 @@ import com.gust.app
 Rectangle {
     id: root
     property string preset: "standard"
+    /// The folder's own status ("12 items"), bound to the model.
     property string status: ""
+    /// What the last action said. Outranks `status` until the model says
+    /// something newer or the folder changes.
+    property string message: ""
     /// Live selection summary. Non-empty means a selection exists.
     property string selection: ""
     /// A message the user must actually read: a refusal, a failure, a reason
@@ -29,7 +33,8 @@ Rectangle {
 
     readonly property string displayText:
         root.alert !== "" ? root.alert
-        : (root.selection !== "" ? root.selection : root.status)
+        : (root.selection !== "" ? root.selection
+           : (root.message !== "" ? root.message : root.status))
 
     implicitHeight: Tokens.controlHeight
     color: Tokens.backgroundDark

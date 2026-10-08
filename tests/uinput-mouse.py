@@ -194,6 +194,15 @@ def main():
                     w,
                     h,
                 )
+                # A hand takes time to cross a window. Without a pause the
+                # compositor coalesces the motion and a window the pointer
+                # passes over during a drag sees almost none of it.
+                time.sleep(0.03)
+            # Settle on the target with a last small movement, as a hand
+            # does: drop targets learn where the pointer is from motion.
+            move_to(fd, x2 + 2, y2, w, h)
+            time.sleep(0.05)
+            move_to(fd, x2, y2, w, h)
             # An optional sixth argument keeps the button down that many
             # seconds at the end, so a screenshot can catch a drag in flight
             # (an argument, not an env var: sudo drops the environment).

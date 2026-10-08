@@ -195,6 +195,136 @@ pub fn escape_for_display(s: &OsStr) -> String {
     out
 }
 
+/// The place a path lives in, when it is somewhere Gust or the desktop
+/// mounted something: the mount's root folder and the name a person knows it
+/// by. `/run/user/1000/gust/tailnet/nas/Shared` → (`…/tailnet/nas`, "nas").
+///
+/// The path bar starts there instead of at `/`, and the window title, the
+/// tab and a stalled-place message use the name. Pure: it reads no file.
+pub fn place_root(path: &Path) -> Option<(PathBuf, String)> {
+    let comps: Vec<&OsStr> = path.components().map(|c| c.as_os_str()).collect();
+    let at = |i: usize| comps.get(i).map(|c| c.to_string_lossy().to_string());
+    let root_of = |n: usize| -> PathBuf { comps[..n].iter().collect() };
+    // /run/user/<uid>/gust/{places,tailnet,cloud}/<name>
+    // /run/user/<uid>/gvfs/<share>
+    if at(1).as_deref() == Some("run") && at(2).as_deref() == Some("user") {
+        if at(4).as_deref() == Some("gust") {
+            if let (Some(kind), Some(name)) = (at(5), at(6)) {
+                if matches!(kind.as_str(), "places" | "tailnet" | "cloud") {
+                    return Some((root_of(7), escape_for_display(OsStr::new(&name))));
+                }
+            }
+        }
+        if at(4).as_deref() == Some("gvfs") {
+            if let Some(share) = at(5) {
+                return Some((root_of(6), gvfs_label(&share)));
+            }
+        }
+    }
+    // /run/media/<user>/<label>: a drive udisks mounted.
+    if at(1).as_deref() == Some("run") && at(2).as_deref() == Some("media") {
+        if let Some(label) = at(4) {
+            return Some((root_of(5), escape_for_display(OsStr::new(&label))));
+        }
+    }
+    None
+}
+
+/// A GVfs mount directory's name as a person would say it:
+/// `smb-share:server=nas,share=photos` → "photos on nas".
+fn gvfs_label(dir: &str) -> String {
+    let Some((scheme, params)) = dir.split_once(':') else {
+        return escape_for_display(OsStr::new(dir));
+    };
+    // A phone's mount names it by serial; say what it is instead (the app
+    // replaces this with the phone's own name once it has opened it).
+    match scheme {
+        "afc" => return "iPhone or iPad".into(),
+        "mtp" => return "Phone".into(),
+        "gphoto2" => return "Camera".into(),
+        _ => {}
+    }
+    let mut server = None;
+    let mut share = None;
+    for kv in params.split(',') {
+        match kv.split_once('=') {
+            Some(("server" | "host", v)) => server = Some(v.to_string()),
+            Some(("share" | "prefix", v)) => share = Some(v.trim_matches('/').replace("%2F", "/")),
+            _ => {}
+        }
+    }
+    let label = match (share, server) {
+        (Some(sh), Some(sv)) if !sh.is_empty() => format!("{sh} on {sv}"),
+        (_, Some(sv)) => sv,
+        _ => dir.to_string(),
+    };
+    escape_for_display(OsStr::new(&label))
+}
+
+#[cfg(test)]
+mod place_root_tests {
+    use super::*;
+
+    #[test]
+    fn gusts_own_mounts_are_named_by_the_place() {
+        for (p, root, label) in [
+            (
+                "/run/user/1000/gust/tailnet/nas/Shared/a",
+                "/run/user/1000/gust/tailnet/nas",
+                "nas",
+            ),
+            (
+                "/run/user/1000/gust/places/box",
+                "/run/user/1000/gust/places/box",
+                "box",
+            ),
+            (
+                "/run/user/1000/gust/cloud/drive/x",
+                "/run/user/1000/gust/cloud/drive",
+                "drive",
+            ),
+            (
+                "/run/media/me/USB STICK/dcim",
+                "/run/media/me/USB STICK",
+                "USB STICK",
+            ),
+            (
+                "/run/user/1000/gvfs/afc:host=00008030-000A1B2C3D4E5F60/DCIM",
+                "/run/user/1000/gvfs/afc:host=00008030-000A1B2C3D4E5F60",
+                "iPhone or iPad",
+            ),
+            (
+                "/run/user/1000/gvfs/smb-share:server=nas.local,share=photos/2024",
+                "/run/user/1000/gvfs/smb-share:server=nas.local,share=photos",
+                "photos on nas.local",
+            ),
+        ] {
+            let (r, l) = place_root(Path::new(p)).unwrap_or_else(|| panic!("{p}"));
+            assert_eq!(r, PathBuf::from(root), "{p}");
+            assert_eq!(l, label, "{p}");
+        }
+    }
+
+    #[test]
+    fn ordinary_folders_and_half_paths_have_no_place() {
+        for p in [
+            "/home/me/Documents",
+            "/run/user/1000/gust/tailnet",
+            "/run/user/1000/gust/other/x",
+            "/run/media/me",
+            "/",
+        ] {
+            assert_eq!(place_root(Path::new(p)), None, "{p}");
+        }
+    }
+
+    #[test]
+    fn a_hostile_device_name_is_shown_escaped() {
+        let (_, l) = place_root(Path::new("/run/media/me/a\u{202E}gpj.exe")).unwrap();
+        assert!(l.contains("<U+202E>"), "{l}");
+    }
+}
+
 /// Tri-state capability. `Unknown` must not be collapsed into `No`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Cap {

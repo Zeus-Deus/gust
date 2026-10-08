@@ -348,6 +348,22 @@ pub mod qobject {
         /// no daemon, no network, and Gust never auto-mounts (DESIGN §6.13).
         #[qinvokable]
         fn devices_json(self: &DirModel) -> QString;
+        /// Read the device list again on a worker; devices_changed fires
+        /// when it is ready. The UI thread never runs lsblk.
+        #[qinvokable]
+        fn request_devices(self: Pin<&mut DirModel>);
+        /// Open a phone or camera (DESIGN §6.13.1): mount it through GVfs on
+        /// a worker, answering its Trust/unlock question until the person has
+        /// done it on the phone, then browse it. `apps` opens an iPhone's
+        /// shared app files instead of its photos.
+        #[qinvokable]
+        fn phone_open(self: Pin<&mut DirModel>, id: QString, apps: bool) -> QString;
+        /// Stop waiting for a phone (Cancel while it asks for Trust).
+        #[qinvokable]
+        fn phone_cancel(self: Pin<&mut DirModel>, id: QString);
+        /// Eject a phone. Never forced; refused while a transfer runs.
+        #[qinvokable]
+        fn phone_eject(self: Pin<&mut DirModel>, id: QString) -> QString;
         /// Compress the selection into a .tar.zst in this folder.
         /// Runs through the job machinery, so it is cancellable (DESIGN §6.15).
         #[qinvokable]
@@ -570,6 +586,41 @@ pub mod qobject {
         /// Accept a drop of URIs from another application onto `row`.
         #[qinvokable]
         fn drop_uris(self: Pin<&mut DirModel>, row: i32, uris: &QString, as_move: bool) -> QString;
+        /// Everything a drag hands to other applications, as JSON
+        /// {uris, text, gnome}: built here so no name is decoded in JS.
+        #[qinvokable]
+        fn drag_mime_json(self: &DirModel) -> QString;
+        /// A drag from another window or application entered this one:
+        /// read the mount table once for planning (DESIGN §6.1).
+        #[qinvokable]
+        fn drop_enter(self: Pin<&mut DirModel>);
+        /// What dropping `uris` onto `row` (or into the absolute folder
+        /// `dest`, when not empty) would do. `gust` is true for a drag from
+        /// another Gust window, which follows D60 (Move on one drive, Copy
+        /// across); any other application's drag copies. `mode` 1 = Copy,
+        /// 2 = Move, 0 = that default.
+        #[qinvokable]
+        fn uri_preview(
+            self: &DirModel,
+            row: i32,
+            dest: &QString,
+            uris: &QString,
+            mode: i32,
+            gust: bool,
+        ) -> QString;
+        /// Perform that drop through the transfer engine.
+        #[qinvokable]
+        fn uri_drop(
+            self: Pin<&mut DirModel>,
+            row: i32,
+            dest: &QString,
+            uris: &QString,
+            mode: i32,
+            gust: bool,
+        ) -> QString;
+        /// Forget what the last drag carried.
+        #[qinvokable]
+        fn drag_end(self: Pin<&mut DirModel>);
         #[qinvokable]
         fn clip_summary(self: &DirModel) -> QString;
         #[qinvokable]
@@ -1273,12 +1324,63 @@ impl DirModelRust {
     }
 }
 
+/// Names for mounted places Gust knows better than their mount path does:
+/// an opened phone is "Alex's iPhone", not `afc:host=<udid>`.
+fn place_labels() -> &'static std::sync::Mutex<Vec<(std::path::PathBuf, String)>> {
+    static S: std::sync::OnceLock<std::sync::Mutex<Vec<(std::path::PathBuf, String)>>> =
+        std::sync::OnceLock::new();
+    S.get_or_init(Default::default)
+}
+
+/// The place a path is in and its name: a phone Gust opened first, then the
+/// general rule (Gust's own mounts, GVfs shares, drives).
+fn place_of(path: &std::path::Path) -> Option<(std::path::PathBuf, String)> {
+    let named = place_labels().lock().ok().and_then(|g| {
+        g.iter()
+            .filter(|(root, _)| path.starts_with(root))
+            .max_by_key(|(root, _)| root.as_os_str().len())
+            .cloned()
+    });
+    named.or_else(|| gust_core::location::place_root(path))
+}
+
+/// Where each plugged-in phone stands, by its id (DESIGN §6.13.1).
+fn phone_states(
+) -> &'static std::sync::Mutex<std::collections::HashMap<String, gust_remote::phones::PhoneState>> {
+    static S: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, gust_remote::phones::PhoneState>>,
+    > = std::sync::OnceLock::new();
+    S.get_or_init(Default::default)
+}
+
+/// Phones the user stopped waiting for.
+fn phone_cancels() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    static S: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    S.get_or_init(Default::default)
+}
+
+/// The device list, shared by every tab's model (one machine, one list).
+fn devices_cache() -> &'static std::sync::Mutex<String> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<String>> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new("[]".to_string()))
+}
+
+/// "1 item", "12 items".
+fn count_items<N: std::fmt::Display + PartialEq + From<u8>>(n: N) -> String {
+    if n == N::from(1) {
+        "1 item".to_string()
+    } else {
+        format!("{n} items")
+    }
+}
+
 /// Label for a clipboard or command target: one name, or a count.
 fn clip_label(paths: &[std::path::PathBuf]) -> String {
     match paths.len() {
         0 => "nothing".to_string(),
         1 => display_file_name(&paths[0]),
-        n => format!("{n} items"),
+        n => count_items(n),
     }
 }
 
@@ -1483,7 +1585,24 @@ impl qobject::DirModel {
 
         let display = key.display_path();
         self.as_mut().set_location(QString::from(&display));
-        self.as_mut().set_location_display(QString::from(&display));
+        // Inside a mounted place, name it as the user knows it ("nas/Shared"),
+        // not by Gust's mount path under /run (title bar, tab label).
+        let shown = key
+            .as_path()
+            .and_then(|p| {
+                let (root, label) = place_of(p)?;
+                let rest = p.strip_prefix(&root).ok()?;
+                Some(if rest.as_os_str().is_empty() {
+                    label
+                } else {
+                    format!(
+                        "{label}/{}",
+                        gust_core::location::escape_for_display(rest.as_os_str())
+                    )
+                })
+            })
+            .unwrap_or_else(|| display.clone());
+        self.as_mut().set_location_display(QString::from(&shown));
         self.as_mut().set_status(QString::from("reading…"));
         self.as_mut().set_settled(false);
 
@@ -3184,7 +3303,22 @@ impl qobject::DirModel {
         for dir in gust_core::devices::DEVICE_WATCH_DIRS {
             let thread = thread.clone();
             if let Ok(w) = gust_core::watch::DirWatch::start(std::path::Path::new(dir), move |_| {
-                let _ = thread.queue(|model| model.devices_changed());
+                let _ = thread.queue(|model| model.request_devices());
+            }) {
+                watches.push(w);
+            }
+        }
+        // Phones have no block device: a USB device node appearing or going
+        // under /dev/bus/usb/<bus>/ is what says one was plugged in.
+        let usb = gust_remote::phones::watch_dir();
+        let mut buses: Vec<std::path::PathBuf> = std::fs::read_dir(&usb)
+            .map(|rd| rd.flatten().map(|e| e.path()).collect())
+            .unwrap_or_default();
+        buses.push(usb);
+        for dir in buses {
+            let thread = thread.clone();
+            if let Ok(w) = gust_core::watch::DirWatch::start(&dir, move |_| {
+                let _ = thread.queue(|model| model.request_devices());
             }) {
                 watches.push(w);
             }
@@ -3192,7 +3326,34 @@ impl qobject::DirModel {
         self.as_mut().rust_mut().device_watches = watches;
     }
 
+    /// The last device list a worker built ("[]" until the first one).
     fn devices_json(&self) -> QString {
+        QString::from(
+            devices_cache()
+                .lock()
+                .map(|g| g.clone())
+                .unwrap_or_default()
+                .as_str(),
+        )
+    }
+
+    fn request_devices(self: Pin<&mut Self>) {
+        let Some(thread) = self.as_ref().qt_thread_handle() else {
+            return;
+        };
+        let _ = std::thread::Builder::new()
+            .name("gust-devices".into())
+            .spawn(move || {
+                let json = Self::build_devices_json();
+                if let Ok(mut g) = devices_cache().lock() {
+                    *g = json;
+                }
+                let _ = thread.queue(|model| model.devices_changed());
+            });
+    }
+
+    /// lsblk and the udisks check: call on a worker.
+    fn build_devices_json() -> String {
         let found = gust_core::devices::sidebar_devices(gust_core::devices::list_devices());
         let can_act = gust_core::devices::udisks_available();
         let mut out = String::from("[");
@@ -3217,8 +3378,199 @@ impl qobject::DirModel {
                 can_act,
             ));
         }
+        // Phones and cameras (no block device; read from sysfs and udev).
+        let phones = gust_remote::phones::scan();
+        let names = if phones.is_empty() {
+            Vec::new()
+        } else {
+            gust_remote::phones::friendly_names()
+        };
+        let states = phone_states();
+        let mut st = states.lock().unwrap_or_else(|e| e.into_inner());
+        // A phone that was unplugged stops being waited for.
+        st.retain(|id, _| phones.iter().any(|p| &p.id() == id));
+        for p in phones.iter().take(10) {
+            use gust_remote::phones::{backend_installed, PhoneState};
+            let id = p.id();
+            // A missing backend is the first thing to fix, whatever happened
+            // before; an open phone is open regardless.
+            let state = match st.get(&id).cloned() {
+                Some(s @ PhoneState::Open(_)) => s,
+                _ if !backend_installed(p.kind) => PhoneState::NeedsPackage(p.kind.package()),
+                Some(PhoneState::NeedsPackage(_)) | None => PhoneState::Ready,
+                Some(s) => s,
+            };
+            let mount = match &state {
+                PhoneState::Open(m) => m.to_string_lossy().to_string(),
+                _ => String::new(),
+            };
+            if out.len() > 1 {
+                out.push(',');
+            }
+            out.push_str(&format!(
+                r#"{{"name":{},"path":{},"label":{},"state":{},"stateKey":{},"mountPoint":{},"mounted":{},"empty":false,"canAct":true,"phone":{},"apps":{}}}"#,
+                Self::json_str(&id),
+                Self::json_str(&id),
+                Self::json_str(&gust_remote::phones::display_name(p, &names)),
+                Self::json_str(&state.words(p.kind)),
+                Self::json_str(state.key()),
+                Self::json_str(&mount),
+                !mount.is_empty(),
+                Self::json_str(p.kind.as_str()),
+                p.apps_uri.is_some(),
+            ));
+        }
         out.push(']');
-        QString::from(out)
+        out
+    }
+
+    fn set_phone_state(id: &str, state: gust_remote::phones::PhoneState) {
+        if let Ok(mut g) = phone_states().lock() {
+            g.insert(id.to_string(), state);
+        }
+    }
+
+    fn phone_open(self: Pin<&mut Self>, id: QString, apps: bool) -> QString {
+        use gust_remote::phones::{mount, scan, PhoneState};
+        let id = id.to_string();
+        let Some(thread) = self.as_ref().qt_thread_handle() else {
+            return QString::default();
+        };
+        if let Ok(mut c) = phone_cancels().lock() {
+            c.remove(&id);
+        }
+        Self::set_phone_state(&id, PhoneState::Opening);
+        let refresh = thread.clone();
+        let _ = refresh.queue(|model| model.request_devices());
+        self.place_op(
+            "phone-open",
+            id.clone(),
+            "Opening the phone…".into(),
+            move || {
+                // It must still be plugged in, and it is looked up again here so
+                // a stale or crafted id cannot reach gio.
+                let Some(mut phone) = scan().into_iter().find(|p| p.id() == id) else {
+                    Self::set_phone_state(&id, PhoneState::Ready);
+                    return PlaceOutcome::Failed("That phone is no longer plugged in.".into());
+                };
+                if apps {
+                    match phone.apps_uri.clone() {
+                        Some(u) => phone.uri = u,
+                        None => {
+                            return PlaceOutcome::Failed("This device has no app files.".into())
+                        }
+                    }
+                }
+                let cancel_id = id.clone();
+                let cancelled = move || {
+                    phone_cancels()
+                        .lock()
+                        .map(|c| c.contains(&cancel_id))
+                        .unwrap_or(false)
+                };
+                let wait_id = id.clone();
+                let mut progress = move |s: PhoneState| {
+                    Self::set_phone_state(&wait_id, s);
+                    let _ = thread.queue(|model| model.request_devices());
+                };
+                match mount(
+                    &phone,
+                    std::time::Duration::from_secs(120),
+                    &mut progress,
+                    &cancelled,
+                ) {
+                    Ok(path) => {
+                        if !apps {
+                            Self::set_phone_state(&id, PhoneState::Open(path.clone()));
+                        }
+                        let name = gust_remote::phones::display_name(
+                            &phone,
+                            &gust_remote::phones::friendly_names(),
+                        );
+                        let label = if apps {
+                            format!("{name} · app files")
+                        } else {
+                            name
+                        };
+                        if let Ok(mut g) = place_labels().lock() {
+                            g.retain(|(r, _)| r != &path);
+                            g.push((path.clone(), label));
+                        }
+                        PlaceOutcome::Open {
+                            path,
+                            status: "Opened the phone".into(),
+                        }
+                    }
+                    Err(PhoneState::Ready) => {
+                        Self::set_phone_state(&id, PhoneState::Ready);
+                        PlaceOutcome::Done("Stopped waiting for the phone".into())
+                    }
+                    Err(state) => {
+                        let words = state.words(phone.kind);
+                        Self::set_phone_state(&id, state);
+                        PlaceOutcome::Failed(words)
+                    }
+                }
+            },
+        );
+        QString::default()
+    }
+
+    fn phone_cancel(self: Pin<&mut Self>, id: QString) {
+        if let Ok(mut c) = phone_cancels().lock() {
+            c.insert(id.to_string());
+        }
+        let _ = self;
+    }
+
+    fn phone_eject(self: Pin<&mut Self>, id: QString) -> QString {
+        use gust_remote::phones::{local_path, scan, unmount, uris, PhoneState};
+        let id = id.to_string();
+        // Never pull a phone out from under a running copy.
+        if self.as_ref().job.is_some() {
+            return QString::from("A transfer is still running: eject when it has finished.");
+        }
+        self.place_op("phone-eject", id.clone(), "Ejecting…".into(), move || {
+            let Some(phone) = scan().into_iter().find(|p| p.id() == id) else {
+                Self::set_phone_state(&id, PhoneState::Ready);
+                return PlaceOutcome::Done("Safe to unplug".into());
+            };
+            // Every folder it is open at (photos, app files), asked here on
+            // the worker because gio can take a moment to answer.
+            let open: Vec<std::path::PathBuf> =
+                uris(&phone).iter().filter_map(|u| local_path(u)).collect();
+            // Back on the GUI thread: leave the phone if the window is on it,
+            // then unmount on a worker again.
+            PlaceOutcome::Then(Box::new(move |mut model| {
+                for m in &open {
+                    model.as_mut().leave_if_inside(m);
+                }
+                model.place_op("phone-eject", id.clone(), "Ejecting…".into(), move || {
+                    let mut failed = None;
+                    for u in uris(&phone) {
+                        if local_path(&u).is_none() {
+                            continue;
+                        }
+                        let mut one = phone.clone();
+                        one.uri = u;
+                        if let Err(w) = unmount(&one) {
+                            failed.get_or_insert(w);
+                        }
+                    }
+                    if let Ok(mut g) = place_labels().lock() {
+                        g.retain(|(r, _)| !open.iter().any(|m| m == r));
+                    }
+                    match failed {
+                        None => {
+                            Self::set_phone_state(&id, PhoneState::Ready);
+                            PlaceOutcome::Done("Safe to unplug".into())
+                        }
+                        Some(w) => PlaceOutcome::Failed(w),
+                    }
+                });
+            }))
+        });
+        QString::default()
     }
 
     fn device_mount(self: Pin<&mut Self>, path: QString) -> QString {
@@ -4436,8 +4788,8 @@ impl qobject::DirModel {
         self.as_mut().publish_empty_reason(&snap.complete);
         let status = match &snap.complete {
             gust_core::entry::Completeness::Failed { error } => format!("cannot open: {error}"),
-            _ if !settled => format!("{n} items — reading details…"),
-            _ => format!("{n} items"),
+            _ if !settled => format!("{} — reading details…", count_items(n)),
+            _ => count_items(n),
         };
         // Order matters: settled and count are set BEFORE status, because a
         // QML observer reacting to any one of these reads all of them. The
@@ -4793,7 +5145,7 @@ impl qobject::DirModel {
         self.as_mut().publish_empty_reason(&snap_complete);
         let status = match &snap_complete {
             gust_core::entry::Completeness::Failed { error } => format!("cannot open: {error}"),
-            _ => format!("{n} items"),
+            _ => count_items(n),
         };
         self.as_mut().set_status(QString::from(&status));
         self.as_mut().start_thumbnails();
@@ -5166,8 +5518,7 @@ impl qobject::DirModel {
         // status bar keeps announcing a selection that no longer exists.
         self.as_mut().refresh_selection_flags();
         self.as_mut().set_count(n);
-        self.as_mut()
-            .set_status(QString::from(&format!("{n} items")));
+        self.as_mut().set_status(QString::from(&count_items(n)));
     }
 
     fn set_sort(self: Pin<&mut Self>, field: &QString) {
@@ -5245,7 +5596,7 @@ impl qobject::DirModel {
         self.as_mut().set_cursor(0);
         let t = text.to_string();
         let status = if t.is_empty() {
-            format!("{n} items")
+            count_items(n)
         } else {
             format!("{n} of {} match \"{}\"", self.as_ref().all.len(), t)
         };
@@ -5396,11 +5747,25 @@ impl qobject::DirModel {
         let Some(path) = self.key.as_path() else {
             return list;
         };
-        let mut acc = PathBuf::from("/");
-        list.append(QString::from("/"));
-        for c in path.components().skip(1) {
+        // Each crumb is "path\tlabel". Inside a mounted place the bar starts
+        // at the place ("nas / Shared"), not at "/ run / user / 1000 / …".
+        let (start, first_label) = match place_of(path) {
+            Some((root, label)) => (root, label),
+            None => (PathBuf::from("/"), "/".to_string()),
+        };
+        let rest = path.strip_prefix(&start).unwrap_or(path);
+        let mut acc = start.clone();
+        list.append(QString::from(&format!(
+            "{}\t{first_label}",
+            start.to_string_lossy()
+        )));
+        for c in rest.components() {
             acc.push(c);
-            list.append(QString::from(&acc.to_string_lossy().to_string()));
+            let label = gust_core::location::escape_for_display(c.as_os_str());
+            list.append(QString::from(&format!(
+                "{}\t{label}",
+                acc.to_string_lossy()
+            )));
         }
         list
     }
@@ -6016,18 +6381,31 @@ impl qobject::DirModel {
         if self.as_ref().job.is_some() {
             return QString::from("another operation is still running");
         }
-        // Gust's own clipboard first; otherwise whatever another
-        // application left on the system clipboard (DESIGN §6.19).
+        // The newest copy wins, wherever it was made (DESIGN §6.19). The
+        // system clipboard is what every window and application shares, so
+        // it is read first: Gust's own record is used only when the system
+        // clipboard still holds that same copy (it keeps the exact paths and
+        // the cut mode), or when there is no system clipboard to read. It
+        // used to be the other way round, and Ctrl+V in one window moved an
+        // old cut instead of what was copied last in another window.
         let own = self.as_ref().clipboard.clone();
-        let Some((srcs, mode)) = own.or_else(|| {
-            gust_core::clipboard::read().map(|c| {
-                let mode = match c.verb {
-                    gust_core::clipboard::ClipVerb::Cut => ClipMode::Cut,
-                    gust_core::clipboard::ClipVerb::Copy => ClipMode::Copy,
-                };
-                (c.paths, mode)
-            })
-        }) else {
+        let system = gust_core::clipboard::read().map(|c| {
+            let mode = match c.verb {
+                gust_core::clipboard::ClipVerb::Cut => ClipMode::Cut,
+                gust_core::clipboard::ClipVerb::Copy => ClipMode::Copy,
+            };
+            (c.paths, mode)
+        });
+        let chosen = match (own, system) {
+            (Some(o), Some(sys)) if o.0 == sys.0 => Some(o),
+            (Some(_), Some(sys)) => {
+                // Something newer replaced our copy: our marks are stale.
+                self.as_mut().clear_clip();
+                Some(sys)
+            }
+            (o, sys) => sys.or(o),
+        };
+        let Some((srcs, mode)) = chosen else {
             return QString::from("nothing to paste");
         };
         let Some(dest) = into.or_else(|| self.as_ref().key.as_path().map(|p| p.to_path_buf()))
@@ -6035,7 +6413,12 @@ impl qobject::DirModel {
             return QString::from("cannot paste here");
         };
         // Drop anything that vanished since it was copied.
-        let sources: Vec<PathBuf> = srcs.into_iter().filter(|p| p.exists()).collect();
+        // (A file on a network place is not stat'ed here, on the UI thread:
+        // begin_transfer probes those folders with a killable child first.)
+        let sources: Vec<PathBuf> = srcs
+            .into_iter()
+            .filter(|p| gust_core::stall::needs_probe(p) || p.exists())
+            .collect();
         if sources.is_empty() {
             self.as_mut().clear_clip();
             return QString::from("the copied items no longer exist");
@@ -6070,6 +6453,13 @@ impl qobject::DirModel {
         if self.as_ref().job.is_some() {
             return QString::from("another operation is still running");
         }
+        // Finding name clashes stats every source and destination. On a
+        // network place that can block for minutes when the server stops
+        // answering, so a killable child probes each such folder first and a
+        // silent one is refused in words instead of freezing the window.
+        if let Some(why) = Self::stalled_among(&req) {
+            return QString::from(&why);
+        }
         let clashes = gust_ops::jobs::conflicts(&req);
         let pending = PendingTransfer {
             req,
@@ -6082,6 +6472,30 @@ impl qobject::DirModel {
         }
         self.as_mut().rust_mut().pending = Some(pending);
         QString::from(NEEDS_ANSWERS)
+    }
+
+    /// The first folder of a transfer that sits on a network place and does
+    /// not answer, as a sentence; None when all of them answer (or none can
+    /// stall). Local folders are never probed.
+    fn stalled_among(req: &gust_ops::jobs::Request) -> Option<String> {
+        use gust_core::stall::{needs_probe, place_name_for, probe, Reachability};
+        let mut dirs: Vec<PathBuf> = req
+            .sources()
+            .iter()
+            .filter_map(|p| p.parent().map(|q| q.to_path_buf()))
+            .collect();
+        if let Some(d) = req.dest_dir() {
+            dirs.push(d.to_path_buf());
+        }
+        dirs.sort();
+        dirs.dedup();
+        for d in dirs.into_iter().filter(|d| needs_probe(d)).take(4) {
+            let r = probe(&d, std::time::Duration::from_millis(2500));
+            if let Reachability::Stalled { .. } = r {
+                return Some(r.message(&place_name_for(&d)));
+            }
+        }
+        None
     }
 
     fn launch(mut self: Pin<&mut Self>, p: PendingTransfer) -> QString {
@@ -6424,6 +6838,97 @@ impl qobject::DirModel {
 
     fn move_selection_to(self: Pin<&mut Self>, dest: &QString) -> QString {
         self.send_selection_to(dest, true)
+    }
+
+    fn drag_mime_json(&self) -> QString {
+        use gust_core::clipboard::{gnome_payload, uri_list_payload, ClipVerb};
+        let p = &self.drag_payload;
+        let text = p
+            .iter()
+            .map(|x| x.to_string_lossy().to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        QString::from(&format!(
+            r#"{{"uris":{},"text":{},"gnome":{}}}"#,
+            Self::json_str(&uri_list_payload(p)),
+            Self::json_str(&text),
+            Self::json_str(&gnome_payload(ClipVerb::Copy, p)),
+        ))
+    }
+
+    fn drop_enter(mut self: Pin<&mut Self>) {
+        // /proc answers from the kernel's tables: no file is touched here.
+        let mounts = std::fs::read_to_string("/proc/self/mounts").unwrap_or_default();
+        self.as_mut().rust_mut().drag_mounts = gust_core::drop::mount_points(&mounts);
+    }
+
+    fn drag_end(mut self: Pin<&mut Self>) {
+        self.as_mut().rust_mut().drag_payload.clear();
+    }
+
+    fn uri_plan(
+        &self,
+        row: i32,
+        dest: &QString,
+        uris: &QString,
+        mode: i32,
+        gust: bool,
+    ) -> gust_core::drop::DropPlan {
+        use gust_core::drop::{
+            default_action, paths_from_uri_list, plan_drop, DropAction, DropPlan,
+        };
+        let sources = paths_from_uri_list(&uris.to_string());
+        if sources.is_empty() {
+            return DropPlan::Nothing;
+        }
+        let dest = dest.to_string();
+        let (target, is_dir) = if !dest.is_empty() {
+            (PathBuf::from(dest), true)
+        } else {
+            match self.drop_target(row) {
+                Some(t) => t,
+                None => return DropPlan::Refused("cannot drop here".into()),
+            }
+        };
+        let folder = if is_dir {
+            target.clone()
+        } else {
+            target.parent().map(|p| p.to_path_buf()).unwrap_or_default()
+        };
+        let action = match Self::drag_mode(mode) {
+            Some(a) => a,
+            // Another Gust window: the same rule as a drop inside one.
+            None if gust => default_action(&self.drag_mounts, &sources, &folder),
+            // Another application cannot say what it meant: copy.
+            None => DropAction::Copy,
+        };
+        plan_drop(&sources, &target, is_dir, action)
+    }
+
+    fn uri_preview(
+        &self,
+        row: i32,
+        dest: &QString,
+        uris: &QString,
+        mode: i32,
+        gust: bool,
+    ) -> QString {
+        Self::describe_plan(self.uri_plan(row, dest, uris, mode, gust))
+    }
+
+    fn uri_drop(
+        self: Pin<&mut Self>,
+        row: i32,
+        dest: &QString,
+        uris: &QString,
+        mode: i32,
+        gust: bool,
+    ) -> QString {
+        let plan = self.as_ref().uri_plan(row, dest, uris, mode, gust);
+        if matches!(plan, gust_core::drop::DropPlan::Nothing) {
+            return QString::default();
+        }
+        self.perform_drop(plan)
     }
 
     fn drop_uris(self: Pin<&mut Self>, row: i32, uris: &QString, as_move: bool) -> QString {

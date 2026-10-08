@@ -155,19 +155,35 @@ pub fn mount_of<'a>(mounts: &'a [PathBuf], p: &Path) -> Option<&'a Path> {
         .map(|m| m.as_path())
 }
 
+/// The "drive" a path is on, for deciding Move or Copy. Usually its mount;
+/// but every GVfs share (SMB, NFS, phones) sits under the ONE FUSE mount
+/// `…/gvfs`, so there the share's own folder is the drive: two shares on
+/// two servers are never "the same drive".
+fn drive_of(mounts: &[PathBuf], p: &Path) -> Option<PathBuf> {
+    let m = mount_of(mounts, p)?;
+    if m.file_name().is_some_and(|n| n == "gvfs") {
+        if let Ok(rest) = p.strip_prefix(m) {
+            if let Some(first) = rest.components().next() {
+                return Some(m.join(first));
+            }
+        }
+    }
+    Some(m.to_path_buf())
+}
+
 /// What a plain drop (no modifier) does: **Move** when every source is on
 /// the same mount as the target, **Copy** when anything crosses to another
 /// one (a USB stick, a network share, another disk). This is what every
 /// mainstream file manager does, and a move by drop is undoable (Ctrl+Z).
 /// Unknown mounts count as different: the uncertain case copies.
 pub fn default_action(mounts: &[PathBuf], sources: &[PathBuf], target: &Path) -> DropAction {
-    let Some(t) = mount_of(mounts, target) else {
+    let Some(t) = drive_of(mounts, target) else {
         return DropAction::Copy;
     };
     let same = !sources.is_empty()
         && sources
             .iter()
-            .all(|s| mount_of(mounts, s).is_some_and(|m| m == t));
+            .all(|s| drive_of(mounts, s).is_some_and(|m| m == t));
     if same {
         DropAction::Move
     } else {
@@ -313,6 +329,31 @@ mod tests {
                 Path::new("/home/me/c")
             ),
             DropAction::Copy
+        );
+    }
+
+    #[test]
+    fn two_network_shares_are_two_drives() {
+        // RED before: both live under the one gvfs FUSE mount, so a drop
+        // between two servers was planned as a Move.
+        let m = mount_points(
+            "/dev/nvme0n1p2 / btrfs rw 0 0\n\
+             gvfsd-fuse /run/user/1000/gvfs fuse.gvfsd-fuse rw 0 0\n",
+        );
+        let a = "/run/user/1000/gvfs/smb-share:server=a,share=x";
+        let b = "/run/user/1000/gvfs/smb-share:server=b,share=y";
+        assert_eq!(
+            default_action(&m, &[pb(&format!("{a}/f.txt"))], Path::new(b)),
+            DropAction::Copy
+        );
+        // Inside one share it is still one drive.
+        assert_eq!(
+            default_action(
+                &m,
+                &[pb(&format!("{a}/f.txt"))],
+                Path::new(&format!("{a}/sub"))
+            ),
+            DropAction::Move
         );
     }
 

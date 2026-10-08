@@ -10,6 +10,7 @@ pub mod capabilities;
 pub mod cloud;
 pub mod disconnect;
 pub mod mount;
+pub mod phones;
 pub mod shares;
 pub mod ssh_config;
 pub mod tailscale;

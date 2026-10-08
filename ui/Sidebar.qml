@@ -44,6 +44,9 @@ Rectangle {
     property var devices: []
     /// The user clicked a device row: mount it, or browse it if mounted.
     signal deviceChosen(string path, bool mounted)
+    /// A phone row was clicked (DESIGN §6.13.1), or right-clicked for its menu.
+    signal phoneChosen(string id, string stateKey)
+    signal phoneMenu(string id, bool apps, bool open, real x, real y)
 
     /// Centre of each place row by label, in window coordinates (qa).
     function placePoints() {
@@ -59,6 +62,12 @@ Rectangle {
             if (!it) continue
             const p = it.mapToItem(null, it.width / 2, it.height / 2)
             out["bookmark:" + root.bookmarks[i].label] = [Math.round(p.x), Math.round(p.y)]
+        }
+        for (let i = 0; i < deviceRepeater.count; i++) {
+            const it = deviceRepeater.itemAt(i)
+            if (!it) continue
+            const p = it.mapToItem(null, it.width / 2, it.height / 2)
+            out["device:" + root.devices[i].name] = [Math.round(p.x), Math.round(p.y)]
         }
         for (let i = 0; i < remoteRepeater.count; i++) {
             const it = remoteRepeater.itemAt(i)
@@ -153,6 +162,7 @@ Rectangle {
                     onClicked: root.placeChosen(model.path)
                 }
                 DragTarget {
+                    receiver: root.model
                     anchors.fill: parent
                     path: model.path
                     onHover: (t) => root.dragHover(t)
@@ -250,6 +260,7 @@ Rectangle {
                     elide: Text.ElideRight
                 }
                 DragTarget {
+                    receiver: root.model
                     anchors.fill: parent
                     z: 1
                     path: modelData.exists ? modelData.path : ""
@@ -302,6 +313,7 @@ Rectangle {
         }
 
         Repeater {
+            id: deviceRepeater
             model: root.devices
             delegate: Rectangle {
                 required property var modelData
@@ -342,6 +354,8 @@ Rectangle {
                 }
 
                 DragTarget {
+
+                    receiver: root.model
                     anchors.fill: parent
                     z: 1
                     path: modelData.mounted && !modelData.empty ? modelData.path : ""
@@ -352,10 +366,20 @@ Rectangle {
                     id: deviceMouse
                     anchors.fill: parent
                     hoverEnabled: true
+                    acceptedButtons: Qt.LeftButton | Qt.RightButton
                     // An empty drive has nothing to open, and clicking it
                     // must not look like a broken button.
-                    onClicked: {
-                        if (modelData.empty) return
+                    onClicked: (mouse) => {
+                        if (modelData.phone) {
+                            if (mouse.button === Qt.RightButton) {
+                                const g = mapToItem(null, mouse.x, mouse.y)
+                                root.phoneMenu(modelData.name, !!modelData.apps, !!modelData.mounted, g.x, g.y)
+                            } else {
+                                root.phoneChosen(modelData.name, modelData.stateKey)
+                            }
+                            return
+                        }
+                        if (mouse.button !== Qt.LeftButton || modelData.empty) return
                         root.deviceChosen(modelData.path, modelData.mounted)
                     }
                 }
@@ -443,6 +467,7 @@ Rectangle {
                     textFormat: Text.PlainText
                 }
                 DragTarget {
+                    receiver: root.model
                     anchors.fill: parent
                     z: 1
                     path: modelData.lost ? "" : modelData.path

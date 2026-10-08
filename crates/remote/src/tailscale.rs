@@ -244,7 +244,7 @@ pub fn host_known(known_hosts: &Path, host: &str) -> bool {
 pub struct ScannedKeys {
     /// known_hosts lines, exactly as `ssh-keyscan` printed them.
     pub lines: Vec<String>,
-    /// `SHA256:… (ED25519)` per key, for the dialog.
+    /// `ED25519\nSHA256:…` per key (type above hash), for the dialog.
     pub fingerprints: Vec<String>,
 }
 
@@ -311,7 +311,11 @@ fn fingerprint(line: &str) -> Option<String> {
     let _bits = f.next()?;
     let fp = f.next()?;
     let kind = s.split_whitespace().last()?;
-    Some(format!("{fp} {kind}"))
+    // The key type on its own line above its hash: joined on one line, the
+    // 50-character hash filled the dialog's width and "(ED25519)" wrapped
+    // onto a line of its own, looking like a separate key.
+    let kind = kind.trim_start_matches('(').trim_end_matches(')');
+    Some(format!("{kind}\n{fp}"))
 }
 
 /// Record keys the user accepted. Appends; never rewrites the file.

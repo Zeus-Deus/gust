@@ -119,10 +119,13 @@ else
 fi
 
 say "30d · Pause and Resume a running copy from the transfer card"
+# Enough small files that a person can reach Pause: batched flushing (D66)
+# copies 2000 of them on a local disk before the card is drawn.
+N30D=10000
 d30d="/var/tmp/gust-qa-pause"; rm -rf "$d30d"; mkdir -p "$d30d/src" "$d30d/dest"
 python3 -c "
 import os
-for i in range(2000): open('$d30d/src/f%05d' % i, 'wb').write(b'x' * 64)
+for i in range($N30D): open('$d30d/src/f%05d' % i, 'wb').write(b'x' * 64)
 "
 goto "$d30d" || bad "could not open $d30d"
 wait_for "d['model']['count']" "2" 10 >/dev/null
@@ -138,7 +141,7 @@ if [[ "$MOUSE_OK" == 1 && "$(state "d['jobRunning']")" == True ]]; then
   if wait_for "d['jobPaused']" "True" 15; then
     ok "clicking Pause paused the copy"
     sleep 1.0; a="$(find "$d30d/dest" -type f | wc -l)"; sleep 1.5; b="$(find "$d30d/dest" -type f | wc -l)"
-    [[ "$a" == "$b" ]] && ok "no file arrived while paused ($a of 2000)" || bad "files kept arriving while paused ($a → $b)"
+    [[ "$a" == "$b" ]] && ok "no file arrived while paused ($a of $N30D)" || bad "files kept arriving while paused ($a → $b)"
     expect "the card says Paused, not finished" "d['jobState']" "Running"
     expect_contains "the hint strip says it is paused" "d['hintShown']" "Paused"
     shot 30d-paused-card
@@ -147,7 +150,7 @@ if [[ "$MOUSE_OK" == 1 && "$(state "d['jobRunning']")" == True ]]; then
     wait_for "d['jobPaused']" "False" 15 >/dev/null && ok "clicking Resume resumed it" || bad "Resume did not take"
     wait_for "d['jobRunning']" "False" 600 >/dev/null
     n="$(find "$d30d/dest/src" -type f | wc -l)"
-    [[ "$n" == 2000 ]] && ok "the copy finished with all 2000 files" || bad "copied $n of 2000"
+    [[ "$n" == $N30D ]] && ok "the copy finished with all $N30D files" || bad "copied $n of $N30D"
     [[ "$(find "$d30d/dest" -name '*staging*' | wc -l)" == 0 ]] && ok "no staging debris" || bad "staging debris left"
   else
     jr="$(state "d['jobRunning']")"

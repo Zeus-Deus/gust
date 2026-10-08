@@ -197,6 +197,9 @@ pub fn probe_if_risky(path: &Path, timeout: Duration) -> Reachability {
 
 /// Mount points Gust itself created, for reporting which place stalled.
 pub fn place_name_for(path: &Path) -> String {
+    if let Some((_, label)) = crate::location::place_root(path) {
+        return label;
+    }
     // .../gust/places/<alias> or .../gust/cloud/<name>
     let mut parts = path.components().rev();
     let mut last = None;
