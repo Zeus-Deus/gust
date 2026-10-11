@@ -82,21 +82,19 @@ Rectangle {
 
     ListModel {
         id: places
-        // Populated at startup from XDG dirs that actually exist.
+        // Defaults rooted in the person's configured HOME, not the listing.
     }
 
     Component.onCompleted: {
-        const home = root.model ? root.model.location : ""
-        // Derive the home root from the starting location's prefix.
-        const parts = home.split("/")
-        const homeRoot = parts.length > 2 ? "/" + parts[1] + "/" + parts[2] : home
+        const homeRoot = root.model ? root.model.home_path : ""
+        if (homeRoot.length === 0) return
         const candidates = [
-            { label: "Home",        path: homeRoot,                     group: "Places" },
-            { label: "Documents",   path: homeRoot + "/Documents",      group: "Places" },
-            { label: "Downloads",   path: homeRoot + "/Downloads",      group: "Places" },
-            { label: "Pictures",    path: homeRoot + "/Pictures",       group: "Places" },
-            { label: "Videos",      path: homeRoot + "/Videos",         group: "Places" },
-            { label: "Music",       path: homeRoot + "/Music",          group: "Places" },
+            { label: qsTr("Home"),        path: homeRoot,                     group: "Places" },
+            { label: qsTr("Documents"),   path: homeRoot + "/Documents",      group: "Places" },
+            { label: qsTr("Downloads"),   path: homeRoot + "/Downloads",      group: "Places" },
+            { label: qsTr("Pictures"),    path: homeRoot + "/Pictures",       group: "Places" },
+            { label: qsTr("Videos"),      path: homeRoot + "/Videos",         group: "Places" },
+            { label: qsTr("Music"),       path: homeRoot + "/Music",          group: "Places" },
         ]
         for (var i = 0; i < candidates.length; i++)
             places.append(candidates[i])

@@ -1,10 +1,14 @@
 //! Gust — a fast, calm file manager for Omarchy.
 
 pub mod bridge;
+mod cli;
+mod clipboard;
 mod fm1;
+mod folder_sizes;
 mod portal;
 
 use cxx_qt_lib::{QGuiApplication, QQmlApplicationEngine, QString, QUrl};
+use std::ffi::{OsStr, OsString};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -246,7 +250,7 @@ fn claim_show_in_folder() {
 /// socket must belong to the user pkexec authenticated, so a root window
 /// can only ever appear on that user's own desktop; the folder must be an
 /// absolute, existing directory. The window gets a private runtime dir.
-fn prepare_admin_session(a: &[String]) -> Result<(), String> {
+fn prepare_admin_session(a: &[OsString]) -> Result<(), String> {
     use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
     if !is_root() {
         return Err("this mode is only for pkexec".into());
@@ -259,7 +263,8 @@ fn prepare_admin_session(a: &[String]) -> Result<(), String> {
         .and_then(|v| v.parse().ok())
         .ok_or("not started by pkexec")?;
     let sm = std::fs::symlink_metadata(socket).map_err(|_| "no display socket")?;
-    if !socket.starts_with('/') || !sm.file_type().is_socket() || sm.uid() != uid {
+    if !std::path::Path::new(socket).is_absolute() || !sm.file_type().is_socket() || sm.uid() != uid
+    {
         return Err("the display socket does not belong to the user who asked".into());
     }
     let dir = std::path::Path::new(folder);
@@ -279,7 +284,7 @@ fn prepare_admin_session(a: &[String]) -> Result<(), String> {
     if std::path::Path::new(theme).is_dir() {
         std::env::set_var("GUST_OMARCHY_STATE", theme);
     }
-    if qa != "-" && qa.starts_with("/tmp/") {
+    if qa != "-" && std::path::Path::new(qa).starts_with("/tmp") {
         std::env::set_var("GUST_QA_STATE", qa);
     }
     std::env::set_var("GUST_ADMIN", "1");
@@ -308,40 +313,69 @@ const MAIN_QML: &str = "qrc:/qt/qml/com/gust/app/ui/Main.qml";
 fn main() {
     // `--default [on|off]` is a CLI action, not a window: handle it before
     // any Qt object exists so it works over SSH and in a package hook.
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    // Folder arguments are OS bytes, not necessarily Unicode. Checking a
+    // CLI flag must not panic before byte-preserving folder admission.
+    let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     if let Some(pos) = args.iter().position(|a| a == "--default") {
-        let mode = args.get(pos + 1).map(String::as_str).unwrap_or("on");
+        let mode = match args.get(pos + 1) {
+            None => "on",
+            Some(value) => match value.to_str() {
+                Some(mode) => mode,
+                None => {
+                    eprintln!("gust: --default expects on or off");
+                    std::process::exit(1);
+                }
+            },
+        };
         std::process::exit(run_default(mode));
     }
     // Other apps' Open/Save dialogs through Gust (opt-in, reversible).
     if let Some(pos) = args.iter().position(|a| a == "--file-dialogs") {
-        let mode = args.get(pos + 1).map(String::as_str).unwrap_or("on");
+        let mode = match args.get(pos + 1) {
+            None => "on",
+            Some(value) => match value.to_str() {
+                Some(mode) => mode,
+                None => {
+                    eprintln!("gust: --file-dialogs expects on or off");
+                    std::process::exit(1);
+                }
+            },
+        };
         std::process::exit(run_file_dialogs(mode));
     }
     // Omarchy: make Super+Shift+F open Gust (opt-in, reversible).
     if let Some(pos) = args.iter().position(|a| a == "--bind-keys") {
-        let mode = args.get(pos + 1).map(String::as_str).unwrap_or("on");
+        let mode = match args.get(pos + 1) {
+            None => "on",
+            Some(value) => match value.to_str() {
+                Some(mode) => mode,
+                None => {
+                    eprintln!("gust: --bind-keys expects on or off");
+                    std::process::exit(1);
+                }
+            },
+        };
         std::process::exit(run_bind_keys(mode));
     }
     // D-Bus activated by xdg-desktop-portal: other apps' Open/Save dialogs.
-    if args.first().map(String::as_str) == Some("--portal") {
+    if args.first().map(OsString::as_os_str) == Some(OsStr::new("--portal")) {
         std::process::exit(portal::run());
     }
     // D-Bus activated: answer "Show in folder" from other apps.
-    if args.first().map(String::as_str) == Some("--dbus-service") {
+    if args.first().map(OsString::as_os_str) == Some(OsStr::new("--dbus-service")) {
         std::process::exit(fm1::run());
     }
     // Internal: the administrator window, started by `pkexec` from "Open as
     // administrator". Only ever root, and only with a display socket owned
     // by the user who authenticated (pkexec sets PKEXEC_UID).
-    if args.first().map(String::as_str) == Some("--admin") {
+    if args.first().map(OsString::as_os_str) == Some(OsStr::new("--admin")) {
         if let Err(why) = prepare_admin_session(&args[1..]) {
             eprintln!("gust: not opening an administrator window: {why}");
             std::process::exit(1);
         }
     }
     // Internal: hold a clipboard offer after the window that made it.
-    if args.first().map(String::as_str) == Some("--clip-serve") {
+    if args.first().map(OsString::as_os_str) == Some(OsStr::new("--clip-serve")) {
         std::process::exit(gust_core::clipboard::serve_from_stdin());
     }
     if args.iter().any(|a| a == "--help" || a == "-h") {

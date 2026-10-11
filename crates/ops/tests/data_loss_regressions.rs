@@ -225,54 +225,58 @@ fn a_cross_filesystem_move_never_discards_a_child_edited_after_it_was_copied() {
     fs::remove_dir_all(&dst_root).ok();
 }
 
-/// The same case driven through the real `move_tree`, which is what the UI
-/// calls. The edit is interleaved at an OBSERVED boundary rather than by
-/// sleeping and hoping: the writer waits until the copy has actually produced
-/// the target file at the destination, which means that child has been copied
-/// and the walk has moved on.
+/// The real `move_tree`, with an edit at its synchronous completed-entry
+/// callback. Batched copies publish names only after a flush, so polling for
+/// a destination name neither guarantees an interleave nor checks write errors.
+/// One child makes the boundary independent of traversal order and scheduler.
 #[test]
 fn move_tree_cross_device_keeps_the_source_when_a_child_changed_mid_move() {
     let src_root = fixture("xdev2-src");
     let Some(dst_root) = other_fs_fixture("xdev2-dst") else {
         gust_testkit::skip!("SHM", "/dev/shm unavailable");
     };
+    assert_ne!(
+        dev_of(&src_root),
+        dev_of(&dst_root),
+        "must exercise the cross-device copy/remove path"
+    );
     let tree = src_root.join("work");
     fs::create_dir_all(&tree).unwrap();
-    // Enough files that the copy is still walking when the edit lands.
-    for i in 0..600 {
-        fs::write(tree.join(format!("f{i:04}.txt")), format!("original {i}")).unwrap();
-    }
-
     let target = tree.join("f0000.txt");
-    let edited = b"EDITED WHILE THE MOVE WAS RUNNING".to_vec();
+    let original = b"original bytes";
+    let edited = b"EDITED WHILE THE MOVE WAS RUNNING";
+    fs::write(&target, original).unwrap();
+    let root_before = gust_ops::FileIdentity::of_path(&tree).unwrap();
     let dst = dst_root.join("work");
-
-    let watch = dst.join("f0000.txt");
-    let t2 = target.clone();
-    let e2 = edited.clone();
-    let writer = std::thread::spawn(move || {
-        // Wait for the copy to have written this child at the destination.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-        while std::time::Instant::now() < deadline {
-            if watch.exists() {
-                // It has been copied; now edit the SOURCE behind the walk.
-                std::thread::sleep(std::time::Duration::from_millis(2));
-                let _ = fs::write(&t2, &e2);
-                return true;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
-        false
-    });
-
+    let mut injections = 0;
     let cancel = CancelToken::default();
-    let mut noop = |_: usize, _: usize, _: u64, _: u64| {};
-    let res = recursive::move_tree(&tree, &dst, ConflictPolicy::Replace, &cancel, &mut noop);
-    let interleaved = writer.join().unwrap();
-    eprintln!("move_tree returned {res:?}, edit interleaved={interleaved}");
-    assert!(
-        interleaved,
-        "the test could not interleave the edit; it would prove nothing"
+    let mut edit_after_copy = |done: usize, total: usize, bytes: u64, bytes_total: u64| {
+        if done == 1 {
+            assert_eq!(injections, 0, "inject only at the one completed child");
+            assert_eq!(total, 1, "the fixture has exactly one child");
+            assert_eq!(bytes, original.len() as u64);
+            assert_eq!(bytes_total, original.len() as u64);
+            assert_eq!(fs::read(&target).unwrap(), original);
+            fs::write(&target, edited).expect("the mid-move edit must really succeed");
+            assert_eq!(fs::read(&target).unwrap(), edited);
+            assert!(
+                root_before.matches(&gust_ops::FileIdentity::of_path(&tree).unwrap()),
+                "a root-only check must miss the child edit"
+            );
+            injections += 1;
+        }
+    };
+    let res = recursive::move_tree(
+        &tree,
+        &dst,
+        ConflictPolicy::Replace,
+        &cancel,
+        &mut edit_after_copy,
+    );
+    eprintln!("move_tree returned {res:?}, edit injections={injections}");
+    assert_eq!(
+        injections, 1,
+        "the test must interleave exactly one successful edit"
     );
 
     let src_bytes = fs::read(&target).ok();
@@ -286,6 +290,20 @@ fn move_tree_cross_device_keeps_the_source_when_a_child_changed_mid_move() {
     assert!(
         res.is_err(),
         "a move that could not prove the source was unchanged must refuse, got {res:?}"
+    );
+    assert_eq!(
+        src_bytes.as_deref(),
+        Some(&edited[..]),
+        "the edited source stays in place"
+    );
+    assert_eq!(
+        dst_bytes.as_deref(),
+        Some(&original[..]),
+        "the completed original copy was kept"
+    );
+    assert!(
+        matches!(&res, Err(gust_ops::OpError::Refused(why)) if why.contains("inside changed during the move")),
+        "expected the descendant-change guard, not an unrelated error: {res:?}"
     );
 
     fs::remove_dir_all(&src_root).ok();

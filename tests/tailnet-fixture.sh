@@ -106,7 +106,8 @@ EOF
   [[ -n "$KEY" ]] || { echo "no auth key"; return 1; }
   # The key goes to tailscale through a FILE, never argv.
   umask 077; printf '%s' "$KEY" > "$FIX/authkey"; umask 022
-  sudo -n chmod 644 "$FIX/authkey"   # read by the containers' root
+  # docker exec reads this owner's stdin; the host file need not be public.
+  chmod 600 "$FIX/authkey"
 
   # Client key for the peers' sshd: the "user's own SSH key" of the test.
   [[ -f "$FIX/id_ed25519" ]] || ssh-keygen -q -t ed25519 -N '' -C gust-tailnet -f "$FIX/id_ed25519"
@@ -136,6 +137,7 @@ EOF
       --security-opt no-new-privileges \
       "$IMAGE" sh -c '
         set -e
+        trap '\''rm -f /authkey'\'' EXIT
         apk add --no-cache tailscale openssh openssh-sftp-server >/dev/null
         ssh-keygen -A
         adduser -D -s /bin/sh media
@@ -164,7 +166,7 @@ EOF
       $D exec "$name" test -d /home/media/.ssh 2>/dev/null && break; sleep 0.5
     done
     $D exec -i "$name" sh -c 'cat > /home/media/.ssh/authorized_keys' < "$FIX/id_ed25519.pub"
-    $D exec -i "$name" sh -c 'cat > /authkey' < "$FIX/authkey"
+    $D exec -i "$name" sh -c 'umask 077; set -C; cat > /authkey' < "$FIX/authkey"
   done
 
   # Wait until every peer answers on the tailnet AND its sshd is up:

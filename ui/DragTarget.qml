@@ -28,6 +28,9 @@ DropArea {
     function sourceModel(d) {
         return d && d.source && d.source.objectName === "gustDragProxy" ? d.source.paneModel : null
     }
+    function sourceMode(d) {
+        return area.sourceModel(d) ? d.source.transferMode : 0
+    }
     function read(d) {
         area.uris = d.hasUrls ? d.urls.map(u => u.toString()).join("\r\n") + "\r\n"
                               : (d.getDataAsString("text/uri-list") || "")
@@ -41,7 +44,7 @@ DropArea {
         const m = area.sourceModel(d)
         if (m) {
             d.accept(Qt.CopyAction)
-            area.hover(m.drag_preview_into(area.path, 0))
+            area.hover(m.drag_preview_into(area.path, area.sourceMode(d)))
             return
         }
         if (!area.receiver) { d.accepted = false; return }
@@ -57,7 +60,7 @@ DropArea {
         d.accept(Qt.CopyAction)
         area.hover("")
         if (m) {
-            area.landed(m, m.drag_drop_into(area.path, 0))
+            area.landed(m, m.drag_drop_into(area.path, area.sourceMode(d)))
             return
         }
         if (!area.receiver) return

@@ -23,6 +23,9 @@ Rectangle {
     z: 100
 
     function show(c) {
+        // A new owner is presented only after the old dialog fully closed.
+        // Keep this choice only while stepping through one transfer.
+        if (!visible) applyAll = false
         clash = c
         visible = true
         // Keep both is the one answer that can never lose anything.

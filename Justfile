@@ -24,6 +24,18 @@ test-required:
 test-all:
     cargo test --workspace
 
+# VM-only Qt model/signal regressions. Use a fresh owned evidence directory:
+# GUST_MODEL_QA_OUT="$PWD/target/model-qa-run" just qa-model-routing
+# These replace external model I/O, not native CXX/visual/clipboard acceptance.
+qa-model-routing:
+    python3 crates/app/tests/tab_model_regressions.py --source . --output "${GUST_MODEL_QA_OUT:?Set a fresh evidence directory}/tabs"
+    python3 crates/app/tests/pane_focus_regressions.py --source . --output "${GUST_MODEL_QA_OUT:?Set a fresh evidence directory}/panes"
+
+# VM-only exact methods with actual Qt ListModel/Instantiator insertion.
+# Directory I/O, CXX transport and visual/focus hooks are still seams.
+qa-tab-insertion:
+    python3 crates/app/tests/tab_model_regressions.py --insertion --source . --output "${GUST_MODEL_QA_OUT:?Set a fresh evidence directory}/insertion"
+
 lint:
     cargo fmt --all -- --check
     # Rust lints, denied. Scoped to Gust's own crates: gust-app compiles

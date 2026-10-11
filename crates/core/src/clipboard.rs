@@ -490,6 +490,7 @@ pub fn read_image(max: usize) -> ClipImage {
 
 /// Read whatever the desktop currently offers.
 pub fn read() -> Option<ClipContents> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     // In preference order: the format with a verb, then the standard URI
     // list, then plain text as a last resort.
     for ty in [
@@ -497,17 +498,18 @@ pub fn read() -> Option<ClipContents> {
         "text/uri-list",
         "text/plain",
     ] {
-        let out = Command::new("wl-paste")
-            .arg("--no-newline")
-            .arg("--type")
-            .arg(ty)
-            .stdin(Stdio::null())
-            .output()
-            .ok()?;
-        if !out.status.success() {
+        let Some(bytes) = paste_output(
+            Command::new("wl-paste")
+                .arg("--no-newline")
+                .arg("--type")
+                .arg(ty)
+                .stdin(Stdio::null()),
+            deadline,
+            512 * 1024,
+        ) else {
             continue;
-        }
-        let text = String::from_utf8_lossy(&out.stdout).to_string();
+        };
+        let text = String::from_utf8_lossy(&bytes).to_string();
         let parsed = match ty {
             "x-special/gnome-copied-files" => parse_gnome(&text),
             "text/uri-list" => parse_uri_list(&text),
@@ -520,9 +522,125 @@ pub fn read() -> Option<ClipContents> {
     None
 }
 
+/// Retain only a successful, bounded subprocess response.
+fn paste_output(
+    command: &mut Command,
+    deadline: std::time::Instant,
+    max: usize,
+) -> Option<Vec<u8>> {
+    use std::io::Read;
+    if std::time::Instant::now() >= deadline {
+        return None;
+    }
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let result = (|| {
+        let mut stdout = child.stdout.take()?;
+        rustix::fs::fcntl_setfl(&stdout, rustix::fs::OFlags::NONBLOCK).ok()?;
+        let mut bytes = Vec::new();
+        let mut chunk = [0u8; 8192];
+        let mut eof = false;
+        loop {
+            if std::time::Instant::now() >= deadline {
+                return None;
+            }
+            match stdout.read(&mut chunk) {
+                Ok(0) => eof = true,
+                Ok(n) => {
+                    if n > max.saturating_sub(bytes.len()) {
+                        return None;
+                    }
+                    bytes.extend_from_slice(&chunk[..n]);
+                    continue;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => return None,
+            }
+            if let Some(status) = child.try_wait().ok()? {
+                if !status.success() {
+                    return None;
+                }
+                if eof {
+                    return Some(bytes);
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    })();
+    // Close the response pipe before killing: even a departed reader can
+    // leave another process holding its stdout open. Reaping is not a UI wait.
+    if result.is_none() {
+        let _ = child.kill();
+    }
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    result
+}
+
 #[cfg(test)]
 mod codec_tests {
     use super::*;
+
+    #[test]
+    fn a_slow_clipboard_reader_is_refused_at_its_deadline() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 0.3; printf stale"]);
+        let start = std::time::Instant::now();
+        let result = paste_output(
+            &mut command,
+            start + std::time::Duration::from_millis(60),
+            100,
+        );
+        assert!(
+            result.is_none(),
+            "a late response grants no clipboard authority"
+        );
+        assert!(start.elapsed() < std::time::Duration::from_millis(250));
+    }
+
+    #[test]
+    fn an_oversized_clipboard_payload_is_refused_not_truncated() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "printf 123456789"]);
+        assert!(paste_output(
+            &mut command,
+            std::time::Instant::now() + std::time::Duration::from_secs(1),
+            8
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn a_successful_bounded_payload_is_byte_exact() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "printf 'copy\\nfile:///a%%FF'"]);
+        assert_eq!(
+            paste_output(
+                &mut command,
+                std::time::Instant::now() + std::time::Duration::from_secs(1),
+                64
+            ),
+            Some(b"copy\nfile:///a%FF".to_vec())
+        );
+    }
+
+    #[test]
+    fn a_failed_reader_does_not_supply_partial_bytes() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "printf cut; exit 1"]);
+        assert!(paste_output(
+            &mut command,
+            std::time::Instant::now() + std::time::Duration::from_secs(1),
+            64
+        )
+        .is_none());
+    }
 
     #[test]
     fn an_image_offer_is_recognised_and_files_win() {

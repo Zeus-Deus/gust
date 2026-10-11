@@ -1,0 +1,162 @@
+import QtQml
+import QtQuick
+import QtTest
+
+TestCase {
+    name: "TabModelOwnership"
+    Item {
+        id: win
+        property bool ready: false
+        property int activeTab: 1
+        property int activePane: 0
+        property int paneCount: 1
+        property var paneTab: [1, -1]
+        property var tabViews: ["rows", "rows"]
+        property var dirModel: null
+        property var paneAModel: null
+        property var paneBModel: null
+        property string paneAView: "rows"
+        property string paneBView: "rows"
+        property string viewMode: "rows"
+        property int activePaneTabCount: 2
+        property var job: null
+        property var models: [modelA, modelB, modelC, modelD]
+        function focusList() {}
+        function qaDump(tag) {}
+        onActiveTabChanged: {
+            if (ready) {
+@ACTIVE_TAB_HANDLER@
+            }
+        }
+@FUNCTIONS@
+    }
+    QtObject {
+        id: modelA
+        property bool everActivated: true
+        property string startPath: "/A"
+        property string tabLabel: "A"
+        property string cursor: "Payload.txt"
+        function job_running() { return false }
+    }
+    QtObject {
+        id: modelB
+        property bool everActivated: true
+        property string startPath: "/B"
+        property string tabLabel: "B"
+        property string cursor: "Payload.txt"
+        function job_running() { return false }
+    }
+    QtObject {
+        id: modelC
+        property bool everActivated: true
+        property string startPath: "/C"
+        property string tabLabel: "C"
+        property string cursor: "Payload.txt"
+        function job_running() { return false }
+    }
+    QtObject {
+        id: modelD
+        property bool everActivated: true
+        property string startPath: "/D"
+        property string tabLabel: "D"
+        property string cursor: "Payload.txt"
+        function job_running() { return false }
+    }
+    ListModel { id: tabList }
+    QtObject {
+        id: tabs
+        function objectAt(i) {
+            return i >= 0 && i < tabList.count ? win.models[i] : null
+        }
+    }
+    QtObject { id: sessionSaveTimer; function restart() {} }
+    QtObject { id: jobTimer; function start() {} }
+
+    function init() {
+        win.ready = false
+        tabList.clear()
+        for (let i = 0; i < 4; i++)
+            tabList.append({startPath: win.models[i].startPath, label: win.models[i].tabLabel, pane: i < 2 ? 0 : 1})
+        win.paneCount = 1
+        win.activePane = 0
+        win.activeTab = 1
+        win.paneTab = [1, 3]
+        win.tabViews = ["rows", "rows", "rows", "rows"]
+        for (const m of win.models) m.cursor = "Payload.txt"
+        win.refreshActiveModel()
+        win.ready = true
+    }
+    function viewRows() {
+        return ["rows", "grid", "columns"].map(mode => ({tag: mode, mode: mode}))
+    }
+    function test_same_view_switch_owner_data() { return viewRows() }
+    function test_same_view_switch_owner(data) {
+        win.tabViews = [data.mode, data.mode, data.mode, data.mode]
+        win.viewMode = data.mode
+        win.refreshPanes()
+        win.activateTab(0)
+        compare(win.dirModel, modelA)
+        compare(win.paneAModel, modelA, "visible pane must follow the selected tab after the synchronous activeTab handler")
+        compare(win.paneAView, data.mode)
+    }
+    function test_pointer_and_action_share_owner_data() { return viewRows() }
+    function test_pointer_and_action_share_owner(data) {
+        win.tabViews = [data.mode, data.mode, data.mode, data.mode]
+        win.refreshPanes()
+        win.activateTab(0)
+        // External I/O/visual widgets are replaced; the displayed-model
+        // property and selector handlers are exact production code.
+        win.paneAModel.cursor = "Backups"
+        compare(win.dirModel.cursor, "Backups", "a pointer selection must reach the model used by window actions")
+        compare(modelB.cursor, "Payload.txt", "selection must not mutate the previous tab")
+    }
+    function test_keyboard_cycle_owner_data() { return viewRows() }
+    function test_keyboard_cycle_owner(data) {
+        win.tabViews = [data.mode, data.mode, data.mode, data.mode]
+        win.refreshPanes()
+        win.nextTab(1)
+        compare(win.activeTab, 0)
+        compare(win.paneAModel, win.dirModel)
+        win.nextTab(-1)
+        compare(win.activeTab, 1)
+        compare(win.paneAModel, modelB)
+    }
+    function test_other_pane_tab_owner_data() { return viewRows() }
+    function test_other_pane_tab_owner(data) {
+        win.paneCount = 2
+        win.activePane = 1
+        win.activeTab = 3
+        win.paneTab = [1, 3]
+        win.tabViews = [data.mode, data.mode, data.mode, data.mode]
+        win.refreshActiveModel()
+        win.activateTab(2)
+        compare(win.activePane, 1)
+        compare(win.dirModel, modelC)
+        compare(win.paneBModel, modelC)
+        compare(win.paneAModel, modelB, "switching the right pane must not replace the left pane")
+    }
+    function test_switch_to_tab_in_other_pane() {
+        win.paneCount = 2
+        win.refreshActiveModel()
+        win.activateTab(2)
+        compare(win.activePane, 1)
+        compare(win.dirModel, modelC)
+        compare(win.paneBModel, modelC)
+        compare(win.paneAModel, modelB)
+    }
+    function test_reactivate_same_tab_repairs_presented_owner() {
+        win.activeTab = 0
+        win.paneTab = [0, 3]
+        win.refreshActiveModel()
+        win.paneAModel = modelB
+        win.activateTab(0)
+        compare(win.paneAModel, modelA, "activation must refresh even when activeTab does not emit a change")
+    }
+    function test_invalid_tab_preserves_owner() {
+        const old = win.paneAModel
+        win.activateTab(-1)
+        win.activateTab(tabList.count)
+        compare(win.paneAModel, old)
+        compare(win.dirModel, modelB)
+    }
+}

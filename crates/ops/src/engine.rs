@@ -118,6 +118,24 @@ impl From<rustix::io::Errno> for OpError {
 
 pub type OpResult<T> = Result<T, OpError>;
 
+/// Publication never authorizes replacement. Replace callers must preserve
+/// their approved existing object before reaching this boundary; a later
+/// occupant is another conflict, for every policy (including Skip).
+pub(crate) fn publish_noreplace(
+    src_dir: &DirHandle,
+    src_name: &OsStr,
+    dst_dir: &DirHandle,
+    dst_name: &OsStr,
+) -> OpResult<()> {
+    crate::anchor::rename_noreplace(src_dir, src_name, dst_dir, dst_name).map_err(|e| {
+        if e.kind() == io::ErrorKind::AlreadyExists {
+            OpError::Conflict(PathBuf::from(dst_name))
+        } else {
+            OpError::Io(e)
+        }
+    })
+}
+
 /// Build a staging name that cannot collide with a user file.
 fn staging_name(final_name: &OsStr) -> OsString {
     let mut s = OsString::from(".gust-staging-");
@@ -208,13 +226,13 @@ impl Staged {
     /// Give the staged file its real name. The caller has made its bytes
     /// durable first (per file, or for a whole batch with one `syncfs`).
     pub(crate) fn commit(self, dst_dir: &DirHandle, dst_name: &OsStr) -> OpResult<u64> {
-        if let Err(e) =
-            rustix::fs::renameat(dst_dir.as_fd(), &self.stage, dst_dir.as_fd(), dst_name)
-        {
+        #[cfg(test)]
+        publication_tests::before_publication();
+        if let Err(e) = publish_noreplace(dst_dir, &self.stage, dst_dir, dst_name) {
             // Even the final rename can fail (a full directory, a vanished
             // parent). The staging file is ours; do not abandon it.
             self.discard(dst_dir);
-            return Err(e.into());
+            return Err(e);
         }
         // Committed under its real name: the claim no longer describes anything.
         if let Some(c) = &self.claim {
@@ -395,6 +413,16 @@ pub fn copy_symlink(
     dst_dir: &DirHandle,
     dst_name: &OsStr,
 ) -> OpResult<()> {
+    copy_symlink_with_policy(src_dir, src_name, dst_dir, dst_name, ConflictPolicy::Ask)
+}
+
+pub(crate) fn copy_symlink_with_policy(
+    src_dir: &DirHandle,
+    src_name: &OsStr,
+    dst_dir: &DirHandle,
+    dst_name: &OsStr,
+    policy: ConflictPolicy,
+) -> OpResult<()> {
     // Copying a link onto itself would replace the original with a copy of
     // itself and hand undo a step that removes the user's only link. The
     // destination must never be the source.
@@ -409,6 +437,12 @@ pub fn copy_symlink(
             ));
         }
     }
+    if dst_dir.stat_child(dst_name).is_ok() {
+        return match policy {
+            ConflictPolicy::Skip => Ok(()),
+            _ => Err(OpError::Conflict(PathBuf::from(dst_name))),
+        };
+    }
     let target = rustix::fs::readlinkat(src_dir.as_fd(), src_name, Vec::new())?;
     let stage = staging_name(dst_name);
     let staged_abs = PathBuf::from(dst_dir.display()).join(&stage);
@@ -422,7 +456,9 @@ pub fn copy_symlink(
     if let Some(c) = &claim {
         let _ = crate::staging::confirm(c, &staged_abs);
     }
-    let r = rustix::fs::renameat(dst_dir.as_fd(), &stage, dst_dir.as_fd(), dst_name);
+    #[cfg(test)]
+    publication_tests::before_publication();
+    let r = publish_noreplace(dst_dir, &stage, dst_dir, dst_name);
     if r.is_err() {
         discard_staged(dst_dir, &stage, &claim, 0);
     } else if let Some(c) = &claim {
@@ -439,8 +475,7 @@ pub fn move_same_fs(
     dst_dir: &DirHandle,
     dst_name: &OsStr,
 ) -> OpResult<()> {
-    rustix::fs::renameat(src_dir.as_fd(), src_name, dst_dir.as_fd(), dst_name)?;
-    Ok(())
+    publish_noreplace(src_dir, src_name, dst_dir, dst_name)
 }
 
 /// Cross-filesystem move: copy, verify, commit, then remove ONLY the verified
@@ -522,7 +557,9 @@ pub fn run_copy_job(job: &mut Job, cancel: &CancelToken) -> OpResult<()> {
                 FileClass::Regular => {
                     copy_regular_file(&sd, &sn, &dd, &dn, job.conflict_policy, cancel)?;
                 }
-                FileClass::Symlink => copy_symlink(&sd, &sn, &dd, &dn)?,
+                FileClass::Symlink => {
+                    copy_symlink_with_policy(&sd, &sn, &dd, &dn, job.conflict_policy)?
+                }
                 FileClass::Directory => {
                     return Err(OpError::Refused(
                         "recursive directory copy not in this path".into(),
@@ -544,6 +581,10 @@ pub fn run_copy_job(job: &mut Job, cancel: &CancelToken) -> OpResult<()> {
     job.state = JobState::Confirmed;
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "publication_tests.rs"]
+pub(crate) mod publication_tests;
 
 #[cfg(test)]
 mod tests {

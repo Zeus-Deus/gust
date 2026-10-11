@@ -36,6 +36,8 @@ pub mod qobject {
         #[base = QAbstractListModel]
         #[qproperty(QString, location)]
         #[qproperty(QString, location_display)]
+        /// Fixed personal Home root, independent of the folder being browsed.
+        #[qproperty(QString, home_path)]
         #[qproperty(i32, count)]
         #[qproperty(bool, settled)]
         #[qproperty(bool, show_hidden)]
@@ -92,6 +94,14 @@ pub mod qobject {
         /// sentence saying what went wrong.
         #[qsignal]
         fn place_done(self: Pin<&mut DirModel>, op: QString, name: QString, message: QString);
+
+        /// A worker finished file-clipboard admission for this exact model.
+        #[qsignal]
+        fn paste_ready(self: Pin<&mut DirModel>, message: QString, allow_image: bool);
+        #[qinvokable]
+        fn clipboard_busy(self: &DirModel) -> bool;
+        #[qinvokable]
+        fn cancel_clip_paste(self: Pin<&mut DirModel>);
 
         /// A removable device came, went, or had its media or mount change.
         /// The UI asks `devices_json` again.
@@ -925,6 +935,7 @@ pub struct DirModelRust {
     delete_gen: u64,
     location: QString,
     location_display: QString,
+    home_path: QString,
     count: i32,
     settled: bool,
     show_hidden: bool,
@@ -961,6 +972,7 @@ pub struct DirModelRust {
     clip_set: std::collections::HashSet<PathBuf>,
     /// What Ctrl+C / Ctrl+X marked, waiting for a paste.
     clipboard: Option<(Vec<std::path::PathBuf>, ClipMode)>,
+    clipboard_read: crate::clipboard::ReadGate,
     /// The job currently running, if any. Only one at a time in M2.
     job: Option<gust_ops::jobs::JobHandle>,
     /// A copy/move waiting for the user to answer its name clashes.
@@ -1095,6 +1107,7 @@ pub enum UndoExtra {
     Links(Vec<gust_ops::attrs::LinkMade>),
     Owners(Vec<gust_ops::attrs::OwnerChanged>),
     Created(gust_ops::create::Created),
+    Renamed(gust_ops::attrs::RenameMade),
 }
 
 /// Whether a clipboard entry will be copied or moved.
@@ -1125,12 +1138,9 @@ pub fn startup_location() -> PathBuf {
     }
 
     // First non-flag argument wins. Flags are reserved for later options.
-    let arg = std::env::args_os()
-        .skip(1)
-        .find(|a| !a.to_string_lossy().starts_with('-'));
-
-    let Some(arg) = arg else { return home() };
-    let path = PathBuf::from(&arg);
+    let Some(path) = crate::cli::startup_argument(std::env::args_os().skip(1)) else {
+        return home();
+    };
 
     // Resolve relative to the working directory the user launched from.
     let abs = if path.is_absolute() {
@@ -1195,6 +1205,7 @@ impl DirModelRust {
         DirModelRust {
             location: QString::from(&home.to_string_lossy().to_string()),
             location_display: QString::from(&home.to_string_lossy().to_string()),
+            home_path: QString::from(&std::env::var("HOME").unwrap_or_default()),
             count: 0,
             settled: false,
             show_hidden: false,
@@ -1227,6 +1238,7 @@ impl DirModelRust {
             last_extra: UndoExtra::None,
             clip_set: Default::default(),
             clipboard: None,
+            clipboard_read: Default::default(),
             pending: None,
             job_rate: gust_ops::rate::RateMeter::new(),
             job_clock: None,
@@ -4701,6 +4713,18 @@ impl qobject::DirModel {
         }
     }
 
+    /// Gust's own transfer refresh must not carry an old aggregate past
+    /// the new directory metadata. Keep unrelated siblings cached.
+    fn invalidate_job_dir_sizes(mut self: Pin<&mut Self>, job: &gust_ops::journal::Job) {
+        let Some(here) = self.as_ref().key.as_path().map(|p| p.to_path_buf()) else {
+            return;
+        };
+        let mut r = self.as_mut().rust_mut();
+        if crate::folder_sizes::invalidate_job(&mut r.dir_sizes, &here, job) {
+            r.size_cancel.cancel();
+        }
+    }
+
     fn publish_thumbnail(
         mut self: Pin<&mut Self>,
         gen: u64,
@@ -6007,6 +6031,22 @@ impl qobject::DirModel {
         let extra = std::mem::take(&mut self.as_mut().rust_mut().last_extra);
         match extra {
             UndoExtra::None => {}
+            UndoExtra::Renamed(made) => {
+                if let Err(why) = gust_ops::attrs::undo_rename(&made) {
+                    self.as_mut().rust_mut().last_extra = UndoExtra::Renamed(made);
+                    return QString::from(&why);
+                }
+                if self.as_ref().key.as_path() == made.original.parent() {
+                    if let Some(name) = made.original.file_name() {
+                        self.as_mut().relist_focusing(name.to_os_string());
+                    }
+                } else {
+                    self.as_mut().reload();
+                }
+                self.as_mut()
+                    .set_status(QString::from("Restored the original name"));
+                return QString::default();
+            }
             UndoExtra::Links(made) => {
                 let mut refused = Vec::new();
                 for m in &made {
@@ -6192,6 +6232,7 @@ impl qobject::DirModel {
         }
 
         let outcome = gust_ops::undo::apply_undo(&plan);
+        self.as_mut().invalidate_job_dir_sizes(job);
         let verb = match job.kind {
             gust_ops::journal::JobKind::Move => "move",
             _ => "copy",
@@ -6226,6 +6267,7 @@ impl qobject::DirModel {
             UndoExtra::Links(_) => return QString::from("Undo: remove the links"),
             UndoExtra::Owners(_) => return QString::from("Undo: put owners back"),
             UndoExtra::Created(_) => return QString::from("Undo: remove the pasted image"),
+            UndoExtra::Renamed(_) => return QString::from("Undo: restore the original name"),
         }
         if self.last_link.is_some() {
             return QString::from("Undo: remove the link");
@@ -6273,6 +6315,10 @@ impl qobject::DirModel {
             &clip_holder(),
         )
         .is_ok();
+        if !shared && std::env::var_os("WAYLAND_DISPLAY").is_some() {
+            self.as_mut().clear_clip();
+            return QString::from("Could not copy files to the desktop clipboard. Try Copy again.");
+        }
         self.as_mut().set_clip(paths, ClipMode::Copy);
         if shared {
             QString::from(&format!("Copied {label} — paste with Ctrl+V"))
@@ -6303,6 +6349,8 @@ impl qobject::DirModel {
             return QString::from("Nothing to copy the path of");
         }
         let text = gust_core::clipboard::paths_as_text(&paths);
+        // Text replaces a file offer too, including reads in other tabs.
+        self.as_mut().clear_clip();
         match gust_core::clipboard::offer_text(&text) {
             Ok(()) if paths.len() == 1 => QString::from(&format!("Copied path {text}")),
             Ok(()) => QString::from(&format!("Copied {} paths", paths.len())),
@@ -6323,6 +6371,10 @@ impl qobject::DirModel {
             &clip_holder(),
         )
         .is_ok();
+        if !shared && std::env::var_os("WAYLAND_DISPLAY").is_some() {
+            self.as_mut().clear_clip();
+            return QString::from("Could not cut files to the desktop clipboard. Try Cut again.");
+        }
         self.as_mut().set_clip(paths, ClipMode::Cut);
         if shared {
             QString::from(&format!("Cut {label} — paste with Ctrl+V"))
@@ -6378,39 +6430,80 @@ impl qobject::DirModel {
 
     /// Paste into `into`, or into the folder on screen when `None`.
     fn paste_into(mut self: Pin<&mut Self>, into: Option<PathBuf>) -> QString {
-        if self.as_ref().job.is_some() {
+        if self.as_ref().job.is_some() || self.as_ref().clipboard_read.busy() {
             return QString::from("another operation is still running");
         }
-        // The newest copy wins, wherever it was made (DESIGN §6.19). The
-        // system clipboard is what every window and application shares, so
-        // it is read first: Gust's own record is used only when the system
-        // clipboard still holds that same copy (it keeps the exact paths and
-        // the cut mode), or when there is no system clipboard to read. It
-        // used to be the other way round, and Ctrl+V in one window moved an
-        // old cut instead of what was copied last in another window.
-        let own = self.as_ref().clipboard.clone();
-        let system = gust_core::clipboard::read().map(|c| {
-            let mode = match c.verb {
-                gust_core::clipboard::ClipVerb::Cut => ClipMode::Cut,
-                gust_core::clipboard::ClipVerb::Copy => ClipMode::Copy,
-            };
-            (c.paths, mode)
-        });
-        let chosen = match (own, system) {
-            (Some(o), Some(sys)) if o.0 == sys.0 => Some(o),
-            (Some(_), Some(sys)) => {
-                // Something newer replaced our copy: our marks are stale.
-                self.as_mut().clear_clip();
-                Some(sys)
-            }
-            (o, sys) => sys.or(o),
-        };
-        let Some((srcs, mode)) = chosen else {
-            return QString::from("nothing to paste");
-        };
+        let allow_image = into.is_none();
         let Some(dest) = into.or_else(|| self.as_ref().key.as_path().map(|p| p.to_path_buf()))
         else {
             return QString::from("cannot paste here");
+        };
+        let Some(thread) = self.as_ref().qt_thread_handle() else {
+            return QString::from("cannot paste here");
+        };
+        let origin = self.as_ref().key.clone();
+        let own = self.as_ref().clipboard.clone();
+        let has_desktop = std::env::var_os("WAYLAND_DISPLAY").is_some();
+        let ticket = self.as_mut().rust_mut().clipboard_read.start();
+        // Qt can own and serve a newer text copy. Waiting for wl-paste on
+        // Qt's own thread prevents that response and deadlocks this window.
+        let spawned = std::thread::Builder::new()
+            .name("gust-paste-files".into())
+            .spawn(move || {
+                let system = if has_desktop {
+                    gust_core::clipboard::read()
+                } else {
+                    None
+                }
+                .map(|c| {
+                    let mode = match c.verb {
+                        gust_core::clipboard::ClipVerb::Cut => ClipMode::Cut,
+                        gust_core::clipboard::ClipVerb::Copy => ClipMode::Copy,
+                    };
+                    (c.paths, mode)
+                });
+                let chosen = crate::clipboard::choose(own, system, has_desktop);
+                let _ = thread.queue(move |mut model| {
+                    if !model.as_mut().rust_mut().clipboard_read.finish(ticket) {
+                        return;
+                    }
+                    if model.as_ref().key != origin || model.as_ref().job.is_some() {
+                        model.paste_ready(
+                            QString::from("Paste cancelled because the destination changed."),
+                            false,
+                        );
+                        return;
+                    }
+                    if model.as_ref().clipboard != chosen {
+                        // Observing the desktop is not a new clipboard write.
+                        model.as_mut().forget_clip();
+                    }
+                    let result = model.as_mut().apply_clip_paste(chosen, dest);
+                    model.paste_ready(result, allow_image);
+                });
+            });
+        if spawned.is_err() {
+            self.as_mut().rust_mut().clipboard_read.cancel();
+            return QString::from("Could not read the clipboard. Try Paste again.");
+        }
+        QString::from("?clipboard")
+    }
+
+    fn clipboard_busy(&self) -> bool {
+        self.clipboard_read.busy()
+    }
+
+    fn cancel_clip_paste(mut self: Pin<&mut Self>) {
+        self.as_mut().rust_mut().clipboard_read.cancel();
+    }
+
+    fn apply_clip_paste(
+        mut self: Pin<&mut Self>,
+        chosen: Option<(Vec<PathBuf>, ClipMode)>,
+        dest: PathBuf,
+    ) -> QString {
+        let Some((srcs, mode)) = chosen else {
+            return QString::from("nothing to paste");
         };
         // Drop anything that vanished since it was copied.
         // (A file on a network place is not stat'ed here, on the UI thread:
@@ -6420,7 +6513,7 @@ impl qobject::DirModel {
             .filter(|p| gust_core::stall::needs_probe(p) || p.exists())
             .collect();
         if sources.is_empty() {
-            self.as_mut().clear_clip();
+            self.as_mut().forget_clip();
             return QString::from("the copied items no longer exist");
         }
         // Pasting a folder into itself would build an infinite tree.
@@ -6450,6 +6543,7 @@ impl qobject::DirModel {
         req: gust_ops::jobs::Request,
         consumes_cut: bool,
     ) -> QString {
+        self.as_mut().rust_mut().clipboard_read.cancel();
         if self.as_ref().job.is_some() {
             return QString::from("another operation is still running");
         }
@@ -6499,6 +6593,7 @@ impl qobject::DirModel {
     }
 
     fn launch(mut self: Pin<&mut Self>, p: PendingTransfer) -> QString {
+        self.as_mut().rust_mut().clipboard_read.cancel();
         let id = format!("job-{}", gust_ops::journal::now_unix());
         // An item with no answer runs under Ask: if its name was taken after
         // the check, the job stops instead of overwriting.
@@ -6978,12 +7073,27 @@ impl qobject::DirModel {
     // --- direct operations ----------------------------------------------
 
     fn rename_row(mut self: Pin<&mut Self>, row: i32, new_name: &QString) -> QString {
+        if self.as_ref().job.is_some() {
+            return QString::from("another operation is still running");
+        }
         let Some(path) = self.as_ref().path_of_row(row) else {
             return QString::from("no such row");
         };
         let name = std::ffi::OsString::from(new_name.to_string());
-        match gust_ops::recursive::rename_in_place(&path, &name, false) {
-            Ok(_) => {
+        if path.file_name() == Some(name.as_os_str()) {
+            return QString::default();
+        }
+        match gust_ops::attrs::rename_recorded(&path, &name) {
+            Ok(made) => {
+                {
+                    let mut state = self.as_mut().rust_mut();
+                    state.last_job = None;
+                    state.last_trashed_batch.clear();
+                    state.last_bulk_rename.clear();
+                    state.last_link = None;
+                    state.last_modes.clear();
+                    state.last_extra = UndoExtra::Renamed(made);
+                }
                 self.as_mut().relist_focusing(name);
                 QString::default()
             }
@@ -7128,6 +7238,7 @@ impl qobject::DirModel {
         // CopyAs lands the copy directly under its "(copy)" name — no
         // temporary name, so a crash cannot leave a half-named duplicate.
         let id = format!("dup-{}", gust_ops::journal::now_unix());
+        self.as_mut().rust_mut().clipboard_read.cancel();
         let handle = gust_ops::jobs::start_journalled(
             id,
             gust_ops::jobs::Request::CopyAs {
@@ -7590,6 +7701,7 @@ impl qobject::DirModel {
     fn set_clip(mut self: Pin<&mut Self>, paths: Vec<PathBuf>, mode: ClipMode) {
         {
             let mut r = self.as_mut().rust_mut();
+            r.clipboard_read.clipboard_changed();
             r.clip_set = paths.iter().cloned().collect();
             r.clipboard = Some((paths, mode));
         }
@@ -7597,8 +7709,14 @@ impl qobject::DirModel {
     }
 
     fn clear_clip(mut self: Pin<&mut Self>) {
+        self.as_mut().rust_mut().clipboard_read.clipboard_changed();
+        self.forget_clip();
+    }
+
+    fn forget_clip(mut self: Pin<&mut Self>) {
         {
             let mut r = self.as_mut().rust_mut();
+            r.clipboard_read.cancel();
             r.clipboard = None;
             r.clip_set.clear();
         }
@@ -7693,13 +7811,14 @@ impl qobject::DirModel {
         ))
     }
 
-    fn paste_image(self: Pin<&mut Self>) -> QString {
+    fn paste_image(mut self: Pin<&mut Self>) -> QString {
         let Some(dir) = self.as_ref().key.as_path().map(|p| p.to_path_buf()) else {
             return QString::from("cannot paste here");
         };
         let Some(thread) = self.as_ref().qt_thread_handle() else {
             return QString::from("cannot paste here");
         };
+        self.as_mut().rust_mut().clipboard_read.cancel();
         std::thread::Builder::new()
             .name("gust-paste-image".into())
             .spawn(move || {
@@ -8200,6 +8319,7 @@ impl qobject::DirModel {
             // dropped, so a later disconnect cannot discard it silently.
             if let Some(rec) = record.as_ref() {
                 Self::track_cloud_writes(rec);
+                self.as_mut().invalidate_job_dir_sizes(rec);
             }
             {
                 let mut r = self.as_mut().rust_mut();

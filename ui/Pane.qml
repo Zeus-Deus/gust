@@ -23,8 +23,8 @@ Item {
     signal selectionTouched()
     signal dragBegan()
     signal dropPreview(string text)
-    signal dropFailed(string message)
-    signal dropDone()
+    signal dropFailed(var owner, string message)
+    signal dropDone(var owner)
     /// Right-click or Menu key: row -1 means the folder itself. x/y are in
     /// window coordinates.
     signal contextRequested(int row, real x, real y)
@@ -176,8 +176,8 @@ Item {
         if (outward.handedOff) { outward.handedOff = false; return }
         const err = pane.model.drag_drop_on_row(row, pane.dragMode(pane.currentView()))
         pane.model.drag_end()
-        if (err !== "") pane.dropFailed(err)
-        else pane.dropDone()
+        if (err !== "") pane.dropFailed(pane.model, err)
+        else pane.dropDone(pane.model)
     }
 
     // --- what is being dragged, under the pointer --------------------------
@@ -269,6 +269,7 @@ Item {
         // Ctrl or Shift held as the drag leaves decides what another Gust
         // window does with it, as it would here (D60).
         const mode = pane.dragMode(viewItem)
+        outward.transferMode = mode
         outward.handedOff = true
         rowsView.dragActive = false
         gridView.dragActive = false
@@ -295,6 +296,8 @@ Item {
         property bool handedOff: false
         /// The model the drag came from, for drop targets outside the view.
         readonly property var paneModel: pane.model
+        /// The modifier choice captured when the drag leaves its view.
+        property int transferMode: 0
         width: 1; height: 1
         Drag.dragType: Drag.Automatic
         Drag.supportedActions: Qt.CopyAction | Qt.MoveAction
@@ -309,6 +312,9 @@ Item {
     /// The model a drag came from when it is Gust's own, else null.
     function gustSource(d) {
         return d && d.source && d.source.objectName === "gustDragProxy" ? d.source.paneModel : null
+    }
+    function gustMode(d) {
+        return pane.gustSource(d) ? d.source.transferMode : 0
     }
     /// The folder a drop on `row` lands in: that folder, or this one.
     function folderAt(row) {
@@ -366,8 +372,8 @@ Item {
             const row = pane.currentView().rowAt ? pane.currentView().rowAt(drag.x, drag.y) : -1
             const src = pane.gustSource(drag)
             if (src) {
-                pane.dropPreview(src === pane.model ? pane.model.drag_preview(row, 0)
-                                 : src.drag_preview_into(pane.folderAt(row), 0))
+                pane.dropPreview(src === pane.model ? pane.model.drag_preview(row, pane.gustMode(drag))
+                                 : src.drag_preview_into(pane.folderAt(row), pane.gustMode(drag)))
                 return
             }
             // Ring the folder that would receive the drop.
@@ -385,10 +391,10 @@ Item {
             if (src) {
                 const row = pane.currentView().rowAt ? pane.currentView().rowAt(drop.x, drop.y) : -1
                 drop.accept(Qt.CopyAction)
-                const e = src === pane.model ? pane.model.drag_drop_on_row(row, 0)
-                                             : src.drag_drop_into(pane.folderAt(row), 0)
-                if (e !== "") pane.dropFailed(e)
-                else pane.dropDone()
+                const e = src === pane.model ? pane.model.drag_drop_on_row(row, pane.gustMode(drop))
+                                             : src.drag_drop_into(pane.folderAt(row), pane.gustMode(drop))
+                if (e !== "") pane.dropFailed(src, e)
+                else pane.dropDone(src)
                 return
             }
             inbound.read(drop)
@@ -397,8 +403,8 @@ Item {
             // source never deletes anything because of a drop.
             drop.accept(Qt.CopyAction)
             const err = pane.model.uri_drop(row, "", inbound.uris, inbound.mode, inbound.fromGust)
-            if (err !== "") pane.dropFailed(err)
-            else pane.dropDone()
+            if (err !== "") pane.dropFailed(pane.model, err)
+            else pane.dropDone(pane.model)
         }
     }
 }

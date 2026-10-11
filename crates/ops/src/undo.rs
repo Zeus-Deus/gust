@@ -580,7 +580,9 @@ pub fn apply_undo(plan: &UndoPlan) -> UndoOutcome {
                         continue;
                     }
                 }
-                match std::fs::rename(from, to) {
+                #[cfg(test)]
+                crate::engine::publication_tests::before_publication();
+                match crate::anchor::rename_noreplace_paths(from, to) {
                     Ok(()) => out.steps_done += 1,
                     Err(e) => out.problems.push(format!("{}: {e}", from.display())),
                 }

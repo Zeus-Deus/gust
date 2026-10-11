@@ -50,12 +50,13 @@ start() {
     $D volume create "${PREFIX}-data" >/dev/null
 
     # sshd needs CHOWN/SETUID/SETGID/DAC_OVERRIDE to drop privileges, and
-    # SYS_CHROOT for the sftp chroot. Everything else is dropped.
+    # SYS_CHROOT for the sftp chroot. adduser needs FOWNER to set permissions
+    # on the home after assigning it to peer. Everything else is dropped.
     $D run -d --name "${PREFIX}-ssh" \
       --network "$NET" \
       -p "127.0.0.1:${SSH_PORT}:22" \
       --cap-drop ALL \
-      --cap-add CHOWN --cap-add SETUID --cap-add SETGID \
+      --cap-add CHOWN --cap-add FOWNER --cap-add SETUID --cap-add SETGID \
       --cap-add DAC_OVERRIDE --cap-add SYS_CHROOT \
       --security-opt no-new-privileges \
       -v "${PREFIX}-data:/srv/share" \
@@ -91,16 +92,28 @@ start() {
     $D exec "${PREFIX}-ssh" chown peer:peer /home/peer/.ssh/authorized_keys
   fi
 
-  # Wait for the port, then pin the host key: a test must fail on a CHANGED
-  # key, which is impossible if the client is told not to check.
-  for _ in $(seq 1 60); do
-    (exec 3<>/dev/tcp/127.0.0.1/"$SSH_PORT") 2>/dev/null && break
+  # Docker's port proxy can listen before sshd does. Wait for an actual SSH
+  # host key, not merely a TCP accept, and pin it without disabling checking.
+  # Reusing a fixture generation must never silently accept a changed key.
+  local candidate="$FIX/known_hosts.pending"
+  for _ in $(seq 1 30); do
+    ssh-keyscan -T 2 -p "$SSH_PORT" -t ed25519 127.0.0.1 2>/dev/null > "$candidate"
+    [[ -s "$candidate" ]] && break
     sleep 0.5
   done
-  ssh-keyscan -p "$SSH_PORT" -t ed25519 127.0.0.1 2>/dev/null > "$FIX/known_hosts"
-  if [[ ! -s "$FIX/known_hosts" ]]; then
+  if [[ ! -s "$candidate" ]]; then
     echo "peer sshd did not come up; logs:"; $D logs --tail 30 "${PREFIX}-ssh"
     return 1
+  fi
+  if [[ -s "$FIX/known_hosts" ]]; then
+    if ! cmp -s "$FIX/known_hosts" "$candidate"; then
+      rm -f "$candidate"
+      echo "fixture host key changed; the established pin was preserved. Stop this fixture explicitly before creating a new generation." >&2
+      return 1
+    fi
+    rm -f "$candidate"
+  else
+    mv "$candidate" "$FIX/known_hosts"
   fi
 
   # ---- rclone WebDAV peer ------------------------------------------------
@@ -121,14 +134,33 @@ start() {
 }
 
 stop() {
-  have_docker && {
-    # Only ever this fixture's own containers; never a global prune.
-    $D rm -f "${PREFIX}-ssh" >/dev/null 2>&1
-    $D volume rm -f "${PREFIX}-data" >/dev/null 2>&1
-    $D network rm "$NET" >/dev/null 2>&1
+  local remaining failed=0
+  have_docker || { echo "docker unavailable; retaining the peer pin" >&2; return 1; }
+  remaining="$($D ps -a --format '{{.Names}}')" || {
+    echo "cannot inspect the peer generation; retaining its pin" >&2; return 1;
   }
+  # Match this exact fixture name, not a substring or a user-supplied regexp.
+  if [[ $'\n'"$remaining"$'\n' == *$'\n'"${PREFIX}-ssh"$'\n'* ]]; then
+    $D rm -f "${PREFIX}-ssh" >/dev/null 2>&1 || {
+      echo "peer teardown failed; retaining its pin" >&2; return 1;
+    }
+  fi
+  remaining="$($D ps -a --format '{{.Names}}')" || {
+    echo "cannot confirm peer destruction; retaining its pin" >&2; return 1;
+  }
+  if [[ $'\n'"$remaining"$'\n' == *$'\n'"${PREFIX}-ssh"$'\n'* ]]; then
+    echo "peer generation still exists; retaining its pin" >&2; return 1
+  fi
+  # Only ever this fixture's own resources; never a global prune.
+  $D volume rm -f "${PREFIX}-data" >/dev/null 2>&1 || failed=1
+  $D network rm "$NET" >/dev/null 2>&1 || failed=1
   [[ -f "$FIX/dav.pid" ]] && kill "$(cat "$FIX/dav.pid")" 2>/dev/null
   rm -f "$FIX/dav.pid"
+  # Destruction was read back above; only now may a new generation be trusted.
+  rm -f "$FIX/known_hosts" "$FIX/known_hosts.pending"
+  if [[ "$failed" -ne 0 ]]; then
+    echo "SSH generation removed, but auxiliary cleanup failed" >&2; return 1
+  fi
   echo "peers stopped"
 }
 

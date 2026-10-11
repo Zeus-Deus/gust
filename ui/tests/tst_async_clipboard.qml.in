@@ -1,0 +1,171 @@
+// Inserted into the exact-handler pure-QML scaffold by the guest runner.
+    Component {
+        id: ownerFactory
+        QtObject {
+            property string label: ""
+            property bool pending: true
+            property int remaining: 1
+            property var answers: []
+            property int cancels: 0
+            function conflict_json() {
+                return pending ? JSON.stringify({ name: label, canReplace: true, count: remaining, index: 0 }) : ""
+            }
+            function conflict_answer(choice, all) {
+                answers = answers.concat([{ choice: choice, all: all }])
+                remaining -= all ? remaining : 1
+                pending = remaining > 0
+                return pending ? "?conflict" : ""
+            }
+            function conflict_cancel() { cancels++; pending = false }
+        }
+    }
+    function owner(label, count) {
+        const m = createTemporaryObject(ownerFactory, testCase, { label: label, remaining: count || 1 })
+        verify(m !== null)
+        win.liveModels = win.liveModels.concat([m])
+        return m
+    }
+    function init() {
+        win.conflictModel = null
+        win.conflictQueue = []
+        win.liveModels = []
+        win.alertText = ""
+        hints.message = ""
+        conflictDialog.visible = false
+        conflictDialog.clash = null
+        conflictDialog.applyAll = false
+        jobTimer.starts = 0
+        dirModel.running = false
+        dirModel.reading = false
+        dirModel.jobCancels = 0
+        dirModel.readCancels = 0
+    }
+
+    function test_p3_escape_cancels_running_job_before_a_read() {
+        dirModel.running = true
+        dirModel.reading = true
+        const event = { accepted: false }
+        win.handleEscape(event)
+        compare(dirModel.jobCancels, 1, "Escape cancelled the clipboard read instead of the running job")
+        compare(dirModel.readCancels, 0)
+        verify(event.accepted)
+    }
+
+    function test_p3_escape_cancels_an_actual_read_without_a_job() {
+        dirModel.reading = true
+        const event = { accepted: false }
+        win.handleEscape(event)
+        compare(dirModel.jobCancels, 0)
+        compare(dirModel.readCancels, 1)
+        verify(event.accepted)
+    }
+
+    function test_p2_delayed_paste_does_not_replace_drop_conflict_owner() {
+        const b = owner("B drop", 2)
+        const a = owner("A delayed Paste", 2)
+        win.transferStarted(b, "?conflict", "drop")
+        conflictDialog.applyAll = true
+        win.pasteFinished(a, "?conflict", false)
+        compare(win.conflictModel, b, "a delayed Paste stole the visible drop's answer/cancel owner")
+        compare(conflictDialog.clash.name, "B drop")
+        conflictDialog.pick("keep-both")
+        compare(b.answers.length, 1)
+        compare(b.answers[0].all, true)
+        compare(a.answers.length, 0)
+        tryCompare(win, "conflictModel", a)
+        verify(conflictDialog.visible)
+        compare(conflictDialog.clash.name, "A delayed Paste")
+        compare(conflictDialog.applyAll, false, "applyAll leaked from B into A")
+        conflictDialog.pick("skip")
+        compare(a.answers[0].all, false)
+        compare(a.remaining, 1)
+    }
+
+    function test_p2_cancel_advances_only_after_full_dialog_close() {
+        const b = owner("B")
+        const a = owner("A")
+        win.transferStarted(b, "?conflict", "send")
+        win.pasteFinished(a, "?conflict", false)
+        compare(win.conflictModel, b)
+        conflictDialog.cancel()
+        compare(b.cancels, 1)
+        compare(a.cancels, 0)
+        // cancelled() runs before close(). Queue drainage inside cancelled()
+        // would show A and then close it in cancel()'s remaining statements.
+        verify(!conflictDialog.visible, "new dialog opened before cancel() finished closing")
+        tryCompare(win, "conflictModel", a)
+        verify(conflictDialog.visible, "cancel() closed the next owner's dialog")
+        compare(conflictDialog.clash.name, "A")
+        conflictDialog.cancel()
+        compare(a.cancels, 1)
+    }
+
+    function test_p2_cancelled_and_vanished_queued_owners_are_skipped() {
+        const b = owner("active B")
+        const cancelled = owner("cancelled")
+        const vanished = owner("vanished")
+        const c = owner("C")
+        win.transferStarted(b, "?conflict", "drop")
+        win.pasteFinished(cancelled, "?conflict", false)
+        win.pasteFinished(vanished, "?conflict", false)
+        win.pasteFinished(c, "?conflict", false)
+        compare(win.conflictModel, b)
+        cancelled.conflict_cancel()
+        win.liveModels = win.liveModels.filter(m => m !== vanished)
+        vanished.destroy()
+        conflictDialog.cancel()
+        tryCompare(win, "conflictModel", c)
+        verify(conflictDialog.visible)
+        compare(cancelled.answers.length, 0)
+        compare(c.answers.length, 0)
+    }
+
+    function test_p2_vanished_or_cancelled_active_owner_cannot_be_answered() {
+        const b = owner("B")
+        win.transferStarted(b, "?conflict", "drop")
+        win.liveModels = []
+        conflictDialog.pick("replace")
+        compare(b.answers.length, 0, "vanished owner was answered")
+        verify(!conflictDialog.visible)
+        const a = owner("A")
+        win.transferStarted(a, "?conflict", "paste")
+        a.conflict_cancel()
+        conflictDialog.pick("replace")
+        compare(a.answers.length, 0, "cancelled owner was answered")
+        verify(!conflictDialog.visible)
+    }
+
+    function test_p2_each_new_dialog_resets_apply_all() {
+        conflictDialog.applyAll = true
+        conflictDialog.show({ name: "new transfer", canReplace: true })
+        compare(conflictDialog.applyAll, false, "new transfer retained an old applyAll answer")
+    }
+
+    function test_p2_tab_removal_closes_its_active_conflict_route() {
+        const b = owner("B")
+        const a = owner("A")
+        win.transferStarted(b, "?conflict", "drop")
+        win.liveModels = [a]
+        win.handleObjectRemoved(0, b)
+        verify(!conflictDialog.visible, "tab removal left a vanished owner's dialog open")
+        compare(win.conflictModel, null)
+        compare(b.answers.length, 0)
+        win.transferStarted(a, "?conflict", "paste")
+        compare(win.conflictModel, a)
+        verify(conflictDialog.visible)
+    }
+
+    function test_p2_repeated_notifications_do_not_duplicate_a_queued_owner() {
+        const b = owner("B")
+        const a = owner("A")
+        win.transferStarted(b, "?conflict", "drop")
+        win.pasteFinished(a, "?conflict", false)
+        win.pasteFinished(a, "?conflict", false)
+        compare(win.conflictModel, b)
+        conflictDialog.pick("skip")
+        tryCompare(win, "conflictModel", a)
+        conflictDialog.pick("skip")
+        tryCompare(win, "conflictModel", null)
+        compare(win.conflictQueue.length, 0)
+        compare(a.answers.length, 1)
+    }

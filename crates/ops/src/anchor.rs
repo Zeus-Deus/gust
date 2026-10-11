@@ -76,49 +76,49 @@ impl DirHandle {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// One-shot kernel-support injection; filesystem effects stay real.
+    pub(crate) static UNSUPPORTED_ERRNO: std::cell::Cell<Option<rustix::io::Errno>> =
+        const { std::cell::Cell::new(None) };
+}
+
 /// Rename that can never replace what is already at the destination.
 ///
 /// `renameat2(RENAME_NOREPLACE)` makes "is the name free?" and "take it" one
 /// atomic step, so a file that appears between a check and the rename is
-/// refused with `AlreadyExists` instead of silently destroyed. Filesystems
-/// that do not implement the flag (some FUSE and NFS) fall back to
-/// `link`+`unlink` for non-directories, which is equally atomic; only a
-/// directory on such a filesystem uses check-then-rename, the best the
-/// kernel offers there.
+/// refused with `AlreadyExists` instead of silently destroyed. A filesystem
+/// or kernel without the primitive is refused, for every source type. Neither
+/// check-then-rename nor link-then-unlink is a safe atomic-move substitute.
+/// This guards destination occupancy, not concurrent source identity changes.
 pub fn rename_noreplace(
     from_dir: &DirHandle,
     from: &OsStr,
     to_dir: &DirHandle,
     to: &OsStr,
 ) -> io::Result<()> {
-    use rustix::fs::{AtFlags, RenameFlags};
+    use rustix::fs::RenameFlags;
     use rustix::io::Errno;
-    match rustix::fs::renameat_with(
-        from_dir.as_fd(),
-        from,
-        to_dir.as_fd(),
-        to,
-        RenameFlags::NOREPLACE,
-    ) {
+    #[cfg(test)]
+    let unsupported = UNSUPPORTED_ERRNO.with(|e| e.take());
+    #[cfg(not(test))]
+    let unsupported: Option<Errno> = None;
+    let result = match unsupported {
+        Some(e) => Err(e),
+        None => rustix::fs::renameat_with(
+            from_dir.as_fd(),
+            from,
+            to_dir.as_fd(),
+            to,
+            RenameFlags::NOREPLACE,
+        ),
+    };
+    match result {
         Ok(()) => Ok(()),
-        Err(Errno::INVAL) | Err(Errno::NOSYS) | Err(Errno::OPNOTSUPP) => {
-            let st = from_dir.stat_child(from)?;
-            let is_dir = (st.st_mode & 0o170000) == 0o040000;
-            if !is_dir {
-                rustix::fs::linkat(from_dir.as_fd(), from, to_dir.as_fd(), to, AtFlags::empty())?;
-                rustix::fs::unlinkat(from_dir.as_fd(), from, AtFlags::empty())?;
-                return Ok(());
-            }
-            if to_dir.stat_child(to).is_ok() {
-                return Err(io::Error::from(io::ErrorKind::AlreadyExists));
-            }
-            Ok(rustix::fs::renameat(
-                from_dir.as_fd(),
-                from,
-                to_dir.as_fd(),
-                to,
-            )?)
-        }
+        Err(Errno::INVAL) | Err(Errno::NOSYS) | Err(Errno::OPNOTSUPP) => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "This location cannot publish without replacing another item. Use a destination with atomic no-replace rename support; this item was not moved.",
+        )),
         Err(e) => Err(e.into()),
     }
 }

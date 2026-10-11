@@ -227,7 +227,8 @@ goto "$FIXTURE/Documents" || bad "could not open Documents in the new tab"
 palette_run "View: Grid"; sleep 2.5   # the tab list is saved 0.6 s after a change
 expect "two tabs open" "d['tabCount']" "2"
 expect "with two tabs the hint strip is still inside the window" "d['hintsOverflow'] <= 0" "True"
-stop_gust; start_gust "$FIXTURE"
+# Default launch has no folder argument; an explicit folder overrides restore.
+stop_gust; start_gust
 wait_for "d['tabCount']" "2" 20 >/dev/null
 expect "both tabs came back" "d['tabCount']" "2"
 expect "the second tab was the one on screen" "d['activeTab']" "1"

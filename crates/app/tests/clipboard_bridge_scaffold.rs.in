@@ -1,0 +1,256 @@
+//! Focused bridge scaffold: the runner inserts exact production methods below.
+//! Only Qt transport, desktop I/O, listing and job execution are test seams.
+#![allow(dead_code, unused_mut)]
+use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::sync::{mpsc, Arc, Mutex};
+use std::time::Duration;
+
+#[path = "clipboard.rs"]
+mod clipboard;
+type QString = String;
+type Reply = Box<dyn FnOnce(Pin<&mut Model>) + Send>;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ClipMode { Copy, Cut }
+#[derive(Clone, PartialEq, Eq)]
+struct LocationKey(PathBuf);
+impl LocationKey { fn as_path(&self) -> Option<&Path> { Some(&self.0) } }
+#[derive(Clone)]
+struct Thread(Arc<Mutex<mpsc::Sender<Reply>>>);
+impl Thread {
+    fn queue(&self, reply: impl FnOnce(Pin<&mut Model>) + Send + 'static) -> Result<(), ()> {
+        self.0.lock().unwrap().send(Box::new(reply)).map_err(|_| ())
+    }
+}
+struct Model {
+    key: LocationKey,
+    clipboard: Option<(Vec<PathBuf>, ClipMode)>,
+    clipboard_read: clipboard::ReadGate,
+    clip_set: std::collections::HashSet<PathBuf>,
+    job: Option<gust_ops::jobs::JobHandle>,
+    pending: Option<PendingTransfer>,
+    job_rate: gust_ops::rate::RateMeter,
+    job_clock: Option<std::time::Instant>,
+    last_job: Option<()>,
+    last_trashed_batch: Vec<()>,
+    last_extra: UndoExtra,
+    ready: Vec<(QString, bool)>,
+    transport: Thread,
+    replies: mpsc::Receiver<Reply>,
+}
+struct PendingTransfer {
+    req: gust_ops::jobs::Request,
+    clashes: Vec<gust_ops::jobs::Clash>,
+    answers: std::collections::HashMap<PathBuf, gust_ops::journal::ConflictPolicy>,
+    consumes_cut: bool,
+}
+enum UndoExtra { None }
+struct ModelGuard<'a>(&'a mut Model);
+impl std::ops::Deref for ModelGuard<'_> {
+    type Target = Model;
+    fn deref(&self) -> &Model { self.0 }
+}
+impl std::ops::DerefMut for ModelGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Model { self.0 }
+}
+trait RustMut<'a> { fn rust_mut(self) -> ModelGuard<'a>; }
+impl<'a> RustMut<'a> for Pin<&'a mut Model> {
+    fn rust_mut(self) -> ModelGuard<'a> { ModelGuard(self.get_mut()) }
+}
+const NEEDS_ANSWERS: &str = "?conflict";
+fn clip_holder() {}
+fn clip_label(_: &[PathBuf]) -> String { "fixture".into() }
+fn fixture() -> PathBuf { PathBuf::from(std::env::var_os("GUST_TEST_SOURCE").unwrap()) }
+
+// External-I/O seams do not implement clipboard admission or cancellation.
+mod gust_core {
+    pub mod stall { pub fn needs_probe(_: &std::path::Path) -> bool { false } }
+    pub mod clipboard {
+        #[derive(Clone, Copy)]
+        pub enum ClipVerb { Copy, Cut }
+        pub struct Clip { pub verb: ClipVerb, pub paths: Vec<std::path::PathBuf> }
+        pub fn read() -> Option<Clip> {
+            Some(Clip { verb: ClipVerb::Cut, paths: vec![crate::fixture()] })
+        }
+        pub fn offer_with(_: ClipVerb, _: &[std::path::PathBuf], _: &()) -> Result<(), String> { Ok(()) }
+        pub fn offer_text(_: &str) -> Result<(), String> { Ok(()) }
+        pub fn paths_as_text(_: &[std::path::PathBuf]) -> String { "/synthetic/path".into() }
+        pub enum ClipImage { None, Refused(String), Image { bytes: Vec<u8>, ext: &'static str } }
+        pub fn read_image(_: usize) -> ClipImage { ClipImage::None }
+    }
+    pub mod properties {
+        pub fn full_time(_: u64, _: i32) -> String { "synthetic-time".into() }
+        pub fn local_offset_seconds() -> i32 { 0 }
+    }
+}
+mod gust_ops {
+    pub mod journal {
+        #[derive(Clone, Copy)]
+        pub enum ConflictPolicy { Ask }
+        pub fn now_unix() -> u64 { 1 }
+    }
+    pub mod jobs {
+        use std::path::PathBuf;
+        pub enum Request {
+            Copy { sources: Vec<PathBuf>, dest_dir: PathBuf },
+            Move { sources: Vec<PathBuf>, dest_dir: PathBuf },
+            CopyAs { source: PathBuf, dest_path: PathBuf },
+        }
+        pub struct Clash;
+        pub struct JobHandle(pub Request);
+        pub fn conflicts(_: &Request) -> Vec<Clash> { vec![] }
+        pub fn start_resolved(_: String, req: Request, _: std::collections::HashMap<PathBuf, super::journal::ConflictPolicy>, _: (), _: Option<()>) -> JobHandle { JobHandle(req) }
+        pub fn start_journalled(_: String, req: Request, _: super::journal::ConflictPolicy, _: ()) -> JobHandle { JobHandle(req) }
+    }
+    pub mod trash { pub struct TrashDir; impl TrashDir { pub fn home() -> Option<()> { None } } }
+    pub mod rate { pub struct RateMeter; impl RateMeter { pub fn new() -> Self { Self } } }
+    pub mod anchor {
+        pub fn resolve_parent(_: &std::path::Path) -> Result<((), ()), ()> { Ok(((), ())) }
+    }
+    pub mod recursive {
+        pub fn unique_copy_name(_: &(), _: &std::ffi::OsStr) -> Result<std::ffi::OsString, ()> { Ok("fixture (copy)".into()) }
+    }
+    pub mod create {
+        pub const PASTE_MAX_BYTES: usize = 1;
+        pub struct Created;
+        pub fn pasted_image_name(_: &std::path::Path, _: &str, _: &str) -> String { "image.png".into() }
+        pub fn create_from_bytes(_: &std::path::Path, _: &str, _: &[u8]) -> Result<Created, String> { Ok(Created) }
+    }
+}
+impl Model {
+    fn new(gate: clipboard::ReadGate) -> Self {
+        let (tx, rx) = mpsc::channel();
+        Self {
+            key: LocationKey(fixture().parent().unwrap().join("destination")),
+            clipboard: Some((vec![fixture()], ClipMode::Cut)), clipboard_read: gate,
+            clip_set: Default::default(), job: None, pending: None,
+            job_rate: gust_ops::rate::RateMeter::new(), job_clock: None,
+            last_job: None, last_trashed_batch: vec![], last_extra: UndoExtra::None,
+            ready: vec![], transport: Thread(Arc::new(Mutex::new(tx))), replies: rx,
+        }
+    }
+    fn pin(&mut self) -> Pin<&mut Self> { Pin::new(self) }
+    fn qt_thread_handle(&self) -> Option<Thread> { Some(self.transport.clone()) }
+    fn paste_ready(mut self: Pin<&mut Self>, result: QString, image: bool) { self.as_mut().get_mut().ready.push((result, image)); }
+    fn refresh_clip_marks(self: Pin<&mut Self>) {}
+    fn set_cursor_if_no_selection(self: Pin<&mut Self>, _: i32) {}
+    fn target_paths(&self) -> Vec<PathBuf> { vec![fixture()] }
+    fn path_of_row(&self, _: i32) -> Option<PathBuf> { Some(fixture()) }
+    fn production_journal() {}
+    fn stalled_among(_: &gust_ops::jobs::Request) -> Option<String> { None }
+    fn queued(&self) -> Reply { self.replies.recv_timeout(Duration::from_secs(5)).unwrap() }
+    fn paste_image_done(self: Pin<&mut Self>, _: Result<gust_ops::create::Created, String>) {}
+
+    // PRODUCTION_METHODS
+}
+
+// The runner supplies one isolated shared generation per test on GREEN.
+// Legacy RED uses original model-local gates, which have no global state.
+// TEST_GATE_FACTORY
+
+#[cfg(test)]
+mod integration {
+    use super::*;
+    fn cached_cut(a: &mut Model) -> Reply {
+        assert_eq!(a.pin().paste_into(None), "?clipboard");
+        a.queued()
+    }
+    fn mutation_retires_other_models_cut(mutate: impl FnOnce(&mut Model)) {
+        let (a_gate, b_gate) = gate_pair();
+        let mut a = Model::new(a_gate);
+        let mut b = Model::new(b_gate);
+        let reply = cached_cut(&mut a);
+        mutate(&mut b);
+        reply(a.pin());
+        assert!(a.job.is_none(), "old Cut launched a transfer after another model changed the clipboard");
+        assert!(!a.clipboard_busy(), "epoch mismatch stranded the originating read");
+        assert!(a.ready.is_empty(), "retired reply emitted a hint/image/conflict result");
+    }
+    #[test]
+    fn p1_other_model_copy_retires_queued_cut() {
+        mutation_retires_other_models_cut(|b| { b.pin().clip_copy(0); });
+    }
+    #[test]
+    fn p1_other_model_cut_retires_queued_cut() {
+        mutation_retires_other_models_cut(|b| { b.pin().clip_cut(0); });
+    }
+    #[test]
+    fn p1_other_model_copy_path_retires_queued_cut() {
+        mutation_retires_other_models_cut(|b| { b.pin().copy_path(0); });
+    }
+    #[test]
+    fn p1_other_model_clear_retires_queued_cut() {
+        mutation_retires_other_models_cut(|b| { b.pin().clip_clear(); });
+    }
+    #[test]
+    fn p1_unmodified_queued_cut_still_moves() {
+        let (a_gate, _) = gate_pair();
+        let mut a = Model::new(a_gate);
+        let reply = cached_cut(&mut a);
+        reply(a.pin());
+        assert!(matches!(a.job.as_ref().map(|j| &j.0), Some(gust_ops::jobs::Request::Move { .. })));
+        assert_eq!(a.ready, vec![(String::new(), true)]);
+    }
+    #[test]
+    fn p1_old_callback_cannot_consume_newer_read_or_emit_hints() {
+        let (a_gate, b_gate) = gate_pair();
+        let mut a = Model::new(a_gate);
+        let mut b = Model::new(b_gate);
+        let old = cached_cut(&mut a);
+        b.pin().clip_copy(0);
+        a.pin().cancel_clip_paste();
+        let new = cached_cut(&mut a);
+        old(a.pin());
+        assert!(a.clipboard_busy());
+        assert!(a.ready.is_empty());
+        new(a.pin());
+        assert!(a.job.is_some());
+        assert_eq!(a.ready.len(), 1);
+    }
+
+    #[test]
+    fn p3_duplicate_retires_read_even_after_job_is_polled_away() {
+        let (a_gate, _) = gate_pair();
+        let mut a = Model::new(a_gate);
+        let reply = cached_cut(&mut a);
+        assert_eq!(a.pin().duplicate_row(0), "");
+        assert!(matches!(a.job.as_ref().map(|j| &j.0), Some(gust_ops::jobs::Request::CopyAs { .. })));
+        // Job-execution/polling seam: reproduce a quick completed job whose
+        // handle was removed before the original clipboard callback runs.
+        a.job = None;
+        reply(a.pin());
+        assert!(a.job.is_none(), "old Paste launched after Duplicate completed");
+        assert!(a.ready.is_empty(), "old reply replaced Duplicate's UI hints");
+        assert!(!a.clipboard_busy());
+    }
+
+    #[test]
+    fn p3_final_conflict_launch_retires_an_intervening_read() {
+        let (a_gate, _) = gate_pair();
+        let mut a = Model::new(a_gate);
+        let reply = cached_cut(&mut a);
+        let p = PendingTransfer {
+            req: gust_ops::jobs::Request::Copy { sources: vec![fixture()], dest_dir: a.key.0.clone() },
+            clashes: vec![], answers: Default::default(), consumes_cut: false,
+        };
+        assert_eq!(a.pin().launch(p), "");
+        a.job = None;
+        reply(a.pin());
+        assert!(a.job.is_none(), "old Paste launched after a conflict-resolved job completed");
+        assert!(a.ready.is_empty());
+        assert!(!a.clipboard_busy());
+    }
+
+    #[test]
+    fn p3_direct_image_paste_retires_an_intervening_file_read() {
+        let (a_gate, _) = gate_pair();
+        let mut a = Model::new(a_gate);
+        let reply = cached_cut(&mut a);
+        assert_eq!(a.pin().paste_image(), "");
+        reply(a.pin());
+        assert!(a.job.is_none(), "old Cut launched after direct image Paste");
+        assert!(a.ready.is_empty());
+        assert!(!a.clipboard_busy());
+    }
+}

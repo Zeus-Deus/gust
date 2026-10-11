@@ -246,10 +246,11 @@ pub fn start_resolved(
 /// Start a job with every option.
 ///
 /// `trash` is where `Replace` puts the item being replaced, so the user can
-/// get it back (Undo restores it). Without a trash, `Replace` keeps its old
-/// engine meaning; production always passes one, and where the trash cannot
-/// take the old item (another filesystem) the replace is refused rather
-/// than turned into a silent permanent delete.
+/// get it back (Undo restores it). Without a trash, existing leaf items are
+/// not replaced: final publication still requires a free name. Production
+/// always passes one, and where the trash cannot take the old item (another
+/// filesystem) the replace is refused rather than turned into a silent
+/// permanent delete. Preservation itself is not an atomic identity check.
 pub fn start_with(
     id: impl Into<String>,
     req: Request,
@@ -735,6 +736,10 @@ fn run(
         }
     });
 }
+
+#[cfg(test)]
+#[path = "job_publication_tests.rs"]
+mod publication_tests;
 
 #[cfg(test)]
 mod tests {

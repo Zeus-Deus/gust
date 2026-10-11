@@ -180,6 +180,11 @@ def main():
         elif cmd in ("drag", "rdrag"):
             x1, y1, x2, y2 = (int(v) for v in args[1:5])
             btn = BTN_RIGHT if cmd == "rdrag" else BTN_LEFT
+            # A new window under an unchanged absolute position may never get
+            # pointer entry. Establish real motion before pressing, as click
+            # already does; otherwise a whole-suite first drag can be a no-op.
+            move_to(fd, x1 - 2, y1 - 2, w, h)
+            time.sleep(0.10)
             move_to(fd, x1, y1, w, h)
             time.sleep(0.15)
             button(fd, btn, True)

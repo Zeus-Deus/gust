@@ -25,6 +25,7 @@ Window {
         // the window's bindings first ran, so `dirModel` was null and every
         // view came up empty.
         delegate: DirModel {
+            id: tabModel
             required property string startPath
             // A background tab has not listed anything yet. Opening five
             // tabs must not start five listings (DESIGN §6.6).
@@ -39,10 +40,17 @@ Window {
                 return (cut >= 0 && cut < p.length - 1) ? p.substring(cut + 1) : p
             }
             onTabLabelChanged: win.refreshTabLabels()
-            onLocationChanged: sessionSaveTimer.restart()
+            onLocationChanged: {
+                if (clipboard_busy()) {
+                    cancel_clip_paste()
+                    hints.message = qsTr("Paste cancelled")
+                }
+                sessionSaveTimer.restart()
+            }
             // Mounts and connections finish on a worker; every tab reports
             // here, so a result still lands if the user switched tabs.
             onPlace_done: (op, name, message) => win.placeDone(op, name, message)
+            onPaste_ready: (message, allowImage) => win.pasteFinished(tabModel, message, allowImage)
             onDevices_changed: {
                 win.refreshDevices()
                 win.qaDump("devices-changed")
@@ -50,7 +58,10 @@ Window {
             Component.onCompleted: hold_live_updates(win.liveHold)
         }
         onObjectAdded: win.refreshActiveModel()
-        onObjectRemoved: win.refreshActiveModel()
+        onObjectRemoved: (index, object) => {
+            win.forgetConflictOwner(object)
+            win.refreshActiveModel()
+        }
     }
 
 
@@ -908,6 +919,10 @@ Window {
         tabList.insert(at, { startPath: here, label: "…",
                              pane: win.activePane })
         tabViews.splice(at, 0, "rows")
+        // Other panes still show their original tab after the shared list shifts.
+        win.paneTab = win.paneTab.map(function (t) {
+            return t >= at ? t + 1 : t
+        })
         activateTab(at)
         win.refreshPaneTabCount()
         win.qaDump("tab-new")
@@ -979,6 +994,9 @@ Window {
             else it.reload()
         }
         win.viewMode = tabViews[i] || "rows"
+        // activeTab's synchronous handler ran before paneTab was updated.
+        // Publish the final pane owner even when the tab/view did not change.
+        win.refreshPaneTabCount()
         win.focusList()
         win.qaDump("tab-activate")
     }
@@ -1358,6 +1376,8 @@ Window {
         else if (a === "drop-link") {
             const m = win.dropMenuModel
             if (m) {
+                win.alertText = ""
+                hints.message = ""
                 const e = m.drop_link_on_row(win.dropMenuRow)
                 if (e !== "") win.alertText = e
             }
@@ -1587,8 +1607,12 @@ Window {
         if (r === "nothing to paste") { win.pasteImage(); return }
         win.transferStarted(dirModel, r, "paste")
     }
-    function pasteImage() {
-        const e = dirModel.paste_image()
+    function pasteFinished(model, message, allowImage) {
+        if (message === "nothing to paste" && allowImage) { win.pasteImage(model); return }
+        win.transferStarted(model, message, "paste")
+    }
+    function pasteImage(model) {
+        const e = (model || dirModel).paste_image()
         if (e !== "") { win.alertText = e; return }
         hints.message = qsTr("Pasting the image…")
         win.qaDump("paste-image-started")
@@ -1662,9 +1686,16 @@ Window {
     /// taken: ask first) or a refusal. One handler, so paste, drop and
     /// send-to-pane cannot answer the same situation three different ways.
     function transferStarted(model, err, tag) {
+        // A new mouse action must not keep displaying an older refusal.
+        // Keyboard actions already clear it, but a drop need not send a key.
+        win.alertText = ""
+        if (err === "?clipboard") {
+            hints.message = qsTr("Reading the clipboard…")
+            win.qaDump("clipboard-reading")
+            return
+        }
         if (err === "?conflict") {
-            win.conflictModel = model
-            win.showNextConflict()
+            win.queueConflict(model)
             return
         }
         if (err !== "") { win.alertText = err; win.qaDump(tag + "-refused"); return }
@@ -1675,10 +1706,48 @@ Window {
 
     /// The model whose transfer is waiting on the conflict dialog.
     property var conflictModel: null
+    property var conflictQueue: []
+
+    function conflictOwnerLive(model) {
+        if (!model) return false
+        for (let i = 0; i < tabList.count; i++) {
+            if (tabs.objectAt(i) === model) return true
+        }
+        return false
+    }
+
+    function queueConflict(model) {
+        if (!win.conflictOwnerLive(model) || win.conflictModel === model
+            || win.conflictQueue.indexOf(model) >= 0) return
+        win.conflictQueue = win.conflictQueue.concat([model])
+        win.drainConflicts()
+    }
+
+    function drainConflicts() {
+        // cancelled() precedes close(): never present a queued owner while
+        // the previous dialog is still visible or owns its answer route.
+        if (win.conflictModel || conflictDialog.visible) return
+        while (win.conflictQueue.length > 0) {
+            const m = win.conflictQueue[0]
+            win.conflictQueue = win.conflictQueue.slice(1)
+            if (!win.conflictOwnerLive(m) || m.conflict_json() === "") continue
+            win.conflictModel = m
+            win.showNextConflict()
+            return
+        }
+    }
+
+    function forgetConflictOwner(model) {
+        win.conflictQueue = win.conflictQueue.filter(m => m !== model)
+        if (win.conflictModel === model) {
+            win.conflictModel = null
+            conflictDialog.close()
+        }
+    }
 
     function showNextConflict() {
-        const raw = win.conflictModel ? win.conflictModel.conflict_json() : ""
-        if (raw === "") { conflictDialog.close(); return }
+        const raw = win.conflictOwnerLive(win.conflictModel) ? win.conflictModel.conflict_json() : ""
+        if (raw === "") { win.conflictModel = null; conflictDialog.close(); return }
         conflictDialog.show(JSON.parse(raw))
         win.qaDump("conflict")
     }
@@ -2188,9 +2257,9 @@ Window {
                     onSelectionTouched: { win.focusPane(0); win.focusList(); win.qaDump("select") }
                     onDragBegan: { win.focusPane(0); win.qaDump("drag-begin") }
                     onDropPreview: (t) => { hints.message = t }
-                    onDropFailed: (m) => { win.transferStarted(win.paneAModel, m, "drop") }
+                    onDropFailed: (owner, message) => { win.transferStarted(owner, message, "drop") }
                     onDropMenu: (r, x, y) => { win.focusPane(0); win.openDropMenu(win.paneAModel, r, x, y) }
-                    onDropDone: { hints.message = ""; jobTimer.start(); win.qaDump("drop") }
+                    onDropDone: (owner) => { win.transferStarted(owner, "", "drop") }
                     onContextRequested: (r, x, y) => { win.focusPane(0); win.openContextMenu(r, x, y) }
                 }
 
@@ -2224,9 +2293,9 @@ Window {
                         onSelectionTouched: { win.focusPane(1); win.focusList(); win.qaDump("select") }
                         onDragBegan: { win.focusPane(1); win.qaDump("drag-begin") }
                         onDropPreview: (t) => { hints.message = t }
-                        onDropFailed: (m) => { win.transferStarted(win.paneBModel, m, "drop") }
+                        onDropFailed: (owner, message) => { win.transferStarted(owner, message, "drop") }
                         onDropMenu: (r, x, y) => { win.focusPane(1); win.openDropMenu(win.paneBModel, r, x, y) }
-                        onDropDone: { hints.message = ""; jobTimer.start(); win.qaDump("drop") }
+                        onDropDone: (owner) => { win.transferStarted(owner, "", "drop") }
                         onContextRequested: (r, x, y) => { win.focusPane(1); win.openContextMenu(r, x, y) }
                     }
                 }
@@ -2578,6 +2647,12 @@ Window {
                     win.qaDump("job-cancel")
                     event.accepted = true; return
                 }
+                if (dirModel.clipboard_busy()) {
+                    dirModel.cancel_clip_paste()
+                    hints.message = qsTr("Paste cancelled")
+                    win.qaDump("clipboard-cancelled")
+                    event.accepted = true; return
+                }
                 if (chooserBar.active && dirModel.sel_count() === 0 && dirModel.filter === "") {
                     // Escape in an Open/Save dialog is Cancel, as everywhere.
                     Qt.quit()
@@ -2665,6 +2740,7 @@ Window {
                                      : label === "Undo: put owners back" ? qsTr("Owners put back")
                                      : label === "Undo: remove the pasted image" ? qsTr("Removed the pasted image")
                                      : label === "Undo: put permissions back" ? qsTr("Permissions put back")
+                                     : label === "Undo: restore the original name" ? qsTr("Restored the original name")
                                      : label.startsWith("Undo: remove") ? "Copies removed"
                                      : label.startsWith("Undo: move") ? "Moved back"
                                      : "Restored from Trash"
@@ -2965,7 +3041,11 @@ Window {
         objectName: "conflictDialog"
         onAnswered: (choice, all) => {
             const m = win.conflictModel
-            if (!m) { conflictDialog.close(); return }
+            if (!win.conflictOwnerLive(m) || m.conflict_json() === "") {
+                win.conflictModel = null
+                conflictDialog.close()
+                return
+            }
             const err = m.conflict_answer(choice, all)
             if (err === "?conflict") { win.showNextConflict(); return }
             win.conflictModel = null
@@ -2976,12 +3056,17 @@ Window {
             win.qaDump("conflict-resolved")
         }
         onCancelled: {
-            if (win.conflictModel) win.conflictModel.conflict_cancel()
+            if (win.conflictOwnerLive(win.conflictModel)) win.conflictModel.conflict_cancel()
             win.conflictModel = null
             hints.message = qsTr("Cancelled — nothing was changed")
             win.qaDump("conflict-cancelled")
         }
-        onClosed: win.focusList()
+        onClosed: {
+            win.conflictModel = null
+            win.focusList()
+            // Run after close()/cancel() and their current handlers unwind.
+            Qt.callLater(() => win.drainConflicts())
+        }
     }
 
     ConfirmDialog {
@@ -3161,6 +3246,26 @@ Window {
             })(),
             paneCount: win.paneCount,
             activePane: win.activePane,
+            activePaneModelMatches: (function () {
+                const it = win.activePaneItem()
+                return !!it && it.model === win.dirModel
+            })(),
+            presentedPaneLocations: (function () {
+                const out = []
+                for (let p = 0; p < win.paneCount; p++) {
+                    const it = p === 0 ? paneA : paneBLoader.item
+                    out.push(it && it.model ? it.model.location : "")
+                }
+                return out
+            })(),
+            paneModelBindingsMatch: (function () {
+                const out = []
+                for (let p = 0; p < win.paneCount; p++) {
+                    const it = p === 0 ? paneA : paneBLoader.item
+                    out.push(!!it && it.model === win.paneModel(p))
+                }
+                return out
+            })(),
             paneLocations: (function () {
                 let out = []
                 for (let p = 0; p < win.paneCount; p++) {
@@ -3247,6 +3352,7 @@ Window {
             hintKeys: hints.shownKeys,
             alertText: win.alertText,
             jobRunning: dirModel.job_running(),
+            clipboardReading: dirModel.clipboard_busy(),
             jobsRunningAllTabs: win.runningJobModels().length,
             jobState: win.job ? win.job.state : "",
             jobStopping: win.job ? !!win.job.stopping : false,

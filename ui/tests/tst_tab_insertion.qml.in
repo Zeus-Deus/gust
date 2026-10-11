@@ -1,0 +1,130 @@
+import QtQml
+import QtQuick
+import QtTest
+
+TestCase {
+    name: "TabInsertionOwnership"
+    Item {
+        id: win
+        property bool ready: false
+        property int activeTab: 0
+        property int activePane: 0
+        property int paneCount: 2
+        property var paneTab: [0, 1]
+        property var tabViews: ["rows", "grid"]
+        property var dirModel: null
+        property var paneAModel: null
+        property var paneBModel: null
+        property string paneAView: "rows"
+        property string paneBView: "grid"
+        property string viewMode: "rows"
+        property int activePaneTabCount: 1
+        property var job: null
+        function focusList() {}
+        function qaDump(tag) {}
+        onActiveTabChanged: {
+            if (ready) {
+@ACTIVE_TAB_HANDLER@
+            }
+        }
+@FUNCTIONS@
+    }
+    ListModel { id: tabList }
+    // Actual toolkit delegate insertion/index remapping, not a hand-built
+    // objects array. Directory I/O and CXX model transport remain seams.
+    Instantiator {
+        id: tabs
+        model: tabList
+        active: true
+        asynchronous: false
+        delegate: QtObject {
+            required property string startPath
+            property bool everActivated: false
+            property string location: startPath
+            readonly property string tabLabel: location.substring(location.lastIndexOf("/") + 1)
+            property int navigationCount: 0
+            function navigate(path) { navigationCount++; location = path }
+            function navigate_token(token) { throw new Error("unexpected token navigation") }
+            function reload() { throw new Error("unexpected reload") }
+            function job_running() { return false }
+        }
+        onObjectAdded: { if (win.ready) win.refreshActiveModel() }
+        onObjectRemoved: { if (win.ready) win.refreshActiveModel() }
+    }
+    QtObject { id: sessionSaveTimer; function restart() {} }
+    QtObject { id: jobTimer; function start() {} }
+
+    function init() {
+        win.ready = false
+        tabList.clear()
+        tabList.append({ startPath: "/fixture/Left", label: "Left", pane: 0 })
+        tabList.append({ startPath: "/fixture/Right", label: "Right", pane: 1 })
+        tryCompare(tabs, "count", 2)
+        verify(tabs.objectAt(0) !== null && tabs.objectAt(1) !== null, "actual Qt delegates required")
+        tabs.objectAt(0).everActivated = true
+        tabs.objectAt(1).everActivated = true
+        win.activePane = 0
+        win.activeTab = 0
+        win.paneCount = 2
+        win.paneTab = [0, 1]
+        win.tabViews = ["rows", "grid"]
+        win.viewMode = "rows"
+        win.refreshActiveModel()
+        win.ready = true
+    }
+    function test_control_distinct_initial_panes() {
+        compare(win.paneAModel.location, "/fixture/Left")
+        compare(win.paneBModel.location, "/fixture/Right")
+        compare(win.paneAView, "rows")
+        compare(win.paneBView, "grid")
+        compare(win.paneTabs(0).toString(), "0")
+        compare(win.paneTabs(1).toString(), "1")
+    }
+    function test_control_real_qt_delegate_follows_inserted_index() {
+        const right = tabs.objectAt(1)
+        tabList.insert(1, { startPath: "/fixture/Other", label: "Other", pane: 0 })
+        tryCompare(tabs, "count", 3)
+        compare(tabs.objectAt(2), right, "toolkit must retain the displaced original Right delegate")
+        compare(tabs.objectAt(2).location, "/fixture/Right")
+        compare(tabList.get(2).pane, 1)
+    }
+    function test_control_insertion_after_other_pane_keeps_its_index() {
+        const left = win.paneAModel
+        win.activateTab(1)
+        win.newTab("")
+        compare(tabList.count, 3)
+        compare(win.activePane, 1)
+        compare(win.activeTab, 2)
+        compare(win.paneTab[0], 0)
+        compare(win.paneAModel, left)
+        compare(win.paneAModel.location, "/fixture/Left")
+        compare(win.paneAView, "rows")
+    }
+    function test_new_tab_preserves_other_pane_owner_data() {
+        return [{tag: "left_inserts_before_right", owner: 0},
+                {tag: "right_inserts_before_left", owner: 1}]
+    }
+    function test_new_tab_preserves_other_pane_owner(data) {
+        if (data.owner === 1) {
+            tabList.setProperty(0, "pane", 1)
+            tabList.setProperty(1, "pane", 0)
+            win.activePane = 1
+            win.paneTab = [1, 0]
+            win.refreshActiveModel()
+        }
+        const other = data.owner === 0 ? 1 : 0
+        const original = win.paneModel(other)
+        win.newTab("")
+        compare(tabList.count, 3)
+        compare(win.activePane, data.owner)
+        compare(win.activeTab, 1)
+        compare(tabList.get(2).pane, other)
+        compare(tabs.objectAt(2), original, "original other-pane tab must remain retained after insertion")
+        compare(win.paneTab[other], 2, "other pane's stored index must follow its original tab")
+        compare(win.paneModel(other), original, "untouched pane must retain its model, not show the new tab")
+        compare(other === 0 ? win.paneAModel : win.paneBModel, original)
+        compare(win.paneModel(other).location, "/fixture/Right")
+        compare(win.paneViewMode(other), "grid", "untouched pane keeps its original tab's view")
+        compare(win.dirModel, data.owner === 0 ? win.paneAModel : win.paneBModel)
+    }
+}

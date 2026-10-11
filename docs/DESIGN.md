@@ -334,6 +334,25 @@ notifying property; derived values (a tab's label) are `readonly property`
 bindings **on the model itself**, never computed in a change handler, because a
 handler can run before the model has published its new value.
 
+Tab activation refreshes the presented pane models after updating the active
+tab, its owning pane, the pane's stored tab index and its remembered view.
+An `activeTab` change handler runs synchronously and may still see the old
+pane index. Its early refresh is not the final projection. Even activating
+the same tab or switching between equal view modes must refresh that
+projection before focus and action handling resume: the pointer's pane model
+and the active model used by window actions must be the same object.
+QA records the presented pane bindings separately from the desired selectors;
+checking only `paneModel()` would hide a stale displayed model.
+
+Opening a tab beside the active one inserts into the shared tab list. Every
+per-pane stored index at or above that insertion point must shift with its
+original tab before the final activation projection. An untouched pane keeps
+the same model, location and remembered view; matching its displayed model
+to an already-wrong selector is not proof of preservation. Regression coverage
+uses actual Qt ListModel/Instantiator insertion and separately named native
+Left/Right folders. This insertion rule does not certify delayed close target
+identity, cancellation acknowledgement or job/model lifetime.
+
 ### 6.6.2 The lint rule
 
 `tests/lint-qml.sh` now refuses a declarative binding written over a function
@@ -373,6 +392,11 @@ introduce a second kind of state.
 
 1. **One pane is active.** Focus follows an explicit action (Tab, a click);
    it never moves because a job finished or a listing settled.
+   Columns cursor clicks report that interaction even when the cursor stays
+   on the same row; taking pane ownership does not change their selection
+   policy. Parent and preview-column clicks claim their pane before navigation,
+   including a parent-row click that deliberately navigates nowhere. Context
+   and background-tab middle-clicks keep their separate existing routes.
 2. **A second pane is opened deliberately** and closed the same way. Closing
    a pane moves its tabs into the surviving pane rather than discarding them
    — a pane is a layout, and closing a layout must not lose a location, still
@@ -388,6 +412,16 @@ introduce a second kind of state.
 5. **The destination is named before the operation runs.** "Copy 3 items to
    Downloads" — never "copy to the other pane", which tells the user nothing
    about where their files went.
+6. **A drop outcome carries its operation-owning model.** An internal drag
+   across panes executes on the source model, even though the destination
+   pane receives the event. Both successful starts and conflict/refusal
+   answers must use that exact model; asking the receiver can lose a pending
+   question or accidentally expose another transfer's question.
+7. **Modifiers survive leaving the view.** Capture Ctrl/Shift's chosen mode
+   on the drag proxy before starting the native drag. Other panes, sidebar
+   destinations and breadcrumbs must use that mode for both preview and
+   execution, not reset it to the unmodified default. Across processes the
+   existing private MIME value carries the same choice.
 
 ### What is deliberately not in this version
 
@@ -984,6 +1018,33 @@ tried as paths and ignored if they do not exist. Nothing is executed and no
 URI scheme other than `file://` is accepted — a `http://` URI on the
 clipboard is not something to paste into a folder.
 
+File Paste reads the desktop on a worker, never while blocking Qt's event
+loop: Qt may itself own and serve a newer text offer. Each file-clipboard
+read has a shared two-second subprocess budget and a 512 KiB payload cap.
+Missing, empty, non-file or failed reads in a Wayland session grant no
+authority to revive a remembered Copy or Cut. Internal-only Paste is allowed
+only when there is no Wayland session; failed sharing in an active session
+must not promise an internal fallback. A new Copy/Cut, clipboard clear,
+navigation, cancellation or another admitted transfer fences out delayed
+clipboard results. Completion is delivered to the originating model, not
+whichever tab happens to be active, and normal Copy/Move/conflict/Undo still
+uses the existing transfer funnel. File Paste and Paste-into-folder keep
+their existing image-fallback distinction.
+
+Within one process, clipboard replacement is a shared generation across
+every tab/model, captured before starting a read and checked again before
+admission. Copy, Cut, Copy path and clearing an offer invalidate older reads,
+even in another model. This generation does not claim to version clipboard
+writers in other processes. Every transfer launch, including Duplicate's
+direct launch, retires its model's pending read; Escape still targets an
+already running job rather than an older read.
+
+A window presents one conflict owner at a time. A delayed completion from
+another model waits its turn rather than replacing that owner's question or
+answer/cancel route. The apply-to-all choice starts unchecked for each new
+transfer. Advancing the queue occurs only after the previous dialog has
+fully closed, and vanished/cancelled owners cannot be answered.
+
 ### Why a helper process
 
 Qt's clipboard is owned by the GUI thread and a Wayland clipboard offer must
@@ -992,9 +1053,10 @@ the offer for as long as it is needed, and is what the rest of the desktop
 uses. Gust shells out to it with the data on **stdin**, never in argv: a
 file list can be long and a file name can contain anything.
 
-If `wl-copy` is missing, the internal clipboard still works within Gust and
-the status line says the system clipboard is unavailable rather than
-pretending the copy went further than it did.
+Without a Wayland session, the internal clipboard works within Gust and the
+status line names that limited scope. In a Wayland session, a sharing failure
+is reported as a failure rather than retaining a cut that could outlive a
+newer desktop offer.
 
 ## 6.20 Dragging a tab
 
@@ -1118,6 +1180,20 @@ Quattro surfaces rather than like Nautilus.
   `set_sort(field)`, which flips direction on the active column. Both are
   remembered per folder (D31).
 
+## 6.23 Personal places
+
+Home and its sidebar destinations come from the process's configured `HOME`,
+not from the folder passed on the command line or a remote mount path. The
+model publishes that fixed root as `home_path`; populating the sidebar reads
+only this property and performs no filesystem work. Navigating, switching
+panes or opening another tab must not redefine a person's Home.
+
+The existing Documents/Downloads/Pictures/Videos/Music defaults remain children
+of that root. Reading customized XDG user directories is separate work; do not
+claim it is implemented. If HOME is absent, do not invent places from the
+current folder. A nested HOME fixture and a real sidebar click are required
+regressions, since a two-component `/tmp/fixture` masks the former path guess.
+
 ## 7. Undo journal
 
 An undo entry records, per affected path: the expected identity
@@ -1130,6 +1206,72 @@ inverse → **preserve the work and ask**. Never recursively delete a current
 tree to satisfy an undo.
 
 Irreversible deletion never displays an Undo affordance.
+
+A single F2 rename has a one-step inverse in its owning model. Record the
+original and renamed byte paths, the renamed object's identity, and the
+parent directory's device/inode. Undo verifies the held parent and target,
+then restores the original name with an atomic no-replace rename and checks
+the identity the kernel actually moved. A replacement in the stat/rename
+window is refused; restoring its previous name also uses no-replace. If new
+work occupies that name, retain both current names and explain the refusal.
+NOREPLACE makes destination occupancy atomic, not source identity validation;
+read-back and non-clobber recovery do not exclude every possible concurrent
+writer after verification. No hidden staging or deletion is used. It never
+replaces a newly occupied name, follows a symlink, or deletes folder contents.
+A refusal keeps the offer available for retry; a no-op rename does not replace
+the previous offer. Filesystems without safe no-replace renames refuse rather
+than falling back to a check-then-overwrite. This in-memory offer is not a
+claim of cross-window or restart-persistent Undo.
+
+## 7.1 Concurrent publication and clipboard admission
+
+The final publication of staged Copy bytes is an atomic no-replace operation
+on the held destination directory. An earlier absence check is not consent
+to overwrite an object that appears later. Explicit Replace authorizes the
+specific existing object preserved by the transaction, not another writer's
+subsequent replacement; after preservation, final publication is still
+no-replace. Ask, Skip and Keep Both must not become unconditional rename at
+commit. If the filesystem cannot provide a safe atomic primitive, refuse
+with an actionable result instead of check-then-overwrite. Apply this same
+boundary to symlink publication, same-filesystem Move and inverse MoveBack;
+each refusal preserves both the source and the newly occupied destination.
+Unsupported-filesystem behavior and source identity admission remain separate
+contracts and must not be claimed proven by destination no-clobber alone.
+
+Paste admission treats a readable current system clipboard as authoritative
+for both exact OS-byte paths and Copy/Cut verb. Equal paths with a newer Copy
+must not inherit an old internal Cut. A valid non-file system offer is distinct
+from an unavailable clipboard and cannot silently revive a stale file Move.
+Fallback, native owner lifetime and shared cut consumption are separately
+qualified; tests retain ordinary Cut, same-path Copy, different-path Copy and
+newer plain-text controls.
+
+The launch contract consumes OS-byte argv before any display conversion. Local
+file URIs are decoded through the existing byte-safe URI codec; plain OS paths
+are not lossy-normalized. Invalid or unsupported URI input is refused or falls
+back with a truthful result, never passed as a literal `file://` path. A
+non-UTF-8 plain path must not panic before the GUI starts.
+
+Context menus fit the actual client viewport at the supported minimum size.
+Overflow scrolls and reveals the keyboard-focused action; no destructive action
+can remain selected outside the visible menu without being brought into view.
+Closing the menu restores its prior list focus without executing an action.
+Mouse and keyboard reachability need real-window tests independently of QML
+geometry assertions.
+
+Folder totals are cached display metadata, never ownership or recovery
+authority. Transfer completion and Undo invalidate totals for the visible
+ancestors of their recorded destination paths; Move also invalidates its
+source ancestors. A mutation of the open root invalidates its child totals.
+Unrelated sibling caches remain valid, and a Copy does not invalidate its
+unchanged source. Path matching preserves OS bytes and components, with no
+filesystem I/O on the GUI thread. Re-measurement uses the existing local,
+bounded, cancellable viewport worker; no new remote tree walk is admitted.
+
+These are acceptance contracts for the reliability work, not declarations that
+the previous qualified beta already meets them. Durable claim batching must
+retain before-create provenance and exact identity-bound recovery; volatile
+state is never a performance substitute.
 
 ## 8. Trash vs delete
 

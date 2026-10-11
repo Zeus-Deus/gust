@@ -6,8 +6,8 @@
 
 use crate::anchor::{resolve_parent, DirHandle, FileIdentity};
 use crate::engine::{
-    classify, copy_regular_file_with, copy_symlink, stage_regular_file, FileClass, OpError,
-    OpResult, Staged,
+    classify, copy_regular_file_with, copy_symlink_with_policy, stage_regular_file, FileClass,
+    OpError, OpResult, Staged,
 };
 use crate::journal::ConflictPolicy;
 use gust_core::lister::CancelToken;
@@ -263,7 +263,7 @@ pub fn copy_tree_opts(
             }
             let (sd, sn) = resolve_parent(&src_root.join(rel))?;
             let (dd, dn) = resolve_parent(&out(rel))?;
-            copy_symlink(&sd, &sn, &dd, &dn)?;
+            copy_symlink_with_policy(&sd, &sn, &dd, &dn, policy)?;
             done += 1;
             progress(done, total, bytes_done, plan.total_bytes);
         }
@@ -273,7 +273,7 @@ pub fn copy_tree_opts(
         let (dd, dn) = resolve_parent(dst_root)?;
         let st = sd.stat_child(&sn)?;
         match classify(&st) {
-            FileClass::Symlink => copy_symlink(&sd, &sn, &dd, &dn)?,
+            FileClass::Symlink => copy_symlink_with_policy(&sd, &sn, &dd, &dn, policy)?,
             _ => {
                 copy_regular_file_with(&sd, &sn, &dd, &dn, policy, cancel, &mut |w| {
                     progress(0, total.max(1), w, plan.total_bytes)
@@ -409,14 +409,17 @@ pub fn move_tree_opts(
         }
     }
 
-    match rustix::fs::renameat(sd.as_fd(), &sn, dd.as_fd(), &dn) {
+    #[cfg(test)]
+    crate::engine::publication_tests::before_publication();
+    match crate::engine::publish_noreplace(&sd, &sn, &dd, &dn) {
         Ok(()) => {
             progress(1, 1, 0, 0);
             return Ok(());
         }
         // Only EXDEV justifies the slow path; anything else is a real error.
-        Err(rustix::io::Errno::XDEV) => {}
-        Err(e) => return Err(e.into()),
+        Err(OpError::Io(e)) if e.raw_os_error() == Some(rustix::io::Errno::XDEV.raw_os_error()) => {
+        }
+        Err(e) => return Err(e),
     }
 
     // Cross-device: record identity of the WHOLE subtree, copy, verify nothing

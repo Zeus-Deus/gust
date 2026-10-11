@@ -185,6 +185,7 @@ FocusScope {
                             hoverEnabled: true
                             cursorShape: modelData.d ? Qt.PointingHandCursor : Qt.ArrowCursor
                             onClicked: {
+                                root.selectionTouched()
                                 if (!modelData.d || modelData.cur) return
                                 root.model.navigate(root.side.parent.path + "/" + modelData.n)
                             }
@@ -345,6 +346,7 @@ FocusScope {
                                     return
                                 }
                                 root.model.focus_row(index)
+                                root.selectionTouched()
                             }
                             onDoubleClicked: root.activated(index)
                         }
@@ -455,6 +457,7 @@ FocusScope {
                             hoverEnabled: true
                             onClicked: {
                                 const here = root.model.entry_path(root.model.cursor)
+                                root.selectionTouched()
                                 if (modelData.d) root.model.navigate(here + "/" + modelData.n)
                                 else root.model.navigate(here)
                             }

@@ -77,7 +77,15 @@ MOUSE_OK=0
 if sudo -n python3 "$HERE/uinput-mouse.py" move 640 400 >/dev/null 2>&1; then
   MOUSE_OK=1
 fi
-mouse() { sudo -n python3 "$HERE/uinput-mouse.py" "$@" >/dev/null 2>&1; sleep 0.6; }
+mouse() {
+  local status=0
+  sudo -n python3 "$HERE/uinput-mouse.py" "$@" >/dev/null || status=$?
+  if [[ "$status" -ne 0 ]]; then
+    bad "pointer injection failed ($status): $*"
+    return "$status"
+  fi
+  sleep 0.6
+}
 
 # Where is the gust window? Echoes "X Y W H".
 win_geo() {
@@ -130,6 +138,8 @@ expect_contains() {
 }
 
 start_gust() {
+  local start_args=""
+  if [[ "$#" -gt 0 ]]; then printf -v start_args '%q ' "$@"; fi
   pkill -x gust 2>/dev/null || true
   sleep 0.4
   rm -f "$STATE"
@@ -151,7 +161,7 @@ ${QA_PATH_PREPEND:+export PATH="$QA_PATH_PREPEND:\$PATH"}
 # ...and stand-ins for what the system reports (37-phones points sysfs, the
 # udev database and the GVfs backend list at a fake tree).
 ${QA_ENV:+export $QA_ENV}
-exec "$BIN"
+exec "$BIN" $start_args
 EOF
   chmod +x /tmp/gust-qa-run.sh
   vm /tmp/gust-qa-run.sh 9>&- &

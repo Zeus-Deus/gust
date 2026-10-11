@@ -37,6 +37,146 @@ fn ident(p: &Path) -> std::io::Result<Ident> {
     })
 }
 
+// ---------------------------------------------------------------- rename
+
+/// A single rename and the exact object whose original name can be restored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenameMade {
+    pub original: PathBuf,
+    pub renamed: PathBuf,
+    identity: crate::anchor::FileIdentity,
+    parent_dev: u64,
+    parent_ino: u64,
+}
+
+#[cfg(test)]
+type RenameHook = std::cell::RefCell<Option<Box<dyn FnOnce()>>>;
+
+#[cfg(test)]
+thread_local! {
+    // Scheduling only: reads, writes and renames still use production I/O.
+    static RENAME_UNDO_AFTER_CHECK: RenameHook = const { std::cell::RefCell::new(None) };
+    static RENAME_AFTER_COMMIT: RenameHook = const { std::cell::RefCell::new(None) };
+}
+
+/// Rename one entry without replacing anything, retaining a verified inverse.
+pub fn rename_recorded(
+    path: &Path,
+    new_name: &OsStr,
+) -> Result<RenameMade, crate::engine::OpError> {
+    use crate::anchor::{resolve_parent, FileIdentity};
+    crate::recursive::validate_name(new_name)?;
+    let (parent, old_name) = resolve_parent(path)?;
+    if old_name == new_name {
+        return Err(crate::engine::OpError::Refused(
+            "the name has not changed".into(),
+        ));
+    }
+    let identity = FileIdentity::from_stat(&parent.stat_child(&old_name)?);
+    let parent_identity = FileIdentity::from_stat(&parent.stat_self()?);
+    rename_verified(&parent, &old_name, new_name, &identity)?;
+    Ok(RenameMade {
+        original: path.to_path_buf(),
+        renamed: path.with_file_name(new_name),
+        identity,
+        parent_dev: parent_identity.dev,
+        parent_ino: parent_identity.ino,
+    })
+}
+
+/// Restore a name only while the parent and renamed object are still ours.
+/// A refused inverse never consumes the caller's record.
+pub fn undo_rename(made: &RenameMade) -> Result<(), String> {
+    use crate::anchor::{resolve_parent, FileIdentity};
+    let (parent, name) = resolve_parent(&made.renamed)
+        .map_err(|_| "the renamed file's folder is no longer available".to_string())?;
+    let parent_identity = parent
+        .stat_self()
+        .map_err(|e| crate::engine::plain_io_message(&e))?;
+    if (parent_identity.st_dev, parent_identity.st_ino) != (made.parent_dev, made.parent_ino) {
+        return Err("the folder was replaced since; left as it is".into());
+    }
+    let now = parent
+        .stat_child(&name)
+        .map(|st| FileIdentity::from_stat(&st))
+        .map_err(|_| "the renamed item is already gone".to_string())?;
+    if !made.identity.matches(&now) {
+        return Err("the renamed item was changed or replaced since; left as it is".into());
+    }
+    let Some(original_name) = made.original.file_name() else {
+        return Err("the original name is unavailable".into());
+    };
+    rename_verified(&parent, &name, original_name, &made.identity).map_err(|e| match e {
+        crate::engine::OpError::Conflict(_) => {
+            "the original name is occupied again; both items were kept".into()
+        }
+        other => other.to_string(),
+    })
+}
+
+/// Verify what the kernel actually moved, not only the source stat sampled
+/// before it. NOREPLACE is destination-atomic, not source-identity-conditional.
+/// A racing replacement is refused and restored without clobbering new work.
+fn rename_verified(
+    parent: &crate::anchor::DirHandle,
+    from: &OsStr,
+    to: &OsStr,
+    expected: &crate::anchor::FileIdentity,
+) -> Result<(), crate::engine::OpError> {
+    #[cfg(test)]
+    RENAME_UNDO_AFTER_CHECK.with(|hook| {
+        if let Some(run) = hook.borrow_mut().take() {
+            run();
+        }
+    });
+    rename_no_replace(parent, from, to)?;
+    #[cfg(test)]
+    RENAME_AFTER_COMMIT.with(|hook| {
+        if let Some(run) = hook.borrow_mut().take() {
+            run();
+        }
+    });
+    if parent
+        .stat_child(to)
+        .is_ok_and(|st| expected.matches(&crate::anchor::FileIdentity::from_stat(&st)))
+    {
+        return Ok(());
+    }
+    let message = if rename_no_replace(parent, to, from).is_ok() {
+        "the item changed during the rename; its previous name was restored"
+    } else {
+        "the item changed during the rename and its previous name could not be restored. Check both names before trying again. No existing name was replaced."
+    };
+    Err(crate::engine::OpError::Refused(message.into()))
+}
+
+/// Check name occupancy and commit atomically, including for folders.
+fn rename_no_replace(
+    parent: &crate::anchor::DirHandle,
+    from: &OsStr,
+    to: &OsStr,
+) -> Result<(), crate::engine::OpError> {
+    use rustix::io::Errno;
+    match rustix::fs::renameat_with(
+        parent.as_fd(),
+        from,
+        parent.as_fd(),
+        to,
+        rustix::fs::RenameFlags::NOREPLACE,
+    ) {
+        Ok(()) => Ok(()),
+        Err(Errno::EXIST) | Err(Errno::NOTEMPTY) => {
+            Err(crate::engine::OpError::Conflict(PathBuf::from(to)))
+        }
+        Err(Errno::INVAL) | Err(Errno::NOSYS) | Err(Errno::OPNOTSUPP) => {
+            Err(crate::engine::OpError::Refused(
+                "This filesystem cannot rename safely without replacing an existing name".into(),
+            ))
+        }
+        Err(e) => Err(crate::engine::OpError::Io(e.into())),
+    }
+}
+
 // ---------------------------------------------------------------- links
 
 /// A link Gust made, and what it needs to take it back.
@@ -502,6 +642,206 @@ mod tests {
     }
     fn mode(p: &Path) -> u32 {
         p.symlink_metadata().unwrap().mode() & 0o7777
+    }
+
+    #[test]
+    fn a_single_rename_is_undone_with_its_contents() {
+        let d = tmp("rename-undo");
+        fs::write(d.join("before.txt"), b"original").unwrap();
+        let made = rename_recorded(&d.join("before.txt"), OsStr::new("after.txt")).unwrap();
+        assert!(!made.original.exists());
+        undo_rename(&made).unwrap();
+        assert_eq!(fs::read(&made.original).unwrap(), b"original");
+        assert!(!made.renamed.exists());
+        fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn rename_undo_refuses_a_source_replaced_between_check_and_commit() {
+        let d = tmp("rename-commit-race");
+        fs::write(d.join("before"), b"original identity").unwrap();
+        let made = rename_recorded(&d.join("before"), OsStr::new("after")).unwrap();
+        let root = d.clone();
+        RENAME_UNDO_AFTER_CHECK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                fs::rename(root.join("after"), root.join("saved-original")).unwrap();
+                fs::write(root.join("after"), b"replacement writer's bytes").unwrap();
+            }));
+        });
+        let result = undo_rename(&made);
+        assert!(
+            result.is_err(),
+            "a replaced source must not be reported as successfully undone: {result:?}"
+        );
+        assert!(
+            !made.original.exists(),
+            "Undo must recover the replacement's name when it is free"
+        );
+        assert_eq!(
+            fs::read(&made.renamed).unwrap(),
+            b"replacement writer's bytes"
+        );
+        assert_eq!(
+            fs::read(d.join("saved-original")).unwrap(),
+            b"original identity"
+        );
+        fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn a_forward_rename_refuses_a_source_replaced_at_commit() {
+        let d = tmp("rename-forward-race");
+        fs::write(d.join("before"), b"original identity").unwrap();
+        let root = d.clone();
+        RENAME_UNDO_AFTER_CHECK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                fs::rename(root.join("before"), root.join("saved-original")).unwrap();
+                fs::write(root.join("before"), b"replacement writer's bytes").unwrap();
+            }));
+        });
+        assert!(rename_recorded(&d.join("before"), OsStr::new("after")).is_err());
+        assert!(!d.join("after").exists());
+        assert_eq!(
+            fs::read(d.join("before")).unwrap(),
+            b"replacement writer's bytes"
+        );
+        assert_eq!(
+            fs::read(d.join("saved-original")).unwrap(),
+            b"original identity"
+        );
+        fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn rename_race_recovery_never_clobbers_a_newly_occupied_name() {
+        let d = tmp("rename-rollback-occupied");
+        fs::write(d.join("before"), b"original identity").unwrap();
+        let made = rename_recorded(&d.join("before"), OsStr::new("after")).unwrap();
+        let root = d.clone();
+        RENAME_UNDO_AFTER_CHECK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                fs::rename(root.join("after"), root.join("saved-original")).unwrap();
+                fs::write(root.join("after"), b"replacement writer's bytes").unwrap();
+            }));
+        });
+        let root = d.clone();
+        RENAME_AFTER_COMMIT.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                fs::write(root.join("after"), b"new work that blocks recovery").unwrap();
+            }));
+        });
+        assert!(undo_rename(&made)
+            .unwrap_err()
+            .contains("could not be restored"));
+        assert_eq!(
+            fs::read(&made.original).unwrap(),
+            b"replacement writer's bytes"
+        );
+        assert_eq!(
+            fs::read(&made.renamed).unwrap(),
+            b"new work that blocks recovery"
+        );
+        assert_eq!(
+            fs::read(d.join("saved-original")).unwrap(),
+            b"original identity"
+        );
+        fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn a_rename_never_replaces_an_existing_name() {
+        let d = tmp("rename-clash");
+        fs::write(d.join("before"), b"original").unwrap();
+        fs::write(d.join("after"), b"bystander").unwrap();
+        assert!(rename_recorded(&d.join("before"), OsStr::new("after")).is_err());
+        assert_eq!(fs::read(d.join("before")).unwrap(), b"original");
+        assert_eq!(fs::read(d.join("after")).unwrap(), b"bystander");
+        fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn rename_undo_preserves_an_occupied_name_and_can_be_retried() {
+        let d = tmp("rename-occupied");
+        fs::write(d.join("before"), b"original").unwrap();
+        let made = rename_recorded(&d.join("before"), OsStr::new("after")).unwrap();
+        fs::write(&made.original, b"new work").unwrap();
+        assert!(undo_rename(&made).unwrap_err().contains("occupied again"));
+        assert_eq!(fs::read(&made.original).unwrap(), b"new work");
+        assert_eq!(fs::read(&made.renamed).unwrap(), b"original");
+        fs::remove_file(&made.original).unwrap();
+        undo_rename(&made).unwrap();
+        assert_eq!(fs::read(&made.original).unwrap(), b"original");
+        fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn rename_undo_refuses_an_edited_target() {
+        let d = tmp("rename-edited");
+        fs::write(d.join("before"), b"original").unwrap();
+        let made = rename_recorded(&d.join("before"), OsStr::new("after")).unwrap();
+        fs::write(&made.renamed, b"edited after the rename").unwrap();
+        assert!(undo_rename(&made)
+            .unwrap_err()
+            .contains("changed or replaced"));
+        assert!(!made.original.exists());
+        assert_eq!(fs::read(&made.renamed).unwrap(), b"edited after the rename");
+        fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn rename_undo_moves_a_symlink_without_touching_its_target() {
+        let d = tmp("rename-symlink");
+        fs::write(d.join("target"), b"keep target").unwrap();
+        std::os::unix::fs::symlink("target", d.join("before")).unwrap();
+        let made = rename_recorded(&d.join("before"), OsStr::new("after")).unwrap();
+        undo_rename(&made).unwrap();
+        assert_eq!(fs::read_link(&made.original).unwrap(), Path::new("target"));
+        assert_eq!(fs::read(d.join("target")).unwrap(), b"keep target");
+        fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn rename_undo_refuses_a_replaced_parent_even_with_the_same_hardlink() {
+        let d = tmp("rename-parent");
+        fs::create_dir(d.join("folder")).unwrap();
+        fs::write(d.join("folder/before"), b"keep bytes").unwrap();
+        let made = rename_recorded(&d.join("folder/before"), OsStr::new("after")).unwrap();
+        fs::rename(d.join("folder"), d.join("old-folder")).unwrap();
+        fs::create_dir(d.join("folder")).unwrap();
+        fs::hard_link(d.join("old-folder/after"), &made.renamed).unwrap();
+        assert!(undo_rename(&made)
+            .unwrap_err()
+            .contains("folder was replaced"));
+        assert!(!made.original.exists());
+        assert_eq!(fs::read(&made.renamed).unwrap(), b"keep bytes");
+        assert_eq!(fs::read(d.join("old-folder/after")).unwrap(), b"keep bytes");
+        fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn rename_undo_restores_a_folder_without_removing_its_contents() {
+        let d = tmp("rename-folder");
+        fs::create_dir_all(d.join("before/deep")).unwrap();
+        fs::write(d.join("before/deep/work"), b"keep work").unwrap();
+        let made = rename_recorded(&d.join("before"), OsStr::new("after")).unwrap();
+        undo_rename(&made).unwrap();
+        assert_eq!(fs::read(d.join("before/deep/work")).unwrap(), b"keep work");
+        assert!(!made.renamed.exists());
+        fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn rename_undo_preserves_non_utf8_names() {
+        use std::os::unix::ffi::OsStringExt;
+        let d = tmp("rename-bytes");
+        let before = std::ffi::OsString::from_vec(b"before-\xff".to_vec());
+        let after = std::ffi::OsString::from_vec(b"after-\xfe".to_vec());
+        fs::write(d.join(&before), b"byte name").unwrap();
+        let made = rename_recorded(&d.join(&before), &after).unwrap();
+        undo_rename(&made).unwrap();
+        assert_eq!(fs::read(d.join(&before)).unwrap(), b"byte name");
+        assert!(!d.join(&after).exists());
+        fs::remove_dir_all(&d).ok();
     }
 
     #[test]

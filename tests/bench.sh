@@ -20,10 +20,12 @@ mkdir -p "$OUT"
 STATE="$OUT/state.json"
 RESULTS="$OUT/results.txt"
 : > "$RESULTS"
+FAILED=0
 
 say()  { printf '\n\033[1m== %s\033[0m\n' "$*"; }
 line() { printf '  %-42s %12s   target %-12s %s\n' "$1" "$2" "$3" "$4"; \
-         printf '%-42s %12s target %-12s %s\n' "$1" "$2" "$3" "$4" >> "$RESULTS"; }
+         printf '%-42s %12s target %-12s %s\n' "$1" "$2" "$3" "$4" >> "$RESULTS"; \
+         case "$4" in OVER|FAIL|UNKNOWN) FAILED=1 ;; esac; }
 
 vm() { "$HERE/vmsession" "$@"; }
 
@@ -41,27 +43,8 @@ say "fixture: $ACTUAL entries in $BIG"
 # --- 1. cold listing -------------------------------------------------------
 # gust-core's lister, measured directly: no GUI, no compositor noise.
 say "1 · listing throughput (gust-core, no UI)"
-cat > "$OUT/bench_list.rs" <<'EOF'
-// Measures the two real phases: names (what the user sees first) and
-// metadata (what makes the columns true).
-fn main() {
-    let dir = std::env::args().nth(1).expect("dir");
-    let key = gust_core::location::LocationKey::local(std::path::Path::new(&dir));
-    let cancel = gust_core::lister::CancelToken::new();
-
-    let t = std::time::Instant::now();
-    let mut snap = gust_core::lister::list_names(&key, 0, &cancel, |_| {});
-    let names_ms = t.elapsed().as_secs_f64() * 1000.0;
-
-    let t2 = std::time::Instant::now();
-    gust_core::lister::fill_metadata(&mut snap, &cancel);
-    let meta_ms = t2.elapsed().as_secs_f64() * 1000.0;
-
-    println!("{} {:.1} {:.1}", snap.entries.len(), names_ms, names_ms + meta_ms);
-}
-EOF
-mkdir -p "$ROOT/crates/core/examples"
-cp "$OUT/bench_list.rs" "$ROOT/crates/core/examples/bench_list.rs"
+# Use the checked-in example. Measuring must never rewrite the source under
+# the very build whose identity the release gate is checking.
 if (cd "$ROOT" && cargo build --release -p gust-core --example bench_list >/dev/null 2>&1); then
   # Warm the page cache, then take the best of three.
   "$ROOT/target/release/examples/bench_list" "$BIG" >/dev/null 2>&1
@@ -201,3 +184,4 @@ say "environment (numbers are only valid for THIS machine)"
 } | tee -a "$RESULTS"
 
 printf '\n\033[1m== results saved to %s\033[0m\n' "$RESULTS"
+exit "$FAILED"

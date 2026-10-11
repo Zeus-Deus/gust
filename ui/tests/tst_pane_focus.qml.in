@@ -1,0 +1,252 @@
+import QtQml
+import QtQuick
+import QtTest
+
+Item {
+    width: 360
+    height: 160
+
+    Item {
+        id: win
+        property int activePane: 1
+        property int activeTab: 1
+        property int paneCount: 2
+        property var paneTab: [0, 1]
+        property var tabViews: ["columns", "columns"]
+        property string viewMode: "columns"
+        property var dirModel: null
+        property var paneAModel: null
+        property var paneBModel: null
+        property string paneAView: "columns"
+        property string paneBView: "columns"
+        property int activePaneTabCount: 1
+        property var models: [leftModel, rightModel]
+        property int focusCalls: 0
+        property bool focusedCorrectOwner: true
+        function focusList() {
+            focusCalls += 1
+            focusedCorrectOwner = focusedCorrectOwner && dirModel === root.model
+        }
+        function qaDump(tag) {}
+@FUNCTIONS@
+    }
+    ListModel {
+        id: tabList
+        ListElement { pane: 0; startPath: "/left"; label: "left" }
+        ListElement { pane: 1; startPath: "/right"; label: "right" }
+    }
+    QtObject {
+        id: tabs
+        function objectAt(i) { return i >= 0 && i < 2 ? win.models[i] : null }
+    }
+    QtObject {
+        id: leftModel
+        property bool everActivated: true
+        property string tabLabel: "left"
+        property int cursor: 7
+        property string selection: "sentinel"
+        property string navigated: ""
+        property bool ownerAtNavigate: false
+        function focus_row(i) { cursor = i }
+        function sel_contains(i) { return selection === String(i) }
+        function sel_only(i) { selection = String(i) }
+        function entry_path(i) { return "/current/PickedFolder" }
+        function navigate(path) {
+            navigated = path
+            ownerAtNavigate = win.dirModel === leftModel
+        }
+    }
+    QtObject {
+        id: rightModel
+        property bool everActivated: true
+        property string tabLabel: "right"
+        property int cursor: 7
+        property string selection: "sentinel"
+        property string navigated: ""
+        property bool ownerAtNavigate: false
+        function focus_row(i) { cursor = i }
+        function sel_contains(i) { return selection === String(i) }
+        function sel_only(i) { selection = String(i) }
+        function entry_path(i) { return "/current/PickedFolder" }
+        function navigate(path) {
+            navigated = path
+            ownerAtNavigate = win.dirModel === rightModel
+        }
+    }
+    QtObject {
+        id: pane
+        signal selectionTouched()
+        onSelectionTouched: {
+            if (root.targetPane === 0) {
+@MAIN_LEFT_HANDLER@
+            } else {
+@MAIN_RIGHT_HANDLER@
+            }
+        }
+    }
+    Item {
+        id: root
+        anchors.fill: parent
+        property int targetPane: 0
+        property var model: win.models[targetPane]
+        property bool suppressClick: false
+        property var side: ({parent: {path: "/parent"}})
+        property int selections: 0
+        property int contextCalls: 0
+        property int middleCalls: 0
+        signal selectionTouched()
+        signal contextRequested(int row, real x, real y)
+        signal middleClicked(int row)
+        onSelectionTouched: {
+            selections += 1
+@PANE_FORWARD@
+        }
+        onContextRequested: contextCalls += 1
+        onMiddleClicked: middleCalls += 1
+        MouseArea {
+            id: currentMouse
+            width: 100
+            height: 80
+            property int index: 3
+            acceptedButtons: Qt.LeftButton | Qt.RightButton | Qt.MiddleButton
+@CURRENT_CLICK@
+        }
+        MouseArea {
+            id: parentMouse
+            x: 120
+            width: 100
+            height: 80
+            property var modelData: ({d: true, cur: false, n: "Sibling"})
+@PARENT_CLICK@
+        }
+        MouseArea {
+            id: peekMouse
+            x: 240
+            width: 100
+            height: 80
+            property var modelData: ({d: true, n: "Child"})
+@PEEK_CLICK@
+        }
+    }
+    TestCase {
+    name: "ColumnsPaneFocus"
+    when: windowShown
+    function init() {
+        root.targetPane = 0
+        root.suppressClick = false
+        root.selections = 0
+        root.contextCalls = 0
+        root.middleCalls = 0
+        parentMouse.modelData = {d: true, cur: false, n: "Sibling"}
+        peekMouse.modelData = {d: true, n: "Child"}
+        for (const m of win.models) {
+            m.cursor = 7
+            m.selection = "sentinel"
+            m.navigated = ""
+            m.ownerAtNavigate = false
+        }
+        prepare(0)
+    }
+    function prepare(target) {
+        root.targetPane = target
+        win.activePane = 1 - target
+        win.activeTab = 1 - target
+        win.refreshActiveModel()
+        win.focusCalls = 0
+        win.focusedCorrectOwner = true
+    }
+    function directions() {
+        return [{tag: "left", target: 0}, {tag: "right", target: 1}]
+    }
+    function requireOwner(target) {
+        compare(win.activePane, target)
+        compare(win.activeTab, target)
+        compare(win.dirModel, root.model)
+        verify(win.focusedCorrectOwner, "publish clicked model before returning keyboard focus")
+        verify(win.focusCalls > 0)
+    }
+    function test_left_click_claims_owner_data() { return directions() }
+    function test_left_click_claims_owner(data) {
+        prepare(data.target)
+        mouseClick(currentMouse, 20, 20, Qt.LeftButton)
+        requireOwner(data.target)
+        compare(root.model.cursor, 3)
+        compare(root.model.selection, "sentinel", "focusing must not change Columns selection policy")
+        compare(win.models[1 - data.target].cursor, 7)
+        compare(root.selections, 1)
+    }
+    function test_same_cursor_claims_owner_data() { return directions() }
+    function test_same_cursor_claims_owner(data) {
+        prepare(data.target)
+        root.model.cursor = 3
+        mouseClick(currentMouse, 20, 20, Qt.LeftButton)
+        requireOwner(data.target)
+        compare(root.selections, 1)
+    }
+    function test_modified_left_preserves_selection_data() {
+        return [{tag: "ctrl", mods: Qt.ControlModifier}, {tag: "shift", mods: Qt.ShiftModifier}]
+    }
+    function test_modified_left_preserves_selection(data) {
+        mouseClick(currentMouse, 20, 20, Qt.LeftButton, data.mods)
+        requireOwner(0)
+        compare(root.model.selection, "sentinel")
+    }
+    function test_suppressed_drag_click_does_not_claim_owner() {
+        root.suppressClick = true
+        mouseClick(currentMouse, 20, 20, Qt.LeftButton)
+        compare(win.activePane, 1)
+        compare(root.model.cursor, 7)
+        compare(root.selections, 0)
+        verify(!root.suppressClick)
+    }
+    function test_right_click_keeps_existing_route() {
+        mouseClick(currentMouse, 20, 20, Qt.RightButton)
+        compare(root.contextCalls, 1)
+        compare(root.model.cursor, 3)
+        compare(root.model.selection, "3")
+        compare(root.selections, 0, "context request retains its existing Main focus route")
+    }
+    function test_middle_click_keeps_background_route() {
+        mouseClick(currentMouse, 20, 20, Qt.MiddleButton)
+        compare(root.middleCalls, 1)
+        compare(root.model.cursor, 7)
+        compare(win.activePane, 1)
+        compare(root.selections, 0)
+    }
+    function test_parent_navigation_claims_owner_data() { return directions() }
+    function test_parent_navigation_claims_owner(data) {
+        prepare(data.target)
+        mouseClick(parentMouse, 20, 20, Qt.LeftButton)
+        requireOwner(data.target)
+        compare(root.model.navigated, "/parent/Sibling")
+        verify(root.model.ownerAtNavigate, "navigation must run after selecting its pane")
+    }
+    function test_current_parent_row_focuses_without_navigation() {
+        parentMouse.modelData = {d: true, cur: true, n: "Current"}
+        mouseClick(parentMouse, 20, 20, Qt.LeftButton)
+        requireOwner(0)
+        compare(root.model.navigated, "")
+    }
+    function test_parent_file_focuses_without_opening() {
+        parentMouse.modelData = {d: false, cur: false, n: "File"}
+        mouseClick(parentMouse, 20, 20, Qt.LeftButton)
+        requireOwner(0)
+        compare(root.model.navigated, "")
+    }
+    function test_peek_directory_claims_owner_data() { return directions() }
+    function test_peek_directory_claims_owner(data) {
+        prepare(data.target)
+        mouseClick(peekMouse, 20, 20, Qt.LeftButton)
+        requireOwner(data.target)
+        compare(root.model.navigated, "/current/PickedFolder/Child")
+        verify(root.model.ownerAtNavigate)
+    }
+    function test_peek_file_only_navigates_container() {
+        peekMouse.modelData = {d: false, n: "File"}
+        mouseClick(peekMouse, 20, 20, Qt.LeftButton)
+        requireOwner(0)
+        compare(root.model.navigated, "/current/PickedFolder")
+        verify(root.model.ownerAtNavigate)
+    }
+    }
+}
