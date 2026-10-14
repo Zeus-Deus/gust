@@ -309,6 +309,14 @@ Window {
             win.qaDump("place-tailnet-askkey")
             return
         }
+        if (op === "device-unlock" && message.indexOf("passphrase did not unlock") >= 0) {
+            // Wrong passphrase: ask again, saying why. Nothing changed.
+            win.askUnlock(name)
+            prompt.showError(message)
+            dirModel.request_devices()
+            win.qaDump("place-device-unlock-failed")
+            return
+        }
         if (op === "cloud-disconnect" && message.startsWith("ASK:")) {
             win.pendingCloudOff = name
             confirm.purpose = "clouddirty"
@@ -556,6 +564,8 @@ Window {
         if (err !== "") win.alertText = err
     }
 
+    /// The drive a sidebar menu was opened on.
+    property string deviceMenuPath: ""
     /// The phone a sidebar menu was opened on.
     property string phoneMenuId: ""
     /// A phone row was clicked: browse it if it is open; while it waits for
@@ -579,6 +589,8 @@ Window {
     /// A device row was clicked: browse it if it is mounted, otherwise
     /// mount it. Gust never mounts anything on its own.
     function openDevice(path, mounted) {
+        const dev = win.deviceList.find((x) => x.path === path)
+        if (dev && dev.locked) { win.askUnlock(path); return }
         if (mounted) {
             const d = win.deviceList.find((x) => x.path === path)
             if (d && d.mountPoint) dirModel.navigate(d.mountPoint)
@@ -586,6 +598,25 @@ Window {
             return
         }
         const err = dirModel.device_mount(path)
+        if (err !== "") win.alertText = err
+    }
+
+    /// The encrypted drive whose passphrase the prompt is asking for.
+    property string unlockPath: ""
+    /// Ask for an encrypted drive's passphrase (DESIGN §6.13.2).
+    function askUnlock(path) {
+        const d = win.deviceList.find((x) => x.path === path)
+        win.unlockPath = path
+        prompt.secret = true
+        prompt.mode = "unlock"
+        prompt.openWith(qsTr("Unlock %1").arg(d ? d.label : qsTr("drive")), "",
+                        qsTr("Passphrase · sent to udisks, never stored by Gust"))
+        win.qaDump("unlock-prompt")
+    }
+    function unlockEntered(text) {
+        const path = win.unlockPath
+        const err = dirModel.device_unlock(path, text)
+        prompt.secret = false
         if (err !== "") win.alertText = err
     }
 
@@ -1324,6 +1355,11 @@ Window {
         else if (a === "trash-view") { trashPanel.show(dirModel.trash_list()); win.qaDump("trash-open") }
         else if (a === "recent") { recentPanel.show(dirModel.recent_list()); win.qaDump("recent-open-panel") }
         else if (a === "connect") { win.refreshPlaces(); connectPanel.show(); win.qaDump("connect-open") }
+        else if (a === "dv-open") {
+            const d = win.deviceList.find((x) => x.path === win.deviceMenuPath)
+            if (d) win.openDevice(d.path, d.mounted)
+        }
+        else if (a === "dv-eject") win.ejectDevice(win.deviceMenuPath)
         else if (a === "ph-open") dirModel.phone_open(win.phoneMenuId, false)
         else if (a === "ph-apps") dirModel.phone_open(win.phoneMenuId, true)
         else if (a === "ph-eject") {
@@ -2264,6 +2300,18 @@ Window {
                 devices: win.deviceList
                 bookmarks: win.bookmarkList
                 onDeviceChosen: (path, mounted) => win.openDevice(path, mounted)
+                onDeviceMenu: (path, mounted, encrypted, locked, x, y) => {
+                    win.deviceMenuPath = path
+                    const items = [{ label: locked ? qsTr("Unlock…") : qsTr("Open"), hint: "", action: "dv-open" }]
+                    // A locked drive has nothing mounted and nothing to eject.
+                    if (!locked && (mounted || encrypted)) {
+                        items.push({ separator: true })
+                        items.push({ label: encrypted ? qsTr("Lock and eject") : qsTr("Eject"),
+                                     hint: "", action: "dv-eject" })
+                    }
+                    contextMenu.popup(x, y, items)
+                    win.qaDump("device-menu")
+                }
                 onPhoneChosen: (id, stateKey) => win.openPhone(id, stateKey)
                 onPhoneMenu: (id, apps, open, x, y) => {
                     win.phoneMenuId = id
@@ -3003,6 +3051,11 @@ Window {
             if (prompt.mode === "share-password") {
                 prompt.close()
                 win.sharePasswordEntered(text)
+                return
+            }
+            if (prompt.mode === "unlock") {
+                prompt.close()
+                win.unlockEntered(text)
                 return
             }
 

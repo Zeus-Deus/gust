@@ -55,6 +55,8 @@ FocusScope {
     property bool secret: false
 
     function close() {
+        // A secret does not outlive the prompt (DESIGN §6.13.2, §6.14).
+        if (root.secret) field.text = ""
         root.claimingFocus = false
         root.opacity = 0
         root.errorText = ""

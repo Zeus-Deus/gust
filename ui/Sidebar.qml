@@ -44,6 +44,8 @@ Rectangle {
     property var devices: []
     /// The user clicked a device row: mount it, or browse it if mounted.
     signal deviceChosen(string path, bool mounted)
+    /// Right-click on a drive row: its menu (open, eject / lock).
+    signal deviceMenu(string path, bool mounted, bool encrypted, bool locked, real x, real y)
     /// A phone row was clicked (DESIGN §6.13.1), or right-clicked for its menu.
     signal phoneChosen(string id, string stateKey)
     signal phoneMenu(string id, bool apps, bool open, real x, real y)
@@ -377,7 +379,13 @@ Rectangle {
                             }
                             return
                         }
-                        if (mouse.button !== Qt.LeftButton || modelData.empty) return
+                        if (modelData.empty) return
+                        if (mouse.button === Qt.RightButton) {
+                            const g = mapToItem(null, mouse.x, mouse.y)
+                            root.deviceMenu(modelData.path, !!modelData.mounted, !!modelData.encrypted,
+                                            !!modelData.locked, g.x, g.y)
+                            return
+                        }
                         root.deviceChosen(modelData.path, modelData.mounted)
                     }
                 }

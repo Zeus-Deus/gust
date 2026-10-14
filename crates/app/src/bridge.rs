@@ -405,6 +405,11 @@ pub mod qobject {
         /// Unmount a device. Refuses while a transfer is running.
         #[qinvokable]
         fn device_unmount(self: Pin<&mut DirModel>, path: QString) -> QString;
+        /// Unlock an encrypted drive with its passphrase, then mount and
+        /// browse it. The passphrase goes to udisks on a pipe: never argv,
+        /// env, a file or a log, and it is not kept (DESIGN §6.13.2).
+        #[qinvokable]
+        fn device_unlock(self: Pin<&mut DirModel>, path: QString, passphrase: QString) -> QString;
         /// Mount a configured cloud remote and browse it.
         #[qinvokable]
         fn cloud_connect(self: Pin<&mut DirModel>, name: QString) -> QString;
@@ -1390,6 +1395,16 @@ fn phone_cancels() -> &'static std::sync::Mutex<std::collections::HashSet<String
 }
 
 /// The device list, shared by every tab's model (one machine, one list).
+/// Overwrite a secret's bytes before they are freed. Volatile writes, so
+/// the compiler cannot decide the stores are dead and drop them.
+fn wipe(bytes: &mut Vec<u8>) {
+    for b in bytes.iter_mut() {
+        // SAFETY: `b` is a valid, aligned &mut u8 for the whole loop body.
+        unsafe { std::ptr::write_volatile(b, 0) };
+    }
+    bytes.clear();
+}
+
 fn devices_cache() -> &'static std::sync::Mutex<String> {
     static CACHE: std::sync::OnceLock<std::sync::Mutex<String>> = std::sync::OnceLock::new();
     CACHE.get_or_init(|| std::sync::Mutex::new("[]".to_string()))
@@ -3391,7 +3406,7 @@ impl qobject::DirModel {
                 out.push(',');
             }
             out.push_str(&format!(
-                r#"{{"name":{},"path":{},"label":{},"state":{},"mountPoint":{},"mounted":{},"empty":{},"canAct":{}}}"#,
+                r#"{{"name":{},"path":{},"label":{},"state":{},"mountPoint":{},"mounted":{},"empty":{},"canAct":{},"encrypted":{},"locked":{}}}"#,
                 Self::json_str(&d.name),
                 Self::json_str(&d.path),
                 Self::json_str(&d.display()),
@@ -3405,6 +3420,8 @@ impl qobject::DirModel {
                 d.is_mounted(),
                 d.is_empty_drive(),
                 can_act,
+                d.encrypted,
+                d.is_locked(),
             ));
         }
         // Phones and cameras (no block device; read from sysfs and udev).
@@ -3603,7 +3620,7 @@ impl qobject::DirModel {
     }
 
     fn device_mount(self: Pin<&mut Self>, path: QString) -> QString {
-        use gust_core::devices::{mount_args, udisks_available, DeviceError};
+        use gust_core::devices::{udisks_available, DeviceError};
         if !udisks_available() {
             return QString::from(DeviceError::NoUdisks.message());
         }
@@ -3615,14 +3632,30 @@ impl qobject::DirModel {
             move || {
                 // The device must be one the kernel actually reports, so a
                 // crafted path cannot be handed to udisks.
-                if !gust_core::devices::list_devices()
-                    .iter()
-                    .any(|d| d.path == dev)
-                {
+                let Some(found) = gust_core::devices::list_devices()
+                    .into_iter()
+                    .find(|d| d.path == dev)
+                else {
                     return PlaceOutcome::Failed("That device is no longer there.".into());
+                };
+                if found.is_locked() {
+                    return PlaceOutcome::Failed(
+                        "That drive is encrypted. Click it to type its passphrase.".into(),
+                    );
                 }
+                Self::mount_and_open(found.mount_target())
+            },
+        );
+        QString::default()
+    }
+
+    /// Mount a block device through udisks and browse it. On a worker.
+    fn mount_and_open(target: &str) -> PlaceOutcome {
+        use gust_core::devices::mount_args;
+        {
+            {
                 let out = std::process::Command::new("udisksctl")
-                    .args(mount_args(&dev))
+                    .args(mount_args(target))
                     .stdin(std::process::Stdio::null())
                     .output();
                 let out = match out {
@@ -3631,13 +3664,7 @@ impl qobject::DirModel {
                 };
                 if !out.status.success() {
                     let err = String::from_utf8_lossy(&out.stderr);
-                    return PlaceOutcome::Failed(format!(
-                        "Could not mount that device: {}",
-                        err.lines()
-                            .last()
-                            .unwrap_or("udisks did not say why")
-                            .trim()
-                    ));
+                    return PlaceOutcome::Failed(gust_core::devices::mount_failure(&err));
                 }
                 // udisksctl prints "Mounted /dev/sdb1 at /run/media/...".
                 let said = String::from_utf8_lossy(&out.stdout);
@@ -3655,6 +3682,83 @@ impl qobject::DirModel {
                 PlaceOutcome::Failed(
                     "Mounted, but Gust could not tell where. Check the sidebar.".into(),
                 )
+            }
+        }
+    }
+
+    fn device_unlock(self: Pin<&mut Self>, path: QString, passphrase: QString) -> QString {
+        use gust_core::devices::{
+            udisks_available, unlock_args, unlock_failure, unlocked_as, DeviceError,
+        };
+        // Taken out of the QString at once; the bytes are wiped after use.
+        let mut secret = passphrase.to_string().into_bytes();
+        if !udisks_available() {
+            wipe(&mut secret);
+            return QString::from(DeviceError::NoUdisks.message());
+        }
+        if secret.is_empty() {
+            return QString::from("Type the drive's passphrase to unlock it.");
+        }
+        let dev = path.to_string();
+        self.place_op(
+            "device-unlock",
+            dev.clone(),
+            "Unlocking…".into(),
+            move || {
+                let mut secret = secret;
+                let Some(found) = gust_core::devices::list_devices()
+                    .into_iter()
+                    .find(|d| d.path == dev)
+                else {
+                    wipe(&mut secret);
+                    return PlaceOutcome::Failed("That drive is no longer there.".into());
+                };
+                if !found.encrypted {
+                    wipe(&mut secret);
+                    return Self::mount_and_open(found.mount_target());
+                }
+                let cleartext = if let Some(c) = found.cleartext.clone() {
+                    // Unlocked already (another window, or a terminal).
+                    wipe(&mut secret);
+                    c
+                } else {
+                    let child = std::process::Command::new("udisksctl")
+                        .args(unlock_args(&dev))
+                        .stdin(std::process::Stdio::piped())
+                        .stdout(std::process::Stdio::piped())
+                        .stderr(std::process::Stdio::piped())
+                        .spawn();
+                    let mut child = match child {
+                        Ok(c) => c,
+                        Err(e) => {
+                            wipe(&mut secret);
+                            return PlaceOutcome::Failed(format!("Could not unlock: {e}"));
+                        }
+                    };
+                    if let Some(mut stdin) = child.stdin.take() {
+                        use std::io::Write;
+                        let _ = stdin.write_all(&secret);
+                        // Dropping stdin closes it: udisksctl reads to EOF.
+                    }
+                    wipe(&mut secret);
+                    let out = match child.wait_with_output() {
+                        Ok(o) => o,
+                        Err(e) => return PlaceOutcome::Failed(format!("Could not unlock: {e}")),
+                    };
+                    if !out.status.success() {
+                        return PlaceOutcome::Failed(unlock_failure(&String::from_utf8_lossy(
+                            &out.stderr,
+                        )));
+                    }
+                    match unlocked_as(&String::from_utf8_lossy(&out.stdout)) {
+                        Some(c) => c,
+                        None => return PlaceOutcome::Failed(
+                            "Unlocked, but Gust could not tell where. Click the drive to open it."
+                                .into(),
+                        ),
+                    }
+                };
+                Self::mount_and_open(&cleartext)
             },
         );
         QString::default()
@@ -3676,10 +3780,19 @@ impl qobject::DirModel {
             dev.clone(),
             "Ejecting…".into(),
             move || {
-                let mount = gust_core::devices::list_devices()
+                let found = gust_core::devices::list_devices()
                     .into_iter()
-                    .find(|d| d.path == dev)
-                    .and_then(|d| d.mount_point);
+                    .find(|d| d.path == dev);
+                let mount = found.as_ref().and_then(|d| d.mount_point.clone());
+                // An encrypted drive: unmount what is inside, then lock it,
+                // so it is safe to unplug and asks again next time.
+                let target = found
+                    .as_ref()
+                    .map(|d| d.mount_target().to_string())
+                    .unwrap_or_else(|| dev.clone());
+                let lock = found
+                    .as_ref()
+                    .is_some_and(|d| d.encrypted && !d.is_locked());
                 // Back on the GUI thread: leave the device if the pane is on it,
                 // then eject on a worker again.
                 PlaceOutcome::Then(Box::new(move |mut model| {
@@ -3691,11 +3804,32 @@ impl qobject::DirModel {
                         dev.clone(),
                         "Ejecting…".into(),
                         move || {
-                            let out = std::process::Command::new("udisksctl")
-                                .args(unmount_args(&dev))
-                                .stdin(std::process::Stdio::null())
-                                .output();
+                            let out = if mount.is_some() {
+                                std::process::Command::new("udisksctl")
+                                    .args(unmount_args(&target))
+                                    .stdin(std::process::Stdio::null())
+                                    .output()
+                            } else {
+                                // Unlocked but never mounted: nothing to unmount.
+                                std::process::Command::new("true").output()
+                            };
                             match out {
+                                Ok(o) if o.status.success() && lock => {
+                                    let locked = std::process::Command::new("udisksctl")
+                                        .args(gust_core::devices::lock_args(&dev))
+                                        .stdin(std::process::Stdio::null())
+                                        .output();
+                                    match locked {
+                                        Ok(l) if l.status.success() => {
+                                            PlaceOutcome::Done("Locked · safe to remove".into())
+                                        }
+                                        _ => PlaceOutcome::Failed(
+                                            "Unmounted, but the drive could not be locked again. \
+                                             Close anything using it and eject once more."
+                                                .into(),
+                                        ),
+                                    }
+                                }
                                 Ok(o) if o.status.success() => {
                                     PlaceOutcome::Done("Safe to remove".into())
                                 }

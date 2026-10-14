@@ -695,6 +695,21 @@ remote place is. Eject refuses while a transfer is running and says which
 one — pulling a filesystem out from under a copy is how people lose data,
 and a file manager that allows it has not done its job.
 
+### 6.13.2 Encrypted drives
+
+A LUKS drive is one sidebar row that says "locked". Clicking it asks for the
+passphrase in the masked prompt; Gust hands it to `udisksctl unlock
+--key-file /dev/stdin` on a pipe, wipes its copy, and mounts and opens what
+was unlocked. The passphrase is never in argv, the environment, a file or a
+log, and the prompt's field is cleared when it closes. A wrong passphrase
+reopens the prompt with the reason; nothing else changes.
+
+The unlocked volume (a `crypt` child in lsblk) is never a row of its own:
+it is the same drive, and the row's state follows it (unlocked, connected).
+Eject unmounts the volume and then locks the drive, so it is safe to unplug
+and asks again next time. Unlocking needs polkit's active-session rule (the
+default); without it the message says the account is not allowed.
+
 ### 6.13.1 Phones and cameras
 
 An iPhone, iPad or Android phone is not a block device, so `lsblk` never

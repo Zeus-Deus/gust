@@ -34,8 +34,15 @@ pub struct Device {
     /// Filesystem type, when the kernel could identify one. `None` on an
     /// empty optical drive or an unformatted stick.
     pub fstype: Option<String>,
-    /// Where it is mounted, if it is.
+    /// Where it is mounted, if it is. For an encrypted drive, where its
+    /// unlocked contents are mounted.
     pub mount_point: Option<PathBuf>,
+    /// An encrypted (LUKS) drive: it must be unlocked with its passphrase
+    /// before there is anything to open.
+    pub encrypted: bool,
+    /// While an encrypted drive is unlocked, the device its contents are
+    /// read through (e.g. `/dev/dm-0`). `None` while locked.
+    pub cleartext: Option<String>,
 }
 
 impl Device {
@@ -64,10 +71,25 @@ impl Device {
                 DeviceKind::Removable => "no readable filesystem".into(),
             };
         }
+        if self.is_locked() {
+            return "locked".into();
+        }
         match &self.mount_point {
             Some(_) => "connected".into(),
+            None if self.encrypted => "unlocked".into(),
             None => "not connected".into(),
         }
+    }
+
+    /// An encrypted drive whose passphrase has not been given yet.
+    pub fn is_locked(&self) -> bool {
+        self.encrypted && self.cleartext.is_none()
+    }
+
+    /// The device a mount or unmount acts on: the unlocked contents of an
+    /// encrypted drive, else the device itself.
+    pub fn mount_target(&self) -> &str {
+        self.cleartext.as_deref().unwrap_or(&self.path)
     }
 
     /// An optical drive with no disc in it, or a device with no filesystem.
@@ -106,6 +128,9 @@ pub struct RawBlock {
     pub fstype: Option<String>,
     pub label: Option<String>,
     pub mount_point: Option<String>,
+    /// The kernel name of the device this one sits on (`lsblk` PKNAME): a
+    /// partition's disk, an unlocked volume's encrypted drive.
+    pub parent: Option<String>,
 }
 
 /// Should this block device be offered to the user?
@@ -148,7 +173,31 @@ pub fn to_device(b: &RawBlock) -> Device {
         size: b.size.clone(),
         fstype: b.fstype.clone(),
         mount_point: b.mount_point.as_ref().map(PathBuf::from),
+        encrypted: b.fstype.as_deref() == Some("crypto_LUKS"),
+        cleartext: None,
     }
+}
+
+/// The devices worth offering, with each encrypted drive joined to its
+/// unlocked volume (a `crypt` child), whose mount point it takes. The
+/// volume itself is never a row of its own: it is the same drive.
+pub fn offerable_devices(raw: &[RawBlock]) -> Vec<Device> {
+    raw.iter()
+        .filter(|b| is_offerable(b))
+        .map(|b| {
+            let mut d = to_device(b);
+            if d.encrypted {
+                if let Some(c) = raw
+                    .iter()
+                    .find(|c| c.kind == "crypt" && c.parent.as_deref() == Some(b.name.as_str()))
+                {
+                    d.cleartext = Some(c.path.clone());
+                    d.mount_point = c.mount_point.as_ref().map(PathBuf::from);
+                }
+            }
+            d
+        })
+        .collect()
 }
 
 /// Parse `lsblk --json` output into raw rows, flattening children.
@@ -174,6 +223,7 @@ pub fn parse_lsblk(json: &str) -> Vec<RawBlock> {
             fstype: json_str(obj, "fstype"),
             label: json_str(obj, "label"),
             mount_point: json_str(obj, "mountpoint"),
+            parent: json_str(obj, "pkname"),
         });
     }
     out
@@ -233,18 +283,14 @@ pub fn list_devices() -> Vec<Device> {
         .args([
             "--json",
             "-o",
-            "NAME,PATH,SIZE,RM,HOTPLUG,TYPE,FSTYPE,LABEL,MOUNTPOINT",
+            "NAME,PATH,PKNAME,SIZE,RM,HOTPLUG,TYPE,FSTYPE,LABEL,MOUNTPOINT",
         ])
         .output();
     let Ok(out) = out else { return Vec::new() };
     if !out.status.success() {
         return Vec::new();
     }
-    parse_lsblk(&String::from_utf8_lossy(&out.stdout))
-        .iter()
-        .filter(|b| is_offerable(b))
-        .map(to_device)
-        .collect()
+    offerable_devices(&parse_lsblk(&String::from_utf8_lossy(&out.stdout)))
 }
 
 /// Why a mount or eject could not be done.
@@ -304,6 +350,81 @@ pub fn unmount_args(device_path: &str) -> Vec<String> {
         device_path.to_string(),
         "--no-user-interaction".into(),
     ]
+}
+
+/// The argv for unlocking an encrypted drive. The passphrase is NOT here:
+/// it is written to the child's stdin, which udisksctl reads as the key
+/// (`--key-file /dev/stdin`), so it never appears in argv, the environment
+/// or a file (AGENTS.md: no secret in argv, env, logs or config).
+pub fn unlock_args(device_path: &str) -> Vec<String> {
+    vec![
+        "unlock".into(),
+        "-b".into(),
+        device_path.to_string(),
+        "--no-user-interaction".into(),
+        "--key-file".into(),
+        "/dev/stdin".into(),
+    ]
+}
+
+/// The argv for locking an encrypted drive again (after its contents are
+/// unmounted), so it is safe to unplug.
+pub fn lock_args(device_path: &str) -> Vec<String> {
+    vec![
+        "lock".into(),
+        "-b".into(),
+        device_path.to_string(),
+        "--no-user-interaction".into(),
+    ]
+}
+
+/// udisksctl's last error line, in words a person can act on.
+pub fn unlock_failure(stderr: &str) -> String {
+    let last = stderr
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty() && !l.contains("controlling terminal"))
+        .unwrap_or("")
+        .trim();
+    if last.contains("Incorrect passphrase") || last.contains("No key available") {
+        "That passphrase did not unlock the drive. Nothing was changed.".into()
+    } else if last.contains("NotAuthorized") {
+        "This account is not allowed to unlock drives (polkit said no).".into()
+    } else if last.contains("AlreadyUnlocked") || last.contains("already unlocked") {
+        "That drive is already unlocked.".into()
+    } else if last.is_empty() {
+        "Could not unlock the drive; udisks did not say why.".into()
+    } else {
+        format!("Could not unlock the drive: {last}")
+    }
+}
+
+/// udisksctl's mount error, in words a person can act on.
+pub fn mount_failure(stderr: &str) -> String {
+    let last = stderr
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty() && !l.contains("controlling terminal"))
+        .unwrap_or("")
+        .trim();
+    if last.contains("not a mountable filesystem") {
+        "There is no filesystem on it that Linux can open. If it is encrypted, it is \
+         unlocked now; eject it to lock it again."
+            .into()
+    } else if last.contains("NotAuthorized") {
+        "This account is not allowed to mount drives (polkit said no).".into()
+    } else if last.is_empty() {
+        "Could not mount that device; udisks did not say why.".into()
+    } else {
+        format!("Could not mount that device: {last}")
+    }
+}
+
+/// Where udisksctl said it unlocked to: "Unlocked /dev/sda as /dev/dm-0."
+pub fn unlocked_as(stdout: &str) -> Option<String> {
+    let (_, after) = stdout.rsplit_once(" as ")?;
+    let dev = after.trim().trim_end_matches('.');
+    dev.starts_with("/dev/").then(|| dev.to_string())
 }
 
 #[cfg(test)]
@@ -491,6 +612,89 @@ mod tests {
         }
     }
 
+    /// Captured in the VM: a USB drive formatted as LUKS, unlocked by
+    /// udisksctl. The volume is a child of type "crypt".
+    const LUKS_UNLOCKED: &str = r#"{"blockdevices":[{"name":"sda","path":"/dev/sda","pkname":null,"size":"64M","rm":true,"hotplug":false,"type":"disk","fstype":"crypto_LUKS","label":"SECRETS","mountpoint":null,"children":[{"name":"SECRETS","path":"/dev/mapper/SECRETS","pkname":"sda","size":"48M","rm":false,"hotplug":false,"type":"crypt","fstype":"ext4","label":"inner","mountpoint":"/run/media/alex/inner"}]}]}"#;
+    const LUKS_LOCKED: &str = r#"{"blockdevices":[{"name":"sda","path":"/dev/sda","pkname":null,"size":"64M","rm":true,"hotplug":false,"type":"disk","fstype":"crypto_LUKS","label":"SECRETS","mountpoint":null}]}"#;
+
+    #[test]
+    fn a_locked_drive_is_one_row_that_says_locked() {
+        let devs = offerable_devices(&parse_lsblk(LUKS_LOCKED));
+        assert_eq!(devs.len(), 1);
+        let d = &devs[0];
+        assert!(d.encrypted && d.is_locked());
+        assert_eq!(d.state_text(), "locked");
+        assert_eq!(d.display(), "SECRETS");
+        // Something to do with it: it is not an empty drive.
+        assert!(!d.is_empty_drive() && d.can_mount());
+        assert_eq!(sidebar_devices(devs).len(), 1);
+    }
+
+    #[test]
+    fn an_unlocked_drive_is_still_one_row_and_mounts_its_volume() {
+        let devs = offerable_devices(&parse_lsblk(LUKS_UNLOCKED));
+        // The crypt volume is never a second row.
+        assert_eq!(devs.len(), 1, "{devs:?}");
+        let d = &devs[0];
+        assert!(!d.is_locked());
+        assert_eq!(d.cleartext.as_deref(), Some("/dev/mapper/SECRETS"));
+        assert_eq!(d.mount_target(), "/dev/mapper/SECRETS");
+        assert_eq!(
+            d.mount_point.as_deref(),
+            Some(std::path::Path::new("/run/media/alex/inner"))
+        );
+        assert_eq!(d.state_text(), "connected");
+        // Unlocked but not mounted says so.
+        let mut u = d.clone();
+        u.mount_point = None;
+        assert_eq!(u.state_text(), "unlocked");
+    }
+
+    #[test]
+    fn a_plain_drive_mounts_itself() {
+        let devs = offerable_devices(&parse_lsblk(REAL_LSBLK));
+        let usb = devs.iter().find(|d| d.name == "sda1").unwrap();
+        assert!(!usb.encrypted && !usb.is_locked());
+        assert_eq!(usb.mount_target(), "/dev/sda1");
+    }
+
+    #[test]
+    fn the_passphrase_is_never_an_argument() {
+        let a = unlock_args("/dev/sda");
+        assert_eq!(a[0], "unlock");
+        assert!(a.iter().any(|x| x == "--no-user-interaction"));
+        // The key comes from stdin; nothing else in argv could carry it.
+        let i = a.iter().position(|x| x == "--key-file").unwrap();
+        assert_eq!(a[i + 1], "/dev/stdin");
+        assert_eq!(a.len(), 6);
+        assert_eq!(lock_args("/dev/sda")[0], "lock");
+        assert_eq!(lock_args("/dev/sda")[2], "/dev/sda");
+    }
+
+    #[test]
+    fn unlock_failures_are_in_plain_words() {
+        // Real udisksctl stderr from the VM.
+        let wrong = "Error unlocking /dev/sda: GDBus.Error:org.freedesktop.UDisks2.Error.Failed: Error unlocking /dev/sda: Failed to activate device: Incorrect passphrase.";
+        assert!(unlock_failure(wrong).contains("did not unlock"));
+        let noauth = "** (udisksctl unlock:1): WARNING **: Error opening current controlling terminal /dev/tty\nError unlocking /dev/sda: GDBus.Error:org.freedesktop.UDisks2.Error.NotAuthorizedCanObtain: Not authorized to perform operation";
+        assert!(unlock_failure(noauth).contains("not allowed"));
+        assert!(unlock_failure("").contains("did not say"));
+        assert_eq!(
+            unlocked_as("Unlocked /dev/sda as /dev/dm-0.\n").as_deref(),
+            Some("/dev/dm-0")
+        );
+        assert_eq!(unlocked_as("something else"), None);
+    }
+
+    #[test]
+    fn mount_failures_are_in_plain_words() {
+        // Real stderr from the VM: an unlocked LUKS drive with nothing inside.
+        let raw = "Error mounting /dev/dm-0: GDBus.Error:org.freedesktop.UDisks2.Error.Failed: Object /org/freedesktop/UDisks2/block_devices/dm_2d0 is not a mountable filesystem.";
+        let m = mount_failure(raw);
+        assert!(m.contains("no filesystem") && !m.contains("GDBus"), "{m}");
+        assert!(mount_failure("").contains("did not say"));
+    }
+
     #[test]
     fn a_drive_with_nothing_to_open_gets_no_sidebar_row() {
         let mk = |name: &str, fstype: Option<&str>, mp: Option<&str>, kind| Device {
@@ -501,6 +705,8 @@ mod tests {
             size: "8G".into(),
             fstype: fstype.map(str::to_string),
             mount_point: mp.map(PathBuf::from),
+            encrypted: false,
+            cleartext: None,
         };
         let shown = sidebar_devices(vec![
             mk("sr0", None, None, DeviceKind::Disc),
