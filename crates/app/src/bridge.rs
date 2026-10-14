@@ -1033,6 +1033,8 @@ pub struct DirModelRust {
     /// The folder the user was browsing before the find. Results are a
     /// VIEW, not a navigation: leaving them returns here.
     find_origin: Option<LocationKey>,
+    /// The row the cursor was on when the search started.
+    find_return: Option<std::ffi::OsString>,
     /// True while a view that displays thumbnails (Grid) is active. Set by
     /// QML, which owns the view mode.
     thumbs_wanted: bool,
@@ -1275,6 +1277,7 @@ impl DirModelRust {
             hash_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             find_cancel: CancelToken::new(),
             find_origin: None,
+            find_return: None,
             thumbs_wanted: false,
             views: gust_core::views::ViewMemory::default_path()
                 .map(|p| gust_core::views::ViewMemory::load(&p))
@@ -4308,9 +4311,15 @@ impl qobject::DirModel {
 
         let key = self.as_ref().key.clone();
         // Remember where we came from, but only on the FIRST find: a find
-        // started from within results must still return to the real folder.
+        // started from within results must still return to the real folder,
+        // and to the row the user was on.
         if self.as_ref().find_origin.is_none() {
+            let here = {
+                let r = self.as_ref();
+                r.entry_at(r.cursor).map(|e| e.name.clone())
+            };
             self.as_mut().rust_mut().find_origin = Some(key.clone());
+            self.as_mut().rust_mut().find_return = here;
         }
         let gen = self.as_ref().generation;
 
@@ -4337,6 +4346,12 @@ impl qobject::DirModel {
                 }
                 let paths: Vec<PathBuf> = hits.into_iter().map(|h| h.path).collect();
                 let _ = thread.queue(move |model| {
+                    // Typing quickly starts a find per keystroke; a slower
+                    // earlier one finishing last must not replace the
+                    // results for what is in the field now.
+                    if model.as_ref().find_needle.to_string() != needle {
+                        return;
+                    }
                     Self::publish_find(model, gen, paths);
                 });
             })
@@ -4566,6 +4581,10 @@ impl qobject::DirModel {
         // not a navigation — so `navigate` to the same path is a no-op and
         // the results would stay on screen. Re-list the current key instead.
         let origin = self.as_mut().rust_mut().find_origin.take();
+        // Back on the row the user left, not the top of the folder.
+        if let Some(name) = self.as_mut().rust_mut().find_return.take() {
+            self.as_mut().rust_mut().focus_name = Some(name);
+        }
         match origin.as_ref().and_then(|k| k.as_path()) {
             // If a result was opened, the key DID move; go back deliberately.
             Some(p) if Some(p) != self.as_ref().key.as_path() => {

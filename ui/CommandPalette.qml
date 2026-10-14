@@ -77,6 +77,7 @@ Rectangle {
     }
 
     readonly property var allActions: [
+        { id: "search",       label: "Search here and below", hint: "Ctrl+F" },
         { id: "bulk",         label: "Bulk rename (selection)", hint: "" },
         { id: "compress",     label: "Compress to .tar.zst",  hint: "" },
         { id: "extract",      label: "Extract here",          hint: "" },

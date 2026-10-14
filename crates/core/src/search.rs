@@ -203,6 +203,19 @@ pub struct SearchHit {
     pub score: u32,
 }
 
+/// A folder full of generated files nobody searches for by name: build
+/// output and caches. Searching "bench" in a project otherwise returns
+/// hundreds of compiler objects before the user's own files. A cache marks
+/// itself with `CACHEDIR.TAG` (the Cache Directory Tagging spec, which Cargo,
+/// pip and many others follow); `node_modules` is the one big exception.
+/// Only descent is skipped: a name match on the folder itself still shows.
+fn is_generated_tree(dir: &std::path::Path, name: &OsStr) -> bool {
+    if name == "node_modules" || name == "__pycache__" {
+        return true;
+    }
+    std::fs::symlink_metadata(dir.join("CACHEDIR.TAG")).is_ok_and(|m| m.is_file())
+}
+
 /// Filename find within an explicit scope. Cancellable and bounded.
 pub fn find_by_name(
     scope: &SearchScope,
@@ -210,9 +223,9 @@ pub fn find_by_name(
     cancel: &CancelToken,
     mut on_hit: impl FnMut(&SearchHit),
 ) -> Vec<SearchHit> {
-    let mut hits = Vec::new();
+    let mut hits: Vec<(SearchHit, usize)> = Vec::new();
     let Some(root) = scope.root.as_path() else {
-        return hits;
+        return Vec::new();
     };
     let root_dev = std::fs::metadata(root).ok().map(|m| {
         use std::os::unix::fs::MetadataExt;
@@ -242,12 +255,16 @@ pub fn find_by_name(
                     score,
                 };
                 on_hit(&hit);
-                hits.push(hit);
+                hits.push((hit, depth));
             }
             // Descend only into real directories — never follow a symlink,
             // which is how a "search here" becomes an infinite loop or a
             // silent crawl into a network mount.
-            if ft.is_dir() && scope.recursive && depth + 1 < scope.max_depth {
+            if ft.is_dir()
+                && scope.recursive
+                && depth + 1 < scope.max_depth
+                && !is_generated_tree(&item.path(), &name)
+            {
                 if scope.stay_on_device {
                     use std::os::unix::fs::MetadataExt;
                     let same = std::fs::metadata(item.path())
@@ -262,8 +279,16 @@ pub fn find_by_name(
             }
         }
     }
-    hits.sort_by_key(|h| h.score);
-    hits
+    // Best match first; among equals the one nearer the folder being
+    // browsed (what the user most likely meant), then by name so the order
+    // does not depend on the order the disk returned entries in.
+    hits.sort_by(|(a, da), (b, db)| {
+        a.score
+            .cmp(&b.score)
+            .then(da.cmp(db))
+            .then_with(|| a.path.cmp(&b.path))
+    });
+    hits.into_iter().map(|(h, _)| h).collect()
 }
 
 #[cfg(test)]
@@ -427,6 +452,68 @@ mod tests {
             |_| {},
         );
         assert_eq!(hits.len(), 1);
+        fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn live_search_ranks_prefix_then_nearer_then_name() {
+        // Search as you type shows results in this order, so it must be
+        // stable: what you typed as a prefix first, the copy nearer to where
+        // you are before a deeper one, and never the disk's own order.
+        let d = std::env::temp_dir().join(format!("gust-rank-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(d.join("a/b")).unwrap();
+        fs::write(d.join("a/b/bench.md"), b"x").unwrap();
+        fs::write(d.join("bench.md"), b"x").unwrap();
+        fs::write(d.join("a/field-bench.md"), b"x").unwrap();
+        fs::write(d.join("benches.txt"), b"x").unwrap();
+        let hits = find_by_name(
+            &SearchScope::recursive(LocationKey::local(&d), 8),
+            "bench",
+            &CancelToken::new(),
+            |_| {},
+        );
+        let rel: Vec<String> = hits
+            .iter()
+            .map(|h| h.path.strip_prefix(&d).unwrap().display().to_string())
+            .collect();
+        assert_eq!(
+            rel,
+            [
+                "bench.md",
+                "benches.txt",
+                "a/b/bench.md",
+                "a/field-bench.md"
+            ]
+        );
+        fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn find_skips_build_output_and_caches() {
+        let d = std::env::temp_dir().join(format!("gust-cachedir-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(d.join("target/release/build")).unwrap();
+        fs::write(
+            d.join("target/CACHEDIR.TAG"),
+            b"Signature: 8a477f597d28d172789f06886806bc55",
+        )
+        .unwrap();
+        fs::write(d.join("target/release/build/bench.o"), b"x").unwrap();
+        fs::create_dir_all(d.join("node_modules/bench")).unwrap();
+        fs::write(d.join("node_modules/bench/bench.js"), b"x").unwrap();
+        fs::write(d.join("bench.md"), b"x").unwrap();
+        let hits = find_by_name(
+            &SearchScope::recursive(LocationKey::local(&d), 8),
+            "bench",
+            &CancelToken::new(),
+            |_| {},
+        );
+        let rel: Vec<String> = hits
+            .iter()
+            .map(|h| h.path.strip_prefix(&d).unwrap().display().to_string())
+            .collect();
+        assert_eq!(rel, ["bench.md"]);
         fs::remove_dir_all(&d).ok();
     }
 

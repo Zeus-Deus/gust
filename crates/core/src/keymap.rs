@@ -48,6 +48,7 @@ pub mod key {
     pub const QUESTION: u32 = 0x3f;
     pub const A: u32 = 0x41;
     pub const E: u32 = 0x45;
+    pub const F: u32 = 0x46;
     pub const I: u32 = 0x49;
     pub const L: u32 = 0x4c;
     pub const N: u32 = 0x4e;
@@ -207,6 +208,14 @@ const COMMON: &[Binding] = &[
         "Go",
     ),
     b(key::E, CTRL, "eject", "Ctrl+E", "Eject this drive", "Go"),
+    b(
+        key::F,
+        CTRL,
+        "search",
+        "Ctrl+F",
+        "Search this folder and below as you type",
+        "Go",
+    ),
 ];
 
 // Only what a preset changes. Earlier tables win, so a preset can override.

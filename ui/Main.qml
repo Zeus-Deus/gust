@@ -1063,6 +1063,40 @@ Window {
     // fields; if it is not handed back the window looks frozen to the
     // keyboard. Focus is only taken when no overlay is still up, so this can
     // be called freely.
+    /// Ctrl+F: search this folder and below as you type.
+    function openSearch() {
+        // The last action's words ("Selected Work") outrank the model's
+        // status, so the result count would never show while searching.
+        hints.message = ""
+        if (filterBar.filterActive) {
+            filterInput.text = ""
+            dirModel.set_filter_text("")
+            filterBar.filterActive = false
+        }
+        filterBar.searchActive = true
+        searchInput.text = dirModel.finding ? dirModel.findNeedle : ""
+        searchInput.selectAll()
+        searchInput.forceActiveFocus()
+        win.qaDump("search-open")
+    }
+
+    /// Leave the search field. `keep`: stay on the results with the list
+    /// focused (Escape there goes back); otherwise return to the folder and
+    /// the row the search started from.
+    function closeSearch(keep) {
+        searchDebounce.stop()
+        if (keep) {
+            const t = searchInput.text.trim()
+            // Enter before the pause ran: search for what is typed now.
+            if (t !== "" && t !== dirModel.findNeedle) dirModel.find_start(t)
+        } else {
+            dirModel.find_clear()
+        }
+        filterBar.searchActive = false
+        win.focusList()
+        win.qaDump(keep ? "search-kept" : "search-closed")
+    }
+
     function focusList() {
         // Overlays own the keyboard while they are up. The filter BAR is not
         // an overlay: a committed filter keeps narrowing the list while the
@@ -1175,6 +1209,7 @@ Window {
         if (a === "new-file") { win.askNewFile(); return true }
         if (a === "new-folder") { win.askNewFolder(); return true }
         if (a === "jump") { palette.openJump(); return true }
+        if (a === "search") { win.openSearch(); return true }
         if (a === "eject") {
             const dev = dirModel.device_here()
             if (dev === "") hints.message = qsTr("This folder is not on a removable drive")
@@ -1394,6 +1429,9 @@ Window {
         }
         else if (a === "bulk") {
             win.askBulkRename()
+        }
+        else if (a === "search") {
+            win.openSearch()
         }
         else if (a === "compress") {
             const cerr = dirModel.compress_selection(dirModel.cursor)
@@ -2348,11 +2386,16 @@ Window {
         Rectangle {
             id: filterBar
             width: parent.width
-            height: filterActive ? Tokens.controlHeight : 0
-            visible: filterActive
+            height: (filterActive || searchActive) ? Tokens.controlHeight : 0
+            visible: filterActive || searchActive
             color: Tokens.backgroundDark
             property bool filterActive: false
+            // Search as you type (Ctrl+F): the same bar, asking a different
+            // question. The filter narrows this folder; search walks this
+            // folder and below, on a worker, ranked (DESIGN §6.3).
+            property bool searchActive: false
             onFilterActiveChanged: win.qaDump("filterbar")
+            onSearchActiveChanged: win.qaDump("searchbar")
 
             Row {
                 anchors.fill: parent
@@ -2360,9 +2403,10 @@ Window {
                 spacing: Tokens.spaceLg
 
                 Text {
+                    id: searchLabel
                     textFormat: Text.PlainText
                     anchors.verticalCenter: parent.verticalCenter
-                    text: "/"
+                    text: filterBar.searchActive ? qsTr("search") : "/"
                     color: Tokens.accent
                     font.family: Tokens.fontFamily
                     font.pixelSize: Tokens.fontBody
@@ -2370,6 +2414,7 @@ Window {
                 TextInput {
                     id: filterInput
                     objectName: "filterInput"
+                    visible: !filterBar.searchActive
                     anchors.verticalCenter: parent.verticalCenter
                     width: parent.width - Tokens.spaceXxl * 3
                     color: Tokens.foregroundBright
@@ -2390,6 +2435,52 @@ Window {
                     Keys.onReturnPressed: win.focusList()
                     Accessible.role: Accessible.EditableText
                     Accessible.name: "Filter this folder"
+                }
+                TextInput {
+                    id: searchInput
+                    objectName: "searchInput"
+                    visible: filterBar.searchActive
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: parent.width - searchHint.implicitWidth - searchLabel.implicitWidth
+                           - Tokens.spaceLg * 3 - Tokens.rowPaddingX * 2
+                    color: Tokens.foregroundBright
+                    font.family: Tokens.fontFamily
+                    font.pixelSize: Tokens.fontBody
+                    selectByMouse: true
+                    clip: true
+                    // A walk per keystroke would be wasted work while a word
+                    // is still being typed; a short pause starts it.
+                    onTextChanged: if (filterBar.searchActive) searchDebounce.restart()
+                    Keys.onEscapePressed: win.closeSearch(false)
+                    Keys.onReturnPressed: win.closeSearch(true)
+                    Keys.onEnterPressed: win.closeSearch(true)
+                    // Down moves into the results without losing them.
+                    Keys.onDownPressed: win.closeSearch(true)
+                    Accessible.role: Accessible.EditableText
+                    Accessible.name: "Search this folder and below"
+                }
+                Text {
+                    id: searchHint
+                    visible: filterBar.searchActive
+                    textFormat: Text.PlainText
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: dirModel.finding
+                          ? qsTr("Enter keeps results · Esc goes back")
+                          : qsTr("type to search here and below")
+                    color: Tokens.foregroundDim
+                    font.family: Tokens.fontFamily
+                    font.pixelSize: Tokens.fontSmall
+                }
+            }
+            Timer {
+                id: searchDebounce
+                interval: 120
+                repeat: false
+                onTriggered: {
+                    const t = searchInput.text.trim()
+                    if (t === "") dirModel.find_clear()
+                    else dirModel.find_start(t)
+                    win.qaDump("search-typed")
                 }
             }
         }
@@ -3232,6 +3323,8 @@ Window {
             })(),
             preset: win.keyPreset,
             filterBarActive: filterBar.filterActive,
+            searchBarActive: filterBar.searchActive,
+            searchText: searchInput.text,
             finding: dirModel.finding,
             findNeedle: dirModel.findNeedle,
             tabCount: win.tabCount,
