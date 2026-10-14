@@ -52,6 +52,9 @@ pub struct PlannedRename {
 pub struct RenamePlan {
     pub renames: Vec<PlannedRename>,
     pub problems: Vec<RenameProblem>,
+    /// For each file, in order, what is wrong with its new name (if
+    /// anything): the rename card marks that line as you type.
+    pub line_problems: Vec<Option<String>>,
 }
 
 impl RenamePlan {
@@ -71,10 +74,14 @@ impl RenamePlan {
     /// A sentence for the dialog.
     pub fn summary(&self) -> String {
         if !self.problems.is_empty() {
+            // Count the lines that are wrong, not the kinds of problem: two
+            // lines wanting one name are two names that would not work.
+            let marked = self.line_problems.iter().filter(|l| l.is_some()).count();
+            let n = marked.max(self.problems.len());
             return format!(
                 "{} name{} would not work — nothing will be renamed",
-                self.problems.len(),
-                if self.problems.len() == 1 { "" } else { "s" }
+                n,
+                if n == 1 { "" } else { "s" }
             );
         }
         match self.changing() {
@@ -149,44 +156,104 @@ pub fn expand(pattern: &str, original: &str, index: usize, width: usize) -> Stri
     out
 }
 
+/// Every file's new name under `pattern`, in the order given.
+pub fn expand_all(files: &[PathBuf], pattern: &str) -> Vec<String> {
+    // Zero-pad to the width of the largest number, so 1..10 sorts correctly
+    // in every other tool the user will look at these files with.
+    let width = files.len().to_string().len();
+    files
+        .iter()
+        .enumerate()
+        .map(|(i, f)| {
+            let old = f
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            expand(pattern, &old, i + 1, width)
+        })
+        .collect()
+}
+
+/// Replace every occurrence of `find` in `name` with `with`. Literal text,
+/// never a pattern: what you type is what is replaced.
+pub fn replace_all(name: &str, find: &str, with: &str) -> String {
+    if find.is_empty() {
+        return name.to_string();
+    }
+    name.replace(find, with)
+}
+
 /// Build the plan. Touches nothing.
 ///
 /// `files` is in the order the user is looking at them — the current sort —
 /// so numbering matches the screen rather than the order the filesystem
 /// happened to return.
 pub fn plan(dir: &Path, files: &[PathBuf], pattern: &str) -> RenamePlan {
-    let mut out = RenamePlan::default();
     if files.is_empty() || pattern.trim().is_empty() {
+        return RenamePlan::default();
+    }
+    plan_names(dir, files, &expand_all(files, pattern))
+}
+
+/// Build the plan for an explicit new name per file (the rename card's
+/// editable list). `names[i]` is the new name of `files[i]`. Touches nothing.
+pub fn plan_names(dir: &Path, files: &[PathBuf], names: &[String]) -> RenamePlan {
+    let mut out = RenamePlan::default();
+    if files.is_empty() {
         return out;
     }
-    // Zero-pad to the width of the largest number, so 1..10 sorts correctly
-    // in every other tool the user will look at these files with.
-    let width = files.len().to_string().len();
+    out.line_problems = vec![None; files.len()];
+    if names.len() != files.len() {
+        // One name per line, one line per file: anything else means a line
+        // was added or deleted and the pairing is no longer what was shown.
+        out.problems.push(RenameProblem::Invalid {
+            name: format!("{} names for {} files", names.len(), files.len()),
+            why: "keep exactly one line per file".into(),
+        });
+        return out;
+    }
 
     // Names being renamed away are available for reuse within the batch.
     let leaving: HashSet<String> = files
         .iter()
         .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
         .collect();
+    // Every name some line wants, to report BOTH lines of a duplicate.
+    let mut wanted: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for (i, n) in names.iter().enumerate() {
+        let old = files[i]
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string());
+        if old.as_deref() != Some(n.as_str()) {
+            *wanted.entry(n.clone()).or_default() += 1;
+        }
+    }
     let mut taken: HashSet<String> = HashSet::new();
 
     for (i, from) in files.iter().enumerate() {
         let Some(old_name) = from.file_name().map(|n| n.to_string_lossy().to_string()) else {
             continue;
         };
-        let new_name = expand(pattern, &old_name, i + 1, width);
+        let new_name = names[i].clone();
+        let flag = |out: &mut RenamePlan, p: RenameProblem| {
+            out.line_problems[i] = Some(p.message());
+            out.problems.push(p);
+        };
 
         // The filesystem's own rules first.
         let as_os = OsString::from(&new_name);
         if let Err(e) = crate::recursive::validate_name(&as_os) {
-            out.problems.push(RenameProblem::Invalid {
-                name: if new_name.is_empty() {
-                    "(empty)".into()
-                } else {
-                    new_name.clone()
+            flag(
+                &mut out,
+                RenameProblem::Invalid {
+                    name: if new_name.is_empty() {
+                        "(empty)".into()
+                    } else {
+                        new_name.clone()
+                    },
+                    why: format!("{e}"),
                 },
-                why: format!("{e}"),
-            });
+            );
             continue;
         }
 
@@ -202,16 +269,26 @@ pub fn plan(dir: &Path, files: &[PathBuf], pattern: &str) -> RenamePlan {
         }
 
         // Two entries wanting the same name is a mistake the user cannot
-        // see from the pattern alone.
-        if !taken.insert(new_name.clone()) {
-            out.problems.push(RenameProblem::Duplicate(new_name));
+        // see from the pattern alone. Both lines are marked.
+        if wanted.get(&new_name).copied().unwrap_or(0) > 1 {
+            if taken.insert(new_name.clone()) {
+                out.problems
+                    .push(RenameProblem::Duplicate(new_name.clone()));
+            }
+            out.line_problems[i] = Some(RenameProblem::Duplicate(new_name).message());
             continue;
         }
+        // A name another line is renaming away from, but that the other
+        // line keeps (unchanged): still taken.
+        let kept_by_other = names
+            .iter()
+            .enumerate()
+            .any(|(j, n)| j != i && *n == new_name && leaving.contains(n));
 
         // An existing file that is NOT part of this batch would be lost.
         let to = dir.join(&new_name);
-        if to.exists() && !leaving.contains(&new_name) {
-            out.problems.push(RenameProblem::Exists(new_name));
+        if kept_by_other || (to.symlink_metadata().is_ok() && !leaving.contains(&new_name)) {
+            flag(&mut out, RenameProblem::Exists(new_name));
             continue;
         }
 
@@ -503,6 +580,7 @@ mod tests {
                 },
             ],
             problems: Vec::new(),
+            ..Default::default()
         };
         assert!(p.is_safe());
 
@@ -590,6 +668,7 @@ mod tests {
                 unchanged: false,
             }],
             problems: Vec::new(),
+            ..Default::default()
         };
         assert!(p.is_safe());
         let _ = files;
@@ -607,14 +686,112 @@ mod tests {
                 unchanged: false,
             }],
             problems: Vec::new(),
+            ..Default::default()
         };
         assert_eq!(one.summary(), "1 file will be renamed");
 
         let bad = RenamePlan {
             renames: Vec::new(),
             problems: vec![RenameProblem::Exists("x".into())],
+            ..Default::default()
         };
         assert!(bad.summary().contains("nothing will be renamed"));
+    }
+
+    #[test]
+    fn an_edited_list_renames_each_file_to_its_own_line() {
+        let d = tmp("names");
+        let files = make(&d, &["IMG_1.jpg", "IMG_2.jpg", "notes.txt"]);
+        let names: Vec<String> = ["beach.jpg", "IMG_2.jpg", "notes.md"]
+            .map(String::from)
+            .to_vec();
+        let p = plan_names(&d, &files, &names);
+        assert!(p.is_safe(), "{:?}", p.problems);
+        assert_eq!(p.changing(), 2);
+        assert_eq!(p.line_problems, [None, None, None]);
+        let done = execute(&d, &p);
+        assert!(done.failed.is_empty(), "{:?}", done.failed);
+        assert!(d.join("beach.jpg").is_file() && d.join("notes.md").is_file());
+        assert!(d.join("IMG_2.jpg").is_file());
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn each_bad_line_is_marked_and_nothing_runs() {
+        let d = tmp("names-bad");
+        let files = make(&d, &["a.txt", "b.txt", "c.txt", "d.txt"]);
+        std::fs::write(d.join("taken.txt"), "someone else's").unwrap();
+        let names: Vec<String> = ["same.txt", "same.txt", "taken.txt", "x/y"]
+            .map(String::from)
+            .to_vec();
+        let p = plan_names(&d, &files, &names);
+        assert!(!p.is_safe());
+        let marked: Vec<bool> = p.line_problems.iter().map(|l| l.is_some()).collect();
+        assert_eq!(marked, [true, true, true, true], "{:?}", p.line_problems);
+        assert!(p.line_problems[0].as_deref().unwrap().contains("twice"));
+        assert!(p.line_problems[2]
+            .as_deref()
+            .unwrap()
+            .contains("already exists"));
+        assert!(
+            p.summary().starts_with("4 names would not work"),
+            "{}",
+            p.summary()
+        );
+        assert!(execute(&d, &p).done.is_empty());
+        assert!(d.join("a.txt").exists() && d.join("d.txt").exists());
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn a_name_kept_by_another_line_is_still_taken() {
+        // b.txt stays b.txt, so a.txt cannot become b.txt.
+        let d = tmp("names-kept");
+        let files = make(&d, &["a.txt", "b.txt"]);
+        let names: Vec<String> = ["b.txt", "b.txt"].map(String::from).to_vec();
+        let p = plan_names(&d, &files, &names);
+        assert!(!p.is_safe());
+        assert!(p.line_problems[0].is_some());
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn a_swap_through_the_list_works() {
+        let d = tmp("names-swap");
+        std::fs::write(d.join("a.txt"), "A").unwrap();
+        std::fs::write(d.join("b.txt"), "B").unwrap();
+        let files = vec![d.join("a.txt"), d.join("b.txt")];
+        let names: Vec<String> = ["b.txt", "a.txt"].map(String::from).to_vec();
+        let p = plan_names(&d, &files, &names);
+        assert!(p.is_safe(), "{:?}", p.problems);
+        let done = execute(&d, &p);
+        assert!(done.failed.is_empty());
+        assert_eq!(std::fs::read_to_string(d.join("a.txt")).unwrap(), "B");
+        assert_eq!(std::fs::read_to_string(d.join("b.txt")).unwrap(), "A");
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn a_missing_or_extra_line_is_refused() {
+        let d = tmp("names-count");
+        let files = make(&d, &["a.txt", "b.txt"]);
+        let p = plan_names(&d, &files, &["x.txt".to_string()]);
+        assert!(!p.is_safe());
+        assert!(p.summary().contains("nothing will be renamed"));
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn replace_is_literal_text() {
+        assert_eq!(
+            replace_all("IMG_0001.JPG", "IMG_", "beach-"),
+            "beach-0001.JPG"
+        );
+        assert_eq!(replace_all("a.b.c", ".", "-"), "a-b-c");
+        // No pattern language: these are just characters.
+        assert_eq!(replace_all("x(1).txt", "(1)", ""), "x.txt");
+        assert_eq!(replace_all("a*b", "*", "+"), "a+b");
+        assert_eq!(replace_all("same", "", "x"), "same");
     }
 
     #[test]

@@ -683,6 +683,20 @@ pub mod qobject {
         /// Run a bulk rename the user has already seen. All or nothing.
         #[qinvokable]
         fn bulk_apply(self: Pin<&mut DirModel>, row: i32, pattern: &QString) -> QString;
+        /// The rename card's starting text: the selected names, one per
+        /// line, in screen order. "" when a name holds a line break (the
+        /// card cannot show it as one line; F2 renames it alone).
+        #[qinvokable]
+        fn bulk_names(self: &DirModel, row: i32) -> QString;
+        /// Check an edited list (one new name per line, same order) as
+        /// JSON: ok, summary, changing, and each line's problem or null.
+        /// Touches nothing.
+        #[qinvokable]
+        fn bulk_check(self: &DirModel, row: i32, names: &QString) -> QString;
+        /// Rename each file to its line of `names`. All or nothing, one
+        /// Ctrl+Z puts every name back.
+        #[qinvokable]
+        fn bulk_apply_names(self: Pin<&mut DirModel>, row: i32, names: &QString) -> QString;
 
         /// The clash the conflict dialog should show now, as JSON, or "".
         #[qinvokable]
@@ -6180,6 +6194,7 @@ impl qobject::DirModel {
                     })
                     .collect(),
                 problems: Vec::new(),
+                ..Default::default()
             };
             let outcome = gust_ops::bulk::execute(&dir, &plan);
             back += outcome.done.len();
@@ -7180,16 +7195,79 @@ impl qobject::DirModel {
         ))
     }
 
-    fn bulk_apply(mut self: Pin<&mut Self>, row: i32, pattern: &QString) -> QString {
+    fn bulk_apply(self: Pin<&mut Self>, row: i32, pattern: &QString) -> QString {
         let Some(dir) = self.as_ref().key.as_path().map(|p| p.to_path_buf()) else {
             return QString::from("This place cannot be renamed in.");
         };
         let files = self.as_ref().bulk_targets(row);
         let plan = gust_ops::bulk::plan(&dir, &files, &pattern.to_string());
+        self.bulk_execute(dir, plan)
+    }
 
-        // The plan is rebuilt here rather than carried from the preview: the
-        // folder may have changed while the dialog was open, and renaming
-        // against a stale plan is how a bystander file gets overwritten.
+    fn bulk_names(&self, row: i32) -> QString {
+        let names: Vec<String> = self
+            .bulk_targets(row)
+            .iter()
+            .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .collect();
+        if names.iter().any(|n| n.contains('\n') || n.contains('\r')) {
+            return QString::default();
+        }
+        QString::from(names.join("\n"))
+    }
+
+    /// The card's text as one name per line. A trailing newline (an editor
+    /// adds one) is not an extra empty name.
+    fn split_names(text: &str) -> Vec<String> {
+        let t = text.strip_suffix('\n').unwrap_or(text);
+        t.split('\n')
+            .map(|l| l.strip_suffix('\r').unwrap_or(l).to_string())
+            .collect()
+    }
+
+    fn bulk_check(&self, row: i32, names: &QString) -> QString {
+        let Some(dir) = self.key.as_path().map(|p| p.to_path_buf()) else {
+            return QString::from(
+                r#"{"ok":false,"summary":"Not a folder","changing":0,"lines":[]}"#,
+            );
+        };
+        let files = self.bulk_targets(row);
+        let plan = gust_ops::bulk::plan_names(&dir, &files, &Self::split_names(&names.to_string()));
+        let lines: Vec<String> = plan
+            .line_problems
+            .iter()
+            .map(|l| match l {
+                Some(m) => Self::json_str(m),
+                None => "null".into(),
+            })
+            .collect();
+        QString::from(format!(
+            r#"{{"ok":{},"summary":{},"changing":{},"lines":[{}]}}"#,
+            plan.is_safe(),
+            Self::json_str(&plan.summary()),
+            plan.changing(),
+            lines.join(",")
+        ))
+    }
+
+    fn bulk_apply_names(self: Pin<&mut Self>, row: i32, names: &QString) -> QString {
+        let Some(dir) = self.as_ref().key.as_path().map(|p| p.to_path_buf()) else {
+            return QString::from("This place cannot be renamed in.");
+        };
+        let files = self.as_ref().bulk_targets(row);
+        let plan = gust_ops::bulk::plan_names(&dir, &files, &Self::split_names(&names.to_string()));
+        self.bulk_execute(dir, plan)
+    }
+
+    /// Run a bulk rename plan and record its one-step Undo.
+    fn bulk_execute(
+        mut self: Pin<&mut Self>,
+        dir: std::path::PathBuf,
+        plan: gust_ops::bulk::RenamePlan,
+    ) -> QString {
+        // The plan is rebuilt by the caller rather than carried from the
+        // preview: the folder may have changed while the card was open, and
+        // renaming against a stale plan is how a bystander gets overwritten.
         if !plan.is_safe() {
             return QString::from(plan.summary());
         }
@@ -7342,8 +7420,10 @@ impl qobject::DirModel {
             .iter()
             .map(|e| e.name.clone())
             .collect();
-        self.as_mut().rust_mut().selection.select_range_by_name(
+        let from = self.as_ref().cursor.max(0) as usize;
+        self.as_mut().rust_mut().selection.extend_by_name(
             &names,
+            from,
             row.max(0) as usize,
             gust_core::selection::RangeMode::Replace,
         );

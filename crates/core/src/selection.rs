@@ -131,6 +131,30 @@ impl Selection {
         self.names.iter().cloned().collect()
     }
 
+    /// Shift+arrow / Shift+click: extend from the anchor to `target`. With
+    /// no anchor yet (after a plain click, which clears the selection), the
+    /// range starts at the row the cursor is on NOW, `from` — the row the
+    /// user clicked — never at the row being moved to. Click a file,
+    /// Shift+Down: both rows are selected, as everywhere else.
+    pub fn extend_by_name(
+        &mut self,
+        names: &[OsString],
+        from: usize,
+        target: usize,
+        mode: RangeMode,
+    ) {
+        let anchored = self
+            .anchor
+            .as_ref()
+            .is_some_and(|a| names.iter().any(|n| n == a));
+        if !anchored {
+            if let Some(n) = names.get(from) {
+                self.anchor = Some(n.clone());
+            }
+        }
+        self.select_range_by_name(names, target, mode);
+    }
+
     /// `select_range` for a caller that already has the names in order.
     pub fn select_range_by_name(&mut self, names: &[OsString], cursor: usize, mode: RangeMode) {
         if names.is_empty() {
@@ -439,6 +463,27 @@ mod tests {
         s.clear();
         assert!(s.is_empty());
         assert_eq!(s.anchor_row(&visible(&all), 7), 7, "anchor is gone");
+    }
+
+    #[test]
+    fn shift_after_a_plain_click_extends_from_the_clicked_row() {
+        // Found in the real window: click the first file, Shift+Down, and
+        // only the SECOND file was selected — the range anchored at the row
+        // it moved to. F2 then renamed one file instead of two.
+        let list: Vec<OsString> = ["a", "b", "c", "d"].iter().map(OsString::from).collect();
+        let mut s = Selection::new();
+        s.clear(); // what a plain click does
+        s.extend_by_name(&list, 0, 1, RangeMode::Replace);
+        assert_eq!(s.len(), 2);
+        assert!(s.contains(OsStr::new("a")) && s.contains(OsStr::new("b")));
+        // Further Shift+Down keeps growing from the same anchor.
+        s.extend_by_name(&list, 1, 2, RangeMode::Replace);
+        assert_eq!(s.len(), 3);
+        // An existing anchor wins over the cursor.
+        let mut t = Selection::new();
+        t.set_anchor(OsStr::new("d"));
+        t.extend_by_name(&list, 0, 2, RangeMode::Replace);
+        assert!(t.contains(OsStr::new("c")) && t.contains(OsStr::new("d")) && t.len() == 2);
     }
 
     #[test]

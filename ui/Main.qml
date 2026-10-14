@@ -475,6 +475,21 @@ Window {
 
     function askBulkRename() {
         if (!dirModel || dirModel.count === 0) return
+        const names = dirModel.bulk_names(dirModel.cursor)
+        if (names !== "") {
+            renameCard.openWith(dirModel, dirModel.cursor, names)
+            win.qaDump("rename-card")
+            return
+        }
+        // A name with a line break cannot be one line of the card: fall
+        // back to the pattern prompt, which never shows names as lines.
+        askBulkPattern()
+    }
+
+    /// Rename by pattern ({n}, {name}, {ext}): the palette's "Bulk rename
+    /// by pattern", and the fallback for names the card cannot show.
+    function askBulkPattern() {
+        if (!dirModel || dirModel.count === 0) return
         prompt.secret = false
         prompt.mode = "bulk"
         prompt.openWith(qsTr("Rename these files"), "{name}.{ext}",
@@ -1109,7 +1124,7 @@ Window {
         // could not be typed into.
         if (palette.visible || confirm.visible || contextMenu.open
             || conflictDialog.visible || settingsPanel.open || trashPanel.open || recentPanel.open || connectPanel.open
-            || prompt.visible || prompt.claimingFocus)
+            || prompt.visible || prompt.claimingFocus || renameCard.open)
             return
         listFocus.forceActiveFocus()
     }
@@ -1430,6 +1445,9 @@ Window {
         else if (a === "bulk") {
             win.askBulkRename()
         }
+        else if (a === "bulk-pattern") {
+            win.askBulkPattern()
+        }
         else if (a === "search") {
             win.openSearch()
         }
@@ -1624,6 +1642,8 @@ Window {
 
     // --- operations --------------------------------------------------
     function askRename() {
+        // Several selected: rename them all at once in the card.
+        if (dirModel.sel_count() > 1) { win.askBulkRename(); return }
         const row = dirModel.cursor
         const name = dirModel.entry_name(row)
         if (name === "") { hints.message = "Nothing selected"; return }
@@ -2832,6 +2852,7 @@ Window {
                                      : label === "Undo: remove the pasted image" ? qsTr("Removed the pasted image")
                                      : label === "Undo: put permissions back" ? qsTr("Permissions put back")
                                      : label === "Undo: restore the original name" ? qsTr("Restored the original name")
+                                     : /^Undo: put \d+ names? back$/.test(label) ? qsTr("Names put back")
                                      : label.startsWith("Undo: remove") ? "Copies removed"
                                      : label.startsWith("Undo: move") ? "Moved back"
                                      : "Restored from Trash"
@@ -3125,6 +3146,23 @@ Window {
         onChosen: (a) => win.runAction(a)
         onHighlightMoved: win.qaDump("context-menu")
         onClosed: { win.focusList(); win.qaDump("context-menu") }
+    }
+
+    RenameCard {
+        id: renameCard
+        objectName: "renameCard"
+        onVisibleChanged: win.qaDump("rename-card")
+        onCheckChanged: win.qaDump("rename-check")
+        onClosed: win.focusList()
+        onAccepted: (names) => {
+            const m = renameCard.model
+            const r = renameCard.row
+            renameCard.close()
+            if (!m) return
+            const err = m.bulk_apply_names(r, names)
+            if (err !== "") win.alertText = err
+            win.qaDump("bulk-done")
+        }
     }
 
     ConflictDialog {
@@ -3489,6 +3527,11 @@ Window {
             jobSpeed: win.job ? (win.job.speed || "") : "",
             jobEta: win.job ? (win.job.eta || "") : "",
             conflictName: conflictDialog.clash ? conflictDialog.clash.name : "",
+            renameCardOpen: renameCard.open,
+            renameCardBad: renameCard.open ? renameCard.badLines() : 0,
+            renameCardOk: renameCard.open ? renameCard.check.ok : false,
+            renameCardSummary: renameCard.open ? renameCard.check.summary : "",
+            renameCardPoints: renameCard.open ? renameCard.buttonPoints() : ({}),
             conflictCanMerge: !!(conflictDialog.clash && conflictDialog.clash.canMerge),
             conflictFocus: conflictDialog.focusedChoice(),
             conflictPoints: conflictDialog.visible ? conflictDialog.buttonPoints() : ({}),

@@ -2419,7 +2419,7 @@ bulk_sel="$(state "d['selCount']")"
   || bad "expected 3 selected, got $bulk_sel"
 
 # A pattern that would collide must be refused BEFORE anything happens.
-palette_run "Bulk rename"
+palette_run "Rename selection by pattern"
 sleep 1.2
 expect "the rename prompt opened" "d['promptMode']" "bulk"
 ctrl a            # the field is pre-filled; replace it, do not append
@@ -2442,7 +2442,7 @@ key Escape
 sleep 0.8
 
 # A good pattern must show a preview before renaming.
-palette_run "Bulk rename"
+palette_run "Rename selection by pattern"
 sleep 1.2
 ctrl a            # replace the pre-filled pattern
 typ "file-{n}.{ext}"

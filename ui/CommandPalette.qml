@@ -78,7 +78,8 @@ Rectangle {
 
     readonly property var allActions: [
         { id: "search",       label: "Search here and below", hint: "Ctrl+F" },
-        { id: "bulk",         label: "Bulk rename (selection)", hint: "" },
+        { id: "bulk",         label: "Rename selection (edit the names)", hint: "F2" },
+        { id: "bulk-pattern", label: "Rename selection by pattern",       hint: "" },
         { id: "compress",     label: "Compress to .tar.zst",  hint: "" },
         { id: "extract",      label: "Extract here",          hint: "" },
         { id: "split",        label: "Split: two panes",      hint: "" },
