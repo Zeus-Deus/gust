@@ -731,3 +731,174 @@ fn an_unanswered_clash_is_never_overwritten() {
     assert_eq!(fs::read(d.join("dest/b")).unwrap(), b"OLD B");
     fs::remove_dir_all(&d).ok();
 }
+
+// ---------------------------------------------------------------------------
+// Folder merge (DESIGN §6.24): never overwrites, and one Undo puts both
+// folders back exactly as they were.
+// ---------------------------------------------------------------------------
+
+fn merge_fixture(tag: &str) -> (PathBuf, PathBuf, PathBuf) {
+    let root = fixture(tag);
+    let src = root.join("src/Invoices");
+    let dst = root.join("dst/Invoices");
+    fs::create_dir_all(src.join("2026/q1")).unwrap();
+    fs::create_dir_all(dst.join("2026")).unwrap();
+    fs::write(src.join("jan.txt"), b"NEW JAN").unwrap();
+    fs::write(dst.join("jan.txt"), b"OLD JAN").unwrap();
+    fs::write(src.join("feb.txt"), b"same feb").unwrap();
+    fs::write(dst.join("feb.txt"), b"same feb").unwrap();
+    fs::write(src.join("mar.txt"), b"only in src").unwrap();
+    fs::write(src.join("2026/q1/report.txt"), b"q1").unwrap();
+    fs::write(dst.join("may.txt"), b"only in dst").unwrap();
+    fs::write(dst.join("2026/plan.txt"), b"dst plan").unwrap();
+    (root, src, dst)
+}
+
+fn tree(root: &Path) -> Vec<(String, Vec<u8>)> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(rd) = fs::read_dir(&d) else { continue };
+        for e in rd.flatten() {
+            let p = e.path();
+            let rel = p.strip_prefix(root).unwrap().display().to_string();
+            if p.is_dir() {
+                out.push((rel + "/", Vec::new()));
+                stack.push(p);
+            } else {
+                out.push((rel, fs::read(&p).unwrap()));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+fn run_merge(
+    kind: JobKind,
+    src: &Path,
+    dst_parent: &Path,
+) -> (jobs::JobProgress, gust_ops::journal::Job) {
+    let req = match kind {
+        JobKind::Copy => jobs::Request::Copy {
+            sources: vec![src.to_path_buf()],
+            dest_dir: dst_parent.to_path_buf(),
+        },
+        _ => jobs::Request::Move {
+            sources: vec![src.to_path_buf()],
+            dest_dir: dst_parent.to_path_buf(),
+        },
+    };
+    let mut answers = std::collections::HashMap::new();
+    answers.insert(src.to_path_buf(), ConflictPolicy::Merge);
+    let mut h = jobs::start_resolved("merge", req, answers, None, None);
+    let p = h.wait();
+    (p, h.record())
+}
+
+#[test]
+fn a_merging_copy_never_overwrites_and_undo_restores_both_folders() {
+    let (root, src, dst) = merge_fixture("merge-copy");
+    let (src_before, dst_before) = (tree(&src), tree(&dst));
+    let (p, rec) = run_merge(JobKind::Copy, &src, &root.join("dst"));
+    assert_eq!(p.state, JobState::Confirmed, "{p:?}");
+    assert!(p.message.contains("merged"), "{}", p.message);
+    assert!(p.message.contains("1 already there"), "{}", p.message);
+    assert!(p.message.contains("kept both for 1"), "{}", p.message);
+    // Nothing that was there changed.
+    assert_eq!(fs::read(dst.join("jan.txt")).unwrap(), b"OLD JAN");
+    assert_eq!(fs::read(dst.join("may.txt")).unwrap(), b"only in dst");
+    assert_eq!(fs::read(dst.join("2026/plan.txt")).unwrap(), b"dst plan");
+    // What was missing arrived; the clash landed beside it.
+    assert_eq!(fs::read(dst.join("jan (copy).txt")).unwrap(), b"NEW JAN");
+    assert_eq!(fs::read(dst.join("mar.txt")).unwrap(), b"only in src");
+    assert_eq!(fs::read(dst.join("2026/q1/report.txt")).unwrap(), b"q1");
+    assert_eq!(tree(&src), src_before, "a copy leaves its source alone");
+
+    let plan = undo::plan_undo(&rec);
+    assert!(matches!(plan, undo::UndoPlan::Safe { .. }), "{plan:?}");
+    let out = undo::apply_undo(&plan);
+    assert!(out.is_complete(), "{out:?}");
+    assert_eq!(
+        tree(&dst),
+        dst_before,
+        "Undo restores the destination exactly"
+    );
+    assert_eq!(tree(&src), src_before);
+    fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn a_merging_move_keeps_duplicates_in_the_source_and_undo_puts_everything_back() {
+    let (root, src, dst) = merge_fixture("merge-move");
+    let (src_before, dst_before) = (tree(&src), tree(&dst));
+    let (p, rec) = run_merge(JobKind::Move, &src, &root.join("dst"));
+    assert_eq!(p.state, JobState::Confirmed, "{p:?}");
+    assert!(p.message.contains("left where they were"), "{}", p.message);
+    assert_eq!(fs::read(dst.join("jan.txt")).unwrap(), b"OLD JAN");
+    assert_eq!(fs::read(dst.join("jan (copy).txt")).unwrap(), b"NEW JAN");
+    assert_eq!(fs::read(dst.join("2026/q1/report.txt")).unwrap(), b"q1");
+    // The identical file was not moved, so it (and its folder) stays.
+    assert_eq!(fs::read(src.join("feb.txt")).unwrap(), b"same feb");
+    assert!(!src.join("mar.txt").exists() && !src.join("2026").exists());
+
+    let plan = undo::plan_undo(&rec);
+    let out = undo::apply_undo(&plan);
+    assert!(out.is_complete(), "{out:?}");
+    assert_eq!(tree(&dst), dst_before);
+    assert_eq!(tree(&src), src_before, "Undo puts every moved item back");
+    fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn a_merging_move_of_only_new_items_removes_the_emptied_source_and_undo_restores_it() {
+    let root = fixture("merge-move-empty");
+    let src = root.join("src/Photos");
+    let dst = root.join("dst/Photos");
+    fs::create_dir_all(src.join("trip/day1")).unwrap();
+    fs::create_dir_all(&dst).unwrap();
+    fs::write(src.join("trip/day1/a.jpg"), b"a").unwrap();
+    fs::write(dst.join("old.jpg"), b"old").unwrap();
+    let (src_before, dst_before) = (tree(&src), tree(&dst));
+    let (p, rec) = run_merge(JobKind::Move, &src, &root.join("dst"));
+    assert_eq!(p.state, JobState::Confirmed, "{p:?}");
+    assert!(!src.exists(), "a source the move emptied is removed");
+    assert_eq!(fs::read(dst.join("trip/day1/a.jpg")).unwrap(), b"a");
+    let out = undo::apply_undo(&undo::plan_undo(&rec));
+    assert!(out.is_complete(), "{out:?}");
+    assert_eq!(tree(&src), src_before);
+    assert_eq!(tree(&dst), dst_before);
+    fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn undo_of_a_merge_keeps_what_the_user_changed_since() {
+    let (root, src, dst) = merge_fixture("merge-edited");
+    let (_p, rec) = run_merge(JobKind::Copy, &src, &root.join("dst"));
+    // Edited after the merge: Undo must not throw this work away.
+    fs::write(dst.join("mar.txt"), b"edited after the merge").unwrap();
+    let plan = undo::plan_undo(&rec);
+    if let undo::UndoPlan::Safe { .. } = plan {
+        let _ = undo::apply_undo(&plan);
+    }
+    assert_eq!(
+        fs::read(dst.join("mar.txt")).unwrap(),
+        b"edited after the merge"
+    );
+    assert_eq!(fs::read(dst.join("jan.txt")).unwrap(), b"OLD JAN");
+    fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn merge_asked_of_a_file_means_keep_both() {
+    let root = fixture("merge-file");
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::create_dir_all(root.join("dst")).unwrap();
+    fs::write(root.join("src/a.txt"), b"new").unwrap();
+    fs::write(root.join("dst/a.txt"), b"old").unwrap();
+    let (p, _rec) = run_merge(JobKind::Copy, &root.join("src/a.txt"), &root.join("dst"));
+    assert_eq!(p.state, JobState::Confirmed, "{p:?}");
+    assert_eq!(fs::read(root.join("dst/a.txt")).unwrap(), b"old");
+    assert_eq!(fs::read(root.join("dst/a (copy).txt")).unwrap(), b"new");
+    fs::remove_dir_all(&root).ok();
+}

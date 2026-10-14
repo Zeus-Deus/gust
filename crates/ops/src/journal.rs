@@ -72,6 +72,10 @@ pub enum ConflictPolicy {
     Skip,
     Replace,
     KeepBoth,
+    /// A folder onto a folder of the same name: fold the contents in,
+    /// never overwriting anything (DESIGN §6.24). For anything that is not
+    /// a real folder on both sides it means Keep both.
+    Merge,
 }
 
 /// One affected path plus everything needed to invert it.
@@ -149,6 +153,10 @@ pub struct Job {
     /// The user has seen the start-up notice for this interrupted job.
     #[serde(default)]
     pub acknowledged: bool,
+    /// Source folders a merging move emptied and removed, so Undo can
+    /// recreate them before moving anything back (DESIGN §6.24).
+    #[serde(default)]
+    pub removed_empty_dirs: Vec<PathBuf>,
 }
 
 impl Job {
@@ -167,6 +175,7 @@ impl Job {
             planned: Vec::new(),
             dest_dir: None,
             acknowledged: false,
+            removed_empty_dirs: Vec::new(),
         }
     }
 

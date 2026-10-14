@@ -77,6 +77,9 @@ pub enum UndoStep {
     },
     /// Restore preserved overwritten bytes.
     RestorePreserved { preserved: PathBuf, to: PathBuf },
+    /// Recreate an empty folder a merging move removed, so its contents
+    /// can move back into it. Never touches anything already there.
+    RecreateDir { path: PathBuf },
 }
 
 /// Snapshot every descendant identity under `root`.
@@ -196,6 +199,15 @@ pub fn plan_undo(job: &Job) -> UndoPlan {
     }
 
     let mut steps = Vec::new();
+    // A merging move removed the source folders it emptied: they come back
+    // first, shallowest first, so every MoveBack has its parent.
+    if job.kind == JobKind::Move {
+        let mut dirs: Vec<&PathBuf> = job.removed_empty_dirs.iter().collect();
+        dirs.sort_by_key(|p| p.components().count());
+        for d in dirs {
+            steps.push(UndoStep::RecreateDir { path: d.clone() });
+        }
+    }
     for e in &job.entries {
         if !e.done {
             continue;
@@ -599,6 +611,23 @@ pub fn apply_undo(plan: &UndoPlan) -> UndoOutcome {
                 match remove_verified(path, expected.as_ref(), subtree) {
                     Ok(()) => out.steps_done += 1,
                     Err(why) => out.problems.push(why),
+                }
+            }
+
+            UndoStep::RecreateDir { path } => {
+                // Already back (or recreated by the user): nothing to do.
+                // Only an exact real folder counts; a file or link there is
+                // somebody's work and is left alone.
+                match path.symlink_metadata() {
+                    Ok(m) if m.file_type().is_dir() => out.steps_done += 1,
+                    Ok(_) => out.problems.push(format!(
+                        "{} is occupied by something else — left in place",
+                        path.display()
+                    )),
+                    Err(_) => match std::fs::create_dir(path) {
+                        Ok(()) => out.steps_done += 1,
+                        Err(e) => out.problems.push(format!("{}: {e}", path.display())),
+                    },
                 }
             }
 

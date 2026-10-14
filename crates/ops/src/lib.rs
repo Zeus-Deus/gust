@@ -12,6 +12,7 @@ pub mod engine;
 pub mod fat;
 pub mod jobs;
 pub mod journal;
+pub mod merge;
 pub mod permanent;
 pub mod rate;
 pub mod recursive;

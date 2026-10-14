@@ -402,7 +402,7 @@ pub fn move_tree_opts(
     if dd.stat_child(&dn).is_ok() {
         match policy {
             ConflictPolicy::Skip => return Ok(()),
-            ConflictPolicy::Ask | ConflictPolicy::KeepBoth => {
+            ConflictPolicy::Ask | ConflictPolicy::KeepBoth | ConflictPolicy::Merge => {
                 return Err(OpError::Conflict(dst_root.to_path_buf()))
             }
             ConflictPolicy::Replace => {}

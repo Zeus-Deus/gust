@@ -6668,11 +6668,13 @@ impl qobject::DirModel {
             gust_ops::jobs::Request::Move { .. } => "move",
             _ => "copy",
         };
+        // Offered only for a real folder landing on a real folder.
+        let can_merge = gust_ops::merge::can_merge(&c.source, &c.existing);
         QString::from(&format!(
             concat!(
                 "{{\"index\":{},\"count\":{},\"name\":{},\"isDir\":{},",
                 "\"existingSize\":{},\"existingTime\":{},\"incomingSize\":{},\"incomingTime\":{},",
-                "\"canReplace\":{},\"verb\":\"{}\",\"into\":{}}}"
+                "\"canReplace\":{},\"canMerge\":{},\"verb\":\"{}\",\"into\":{}}}"
             ),
             i,
             p.clashes.len(),
@@ -6688,6 +6690,7 @@ impl qobject::DirModel {
             Self::json_str(&new_size),
             Self::json_str(&new_time),
             can_replace,
+            can_merge,
             verb,
             Self::json_str(
                 &c.existing
@@ -6704,6 +6707,7 @@ impl qobject::DirModel {
             "replace" => ConflictPolicy::Replace,
             "keep-both" => ConflictPolicy::KeepBoth,
             "skip" => ConflictPolicy::Skip,
+            "merge" => ConflictPolicy::Merge,
             other => return QString::from(&format!("unknown answer {other:?}")),
         };
         let Some(mut p) = self.as_mut().rust_mut().pending.take() else {

@@ -479,6 +479,10 @@ fn run(
     let mut refused_all: Vec<String> = Vec::new();
     let mut skipped = 0usize;
     let mut kept_both = 0usize;
+    // Folder merges (DESIGN §6.24): how many, and what they found.
+    let mut merged = 0usize;
+    let mut merge_same = 0usize;
+    let mut merge_beside = 0usize;
 
     for (src_index, src) in req.sources().into_iter().enumerate() {
         let bytes_at_start = base_bytes;
@@ -547,7 +551,159 @@ fn run(
                     });
                     continue;
                 }
-                ConflictPolicy::KeepBoth => {
+                ConflictPolicy::Merge if crate::merge::can_merge(&src, &dst) => {
+                    let moving = matches!(req, Request::Move { .. });
+                    let fail = |msg: String| {
+                        let _ = set_rec(&|r| r.state = crate::journal::JobState::Failed);
+                        set(&progress, |p| {
+                            p.state = JobState::Failed;
+                            p.message = msg.clone();
+                        });
+                    };
+                    let stop_cancelled = || {
+                        let _ = set_rec(&|r| r.state = crate::journal::JobState::Cancelled);
+                        set(&progress, |p| {
+                            p.state = JobState::Cancelled;
+                            p.message = "Cancelled — finished items were kept".into();
+                        });
+                    };
+                    let plan = match crate::merge::plan_merge(&src, &dst, fat_names, &cancel) {
+                        Ok(plan) => plan,
+                        Err(crate::engine::OpError::Cancelled) => {
+                            stop_cancelled();
+                            return;
+                        }
+                        Err(e) => {
+                            fail(format!("Could not merge into {}: {e}", dst.display()));
+                            return;
+                        }
+                    };
+                    // Every item goes through the ordinary engine to a name
+                    // that is free now, and is journalled on its own, so one
+                    // Undo can take each back with the usual identity check.
+                    for item in &plan.items {
+                        if cancel.checkpoint() {
+                            stop_cancelled();
+                            return;
+                        }
+                        let item_entries = recursive::plan_tree(&item.src, &cancel)
+                            .map(|pl| pl.entry_count().max(1))
+                            .unwrap_or(1);
+                        let src_id = crate::anchor::FileIdentity::of_path(&item.src)
+                            .ok()
+                            .map(crate::journal::RecordedIdentity::from);
+                        let outcome = {
+                            let mut on_item = |done: usize, _t: usize, bytes: u64, _bt: u64| {
+                                set(&progress, |p| {
+                                    p.entries_done = base_entries + done;
+                                    p.bytes_done = base_bytes + bytes;
+                                });
+                            };
+                            if moving {
+                                recursive::move_tree_opts(
+                                    &item.src,
+                                    &item.dst,
+                                    ConflictPolicy::Ask,
+                                    &cancel,
+                                    &mut on_item,
+                                    fat_names,
+                                )
+                                .map(|_| None)
+                            } else {
+                                recursive::copy_tree_opts(
+                                    &item.src,
+                                    &item.dst,
+                                    ConflictPolicy::Ask,
+                                    &cancel,
+                                    &mut on_item,
+                                    fat_names,
+                                )
+                                .map(Some)
+                            }
+                        };
+                        let ok = outcome.is_ok();
+                        let mut saved = set_rec(&|r| {
+                            r.entries.push(crate::journal::JournalEntry {
+                                source: item.src.clone(),
+                                destination: Some(item.dst.clone()),
+                                source_identity: src_id,
+                                preserved: None,
+                                done: ok,
+                                error: None,
+                            });
+                        });
+                        if ok && saved.is_ok() {
+                            let ids = crate::undo::snapshot_subtree(&item.dst);
+                            saved = set_rec(&|r| {
+                                for (p, id) in &ids {
+                                    r.subtree_identities.push((p.clone(), *id));
+                                }
+                            });
+                        }
+                        if let Err(e) = saved {
+                            lost(e);
+                            return;
+                        }
+                        match outcome {
+                            Ok(copied) => {
+                                if let Some(cp) = copied {
+                                    for (path, why) in cp.refused {
+                                        refused_all.push(format!("{}: {why}", path.display()));
+                                    }
+                                }
+                                base_entries += item_entries;
+                            }
+                            Err(crate::engine::OpError::Cancelled) => {
+                                stop_cancelled();
+                                return;
+                            }
+                            Err(crate::engine::OpError::Conflict(path)) => {
+                                let _ = set_rec(&|r| r.state = crate::journal::JobState::Conflict);
+                                set(&progress, |p| {
+                                    p.state = JobState::Conflict;
+                                    p.message = format!(
+                                        "{} appeared during the merge; it was left alone",
+                                        path.display()
+                                    );
+                                });
+                                return;
+                            }
+                            Err(e) => {
+                                fail(match &e {
+                                    crate::engine::OpError::Io(io) => {
+                                        crate::engine::plain_io_message_at(io, &item.dst)
+                                    }
+                                    other => format!("{other}"),
+                                });
+                                return;
+                            }
+                        }
+                        set(&progress, |p| p.entries_done = base_entries);
+                    }
+                    if moving {
+                        // Only folders the move emptied go; an "already
+                        // there" file keeps its folder in the source.
+                        let removed = crate::merge::remove_emptied(&src, &plan.entered);
+                        if let Err(e) =
+                            set_rec(&|r| r.removed_empty_dirs.extend(removed.iter().cloned()))
+                        {
+                            lost(e);
+                            return;
+                        }
+                    }
+                    merged += 1;
+                    merge_same += plan.already_there.len();
+                    merge_beside += plan.renamed();
+                    base_bytes = bytes_at_start + source_bytes.get(src_index).copied().unwrap_or(0);
+                    set(&progress, |p| {
+                        p.entries_done = base_entries;
+                        p.bytes_done = base_bytes;
+                    });
+                    continue;
+                }
+                // Merge asked of something that is not a folder on both
+                // sides means the one answer that loses nothing.
+                ConflictPolicy::KeepBoth | ConflictPolicy::Merge => {
                     let free = crate::anchor::resolve_parent(&dst)
                         .map_err(crate::engine::OpError::from)
                         .and_then(|(parent, name)| recursive::unique_copy_name(&parent, &name));
@@ -729,6 +885,23 @@ fn run(
         p.refused = refused_all.clone();
         if let Some(n) = renamed_note.clone() {
             p.notes.push(n);
+        }
+        if merged > 0 {
+            p.notes.push(if merged == 1 {
+                "merged into the folder there".to_string()
+            } else {
+                format!("merged into {merged} folders")
+            });
+            if merge_same > 0 {
+                p.notes.push(if p.kind == JobKind::Move {
+                    format!("{merge_same} already there, left where they were")
+                } else {
+                    format!("{merge_same} already there")
+                });
+            }
+            if merge_beside > 0 {
+                p.notes.push(format!("kept both for {merge_beside}"));
+            }
         }
         // A job that refused entries is NOT a clean success.
         if refused_all.is_empty() {

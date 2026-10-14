@@ -315,7 +315,7 @@ pub(crate) fn stage_regular_file(
             // KeepBoth is resolved by the caller choosing a free name; if a
             // name is taken here anyway, it was taken by someone else in the
             // meantime and is theirs.
-            ConflictPolicy::Ask | ConflictPolicy::KeepBoth => {
+            ConflictPolicy::Ask | ConflictPolicy::KeepBoth | ConflictPolicy::Merge => {
                 return Err(OpError::Conflict(PathBuf::from(dst_name)));
             }
             ConflictPolicy::Replace => {}

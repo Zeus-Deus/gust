@@ -1194,6 +1194,34 @@ claim it is implemented. If HOME is absent, do not invent places from the
 current folder. A nested HOME fixture and a real sidebar click are required
 regressions, since a two-component `/tmp/fixture` masks the former path guess.
 
+## 6.24 Merging folders
+
+Pasting or dropping a folder onto a folder of the same name offers **Merge**
+beside Skip, Replace and Keep both, but only when both are real directories
+(never a symlink to one, which would merge into wherever it points).
+
+Merge never overwrites anything, so it needs no second question:
+
+- An entry missing at the destination is copied (or moved) in, whole.
+- A folder present on both sides is entered and merged the same way.
+- A file whose bytes are identical on both sides (a symlink: identical
+  target) is left as it is: "already there".
+- Anything else with a taken name lands beside it under a free
+  "name (copy)" name, which is checked against the names this merge is
+  about to create too, so two of its own items never collide.
+
+The whole plan is made before a byte is written, and each placed item goes
+through the ordinary copy/move engine (staging, claims, no-clobber
+publication). A move removes source folders only once they are empty; an
+"already there" file stays in the source, and the summary says so.
+
+One Undo takes back the whole merge. Each placed item is a journal entry, so
+Undo removes exactly what the merge created (after the usual identity
+check) or moves each item back; the destination's own files are never
+touched. For a move, the source folders it emptied and removed are listed
+in `removed_empty_dirs` and recreated, shallowest first, before anything is
+moved back.
+
 ## 7. Undo journal
 
 An undo entry records, per affected path: the expected identity

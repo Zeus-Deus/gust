@@ -5,7 +5,8 @@ import com.gust.app
 //
 // Three answers, never a silent default: Replace (the old item goes to the
 // Trash first, so Undo brings it back), Keep both (the incoming item gets a
-// free "(copy)" name) and Skip. With several clashes, "apply to all" answers
+// free "(copy)" name) and Skip. A folder landing on a folder adds a fourth,
+// Merge (DESIGN §6.24): the contents fold in and nothing is overwritten. With several clashes, "apply to all" answers
 // the rest in one go. Escape or clicking outside cancels the whole transfer
 // and nothing has been touched.
 Rectangle {
@@ -28,8 +29,10 @@ Rectangle {
         if (!visible) applyAll = false
         clash = c
         visible = true
-        // Keep both is the one answer that can never lose anything.
-        keepButton.forceActiveFocus()
+        // Keep both and Merge are the answers that can never lose
+        // anything; for a folder onto a folder Merge is what is meant.
+        if (c && c.canMerge) mergeButton.forceActiveFocus()
+        else keepButton.forceActiveFocus()
     }
     function close() {
         visible = false
@@ -39,6 +42,7 @@ Rectangle {
     }
     function pick(choice) {
         if (choice === "replace" && !(clash && clash.canReplace)) return
+        if (choice === "merge" && !(clash && clash.canMerge)) return
         answered(choice, applyAll)
     }
     function cancel() {
@@ -47,6 +51,24 @@ Rectangle {
     }
 
     readonly property int remaining: clash ? clash.count - clash.index : 0
+
+    /// Where each answer button is, window coordinates (qa clicks them).
+    function buttonPoints() {
+        const out = {}
+        for (const b of [keepButton.target, mergeButton.target]) {
+            if (!b || !b.visible) continue
+            const p = b.mapToItem(null, b.width / 2, b.height / 2)
+            out[b.objectName.replace("conflict-", "")] = [Math.round(p.x), Math.round(p.y)]
+        }
+        return out
+    }
+
+    /// Which answer has the keyboard (qa): Enter presses it.
+    function focusedChoice() {
+        if (mergeButton.target && mergeButton.target.activeFocus) return "merge"
+        if (keepButton.target && keepButton.target.activeFocus) return "keep-both"
+        return ""
+    }
 
     MouseArea {
         anchors.fill: parent
@@ -116,6 +138,17 @@ Rectangle {
                 wrapMode: Text.Wrap
             }
 
+            Text {
+                textFormat: Text.PlainText
+                width: parent.width
+                visible: !!(root.clash && root.clash.canMerge)
+                text: qsTr("Merge puts what is missing into the folder there. Nothing is overwritten: a file with the same name and different contents lands beside it as a copy.")
+                color: Tokens.foregroundDim
+                font.family: Tokens.fontFamily
+                font.pixelSize: Tokens.fontSmall
+                wrapMode: Text.Wrap
+            }
+
             // Apply to all — only when there is more than one question.
             Item {
                 visible: root.remaining > 1
@@ -162,7 +195,13 @@ Rectangle {
                 spacing: Tokens.spaceLg
 
                 Repeater {
-                    model: [
+                    model: (root.clash && root.clash.canMerge) ? [
+                        { id: "cancel", label: qsTr("Cancel") },
+                        { id: "skip", label: qsTr("Skip") },
+                        { id: "replace", label: qsTr("Replace") },
+                        { id: "keep-both", label: qsTr("Keep both") },
+                        { id: "merge", label: qsTr("Merge") }
+                    ] : [
                         { id: "cancel", label: qsTr("Cancel") },
                         { id: "skip", label: qsTr("Skip") },
                         { id: "replace", label: qsTr("Replace") },
@@ -170,6 +209,8 @@ Rectangle {
                     ]
                     delegate: Rectangle {
                         id: btn
+                        readonly property bool primary:
+                            modelData.id === ((root.clash && root.clash.canMerge) ? "merge" : "keep-both")
                         readonly property bool enabledChoice:
                             modelData.id !== "replace" || (root.clash && root.clash.canReplace)
                         objectName: "conflict-" + modelData.id
@@ -181,17 +222,20 @@ Rectangle {
                                ? Tokens.withAlpha(Tokens.accent, 0.2) : "transparent"
                         border.width: Math.max(1, Tokens.borderWidth)
                         border.color: activeFocus ? Tokens.accent
-                                      : modelData.id === "keep-both" ? Tokens.accent
+                                      : btn.primary ? Tokens.accent
                                       : Tokens.withAlpha(Tokens.border, Tokens.borderAlpha)
                         activeFocusOnTab: enabledChoice
-                        Component.onCompleted: if (modelData.id === "keep-both") keepButton.target = btn
+                        Component.onCompleted: {
+                            if (modelData.id === "keep-both") keepButton.target = btn
+                            if (modelData.id === "merge") mergeButton.target = btn
+                        }
 
                         Text {
                             textFormat: Text.PlainText
                             id: lbl
                             anchors.centerIn: parent
                             text: modelData.label
-                            color: modelData.id === "keep-both" ? Tokens.foregroundBright : Tokens.foreground
+                            color: btn.primary ? Tokens.foregroundBright : Tokens.foreground
                             font.family: Tokens.fontFamily
                             font.pixelSize: Tokens.fontBody
                         }
@@ -213,7 +257,9 @@ Rectangle {
             Text {
                 textFormat: Text.PlainText
                 anchors.right: parent.right
-                text: qsTr("R replace · K keep both · S skip · A all · Esc cancel")
+                text: (root.clash && root.clash.canMerge)
+                      ? qsTr("M merge · R replace · K keep both · S skip · A all · Esc cancel")
+                      : qsTr("R replace · K keep both · S skip · A all · Esc cancel")
                 color: Tokens.foregroundDim
                 font.family: Tokens.fontFamily
                 font.pixelSize: Tokens.fontCaption
@@ -221,11 +267,21 @@ Rectangle {
         }
     }
 
-    // Holds the Keep both button so show() can focus it.
+    // Hold the Keep both and Merge buttons so show() can focus one.
     QtObject {
         id: keepButton
         property Item target: null
         function forceActiveFocus() { if (target) target.forceActiveFocus(); else root.forceActiveFocus() }
+    }
+    QtObject {
+        id: mergeButton
+        property Item target: null
+        // The Merge button is created when the clash arrives; focus it once
+        // it exists rather than racing the Repeater.
+        function forceActiveFocus() {
+            if (target) target.forceActiveFocus()
+            else Qt.callLater(() => { if (target) target.forceActiveFocus(); else keepButton.forceActiveFocus() })
+        }
     }
 
     Keys.onEscapePressed: root.cancel()
@@ -233,6 +289,7 @@ Rectangle {
         if (e.key === Qt.Key_R) { root.pick("replace"); e.accepted = true }
         else if (e.key === Qt.Key_K) { root.pick("keep-both"); e.accepted = true }
         else if (e.key === Qt.Key_S) { root.pick("skip"); e.accepted = true }
+        else if (e.key === Qt.Key_M) { root.pick("merge"); e.accepted = true }
         else if (e.key === Qt.Key_A && root.remaining > 1) { root.applyAll = !root.applyAll; e.accepted = true }
     }
 
