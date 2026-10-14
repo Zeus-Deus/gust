@@ -37,11 +37,37 @@ pub enum OpError {
     Refused(String),
     Conflict(PathBuf),
     Cancelled,
+    /// The record that lets Gust find and clean up after an interrupted
+    /// copy could not be saved. Nothing is written without it.
+    Recovery(io::Error),
+}
+
+/// Why the recovery record (journal or staging claim) could not be saved,
+/// in words. It lives in the user's own state folder, not at the
+/// destination, so "the destination is full" would be the wrong advice.
+pub fn recovery_reason(e: &io::Error) -> String {
+    use io::ErrorKind::*;
+    match e.kind() {
+        StorageFull => "the disk holding your home folder is full".into(),
+        PermissionDenied => "Gust's state folder is not writable".into(),
+        ReadOnlyFilesystem => "the disk holding your home folder is read-only".into(),
+        _ => match e.raw_os_error() {
+            Some(28) => "the disk holding your home folder is full".into(),
+            Some(122) => "you are over your disk quota".into(),
+            Some(30) => "the disk holding your home folder is read-only".into(),
+            _ => plain_io_message(e),
+        },
+    }
 }
 
 impl std::fmt::Display for OpError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            OpError::Recovery(e) => write!(
+                f,
+                "Gust could not save its recovery record ({}), so it wrote nothing more.",
+                recovery_reason(e)
+            ),
             OpError::Io(e) => write!(f, "{}", plain_io_message(e)),
             OpError::Refused(r) => write!(f, "refused: {r}"),
             OpError::Conflict(p) => write!(f, "conflict at {}", p.display()),
@@ -321,7 +347,9 @@ pub(crate) fn stage_regular_file(
         }
     }
     let mut active = Active(Some(staged_abs.clone()));
-    let claim = crate::staging::claim(&staged_abs).ok();
+    // No claim, no copy: a staging file nobody owns can never be cleaned up
+    // after a crash, and a full home disk is exactly when that happens.
+    let claim = Some(crate::staging::claim(&staged_abs).map_err(OpError::Recovery)?);
     // Create with the source's permission bits masked to owner-only first;
     // widened at the end. Never world-readable in between.
     let dst = match rustix::fs::openat(
@@ -341,7 +369,11 @@ pub(crate) fn stage_regular_file(
     if let Some(c) = &claim {
         // Bind the claim to the object actually created (device + inode), so
         // reclaiming can prove it is the same file and not a replacement.
-        let _ = crate::staging::confirm(c, &staged_abs);
+        if let Err(e) = crate::staging::confirm(c, &staged_abs) {
+            drop(dst);
+            discard_staged(dst_dir, &stage, &claim, 0);
+            return Err(OpError::Recovery(e));
+        }
     }
 
     let mut written = 0u64;
@@ -446,7 +478,7 @@ pub(crate) fn copy_symlink_with_policy(
     let target = rustix::fs::readlinkat(src_dir.as_fd(), src_name, Vec::new())?;
     let stage = staging_name(dst_name);
     let staged_abs = PathBuf::from(dst_dir.display()).join(&stage);
-    let claim = crate::staging::claim(&staged_abs).ok();
+    let claim = Some(crate::staging::claim(&staged_abs).map_err(OpError::Recovery)?);
     if let Err(e) = rustix::fs::symlinkat(target.as_c_str(), dst_dir.as_fd(), &stage) {
         if let Some(c) = &claim {
             crate::staging::release(c);
@@ -454,7 +486,10 @@ pub(crate) fn copy_symlink_with_policy(
         return Err(e.into());
     }
     if let Some(c) = &claim {
-        let _ = crate::staging::confirm(c, &staged_abs);
+        if let Err(e) = crate::staging::confirm(c, &staged_abs) {
+            discard_staged(dst_dir, &stage, &claim, 0);
+            return Err(OpError::Recovery(e));
+        }
     }
     #[cfg(test)]
     publication_tests::before_publication();
@@ -633,7 +668,7 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner());
         use std::os::unix::fs::PermissionsExt;
         let d = tmp("unremovable");
-        std::env::set_var("XDG_STATE_HOME", d.join("state"));
+        crate::staging::fault::state_home(&d.join("state"));
         fs::create_dir_all(d.join("src")).unwrap();
         fs::create_dir_all(d.join("dst")).unwrap();
         fs::write(d.join("src/big.bin"), vec![7u8; 3 * 1024 * 1024]).unwrap();
@@ -1012,7 +1047,7 @@ mod sweep_tests {
             .unwrap_or_else(|e| e.into_inner());
         let d = tmp("dead");
         // Isolate the claim store so this test owns it.
-        std::env::set_var("XDG_STATE_HOME", d.join("state"));
+        crate::staging::fault::state_home(&d.join("state"));
 
         // Real debris: a staging file WITH an ownership claim, whose owning
         // process is gone. A filename alone is deliberately not enough any
@@ -1059,7 +1094,7 @@ mod sweep_tests {
             .unwrap_or_else(|e| e.into_inner());
         use std::os::unix::fs::MetadataExt;
         let d = tmp("netdebris");
-        std::env::set_var("XDG_STATE_HOME", d.join("state"));
+        crate::staging::fault::state_home(&d.join("state"));
         let debris = d.join(".gust-staging-999999-holiday.mkv");
         fs::write(&debris, vec![1u8; 4096]).unwrap();
         let claim = crate::staging::claim(&debris).unwrap();
@@ -1102,7 +1137,7 @@ mod sweep_tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let d = tmp("unclaimed");
-        std::env::set_var("XDG_STATE_HOME", d.join("state"));
+        crate::staging::fault::state_home(&d.join("state"));
 
         // Exactly the old heuristic's target: the right name shape and a PID
         // that cannot be alive. Without an ownership record it is somebody

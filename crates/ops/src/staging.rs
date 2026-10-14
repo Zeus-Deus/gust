@@ -41,6 +41,16 @@ pub struct StagingClaim {
 /// Where claims live: private, per-user, and outside any directory Gust
 /// browses, so a claim file can never itself be mistaken for user data.
 pub fn claims_dir() -> PathBuf {
+    // Tests run in parallel threads and several point XDG_STATE_HOME at a
+    // folder they later delete; each test thread gets its own store instead.
+    #[cfg(test)]
+    {
+        if let Some(d) = fault::DIR.with(|d| d.borrow().clone()) {
+            return d.join("gust/staging-claims");
+        }
+        return std::env::temp_dir().join(format!("gust-test-claims-{}", std::process::id()));
+    }
+    #[allow(unreachable_code)]
     let base = std::env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))
@@ -72,6 +82,10 @@ fn claim_file_for(path: &Path) -> PathBuf {
 /// harmless stale claim, whereas a file with no claim would be undeletable
 /// debris forever.
 pub fn claim(path: &Path) -> std::io::Result<PathBuf> {
+    #[cfg(test)]
+    if fault::CLAIM.with(|c| c.get()) {
+        return Err(std::io::Error::from_raw_os_error(28));
+    }
     let dir = claims_dir();
     fs::create_dir_all(&dir)?;
     #[cfg(unix)]
@@ -106,6 +120,10 @@ pub fn claim(path: &Path) -> std::io::Result<PathBuf> {
 /// Complete a claim with the identity of the file actually created.
 pub fn confirm(claim_path: &Path, staged: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::MetadataExt;
+    #[cfg(test)]
+    if fault::CONFIRM.with(|c| c.get()) {
+        return Err(std::io::Error::from_raw_os_error(28));
+    }
     let md = staged.symlink_metadata()?;
     let mut f = fs::OpenOptions::new()
         .create(true)
@@ -263,6 +281,26 @@ pub fn owner_is_live(c: &StagingClaim) -> bool {
     Path::new(&format!("/proc/{}", c.pid)).exists()
 }
 
+/// Per-thread failure injection, so a test can make the claim store fail
+/// without pointing the process-wide XDG_STATE_HOME at something broken
+/// under every other test running in parallel.
+#[cfg(test)]
+pub(crate) mod fault {
+    use std::cell::Cell;
+    thread_local! {
+        pub(crate) static CLAIM: Cell<bool> = const { Cell::new(false) };
+        pub(crate) static CONFIRM: Cell<bool> = const { Cell::new(false) };
+        pub(crate) static DIR: std::cell::RefCell<Option<std::path::PathBuf>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    /// This test thread's claim store lives under `state` (as
+    /// XDG_STATE_HOME would put it).
+    pub(crate) fn state_home(state: &std::path::Path) {
+        DIR.with(|d| *d.borrow_mut() = Some(state.to_path_buf()));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -278,7 +316,7 @@ mod tests {
         ));
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(&d).unwrap();
-        std::env::set_var("XDG_STATE_HOME", &d);
+        fault::state_home(&d);
         d
     }
 

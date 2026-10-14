@@ -220,8 +220,13 @@ pub fn thumbnail(path: &Path, mime: &str, size: ThumbSize) -> Result<PathBuf, Th
         thumbnail_path(path, size).ok_or_else(|| ThumbError::Cache("no cache dir".into()))?;
     let base = cache_base().ok_or_else(|| ThumbError::Cache("no cache dir".into()))?;
 
-    // Private scratch for the helper's output, inside our own cache.
-    let scratch = base.join(format!(".gust-thumb-{}-{}", std::process::id(), mtime));
+    // Private scratch for the helper's output, inside our own cache. Unique
+    // per render: files copied in the same second share an mtime, and two
+    // workers (a listing that refreshed while the last pass still ran) then
+    // deleted each other's output, leaving a copied photo without a preview.
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let scratch = base.join(format!(".gust-thumb-{}-{}-{n}", std::process::id(), mtime));
     let _ = std::fs::remove_dir_all(&scratch);
     std::fs::create_dir_all(&scratch).map_err(|e| ThumbError::Cache(e.to_string()))?;
 
@@ -558,6 +563,63 @@ mod tests {
             .starts_with(&[0x89, b'P', b'N', b'G']));
         // Past the end: the helper fails, nothing is cached.
         assert!(pdf_page_in(&cache, &pdf, 9, 256).is_err());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn two_passes_over_same_second_images_both_succeed() {
+        // Found in the real window: five photos pasted in one second, the
+        // listing refreshed while the first thumbnail pass still ran, and
+        // one copy kept a generic icon for good. Both passes named their
+        // scratch folder after pid + mtime, so each deleted the other's
+        // helper output.
+        gust_testkit::skip_unless!(
+            sandbox_available() && gust_testkit::have("magick"),
+            "thumbnails",
+            "bwrap or ImageMagick is not installed"
+        );
+        let d = std::env::temp_dir().join(format!("gust-thumb-race-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        std::env::set_var("XDG_CACHE_HOME", d.join("cache"));
+        let when =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_760_000_000);
+        let mut imgs = Vec::new();
+        for i in 0..8 {
+            let p = d.join(format!("IMG_{i}.png"));
+            let ok = Command::new("magick")
+                .args([
+                    "-size",
+                    "64x48",
+                    &format!("xc:rgb({},{},90)", i * 30, 255 - i * 30),
+                ])
+                .arg(&p)
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok);
+            std::fs::File::options()
+                .write(true)
+                .open(&p)
+                .unwrap()
+                .set_modified(when)
+                .unwrap();
+            imgs.push(p);
+        }
+        let run = |list: Vec<PathBuf>| {
+            std::thread::spawn(move || {
+                list.iter()
+                    .map(|p| (p.clone(), thumbnail(p, "image/png", ThumbSize::Normal)))
+                    .collect::<Vec<_>>()
+            })
+        };
+        let mut rev = imgs.clone();
+        rev.reverse();
+        let a = run(imgs.clone());
+        let b = run(rev);
+        for (p, r) in a.join().unwrap().into_iter().chain(b.join().unwrap()) {
+            assert!(r.is_ok(), "{}: {:?}", p.display(), r.err());
+        }
         let _ = std::fs::remove_dir_all(&d);
     }
 

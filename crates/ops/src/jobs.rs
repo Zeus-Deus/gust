@@ -341,21 +341,37 @@ fn run(
     // Mutate the in-memory record and immediately persist it. Both must move
     // together: a snapshot and a journal that disagree about success is the
     // bug class this exists to prevent.
-    let set_rec = |f: &dyn Fn(&mut crate::journal::Job)| {
+    //
+    // A journal that cannot be written is NOT shrugged off: without it a
+    // crash leaves work nobody can find or undo. The caller stops the job.
+    let set_rec = |f: &dyn Fn(&mut crate::journal::Job)| -> std::io::Result<()> {
         let snapshot = if let Ok(mut g) = record.lock() {
             f(&mut g);
             Some(g.clone())
         } else {
             None
         };
-        if let (Some(j), Some(snap)) = (journal.as_ref(), snapshot) {
-            // A journal write failure must not abort the operation, but it
-            // must not be silent either: the error is recorded on the entry
-            // so the UI can say durability is unavailable.
-            let _ = j.record(&snap);
+        match (journal.as_ref(), snapshot) {
+            (Some(j), Some(snap)) => j.record(&snap),
+            _ => Ok(()),
         }
     };
-    set_rec(&|r| r.state = crate::journal::JobState::Running);
+    // The journal is lost: say so, mark the in-memory record failed (the
+    // disk copy cannot be updated anyway) and stop.
+    let lost = |e: std::io::Error| {
+        if let Ok(mut g) = record.lock() {
+            g.state = crate::journal::JobState::Failed;
+        }
+        let msg = crate::engine::OpError::Recovery(e).to_string();
+        set(&progress, |p| {
+            p.state = JobState::Failed;
+            p.message = msg.clone();
+        });
+    };
+    if let Err(e) = set_rec(&|r| r.state = crate::journal::JobState::Running) {
+        lost(e);
+        return;
+    }
     set(&progress, |p| {
         p.state = JobState::Running;
         p.message = "Preparing…".into();
@@ -383,7 +399,7 @@ fn run(
     let mut source_bytes: Vec<u64> = Vec::new();
     for src in req.sources() {
         if cancel.checkpoint() {
-            set_rec(&|r| r.state = crate::journal::JobState::Cancelled);
+            let _ = set_rec(&|r| r.state = crate::journal::JobState::Cancelled);
             set(&progress, |p| {
                 p.state = JobState::Cancelled;
                 p.message = "Cancelled".into();
@@ -432,7 +448,7 @@ fn run(
                 }
             }
             Err(e) => {
-                set_rec(&|r| r.state = crate::journal::JobState::Failed);
+                let _ = set_rec(&|r| r.state = crate::journal::JobState::Failed);
                 set(&progress, |p| {
                     p.state = JobState::Failed;
                     p.message = format!("Cannot read {}: {e}", src.display());
@@ -442,7 +458,7 @@ fn run(
         }
     }
     if let Some(why) = fat_check.refusal() {
-        set_rec(&|r| r.state = crate::journal::JobState::Failed);
+        let _ = set_rec(&|r| r.state = crate::journal::JobState::Failed);
         set(&progress, |p| {
             p.state = JobState::Failed;
             p.message = why.clone();
@@ -467,7 +483,7 @@ fn run(
     for (src_index, src) in req.sources().into_iter().enumerate() {
         let bytes_at_start = base_bytes;
         if cancel.checkpoint() {
-            set_rec(&|r| r.state = crate::journal::JobState::Cancelled);
+            let _ = set_rec(&|r| r.state = crate::journal::JobState::Cancelled);
             set(&progress, |p| {
                 p.state = JobState::Cancelled;
                 p.message = "Cancelled — finished items were kept".into();
@@ -541,7 +557,7 @@ fn run(
                             kept_both += 1;
                         }
                         Err(e) => {
-                            set_rec(&|r| r.state = crate::journal::JobState::Failed);
+                            let _ = set_rec(&|r| r.state = crate::journal::JobState::Failed);
                             set(&progress, |p| {
                                 p.state = JobState::Failed;
                                 p.message = format!("No free name beside {}: {e}", dst.display());
@@ -555,7 +571,7 @@ fn run(
                         match crate::trash::trash_path(&dst, t) {
                             Ok(item) => preserved = Some(t.files.join(&item.trashed_name)),
                             Err(e) => {
-                                set_rec(&|r| r.state = crate::journal::JobState::Failed);
+                                let _ = set_rec(&|r| r.state = crate::journal::JobState::Failed);
                                 let shown = dst.display().to_string();
                                 set(&progress, |p| {
                                     p.state = JobState::Failed;
@@ -586,13 +602,17 @@ fn run(
         {
             let pre = crate::undo::snapshot_subtree(&dst);
             let pre_paths: Vec<PathBuf> = pre.keys().cloned().collect();
-            set_rec(&|r| {
+            // What undo must never touch is durable before a byte moves.
+            if let Err(e) = set_rec(&|r| {
                 for p in &pre_paths {
                     if !r.preexisting_at_dest.contains(p) {
                         r.preexisting_at_dest.push(p.clone());
                     }
                 }
-            });
+            }) {
+                lost(e);
+                return;
+            }
         }
 
         let outcome = match req {
@@ -620,7 +640,7 @@ fn run(
                 }
             });
             let dst_for_rec = dst.clone();
-            set_rec(&|r| {
+            let mut saved = set_rec(&|r| {
                 r.entries.push(crate::journal::JournalEntry {
                     source: src.clone(),
                     destination: Some(dst_for_rec.clone()),
@@ -630,15 +650,22 @@ fn run(
                     error: None,
                 });
             });
-            if entry_ok {
+            if entry_ok && saved.is_ok() {
                 // Capture what we just created so undo can prove it is
                 // untouched before removing it.
                 let ids = crate::undo::snapshot_subtree(&dst);
-                set_rec(&|r| {
+                saved = set_rec(&|r| {
                     for (p, id) in &ids {
                         r.subtree_identities.push((p.clone(), *id));
                     }
                 });
+            }
+            // This item is done, but nothing further is started without a
+            // record of it. Undo still works in this session (the record in
+            // memory is intact); only crash recovery is lost.
+            if let Err(e) = saved {
+                lost(e);
+                return;
             }
         }
 
@@ -660,7 +687,7 @@ fn run(
                 });
             }
             Err(crate::engine::OpError::Cancelled) => {
-                set_rec(&|r| r.state = crate::journal::JobState::Cancelled);
+                let _ = set_rec(&|r| r.state = crate::journal::JobState::Cancelled);
                 set(&progress, |p| {
                     p.state = JobState::Cancelled;
                     p.message = "Cancelled — finished items were kept".into();
@@ -668,7 +695,7 @@ fn run(
                 return;
             }
             Err(crate::engine::OpError::Conflict(path)) => {
-                set_rec(&|r| r.state = crate::journal::JobState::Conflict);
+                let _ = set_rec(&|r| r.state = crate::journal::JobState::Conflict);
                 set(&progress, |p| {
                     p.state = JobState::Conflict;
                     p.message = format!("{} already exists", path.display());
@@ -676,7 +703,7 @@ fn run(
                 return;
             }
             Err(e) => {
-                set_rec(&|r| r.state = crate::journal::JobState::Failed);
+                let _ = set_rec(&|r| r.state = crate::journal::JobState::Failed);
                 let msg = match &e {
                     crate::engine::OpError::Io(io) => crate::engine::plain_io_message_at(io, &dst),
                     other => format!("{other}"),
@@ -690,7 +717,7 @@ fn run(
         }
     }
 
-    set_rec(&|r| {
+    let _ = set_rec(&|r| {
         r.state = if refused_all.is_empty() {
             crate::journal::JobState::Confirmed
         } else {

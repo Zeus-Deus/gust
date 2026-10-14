@@ -42,6 +42,15 @@ impl Fixture {
     }
 
     fn run(&self, kind: JobKind, policy: ConflictPolicy) -> (JobProgress, crate::journal::Job) {
+        self.run_with(kind, policy, None)
+    }
+
+    fn run_with(
+        &self,
+        kind: JobKind,
+        policy: ConflictPolicy,
+        journal: Option<crate::journal::Journal>,
+    ) -> (JobProgress, crate::journal::Job) {
         let req = match kind {
             JobKind::Copy => Request::Copy {
                 sources: vec![self.source.clone()],
@@ -62,7 +71,7 @@ impl Fixture {
             progress.clone(),
             CancelToken::new(),
             record.clone(),
-            None,
+            journal,
             Some(self.trash.clone()),
         );
         let progress = progress.lock().unwrap().clone();
@@ -209,5 +218,92 @@ fn publication_job_initial_policy_lifecycle_and_replace_undo() {
                 assert!(old_id.matches(&FileIdentity::of_path(&f.destination).unwrap()));
             }
         }
+    }
+}
+
+/// Names left in `dir` that look like Gust staging debris.
+fn staging_debris(dir: &Path) -> Vec<String> {
+    fs::read_dir(dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with(".gust-staging"))
+        .collect()
+}
+
+/// A recovery record that cannot be saved stops the job before anything is
+/// written, and says so. Found by review: `jobs.rs` discarded the journal's
+/// error and `engine.rs` turned a failed staging claim into `None`, so a full
+/// home disk let copies and moves go ahead with no way to recover them.
+#[test]
+fn a_staging_claim_that_cannot_be_saved_stops_the_copy() {
+    for (tag, which) in [("claim", 0), ("confirm", 1)] {
+        // A same-disk move is one rename and stages nothing; the copy path
+        // (which a move across disks also takes) is where staging happens.
+        for kind in [JobKind::Copy] {
+            for class in [FileClass::Regular, FileClass::Symlink] {
+                let f = Fixture::new(&format!("nofault-{tag}-{kind:?}-{class:?}"), class);
+                let flag = if which == 0 {
+                    &crate::staging::fault::CLAIM
+                } else {
+                    &crate::staging::fault::CONFIRM
+                };
+                flag.with(|c| c.set(true));
+                let (progress, record) = f.run(kind, ConflictPolicy::Ask);
+                flag.with(|c| c.set(false));
+                let what = format!("{tag}/{kind:?}/{class:?}");
+                assert_eq!(progress.state, JobState::Failed, "{what}: {progress:?}");
+                assert!(
+                    progress.message.contains("recovery record"),
+                    "{what}: {}",
+                    progress.message
+                );
+                assert!(
+                    !progress.message.contains("os error"),
+                    "{}",
+                    progress.message
+                );
+                assert!(
+                    f.destination.symlink_metadata().is_err(),
+                    "{what}: nothing may be published without a recovery record"
+                );
+                assert!(
+                    staging_debris(&f.root.join("dest")).is_empty(),
+                    "{what}: no staging file may be left behind"
+                );
+                assert!(f.source.symlink_metadata().is_ok(), "{what}: source kept");
+                assert_eq!(record.state, JobState::Failed, "{what}");
+                assert!(!record.offers_undo(), "{what}");
+            }
+        }
+    }
+}
+
+#[test]
+fn a_journal_that_cannot_be_written_stops_the_job_before_any_byte() {
+    for kind in [JobKind::Copy, JobKind::Move] {
+        let f = Fixture::new(&format!("nojournal-{kind:?}"), FileClass::Regular);
+        // A regular file where the journal's folder must go: every write
+        // fails (ENOTDIR), exactly like an unwritable state folder.
+        fs::write(f.root.join("blocker"), b"not a folder").unwrap();
+        let journal = crate::journal::Journal::new(f.root.join("blocker/journal.ndjson"));
+        let (progress, record) = f.run_with(kind, ConflictPolicy::Ask, Some(journal));
+        assert_eq!(progress.state, JobState::Failed, "{kind:?}: {progress:?}");
+        assert!(
+            progress.message.contains("recovery record"),
+            "{kind:?}: {}",
+            progress.message
+        );
+        assert!(
+            f.destination.symlink_metadata().is_err(),
+            "{kind:?}: nothing written"
+        );
+        assert_eq!(
+            fs::read(&f.source).unwrap(),
+            b"SOURCE",
+            "{kind:?}: source kept"
+        );
+        assert_eq!(record.state, JobState::Failed);
+        assert!(!record.offers_undo());
     }
 }
