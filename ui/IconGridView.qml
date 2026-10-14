@@ -232,6 +232,16 @@ FocusScope {
                         }
                     }
 
+                    // Colour tags on the icon's top-left corner (§6.25).
+                    TagDots {
+                        anchors.top: preview.top
+                        anchors.left: preview.left
+                        anchors.margins: Tokens.spaceXs
+                        dot: Math.max(Math.round(Tokens.fontBody * 0.6), Math.round(root.tileSize * 0.09))
+                        keys: tagKeys
+                        z: 2
+                    }
+
                     Text {
                         textFormat: Text.PlainText
                         anchors.top: preview.bottom

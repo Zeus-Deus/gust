@@ -902,3 +902,71 @@ fn merge_asked_of_a_file_means_keep_both() {
     assert_eq!(fs::read(root.join("dst/a (copy).txt")).unwrap(), b"new");
     fs::remove_dir_all(&root).ok();
 }
+
+// ---------------------------------------------------------------------------
+// Colour tags travel with a copy, on the same disk and across disks
+// (DESIGN §6.25). A destination that cannot hold them still gets the bytes.
+// ---------------------------------------------------------------------------
+
+fn get_tags(p: &Path) -> Option<String> {
+    gust_core::tags::read_raw(p)
+        .unwrap()
+        .map(|v| String::from_utf8(v).unwrap())
+}
+
+fn set_raw_tags(p: &Path, v: &str) -> bool {
+    rustix::fs::lsetxattr(
+        p,
+        "user.xdg.tags",
+        v.as_bytes(),
+        rustix::fs::XattrFlags::empty(),
+    )
+    .is_ok()
+}
+
+#[test]
+fn a_copy_keeps_its_colour_tags_here_and_across_disks() {
+    let root = fixture("tags-copy");
+    let src = root.join("src");
+    fs::create_dir_all(src.join("folder")).unwrap();
+    fs::write(src.join("photo.jpg"), "jpg").unwrap();
+    fs::write(src.join("folder/inner.txt"), "in").unwrap();
+    if !set_raw_tags(&src.join("photo.jpg"), "Red,work") {
+        eprintln!("skipped: no user xattrs on the temp dir");
+        return;
+    }
+    assert!(set_raw_tags(&src.join("folder/inner.txt"), "Blue"));
+
+    let mut dests = vec![root.join("same-disk")];
+    if let Some(other) = other_fs_fixture("tags-copy") {
+        dests.push(other);
+    }
+    for dst in dests {
+        fs::create_dir_all(&dst).unwrap();
+        let (p, job) = run_job(
+            JobKind::Copy,
+            vec![src.join("photo.jpg"), src.join("folder")],
+            dst.clone(),
+            ConflictPolicy::Ask,
+        );
+        assert_eq!(job.state, JobState::Confirmed, "{p:?}");
+        assert_eq!(fs::read(dst.join("photo.jpg")).unwrap(), b"jpg");
+        assert_eq!(
+            get_tags(&dst.join("photo.jpg")).as_deref(),
+            Some("Red,work"),
+            "{dst:?}"
+        );
+        assert_eq!(
+            get_tags(&dst.join("folder/inner.txt")).as_deref(),
+            Some("Blue"),
+            "{dst:?}"
+        );
+        // And the source still has its own.
+        assert_eq!(
+            get_tags(&src.join("photo.jpg")).as_deref(),
+            Some("Red,work")
+        );
+        let _ = fs::remove_dir_all(&dst);
+    }
+    let _ = fs::remove_dir_all(&root);
+}

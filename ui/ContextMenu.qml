@@ -50,7 +50,12 @@ Item {
 
     /// Show `list` with its top-left corner at (px, py) in window
     /// coordinates, flipped or nudged so it always fits on screen.
+    /// Where the last menu was opened (window coordinates), so a follow-on
+    /// menu (Tag ▸ colours) opens in the same place.
+    property point lastAt: Qt.point(0, 0)
+
     function popup(px, py, list) {
+        lastAt = Qt.point(px, py)
         items = list
         let wl = 0, wh = 0, h = padY * 2
         for (let i = 0; i < list.length; i++) {

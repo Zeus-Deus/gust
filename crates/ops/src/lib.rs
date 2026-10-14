@@ -17,6 +17,7 @@ pub mod permanent;
 pub mod rate;
 pub mod recursive;
 pub mod staging;
+pub mod tags;
 pub mod trash;
 pub mod undo;
 

@@ -413,6 +413,9 @@ pub(crate) fn stage_regular_file(
         // Preserve mode (minus setuid/setgid — never applied blindly).
         let safe_mode = st.st_mode & 0o7777 & !0o6000;
         rustix::fs::fchmod(&dst, Mode::from_bits_truncate(safe_mode))?;
+        // Colour tags travel with the copy (DESIGN §6.25), onto the staged
+        // file, so they are there the moment it has its name.
+        crate::tags::carry(&src, &dst);
         // Durability before the destination name exists. fsync can itself
         // fail on a full filesystem, which is exactly when the staging file
         // must not be left behind. A batch defers this to one syncfs.

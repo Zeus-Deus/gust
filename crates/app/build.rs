@@ -35,6 +35,7 @@ fn main() {
         "ui/DragTarget.qml",
         "ui/ConnectPanel.qml",
         "ui/RenameCard.qml",
+        "ui/TagDots.qml",
     ];
 
     let mut module = QmlModule::new("com.gust.app").qml_files(views);

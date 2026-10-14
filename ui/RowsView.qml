@@ -318,6 +318,11 @@ FocusScope {
                                     elide: Text.ElideMiddle
                                     width: Math.min(implicitWidth, rowItem.width * 0.55)
                                 }
+                                // Colour tags (DESIGN §6.25).
+                                TagDots {
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    keys: tagKeys
+                                }
                                 // Read-only, no access, mount point, link.
                                 Row {
                                     anchors.verticalCenter: parent.verticalCenter

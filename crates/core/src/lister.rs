@@ -204,6 +204,9 @@ pub fn stat_entry(dir: &Path, name: &OsStr, kind: EntryKind) -> Option<Metadata>
         (None, false)
     };
     let mount_root = kind == EntryKind::Dir && is_mount_root(&p);
+    // One lgetxattr, not following a link; a filesystem without user
+    // attributes simply has no tags.
+    let tags = crate::tags::mask_for(&p);
     Some(Metadata {
         size: md.size(),
         mtime: md.mtime(),
@@ -215,6 +218,7 @@ pub fn stat_entry(dir: &Path, name: &OsStr, kind: EntryKind) -> Option<Metadata>
         link_ok,
         link_dir,
         mount_root,
+        tags,
     })
 }
 

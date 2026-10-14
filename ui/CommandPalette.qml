@@ -78,6 +78,14 @@ Rectangle {
 
     readonly property var allActions: [
         { id: "search",       label: "Search here and below", hint: "Ctrl+F" },
+        { id: "tag-1",        label: "Tag red",                hint: "Alt+1" },
+        { id: "tag-2",        label: "Tag orange",             hint: "Alt+2" },
+        { id: "tag-3",        label: "Tag yellow",             hint: "Alt+3" },
+        { id: "tag-4",        label: "Tag green",              hint: "Alt+4" },
+        { id: "tag-5",        label: "Tag blue",               hint: "Alt+5" },
+        { id: "tag-6",        label: "Tag purple",             hint: "Alt+6" },
+        { id: "tag-7",        label: "Tag gray",               hint: "Alt+7" },
+        { id: "tag-clear",    label: "Remove colour tags",     hint: "Alt+0" },
         { id: "bulk",         label: "Rename selection (edit the names)", hint: "F2" },
         { id: "bulk-pattern", label: "Rename selection by pattern",       hint: "" },
         { id: "compress",     label: "Compress to .tar.zst",  hint: "" },

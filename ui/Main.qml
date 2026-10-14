@@ -1227,7 +1227,23 @@ Window {
 
     /// Run an action from the key table. Returns false when the action does
     /// not apply right now, so the key falls through to the usual handling.
+    /// Toggle a colour tag ("1"–"7") or remove the colours ("clear") on the
+    /// selection, else the cursor row (DESIGN §6.25).
+    function applyTag(op) {
+        const err = dirModel.set_tags(op)
+        if (err !== "") win.alertText = err
+        else win.alertText = ""
+        // Said as a message, not left in the status: the reload that shows
+        // the new dots finishes after this and puts "N items" back.
+        hints.message = err === "" ? dirModel.status : ""
+        win.qaDump("tags")
+    }
+
     function runKeyAction(a) {
+        if (a.startsWith("tag-")) {
+            win.applyTag(a.substring(4))
+            return true
+        }
         if (a.startsWith("tab-")) {
             const n = parseInt(a.substring(4))
             const mine = win.paneTabs(win.activePane)
@@ -1355,6 +1371,22 @@ Window {
         else if (a === "trash-view") { trashPanel.show(dirModel.trash_list()); win.qaDump("trash-open") }
         else if (a === "recent") { recentPanel.show(dirModel.recent_list()); win.qaDump("recent-open-panel") }
         else if (a === "connect") { win.refreshPlaces(); connectPanel.show(); win.qaDump("connect-open") }
+        else if (a === "tag-menu") {
+            // The seven colours, in the place the menu was (DESIGN §6.25).
+            const names = [qsTr("Red"), qsTr("Orange"), qsTr("Yellow"), qsTr("Green"),
+                           qsTr("Blue"), qsTr("Purple"), qsTr("Gray")]
+            const have = dirModel.entry_tags(dirModel.cursor).split(",")
+            const keys = ["red", "orange", "yellow", "green", "blue", "purple", "gray"]
+            const items = names.map((n, i) => ({
+                label: (have.indexOf(keys[i]) >= 0 ? "\u2713 " : "") + n,
+                hint: "Alt+" + (i + 1), action: "tag-" + (i + 1) }))
+            items.push({ separator: true })
+            items.push({ label: qsTr("Remove colours"), hint: "Alt+0", action: "tag-clear" })
+            const at = contextMenu.lastAt
+            contextMenu.popup(at.x, at.y, items)
+            win.qaDump("tag-menu")
+        }
+        else if (a.startsWith("tag-")) win.applyTag(a.substring(4))
         else if (a === "dv-open") {
             const d = win.deviceList.find((x) => x.path === win.deviceMenuPath)
             if (d) win.openDevice(d.path, d.mounted)
@@ -1617,6 +1649,7 @@ Window {
         if (many) list.push({ label: qsTr("Rename ") + dirModel.sel_count() + qsTr(" items…"), hint: "", action: "bulk" })
         else list.push({ label: qsTr("Rename…"), hint: "F2", action: "rename" })
         list.push({ label: qsTr("Duplicate"), hint: "Ctrl+D", action: "duplicate" })
+        list.push({ label: qsTr("Tag…"), hint: "Alt+1–7", action: "tag-menu" })
         if (!many) list.push({ label: qsTr("Make link"), hint: "", action: "make-link" })
         // The user's own actions (~/.config/gust/actions/*.toml) that fit
         // this selection.
@@ -2901,6 +2934,7 @@ Window {
                                      : label === "Undo: put permissions back" ? qsTr("Permissions put back")
                                      : label === "Undo: restore the original name" ? qsTr("Restored the original name")
                                      : /^Undo: put \d+ names? back$/.test(label) ? qsTr("Names put back")
+                                     : label === "Undo: put the tags back" ? qsTr("Tags put back")
                                      : label.startsWith("Undo: remove") ? "Copies removed"
                                      : label.startsWith("Undo: move") ? "Moved back"
                                      : "Restored from Trash"
@@ -3500,6 +3534,15 @@ Window {
             menuPoints: contextMenu.open ? contextMenu.itemPoints() : ({}),
             placePoints: sidebar.placePoints(),
             crumbPoints: crumbs.crumbPoints(),
+            rowTags: (function () {
+                const out = {}
+                if (!dirModel) return out
+                for (let i = 0; i < Math.min(dirModel.count, 60); i++) {
+                    const t = dirModel.entry_tags(i)
+                    if (t !== "") out[dirModel.entry_name(i)] = t
+                }
+                return out
+            })(),
             rowPoints: (function () {
                 const it = win.activePaneItem()
                 return it && it.rowPoints ? it.rowPoints() : ({})

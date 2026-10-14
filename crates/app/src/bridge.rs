@@ -490,6 +490,14 @@ pub mod qobject {
         /// "bob:media"). Ctrl+Z puts every owner back where unchanged since.
         #[qinvokable]
         fn set_owner(self: Pin<&mut DirModel>, spec: &QString) -> QString;
+        /// Colour tags on the selection (else the cursor row): "1"–"7"
+        /// toggles that colour, "clear" removes every colour. One Ctrl+Z
+        /// puts every file's tags back (DESIGN §6.25).
+        #[qinvokable]
+        fn set_tags(self: Pin<&mut DirModel>, op: &QString) -> QString;
+        /// The colour keys on a row ("red,blue"), for qa and the views.
+        #[qinvokable]
+        fn entry_tags(self: &DirModel, row: i32) -> QString;
         /// The cursor row's owner, "alice : alice".
         #[qinvokable]
         fn owner_text(self: &DirModel) -> QString;
@@ -941,6 +949,7 @@ const ROLE_TYPE_TEXT: i32 = 0x010B;
 const ROLE_CLIP: i32 = 0x010C;
 const ROLE_ICON_KEY: i32 = 0x010D;
 const ROLE_EMBLEMS: i32 = 0x010E;
+const ROLE_TAGS: i32 = 0x010F;
 
 pub struct DirModelRust {
     empty_reason: QString,
@@ -1129,6 +1138,7 @@ pub enum UndoExtra {
     Owners(Vec<gust_ops::attrs::OwnerChanged>),
     Created(gust_ops::create::Created),
     Renamed(gust_ops::attrs::RenameMade),
+    Tags(Vec<gust_ops::tags::TagChanged>),
 }
 
 /// Whether a clipboard entry will be copied or moved.
@@ -5966,6 +5976,13 @@ impl qobject::DirModel {
         QString::from(&k.unwrap_or_default())
     }
 
+    fn entry_tags(&self, row: i32) -> QString {
+        let v = self
+            .entry_at(row)
+            .map(|e| gust_core::tags::keys_of(e.meta.map(|m| m.tags).unwrap_or(0)).join(","));
+        QString::from(&v.unwrap_or_default())
+    }
+
     fn entry_emblems(&self, row: i32) -> QString {
         let v = self
             .entry_at(row)
@@ -6214,6 +6231,22 @@ impl qobject::DirModel {
                     .set_status(QString::from("Restored the original name"));
                 return QString::default();
             }
+            UndoExtra::Tags(ch) => {
+                let (back, refused) = gust_ops::tags::undo_tags(&ch);
+                self.as_mut().reload();
+                if refused.is_empty() {
+                    self.as_mut().set_status(QString::from(&format!(
+                        "Tags put back on {back} item{}",
+                        if back == 1 { "" } else { "s" }
+                    )));
+                    return QString::default();
+                }
+                return QString::from(&format!(
+                    "Put back {back}; {} left as they are: {}",
+                    refused.len(),
+                    refused.join("; ")
+                ));
+            }
             UndoExtra::Links(made) => {
                 let mut refused = Vec::new();
                 for m in &made {
@@ -6436,6 +6469,7 @@ impl qobject::DirModel {
             UndoExtra::Owners(_) => return QString::from("Undo: put owners back"),
             UndoExtra::Created(_) => return QString::from("Undo: remove the pasted image"),
             UndoExtra::Renamed(_) => return QString::from("Undo: restore the original name"),
+            UndoExtra::Tags(_) => return QString::from("Undo: put the tags back"),
         }
         if self.last_link.is_some() {
             return QString::from("Undo: remove the link");
@@ -7977,6 +8011,72 @@ impl qobject::DirModel {
         }
     }
 
+    fn set_tags(mut self: Pin<&mut Self>, op: &QString) -> QString {
+        use gust_ops::tags::TagOp;
+        let op = match op.to_string().as_str() {
+            "clear" => TagOp::Clear,
+            n => match n.parse::<usize>() {
+                Ok(i) if (1..=7).contains(&i) => TagOp::Toggle(i),
+                _ => return QString::from("unknown tag"),
+            },
+        };
+        let targets = self.as_ref().target_paths();
+        if targets.is_empty() {
+            return QString::from("Nothing to tag here");
+        }
+        // Local xattr calls, one per file: bounded by the selection. A
+        // network folder is refused rather than risk a stalled UI thread.
+        if let Some(dir) = self.as_ref().key.as_path() {
+            if gust_core::stall::needs_probe(dir) {
+                return QString::from("Tags can only be set on this computer's own drives.");
+            }
+        }
+        let out = gust_ops::tags::set_tags(&targets, op);
+        let n = out.changed.len();
+        if n > 0 {
+            let mut r = self.as_mut().rust_mut();
+            r.last_extra = UndoExtra::Tags(out.changed.clone());
+            r.last_modes.clear();
+            r.last_link = None;
+            r.last_job = None;
+            r.last_bulk_rename.clear();
+            r.last_trashed_batch.clear();
+        }
+        self.as_mut().reload();
+        if n == 0 {
+            if !out.failed.is_empty() {
+                return QString::from(&out.failed.join("; "));
+            }
+            self.as_mut().set_status(QString::from("Nothing changed"));
+            return QString::default();
+        }
+        let what = match op {
+            TagOp::Clear => "Colours removed from".to_string(),
+            TagOp::Toggle(i) => {
+                let name = gust_core::tags::NAMES[i - 1];
+                if out.changed.iter().any(|c| {
+                    gust_core::tags::mask_of(
+                        &c.after
+                            .as_deref()
+                            .map(gust_core::tags::parse)
+                            .unwrap_or_default(),
+                    ) & (1 << (i - 1))
+                        != 0
+                }) {
+                    format!("{name} added to")
+                } else {
+                    format!("{name} removed from")
+                }
+            }
+        };
+        let mut msg = format!("{what} {n} item{}", if n == 1 { "" } else { "s" });
+        if !out.failed.is_empty() {
+            msg.push_str(&format!(" · not tagged: {}", out.failed.join("; ")));
+        }
+        self.as_mut().set_status(QString::from(&msg));
+        QString::default()
+    }
+
     fn set_owner(mut self: Pin<&mut Self>, spec: &QString) -> QString {
         let spec = match gust_ops::attrs::OwnerSpec::parse(&spec.to_string()) {
             Ok(s) => s,
@@ -8633,6 +8733,9 @@ impl qobject::DirModel {
             ROLE_EMBLEMS => QVariant::from(&QString::from(
                 &gust_core::icons::emblems_for(e.kind, e.meta.as_ref()).join(","),
             )),
+            ROLE_TAGS => QVariant::from(&QString::from(
+                &gust_core::tags::keys_of(e.meta.map(|m| m.tags).unwrap_or(0)).join(","),
+            )),
             ROLE_THUMB => {
                 // Only ever a CACHED thumbnail. This runs on the GUI thread,
                 // so it must not render, and must not even stat the source
@@ -8669,6 +8772,7 @@ impl qobject::DirModel {
         h.insert(ROLE_CLIP, QByteArray::from("clipMark"));
         h.insert(ROLE_ICON_KEY, QByteArray::from("iconKey"));
         h.insert(ROLE_EMBLEMS, QByteArray::from("emblems"));
+        h.insert(ROLE_TAGS, QByteArray::from("tagKeys"));
         h
     }
 }

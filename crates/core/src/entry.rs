@@ -51,6 +51,8 @@ pub struct Metadata {
     /// Is something mounted here (a disk, a bind mount, a network share)?
     /// Read without triggering an automount.
     pub mount_root: bool,
+    /// Colour tags (DESIGN §6.25), as bits: bit 0 = Red … bit 6 = Gray.
+    pub tags: u8,
 }
 
 #[derive(Debug, Clone)]

@@ -307,6 +307,13 @@ pub fn action_for(p: Preset, key: u32, mods: u32) -> Option<String> {
     if mods == CTRL && (key::ONE..=key::NINE).contains(&key) {
         return Some(format!("tab-{}", key - key::ZERO));
     }
+    // Alt+1…7: toggle a colour tag; Alt+0: remove the colours (§6.25).
+    if mods == ALT && (key::ONE..=key::ONE + 6).contains(&key) {
+        return Some(format!("tag-{}", key - key::ZERO));
+    }
+    if mods == ALT && key == key::ZERO {
+        return Some("tag-clear".into());
+    }
     bindings(p)
         .into_iter()
         .find(|b| b.key == key && b.mods == mods)
@@ -360,6 +367,12 @@ const SHARED_DOCS: &[(&str, &str, &str)] = &[
     ("Go", "PgUp PgDn Home End", "Jump a page, or to an end"),
     ("Go", "Enter", "Open"),
     ("Go", "Ctrl+1–9", "Go to tab 1–9"),
+    (
+        "Tag",
+        "Alt+1–7",
+        "Toggle a colour: red, orange, yellow, green, blue, purple, gray",
+    ),
+    ("Tag", "Alt+0", "Remove the colours"),
     ("Go", "Ctrl+T / Ctrl+W", "New tab / close tab"),
     ("Go", "Ctrl+Tab", "Next tab"),
     ("Go", "Tab", "Other pane (when split)"),
@@ -408,6 +421,17 @@ fn json(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn alt_digits_tag_in_every_preset() {
+        for p in [Preset::Standard, Preset::Vim] {
+            assert_eq!(action_for(p, key::ONE, ALT).as_deref(), Some("tag-1"));
+            assert_eq!(action_for(p, key::ONE + 6, ALT).as_deref(), Some("tag-7"));
+            assert_eq!(action_for(p, key::ZERO, ALT).as_deref(), Some("tag-clear"));
+            // Alt+8 and Alt+9 are not colours.
+            assert_eq!(action_for(p, key::ONE + 7, ALT), None);
+        }
+    }
 
     #[test]
     fn ctrl_digits_pick_a_tab_in_every_preset() {

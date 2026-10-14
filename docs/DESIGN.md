@@ -1237,6 +1237,29 @@ touched. For a move, the source folders it emptied and removed are listed
 in `removed_empty_dirs` and recreated, shallowest first, before anything is
 moved back.
 
+## 6.25 Colour tags
+
+Seven colours (Red, Orange, Yellow, Green, Blue, Purple, Gray), stored in the
+`user.xdg.tags` extended attribute as a comma-separated list — the same place
+Dolphin and Flea keep them, so a file tagged in one shows in the others. A
+name Gust does not know (a Dolphin word tag) is kept, in its place, whenever
+Gust writes the list back.
+
+- Alt+1…7 toggles a colour on the selection (else the cursor row); over a
+  mixed selection it turns the colour on for all, then off for all. Alt+0
+  removes the colours. The row menu has Tag… with the same choices, and the
+  palette has one line per colour.
+- Reading is one `lgetxattr` per row in the metadata pass, on a worker,
+  never following a link. Rows show small dots after the name; the grid
+  shows them on the tile's corner. Colours come from the Omarchy theme.
+- Setting is refused on a network folder (it would block the UI thread on a
+  stalled server). Links cannot carry user attributes on Linux and say so.
+- One Ctrl+Z puts every file's exact previous value back (absent included),
+  only on the same object (dev + inode) whose tags were not changed since.
+- A copy carries its tags (on the staged file, before it has its name),
+  same disk or another; a destination that cannot hold them still gets the
+  bytes and says nothing.
+
 ## 7. Undo journal
 
 An undo entry records, per affected path: the expected identity
