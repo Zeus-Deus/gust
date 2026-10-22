@@ -88,6 +88,19 @@ sys.exit(23 if os.environ.get('CASE') == 'failure' else 0)
 
 
 class FixtureContainmentTests(unittest.TestCase):
+    def test_fresh_fixture_is_built_and_sibling_data_is_untouched(self):
+        with tempfile.TemporaryDirectory(prefix="gust-fresh-fixture-") as temporary:
+            parent = Path(temporary)
+            sibling = parent / "keep"
+            sibling.write_text("outside fixture")
+            destination = parent / "fixture"
+            result = subprocess.run([str(ROOT / "tests/make-fixture.sh"), str(destination)],
+                                    capture_output=True, timeout=20)
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(len(list((destination / "big").iterdir())), 5000)
+            self.assertEqual(sibling.read_text(), "outside fixture")
+            self.assertEqual(destination.stat().st_mode & 0o777, 0o700)
+
     def test_existing_files_and_symlink_targets_survive_fixture_builder(self):
         with tempfile.TemporaryDirectory(prefix="gust-containment-") as temporary:
             root = Path(temporary)
@@ -131,6 +144,17 @@ class GateAdmissionTests(unittest.TestCase):
             capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 1)
         self.assertFalse(destination.exists())
+
+    def test_evidence_cannot_be_written_into_another_checkout(self):
+        with tempfile.TemporaryDirectory(prefix="gust-other-checkout-") as temporary:
+            root = Path(temporary)
+            (root / ".git").mkdir()
+            destination = root / "evidence"
+            result = subprocess.run(["python3", str(ROOT / "tests/release-gates.py"),
+                "--gate", "native", "--output", str(destination)],
+                capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 1)
+            self.assertFalse(destination.exists())
 
 
 if __name__ == "__main__":

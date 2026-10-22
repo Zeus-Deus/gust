@@ -50,7 +50,9 @@ python3 tests/release-gates.py --gate models --output /tmp/gust-models-fresh
 Output must be fresh and outside the checkout. Every gate is named PASS, FAIL or
 SKIP. `--required` makes every non-PASS fatal. Without it, skips remain explicit
 and are never a release qualification. `--gate` can be repeated. With no selector,
-all qualification scopes are requested, including unavailable native gates.
+all implemented gate scopes are requested, including unavailable native gates.
+Benchmark and hardware/provider acceptance remain separate coordinated work;
+this runner never turns their historical evidence into a current pass.
 
 `library-unit` selects `--lib`; `libraries` includes integration/doc tests.
 `app` runs the app Rust tests and requires Qt build tools. `model-seams` runs the

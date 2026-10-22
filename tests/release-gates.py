@@ -26,7 +26,8 @@ class Gates:
     def __init__(self, args):
         self.args = args
         self.output = args.output.resolve()
-        if self.output.is_relative_to(ROOT) or self.output.exists():
+        if (self.output.is_relative_to(ROOT) or self.output.exists()
+                or any((parent / ".git").exists() for parent in self.output.parents)):
             raise ValueError("output must be fresh and outside the checkout")
         self.output.mkdir(parents=True, mode=0o700)
         self.results = []

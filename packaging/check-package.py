@@ -106,7 +106,8 @@ def main():
     parser.add_argument("--architecture", choices=("x86_64", "aarch64"))
     args = parser.parse_args()
     output = args.output.resolve()
-    if output.is_relative_to(ROOT) or output.exists():
+    if (output.is_relative_to(ROOT) or output.exists()
+            or any((parent / ".git").exists() for parent in output.parents)):
         parser.error("output must be fresh and outside the checkout")
     output.mkdir(mode=0o700, parents=True)
     try:
