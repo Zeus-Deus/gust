@@ -87,35 +87,17 @@ pub enum UndoStep {
 /// This is what makes the subtree check real. Symlinks are recorded but never
 /// followed.
 pub fn snapshot_subtree(root: &Path) -> BTreeMap<PathBuf, RecordedIdentity> {
-    let mut out = BTreeMap::new();
+    try_snapshot_subtree(root, &gust_core::lister::CancelToken::new()).unwrap_or_default()
+}
 
-    // Record the root itself. When a single FILE is copied, the root is that
-    // file and there is nothing to walk — omitting it left undo unable to
-    // verify the very thing it was asked to remove.
-    if let Ok(id) = FileIdentity::of_path(root) {
-        out.insert(root.to_path_buf(), RecordedIdentity::from(id));
-    }
-
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let Ok(rd) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for e in rd.flatten() {
-            let p = e.path();
-            if let Ok(id) = FileIdentity::of_path(&p) {
-                out.insert(p.clone(), RecordedIdentity::from(id));
-            }
-            let is_real_dir = e
-                .file_type()
-                .map(|t| t.is_dir() && !t.is_symlink())
-                .unwrap_or(false);
-            if is_real_dir {
-                stack.push(p);
-            }
-        }
-    }
-    out
+pub fn try_snapshot_subtree(
+    root: &Path,
+    cancel: &gust_core::lister::CancelToken,
+) -> std::io::Result<BTreeMap<PathBuf, RecordedIdentity>> {
+    Ok(crate::history_tree::snapshot(root, cancel)?
+        .into_iter()
+        .map(|(p, id)| (p, id.into()))
+        .collect())
 }
 
 /// Verify a subtree is byte-for-byte the tree we recorded.
@@ -125,7 +107,10 @@ pub fn verify_subtree_unchanged(
     root: &Path,
     recorded: &BTreeMap<PathBuf, RecordedIdentity>,
 ) -> Option<UndoRefusal> {
-    let current = snapshot_subtree(root);
+    let current = match try_snapshot_subtree(root, &gust_core::lister::CancelToken::new()) {
+        Ok(current) => current,
+        Err(_) => return Some(UndoRefusal::IdentityUnknown(root.to_path_buf())),
+    };
 
     // Anything present now that was not recorded is new work.
     for path in current.keys() {
@@ -162,7 +147,10 @@ pub fn verify_created_subtree(
     recorded: &BTreeMap<PathBuf, RecordedIdentity>,
     preexisting: &std::collections::BTreeSet<&PathBuf>,
 ) -> Option<UndoRefusal> {
-    let current = snapshot_subtree(root);
+    let current = match try_snapshot_subtree(root, &gust_core::lister::CancelToken::new()) {
+        Ok(current) => current,
+        Err(_) => return Some(UndoRefusal::IdentityUnknown(root.to_path_buf())),
+    };
 
     // Anything present now that was neither recorded nor known to predate the
     // operation is new work created since.

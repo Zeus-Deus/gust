@@ -45,6 +45,7 @@ pub struct RenameMade {
     pub original: PathBuf,
     pub renamed: PathBuf,
     identity: crate::anchor::FileIdentity,
+    pub(crate) subtree: std::collections::BTreeMap<PathBuf, crate::anchor::FileIdentity>,
     parent_dev: u64,
     parent_ino: u64,
 }
@@ -74,11 +75,23 @@ pub fn rename_recorded(
     }
     let identity = FileIdentity::from_stat(&parent.stat_child(&old_name)?);
     let parent_identity = FileIdentity::from_stat(&parent.stat_self()?);
+    let inventory = crate::history_tree::snapshot(path, &gust_core::lister::CancelToken::new())?;
+    let renamed = path.with_file_name(new_name);
+    let subtree = inventory
+        .into_iter()
+        .map(|(original, identity)| {
+            let relative = original
+                .strip_prefix(path)
+                .map_err(|_| crate::engine::OpError::Refused("invalid rename inventory".into()))?;
+            Ok((renamed.join(relative), identity))
+        })
+        .collect::<Result<_, crate::engine::OpError>>()?;
     rename_verified(&parent, &old_name, new_name, &identity)?;
     Ok(RenameMade {
         original: path.to_path_buf(),
         renamed: path.with_file_name(new_name),
         identity,
+        subtree,
         parent_dev: parent_identity.dev,
         parent_ino: parent_identity.ino,
     })

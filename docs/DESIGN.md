@@ -1516,3 +1516,32 @@ Job observers also expose pause/resume/is_paused/cancel_requested/record for
 existing progress controls. APP can hold a history admission lock and job
 handle on a worker until the terminal receipt, while GUI code polls an
 observer. Cancellation is acknowledged only by a terminal worker snapshot.
+
+## 7.3 Persistent typed recovery
+
+`history::History::open(path)` opens a private, byte-preserving durable store
+under an exclusive nonblocking lock. Open/drop around each serialized worker
+command, including admission through receipt; another Gust process can acquire
+the store between commands. A GUI poll must never open it. `entries()` returns
+loaded HistoryEntry { id, label, kind, status, created_unix }. Typed receipt
+methods record confirmed jobs, created files, RenameMade, links, modes, owners
+and tags. Rename receipts retain a complete inventory from before mutation;
+recording must not adopt later descendants as operation-owned work.
+
+`undo/redo(cancel)` returns a typed entry or refusal; `undo_many/redo_many`
+returns completed entries and the first refusal without consuming its cursor.
+Created objects move intact into private same-volume vaults; redo returns the
+same objects, never rereads changed originals. New actions retire redo offers
+but never implicitly delete preserved vault bytes. Every inverse uses held
+parents, full descendant identities, no-follow traversal and no-replace moves.
+An unreadable, changed, newly occupied, unsupported or cancelled inverse
+preserves work. Overlapping rename batches and cross-volume inverses refuse
+until a safe explicit protocol is available; legacy recovery remains available.
+
+Durable intent precedes inverse effects. Restart with a pending intent fences
+history behind an Interrupted entry; no automatic replay or guessed cleanup.
+Irreversible/untracked mutations admit an explicit barrier. Unknown historical
+jobs are not silently imported. Parent directory mtime changes from validated
+tracked inverses may refresh older ancestor receipts only after exact inventory,
+all inode identities and every non-directory identity still match. Untracked
+new work prevents this refresh and blocks the older inverse.
