@@ -81,11 +81,14 @@ pub enum ConflictPolicy {
 /// One affected path plus everything needed to invert it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JournalEntry {
+    #[serde(with = "path_wire")]
     pub source: PathBuf,
+    #[serde(with = "optional_path_wire")]
     pub destination: Option<PathBuf>,
     /// Identity of the source at plan time.
     pub source_identity: Option<RecordedIdentity>,
     /// Where overwritten content was preserved, if anything was overwritten.
+    #[serde(with = "optional_path_wire")]
     pub preserved: Option<PathBuf>,
     pub done: bool,
     pub error: Option<String>,
@@ -130,11 +133,13 @@ pub struct Job {
     pub conflict_policy: ConflictPolicy,
     pub entries: Vec<JournalEntry>,
     /// Every descendant identity captured at plan time, for subtree-safe undo.
+    #[serde(with = "identities_wire")]
     pub subtree_identities: Vec<(PathBuf, RecordedIdentity)>,
     /// Paths that already existed at the destination BEFORE this operation
     /// ran. Undo must never remove these: they are the user's own data that
     /// a merging copy happened to land beside.
     #[serde(default)]
+    #[serde(with = "paths_wire")]
     pub preexisting_at_dest: Vec<PathBuf>,
     pub created_unix: i64,
     /// The process that ran the job and the boot it ran in. Together they
@@ -147,8 +152,10 @@ pub struct Job {
     /// What the job set out to do, written before the first byte, so a
     /// crash during the first file still leaves a record that says where.
     #[serde(default)]
+    #[serde(with = "paths_wire")]
     pub planned: Vec<PathBuf>,
     #[serde(default)]
+    #[serde(with = "optional_path_wire")]
     pub dest_dir: Option<PathBuf>,
     /// The user has seen the start-up notice for this interrupted job.
     #[serde(default)]
@@ -156,6 +163,7 @@ pub struct Job {
     /// Source folders a merging move emptied and removed, so Undo can
     /// recreate them before moving anything back (DESIGN §6.24).
     #[serde(default)]
+    #[serde(with = "paths_wire")]
     pub removed_empty_dirs: Vec<PathBuf>,
 }
 
@@ -219,34 +227,70 @@ impl Journal {
     /// Record a job state. Durable: fsync before returning, so the journal
     /// cannot lag behind the destructive action it protects.
     pub fn record(&self, job: &Job) -> std::io::Result<()> {
+        self.append(&serde_json::to_vec(job)?)
+    }
+
+    pub(crate) fn record_update(&self, update: &JournalUpdate) -> std::io::Result<()> {
+        self.append(&serde_json::to_vec(update)?)
+    }
+
+    fn append(&self, bytes: &[u8]) -> std::io::Result<()> {
+        use std::os::unix::fs::DirBuilderExt;
         if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)?;
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(parent)?;
         }
-        let line = serde_json::to_string(job)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        let mut f = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)?;
-        // Restrictive from creation — the journal names user paths.
-        #[cfg(unix)]
+        let (parent, name) = crate::anchor::resolve_parent(&self.path)?;
+        let fd = rustix::fs::openat(
+            parent.as_fd(),
+            &name,
+            rustix::fs::OFlags::WRONLY
+                | rustix::fs::OFlags::APPEND
+                | rustix::fs::OFlags::CREATE
+                | rustix::fs::OFlags::NOFOLLOW
+                | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::from_bits_truncate(0o600),
+        )?;
+        let stat = rustix::fs::fstat(&fd)?;
+        if stat.st_mode & 0o170000 != 0o100000 || stat.st_uid != rustix::process::geteuid().as_raw()
         {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = f.set_permissions(std::fs::Permissions::from_mode(0o600));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "journal is not a private owned regular file",
+            ));
         }
-        writeln!(f, "{line}")?;
-        f.sync_all()?;
+        rustix::fs::flock(&fd, rustix::fs::FlockOperation::LockExclusive)?;
+        rustix::fs::fchmod(&fd, rustix::fs::Mode::from_bits_truncate(0o600))?;
+        let mut file = std::fs::File::from(fd);
+        file.write_all(bytes)?;
+        file.write_all(b"\n")?;
+        file.sync_all()?;
+        rustix::fs::fsync(parent.as_fd())?;
         Ok(())
     }
 
-    /// Read back all records, skipping a torn final line.
+    /// Read records and fold compact archive updates into their admitted job.
+    /// A torn tail is ignored; an unknown update cannot invent a new job.
     pub fn load(&self) -> Vec<Job> {
         let Ok(text) = std::fs::read_to_string(&self.path) else {
             return Vec::new();
         };
-        text.lines()
-            .filter_map(|l| serde_json::from_str::<Job>(l).ok())
-            .collect()
+        let mut jobs = Vec::<Job>::new();
+        let mut latest = std::collections::BTreeMap::<String, usize>::new();
+        for line in text.lines() {
+            if let Ok(job) = serde_json::from_str::<Job>(line) {
+                latest.insert(job.id.clone(), jobs.len());
+                jobs.push(job);
+            } else if let Ok(update) = serde_json::from_str::<JournalUpdate>(line) {
+                let Some(index) = latest.get(update.id()).copied() else {
+                    continue;
+                };
+                update.apply(&mut jobs[index]);
+            }
+        }
+        jobs
     }
 
     /// Jobs whose process died before they ended, not yet acknowledged —
@@ -324,6 +368,162 @@ impl Journal {
             .into_values()
             .filter(|j| !j.state.is_terminal())
             .collect()
+    }
+}
+
+/// Compact, durable archive publication records. Intent has no authority to
+/// delete; only a committed identity may become a completed entry.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "update")]
+pub(crate) enum JournalUpdate {
+    ArchiveIntent {
+        id: String,
+        index: usize,
+        source: Vec<u8>,
+        destination: Vec<u8>,
+        expected: Option<RecordedIdentity>,
+    },
+    ArchivePublished {
+        id: String,
+        index: usize,
+        identity: RecordedIdentity,
+    },
+}
+impl JournalUpdate {
+    fn id(&self) -> &str {
+        match self {
+            Self::ArchiveIntent { id, .. } | Self::ArchivePublished { id, .. } => id,
+        }
+    }
+    fn apply(self, job: &mut Job) {
+        use std::os::unix::ffi::OsStringExt;
+        if job.state.is_terminal() {
+            return;
+        }
+        match self {
+            Self::ArchiveIntent {
+                index,
+                source,
+                destination,
+                expected,
+                ..
+            } if index == job.entries.len() => {
+                job.state = JobState::Committing;
+                job.entries.push(JournalEntry {
+                    source: std::ffi::OsString::from_vec(source).into(),
+                    destination: Some(std::ffi::OsString::from_vec(destination).into()),
+                    source_identity: expected,
+                    preserved: None,
+                    done: false,
+                    error: None,
+                });
+            }
+            Self::ArchivePublished {
+                index, identity, ..
+            } => {
+                if let Some(entry) = job.entries.get_mut(index) {
+                    entry.done = true;
+                    if let Some(path) = &entry.destination {
+                        job.subtree_identities.push((path.clone(), identity));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum WirePath {
+    Text(String),
+    Bytes(Vec<u8>),
+}
+impl WirePath {
+    fn new(path: &Path) -> Self {
+        use std::os::unix::ffi::OsStrExt;
+        match path.to_str() {
+            Some(text) => Self::Text(text.into()),
+            None => Self::Bytes(path.as_os_str().as_bytes().to_vec()),
+        }
+    }
+    fn path(self) -> PathBuf {
+        use std::os::unix::ffi::OsStringExt;
+        match self {
+            Self::Text(text) => text.into(),
+            Self::Bytes(bytes) => std::ffi::OsString::from_vec(bytes).into(),
+        }
+    }
+}
+mod path_wire {
+    use super::*;
+    pub fn serialize<S: serde::Serializer>(path: &Path, serializer: S) -> Result<S::Ok, S::Error> {
+        WirePath::new(path).serialize(serializer)
+    }
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<PathBuf, D::Error> {
+        Ok(WirePath::deserialize(deserializer)?.path())
+    }
+}
+mod optional_path_wire {
+    use super::*;
+    pub fn serialize<S: serde::Serializer>(
+        path: &Option<PathBuf>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        path.as_ref()
+            .map(|p| WirePath::new(p))
+            .serialize(serializer)
+    }
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<PathBuf>, D::Error> {
+        Ok(Option::<WirePath>::deserialize(deserializer)?.map(WirePath::path))
+    }
+}
+mod paths_wire {
+    use super::*;
+    pub fn serialize<S: serde::Serializer>(
+        paths: &[PathBuf],
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        paths
+            .iter()
+            .map(|p| WirePath::new(p))
+            .collect::<Vec<_>>()
+            .serialize(serializer)
+    }
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Vec<PathBuf>, D::Error> {
+        Ok(Vec::<WirePath>::deserialize(deserializer)?
+            .into_iter()
+            .map(WirePath::path)
+            .collect())
+    }
+}
+mod identities_wire {
+    use super::*;
+    pub fn serialize<S: serde::Serializer>(
+        paths: &[(PathBuf, RecordedIdentity)],
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        paths
+            .iter()
+            .map(|(p, id)| (WirePath::new(p), id))
+            .collect::<Vec<_>>()
+            .serialize(serializer)
+    }
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Vec<(PathBuf, RecordedIdentity)>, D::Error> {
+        Ok(
+            Vec::<(WirePath, RecordedIdentity)>::deserialize(deserializer)?
+                .into_iter()
+                .map(|(p, id)| (p.path(), id))
+                .collect(),
+        )
     }
 }
 
@@ -462,5 +662,61 @@ mod tests {
         let mode = std::fs::metadata(jr.path()).unwrap().permissions().mode();
         assert_eq!(mode & 0o077, 0, "journal must not be group/world readable");
         std::fs::remove_file(jr.path()).ok();
+    }
+    #[test]
+    fn compact_archive_intents_fold_without_inventing_jobs_or_completion() {
+        let d = std::env::temp_dir().join(format!("gust-journal-delta-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let path = d.join("journal");
+        let _ = std::fs::remove_file(&path);
+        let journal = Journal::new(&path);
+        let job = Job::new("delta", JobKind::Extract);
+        journal.record(&job).unwrap();
+        journal
+            .record_update(&JournalUpdate::ArchiveIntent {
+                id: "delta".into(),
+                index: 0,
+                source: b"/synthetic/staging".to_vec(),
+                destination: b"/synthetic/destination".to_vec(),
+                expected: None,
+            })
+            .unwrap();
+        journal
+            .record_update(&JournalUpdate::ArchiveIntent {
+                id: "unknown".into(),
+                index: 0,
+                source: Vec::new(),
+                destination: Vec::new(),
+                expected: None,
+            })
+            .unwrap();
+        let loaded = journal.load();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].state, JobState::Committing);
+        assert_eq!(loaded[0].entries.len(), 1);
+        assert!(!loaded[0].entries[0].done);
+        let identity = RecordedIdentity {
+            dev: 1,
+            ino: 2,
+            mtime: 3,
+            mtime_nsec: 4,
+            size: 5,
+        };
+        journal
+            .record_update(&JournalUpdate::ArchivePublished {
+                id: "delta".into(),
+                index: 0,
+                identity,
+            })
+            .unwrap();
+        let loaded = journal.load();
+        assert!(loaded[0].entries[0].done);
+        assert_eq!(loaded[0].subtree_identities.len(), 1);
+        assert_eq!(
+            loaded[0].state,
+            JobState::Committing,
+            "a member receipt is not whole-job success"
+        );
+        std::fs::remove_dir_all(d).unwrap();
     }
 }

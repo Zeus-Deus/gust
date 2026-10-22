@@ -28,6 +28,8 @@ pub const MAX_LISTED: usize = 2000;
 pub enum ArchiveError {
     NoTool,
     SandboxUnavailable,
+    PasswordRequired,
+    IncorrectPassword,
     Unsupported(String),
     Failed(String),
     Cancelled,
@@ -45,6 +47,8 @@ impl ArchiveError {
             Self::SandboxUnavailable => {
                 "Archives need a working bubblewrap and prlimit sandbox.".into()
             }
+            Self::PasswordRequired => "This archive needs a password.".into(),
+            Self::IncorrectPassword => "The archive password was not accepted.".into(),
             Self::Unsupported(name) => format!("Gust cannot read {name} as an archive."),
             Self::Failed(why) | Self::Limit(why) => why.clone(),
             Self::Cancelled => "Archive operation cancelled.".into(),
@@ -667,6 +671,11 @@ impl Reader {
         let mut bytes = vec![0; length];
         self.read_exact(&mut bytes, cancel)?;
         let frame: Frame = serde_json::from_slice(&bytes).map_err(|_| protocol_error())?;
+        match frame {
+            Frame::PasswordRequired => return Err(ArchiveError::PasswordRequired),
+            Frame::IncorrectPassword => return Err(ArchiveError::IncorrectPassword),
+            _ => {}
+        }
         if matches!(frame, Frame::Failed) {
             return Err(ArchiveError::Failed("Archive could not be decoded; it may be damaged, unsupported, or require a different password.".into()));
         }
@@ -850,6 +859,34 @@ fn process_umask() -> u32 {
         & 0o777
 }
 
+pub(crate) trait PublicationObserver {
+    fn intent(
+        &mut self,
+        source: &Path,
+        destination: &Path,
+        expected: Option<crate::anchor::FileIdentity>,
+    ) -> Result<usize, ArchiveError>;
+    fn committed(
+        &mut self,
+        index: usize,
+        identity: crate::anchor::FileIdentity,
+    ) -> Result<(), ArchiveError>;
+}
+struct VolatilePublication;
+impl PublicationObserver for VolatilePublication {
+    fn intent(
+        &mut self,
+        _: &Path,
+        _: &Path,
+        _: Option<crate::anchor::FileIdentity>,
+    ) -> Result<usize, ArchiveError> {
+        Ok(0)
+    }
+    fn committed(&mut self, _: usize, _: crate::anchor::FileIdentity) -> Result<(), ArchiveError> {
+        Ok(())
+    }
+}
+
 /// Worker-side extraction. All archive data is decoded in a sandbox; the
 /// parent creates only vetted names and checks actual bytes before each write.
 pub fn extract_with(
@@ -859,6 +896,26 @@ pub fn extract_with(
     password: Option<&ArchivePassword>,
     cancel: &CancelToken,
     progress: &mut dyn FnMut(super::jobs::ArchivePhase, usize, u64),
+) -> Result<Extracted, ArchiveError> {
+    extract_recorded(
+        archive,
+        dest,
+        policy,
+        password,
+        cancel,
+        progress,
+        &mut VolatilePublication,
+    )
+}
+
+pub(crate) fn extract_recorded(
+    archive: &Path,
+    dest: &Path,
+    policy: &ExtractPolicy,
+    password: Option<&ArchivePassword>,
+    cancel: &CancelToken,
+    progress: &mut dyn FnMut(super::jobs::ArchivePhase, usize, u64),
+    observer: &mut dyn PublicationObserver,
 ) -> Result<Extracted, ArchiveError> {
     use super::{jobs::ArchivePhase, stage};
     use std::collections::{BTreeMap, BTreeSet};
@@ -1095,11 +1152,43 @@ pub fn extract_with(
             } else {
                 relative.parent().unwrap_or(Path::new(""))
             };
-            stage::parents_with(&staging.parent, path, true, &mut |path, identity| {
-                published.insert(path.to_path_buf(), identity);
-                published_dirs.insert(path.to_path_buf());
-                done.dirs += 1;
-            })?;
+            let mut parent = staging.parent.open_child_dir(std::ffi::OsStr::new("."))?;
+            let mut relative_dir = PathBuf::new();
+            for component in path.components() {
+                let std::path::Component::Normal(name) = component else {
+                    return Err(protocol_error());
+                };
+                relative_dir.push(name);
+                match parent.open_child_dir(name) {
+                    Ok(child) => parent = child,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        reader.check(cancel)?;
+                        let ticket = observer.intent(archive, &dest.join(&relative_dir), None)?;
+                        match rustix::fs::mkdirat(
+                            parent.as_fd(),
+                            name,
+                            rustix::fs::Mode::from_bits_truncate(0o700),
+                        ) {
+                            Ok(()) => {
+                                let child = parent.open_child_dir(name)?;
+                                let identity =
+                                    crate::anchor::FileIdentity::from_stat(&child.stat_self()?);
+                                published.insert(relative_dir.clone(), identity);
+                                published_dirs.insert(relative_dir.clone());
+                                done.dirs += 1;
+                                observer.committed(ticket, identity)?;
+                                rustix::fs::fsync(parent.as_fd())?;
+                                parent = child;
+                            }
+                            Err(rustix::io::Errno::EXIST) => {
+                                parent = parent.open_child_dir(name)?;
+                            }
+                            Err(error) => return Err(error.into()),
+                        }
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            }
         }
         // Publish real files before symlinks so every link follows the
         // archive's chosen keep-both name, never a pre-existing namesake.
@@ -1139,6 +1228,12 @@ pub fn extract_with(
                     chosen.push(format!(" ({})", suffix + 1));
                     chosen
                 };
+                reader.check(cancel)?;
+                let ticket = observer.intent(
+                    &dest.join(&staging.name).join(relative),
+                    &dest.join(path).join(&chosen),
+                    Some(expected),
+                )?;
                 match crate::anchor::rename_noreplace(&source, name, &target, &chosen) {
                     Ok(()) => {
                         let placed = path.join(&chosen);
@@ -1156,6 +1251,7 @@ pub fn extract_with(
                         if !expected.matches(&now) {
                             return Err(ArchiveError::Failed("Archive staging changed during publication; published work was preserved.".into()));
                         }
+                        observer.committed(ticket, now)?;
                         rustix::fs::fsync(target.as_fd())?;
                         moved = true;
                         progress(ArchivePhase::Publishing, seen, actual);

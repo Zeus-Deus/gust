@@ -19,6 +19,8 @@ pub enum Frame {
     EndMember,
     EndArchive,
     Failed,
+    PasswordRequired,
+    IncorrectPassword,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
