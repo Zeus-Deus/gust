@@ -85,7 +85,8 @@ require owner review; this is not an exhaustive static call graph.
 
 The baseline package supplies Qt, D-Bus/GLib, SSHFS/rclone/GVfs backends, clipboard,
 preview and archive tools. Curl/OpenSSL/GLib are included for the remote lane's native GIO
-and TLS-sharing integration; installing them does not claim that integration is
+and TLS-sharing integration (GLib/GIO >= 2.66; Ubuntu builds need
+libglib2.0-dev and pkg-config). Installing them does not claim that integration is
 already consumed in every app revision. GVfs FTP/WebDAV support is supplied by
 the matching installed GVfs build and must be tested with its actual backend.
 On Arch, FTP/FTPS come from GVfs; WebDAV needs

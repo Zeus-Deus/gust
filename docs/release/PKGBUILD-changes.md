@@ -12,8 +12,9 @@ alone is not installed qualification. Runtime helper providers are checked for
 drift, including GLib/GIO, curl, tar/zstd, MIME data and the active media helper.
 Optional preview prerequisites remain explicit capabilities.
 
-`check()` invokes the shared skip-aware required workspace library runner.
-Ignored tests, missing fixtures and empty success cannot qualify a package.
+`check()` invokes the shared skip-aware required workspace library-unit scope,
+with the one manual disk benchmark explicitly excluded and recorded. Other
+ignored tests, missing fixtures and empty success cannot qualify a package.
 Desktop, KVM model, theme, benchmark and real-device/account checks are separate;
 public hosted CI does not claim those passes. See [release preparation](README.md)
 and [testing](../TESTING.md) for actual commands and limitations.

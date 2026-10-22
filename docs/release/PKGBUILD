@@ -24,7 +24,7 @@ license=('MIT')
 options=(!lto)
 # Connection and device helpers ship with Gust; connecting remains explicit.
 depends=(
-  'qt6-base' 'qt6-declarative' 'dbus' 'glibc' 'gcc-libs' 'glib2'
+  'qt6-base' 'qt6-declarative' 'dbus' 'glibc' 'gcc-libs' 'glib2>=2.66'
   'openssh' 'sshfs' 'fuse3' 'rclone'
   'gvfs' 'gvfs-afc' 'gvfs-smb' 'gvfs-nfs' 'gvfs-mtp' 'gvfs-gphoto2' 'gvfs-dnssd'
   'usbmuxd' 'polkit'
