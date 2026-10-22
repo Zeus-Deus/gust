@@ -6,6 +6,7 @@ use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::OsStringExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
+use std::time::Instant;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BlockEffect {
@@ -26,6 +27,82 @@ impl std::fmt::Display for BlockFailure {
     }
 }
 impl std::error::Error for BlockFailure {}
+
+fn discovery_failure(code: ErrorCode) -> BlockFailure {
+    let message = match code {
+        ErrorCode::Cancelled => {
+            "Cancelled while refreshing the device list. No device operation was started."
+        }
+        ErrorCode::Timeout => {
+            "Refreshing the device list took too long. No device operation was started."
+        }
+        ErrorCode::MissingHelper => {
+            "Device discovery is unavailable. Check that lsblk (util-linux) is installed."
+        }
+        ErrorCode::Busy => {
+            "Device helpers are busy. Wait for them to finish before refreshing the device list."
+        }
+        ErrorCode::Protocol => {
+            "The device list is incomplete or invalid. Refresh it before choosing a drive."
+        }
+        _ => "The device list could not be refreshed. Check device support before retrying.",
+    };
+    BlockFailure {
+        error: RemoteError {
+            code,
+            message: message.into(),
+        },
+        // Discovery never sends a device-changing request to the service.
+        effect: BlockEffect::NotStarted,
+    }
+}
+
+fn list_devices_using(
+    program: &OsStr,
+    ctx: &CallContext<'_>,
+) -> Result<Vec<devices::Device>, BlockFailure> {
+    let started = Instant::now();
+    let remaining = || -> Result<CallContext<'_>, BlockFailure> {
+        let context = CallContext {
+            cancel: ctx.cancel,
+            timeout: ctx.timeout.saturating_sub(started.elapsed()),
+        };
+        context.check().map_err(|e| discovery_failure(e.code))?;
+        Ok(context)
+    };
+    let mut command = Command::new(program);
+    command
+        .args([
+            "--json",
+            "-o",
+            "NAME,PATH,PKNAME,SIZE,RM,HOTPLUG,TYPE,FSTYPE,LABEL,MOUNTPOINT",
+        ])
+        .env("LC_ALL", "C");
+    let output = helper::run(command, &[], &remaining()?).map_err(|e| discovery_failure(e.code))?;
+    remaining()?;
+    if !output.status.success() {
+        return Err(discovery_failure(ErrorCode::Failed));
+    }
+    let text =
+        std::str::from_utf8(&output.stdout).map_err(|_| discovery_failure(ErrorCode::Protocol))?;
+    // Validate the envelope, leaving all device parsing and filtering to CORE.
+    let envelope: serde_json::Value =
+        serde_json::from_str(text).map_err(|_| discovery_failure(ErrorCode::Protocol))?;
+    if !envelope
+        .get("blockdevices")
+        .is_some_and(serde_json::Value::is_array)
+    {
+        return Err(discovery_failure(ErrorCode::Protocol));
+    }
+    let devices = devices::offerable_devices(&devices::parse_lsblk(text));
+    remaining()?;
+    Ok(devices)
+}
+
+/// Refresh device selection on a worker within the caller's remaining budget.
+pub fn list_devices(ctx: &CallContext<'_>) -> Result<Vec<devices::Device>, BlockFailure> {
+    list_devices_using(OsStr::new("lsblk"), ctx)
+}
 
 #[derive(Clone, Copy)]
 enum Action {
@@ -253,6 +330,138 @@ mod tests {
             cancel,
             timeout: Duration::from_secs(3),
         }
+    }
+
+    #[test]
+    fn discovery_preserves_core_filtering_and_cleartext_join_without_path_io() {
+        let json = r#"{"blockdevices":[
+            {"name":"system","path":"/dev/system","rm":false,"hotplug":false,"type":"disk"},
+            {"name":"fixture","path":"/dev/fixture","size":"4G","rm":true,"hotplug":true,"type":"part","fstype":"crypto_LUKS","label":"Synthetic","children":[
+                {"name":"dm-fixture","path":"/dev/dm-fixture","pkname":"fixture","type":"crypt","fstype":"ext4","mountpoint":"/synthetic/not-created"}
+            ]},
+            {"name":"loop-fixture","path":"/dev/loop-fixture","rm":true,"type":"loop"}
+        ]}"#;
+        let fixture = Fixture::new(&format!(
+            "import os,sys\nassert os.environ['LC_ALL']=='C'\nassert sys.argv[1:]==['--json','-o','NAME,PATH,PKNAME,SIZE,RM,HOTPLUG,TYPE,FSTYPE,LABEL,MOUNTPOINT']\nassert sys.stdin.buffer.read()==b''\nsys.stdout.write({json:?})"
+        ));
+        let cancel = CancelToken::new();
+        let listed = list_devices_using(fixture.program(), &context(&cancel)).unwrap();
+        assert_eq!(
+            listed,
+            devices::offerable_devices(&devices::parse_lsblk(json))
+        );
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].path, "/dev/fixture");
+        assert!(listed[0].encrypted);
+        assert_eq!(listed[0].cleartext.as_deref(), Some("/dev/dm-fixture"));
+        assert_eq!(
+            listed[0].mount_point,
+            Some(PathBuf::from("/synthetic/not-created"))
+        );
+
+        let empty = Fixture::new("print('{\"blockdevices\":[]}')");
+        assert!(list_devices_using(empty.program(), &context(&cancel))
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn discovery_failures_never_become_empty_success_or_expose_diagnostics() {
+        let cancel = CancelToken::new();
+        for reply in [
+            "",
+            "{",
+            "{}",
+            "[]",
+            "{\"blockdevices\":null}",
+            "{\"blockdevices\":[]} trailing",
+        ] {
+            let fixture = Fixture::new(&format!("print({reply:?})"));
+            let e = list_devices_using(fixture.program(), &context(&cancel)).unwrap_err();
+            assert_eq!(e.error.code, ErrorCode::Protocol);
+            assert_eq!(e.effect, BlockEffect::NotStarted);
+        }
+        let invalid_utf8 = Fixture::new("import sys\nsys.stdout.buffer.write(b'\\xff')");
+        assert_eq!(
+            list_devices_using(invalid_utf8.program(), &context(&cancel))
+                .unwrap_err()
+                .error
+                .code,
+            ErrorCode::Protocol
+        );
+        let failed = Fixture::new(
+            "import sys\nsys.stderr.write('synthetic-private-diagnostic')\nsys.exit(1)",
+        );
+        let e = list_devices_using(failed.program(), &context(&cancel)).unwrap_err();
+        assert_eq!(e.error.code, ErrorCode::Failed);
+        assert!(!format!("{e:?} {e}").contains("synthetic-private-diagnostic"));
+        let e = list_devices_using(failed.root.join("missing").as_os_str(), &context(&cancel))
+            .unwrap_err();
+        assert_eq!(e.error.code, ErrorCode::MissingHelper);
+        assert!(e.error.message.contains("lsblk"));
+    }
+
+    #[test]
+    fn discovery_honors_pre_cancel_deadline_and_output_bounds() {
+        let fixture =
+            Fixture::new("import pathlib\npathlib.Path(__file__).with_name('launched').touch()");
+        let cancel = CancelToken::new();
+        let zero = CallContext {
+            cancel: &cancel,
+            timeout: Duration::ZERO,
+        };
+        assert_eq!(
+            list_devices_using(fixture.program(), &zero)
+                .unwrap_err()
+                .error
+                .code,
+            ErrorCode::Timeout
+        );
+        cancel.cancel();
+        assert_eq!(
+            list_devices_using(fixture.program(), &context(&cancel))
+                .unwrap_err()
+                .error
+                .code,
+            ErrorCode::Cancelled
+        );
+        assert!(!fixture.root.join("launched").exists());
+
+        let cancel = CancelToken::new();
+        let flood = Fixture::new("import sys\nsys.stdout.buffer.write(b'x'*(9*1024*1024))");
+        let e = list_devices_using(flood.program(), &context(&cancel)).unwrap_err();
+        assert_eq!(e.error.code, ErrorCode::Protocol);
+        assert_eq!(e.effect, BlockEffect::NotStarted);
+        let quiet = Fixture::new("import time\ntime.sleep(30)");
+        let short = CallContext {
+            cancel: &cancel,
+            timeout: Duration::from_millis(150),
+        };
+        let start = Instant::now();
+        let e = list_devices_using(quiet.program(), &short).unwrap_err();
+        assert_eq!(e.error.code, ErrorCode::Timeout);
+        assert_eq!(e.effect, BlockEffect::NotStarted);
+        assert!(start.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn discovery_observes_cancellation_while_the_helper_is_active() {
+        let fixture = Fixture::new("import pathlib,time\npathlib.Path(__file__).with_name('started').touch()\ntime.sleep(30)");
+        let token = Arc::new(CancelToken::new());
+        let cancel = Arc::clone(&token);
+        let marker = fixture.root.join("started");
+        let worker = std::thread::spawn(move || {
+            let start = Instant::now();
+            while !marker.exists() && start.elapsed() < Duration::from_secs(2) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert!(marker.exists());
+            cancel.cancel();
+        });
+        let e = list_devices_using(fixture.program(), &context(&token)).unwrap_err();
+        worker.join().unwrap();
+        assert_eq!(e.error.code, ErrorCode::Cancelled);
+        assert_eq!(e.effect, BlockEffect::NotStarted);
     }
 
     #[test]

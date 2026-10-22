@@ -1499,3 +1499,14 @@ the caller retains and wipes its buffer. Existing input/output and helper-admiss
 bounds apply. CLI output is read in the C locale; malformed replies never trigger
 path guesses or filesystem checks. Tests use private executable stand-ins, never
 the real device service, mounts or credentials.
+
+`block::list_devices(&CallContext) -> Result<Vec<gust_core::devices::Device>, BlockFailure>`
+is the worker-only bounded discovery adapter. It runs `lsblk` with CORE's existing
+column selection, validates a complete UTF-8 JSON envelope, and delegates device
+parsing/filtering to `devices::{parse_lsblk,offerable_devices}`. Helper errors,
+invalid replies, cancellation and exhausted parsing budget are failures, never an
+empty-success fallback. A valid empty inventory remains successful. Discovery
+errors carry `NotStarted`: no device-changing request was made, even if the
+read-only discovery helper ran. Its diagnostics remain static and sanitized.
+APP passes the same token and remaining overall budget through discovery and
+subsequent mount/unlock/eject operations; a failed refresh must prevent them.
