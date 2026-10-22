@@ -10,8 +10,8 @@
 #   still needs runtime qualification.
 
 pkgname=gust
-_commit=8107b40075df893f2421b2838295a0235af122eb
-pkgver=0.1.0.r116.g8107b40075df
+_commit=eed811cb435f737d43ec6c19da52d3b742564235
+pkgver=0.1.0.r118.geed811cb435f
 pkgrel=1
 pkgdesc="A fast, calm file manager for Omarchy"
 arch=('x86_64' 'aarch64')
@@ -47,7 +47,7 @@ optdepends=(
   'libreoffice-fresh: sandboxed Office/HTML conversion (capability-gated)'
 )
 source=("$pkgname-$_commit.tar.gz::https://codeload.github.com/Zeus-Deus/gust/tar.gz/$_commit")
-sha256sums=('d8b82d6de0daca44a764c25684f8d7a361b7a689eaad48fc86c845d0d46801d2')
+sha256sums=('60c87b6281ceacc88b765bedce4c56f09841267cce9e669cad38c1b0a5c97039')
 
 build() {
   cd "$pkgname-$_commit"
