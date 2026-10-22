@@ -16,7 +16,7 @@ concurrency:
 jobs:
   check:
     name: Check
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     env:
       CARGO_TERM_COLOR: always
@@ -57,21 +57,43 @@ jobs:
         if: steps.changes.outputs.code == 'true'
         run: cargo fmt --all -- --check
 
+      - name: Restore build dependency downloads
+        id: apt-cache
+        if: steps.changes.outputs.code == 'true'
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ${{ runner.temp }}/gust-apt-cache/*.deb
+          key: ubuntu-26.04-apt-${{ hashFiles('.github/workflows/ci.yml') }}
+
       - name: Install build dependencies
         if: steps.changes.outputs.code == 'true'
         run: |
+          # The default Azure mirror throttled downloads in the hosted run.
+          printf 'https://archive.ubuntu.com/ubuntu/\tpriority:1\nhttps://security.ubuntu.com/ubuntu/\tpriority:2\n' \
+            | sudo tee /etc/apt/apt-mirrors.txt > /dev/null
+          mkdir -p "$RUNNER_TEMP/gust-apt-cache"
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends \
+          sudo apt-get -o Dir::Cache::archives="$RUNNER_TEMP/gust-apt-cache" \
+            install -y --no-install-recommends \
             just libarchive-tools libdbus-1-dev libwayland-dev \
             qt6-base-dev qt6-declarative-dev qt6-declarative-dev-tools
           test -x /usr/lib/qt6/bin/qmllint
           bsdtar --version
+          qmake6 -query QT_VERSION
+
+      # Save after installation so a later compile failure still warms the cache.
+      - name: Cache build dependency downloads
+        if: steps.changes.outputs.code == 'true' && steps.apt-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ${{ runner.temp }}/gust-apt-cache/*.deb
+          key: ${{ steps.apt-cache.outputs.cache-primary-key }}
 
       - name: Restore Rust build cache
         if: steps.changes.outputs.code == 'true'
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          key: ubuntu-24.04-qt6
+          key: ubuntu-26.04-qt6
           cache-on-failure: "true"
           cache-bin: "false"
 
