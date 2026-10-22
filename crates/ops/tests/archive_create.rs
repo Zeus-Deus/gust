@@ -596,3 +596,60 @@ fn zip_mixed_unicode_and_opaque_members_keep_exact_names_and_link_targets() {
         );
     }
 }
+
+#[test]
+fn zip_unicode_link_name_with_opaque_target_has_correct_independent_encoding() {
+    use std::{
+        os::{
+            fd::AsRawFd,
+            unix::{ffi::OsStringExt, process::CommandExt},
+        },
+        process::{Command, Stdio},
+    };
+    let f = Fixture::new();
+    let source = f.0.join("source");
+    let name = OsString::from("é-link");
+    let target = OsString::from_vec(b"raw-\xff-\x80".to_vec());
+    std::os::unix::fs::symlink(&target, source.join(&name)).unwrap();
+    let destination = f.0.join("encoding.zip");
+    io::create_with(
+        &source,
+        std::slice::from_ref(&name),
+        &destination,
+        ArchiveFormat::Zip,
+        None,
+        &CancelToken::new(),
+        &mut |_, _, _| {},
+    )
+    .unwrap();
+    let inherited = std::fs::File::open(&destination).unwrap();
+    let mut command = Command::new("/usr/bin/bwrap");
+    command.args(["--unshare-all","--die-with-parent","--clearenv","--ro-bind","/usr","/usr","--symlink","usr/lib","/lib","--symlink","usr/lib","/lib64","--proc","/proc","--dev","/dev","--ro-bind-fd"]).arg(inherited.as_raw_fd().to_string()).arg("/input").args(["/usr/bin/prlimit","--as=536870912","--cpu=10","--nofile=64","--fsize=0","--","/usr/bin/python3","-B","-c",r#"
+import json,struct,zipfile
+with zipfile.ZipFile('/input') as z:
+ entries=z.infolist();assert len(entries)==1
+ info=entries[0]
+ with open('/input','rb') as raw:
+  raw.seek(info.header_offset);header=raw.read(30)
+ assert header[:4]==b'PK\x03\x04'
+ print(json.dumps({'name':info.filename,'central':info.flag_bits,'local':struct.unpack_from('<H',header,6)[0],'target':z.read(info).hex()}))
+"#]).stdin(Stdio::null()).stderr(Stdio::null());
+    // SAFETY: child-only async-signal-safe fcntl on an owned input descriptor.
+    unsafe {
+        command.pre_exec(move || {
+            rustix::io::fcntl_setfd(&inherited, rustix::io::FdFlags::empty())
+                .map_err(std::io::Error::from)
+        });
+    }
+    let output = command.output().unwrap();
+    assert!(output.status.success(), "independent ZIP reader failed");
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["name"], "é-link", "{result}");
+    assert_ne!(result["central"].as_u64().unwrap() & 0x800, 0, "{result}");
+    assert_ne!(result["local"].as_u64().unwrap() & 0x800, 0, "{result}");
+    assert_eq!(result["target"], "7261772dff2d80", "{result}");
+    assert_eq!(
+        std::fs::read_link(source.join(name)).unwrap().as_os_str(),
+        &target
+    );
+}

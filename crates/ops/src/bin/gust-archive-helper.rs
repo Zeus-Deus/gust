@@ -310,7 +310,8 @@ fn write_archive() -> Result<(), ()> {
             let frame: WriteFrame = protocol::read_message(&mut input).map_err(|_| ())?;
             match frame {
                 WriteFrame::Header(member) if remaining.is_none() => {
-                    let utf8 = std::str::from_utf8(&member.name).is_ok()
+                    let name_utf8 = std::str::from_utf8(&member.name).is_ok();
+                    let utf8 = name_utf8
                         && member
                             .link
                             .as_ref()
@@ -321,7 +322,8 @@ fn write_archive() -> Result<(), ()> {
                     if matches!(request.format, WriteFormat::Zip) {
                         // ZIP has a per-member UTF-8 flag. Opaque Unix names
                         // must retain their bytes without claiming UTF-8.
-                        let locale = if utf8 { c"C.UTF-8" } else { c"C" };
+                        // Symlink content does not determine filename flags.
+                        let locale = if name_utf8 { c"C.UTF-8" } else { c"C" };
                         if setlocale(0, locale.as_ptr()).is_null() {
                             return Err(());
                         }

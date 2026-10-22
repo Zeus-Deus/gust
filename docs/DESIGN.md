@@ -984,7 +984,8 @@ timestamp comparison remains mandatory, including nanosecond precision.
 
 Creation defines filename encoding per format: full PAX uses binary headers
 to retain Unix byte names and link targets; ZIP retains its original byte names
-and sets UTF-8 flags only for representable members (opaque names stay unflagged);
+and sets UTF-8 flags from the filename alone (opaque names stay unflagged).
+Symlink target bytes are content and never determine ZIP's filename flag;
 7z requires UTF-8 names and link targets for its UTF-16 representation. Invalid
 7z encodings return `UnsupportedEncoding { format, member }` before staging or
 payload. The codec's private process initializes its character locale before
