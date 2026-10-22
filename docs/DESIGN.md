@@ -754,14 +754,28 @@ Three places touch a path before any worker does, and all three are bounded:
 | the listing worker | Unbounded, the folder never settles and the worker never returns. |
 
 **Only paths that can actually stall are probed.** The filesystem type comes
-from `/proc/self/mounts`, which the kernel answers from its own tables and
+from `/proc/self/mountinfo`, which the kernel answers from its own tables and
 which therefore cannot itself hang. A path on ext4/btrfs/xfs/tmpfs spawns no
 child and pays nothing.
 
-`stall::fstype_for` reads the mount table as bytes and delegates to the pure
-`stall::fstype_from_mounts(path, table_bytes)` fixture/parser API. Mount points
-are decoded before longest-component-prefix matching, with no candidate open,
-stat or canonicalization. Shared `mount_table::decode_field(&[u8]) -> OsString`
+`stall::fstype_for` reads bounded mountinfo bytes and delegates to the pure
+`stall::fstype_from_mountinfo(path, table_bytes)` API. No flat-table fallback,
+candidate open, stat or canonicalization is used. `MountInfo::parse` accepts at
+most 4 MiB / 65,536 records; explicit Limit/Invalid/Ambiguous/NoMount errors never
+publish a truncated inventory. `MountRecord` exposes id, parent_id, raw
+mount_point and fs_type; `resolve` returns the visible record and
+`visible_mounts` supplies the read-only inventory. Parent IDs select a unique
+same-path overmount leaf, including autofs covered by a local mount. Nested
+records attached to a covered ancestor are hidden, even when the covering
+ancestor path has no duplicate record. Unresolved sibling stacks fence only
+their subtree for resolution; an inventory containing such a region returns
+Ambiguous. No first/last row ordering determines visibility. These semantics
+follow proc_pid_mountinfo(5). The compatibility `fstype_from_mounts` signature
+remains, but flat tables return None for duplicate matching points or differing
+matching ancestor filesystem types: they cannot establish visibility. An
+unknown production lookup requires a probe rather than authorizing direct I/O.
+
+Shared `mount_table::decode_field(&[u8]) -> OsString`
 handles the kernel's space, tab, newline and backslash octal escapes exactly
 once, retaining raw non-UTF-8 bytes and literal escape-looking name segments.
 Core drop handling uses the same decoder and byte field separators. Filesystem
