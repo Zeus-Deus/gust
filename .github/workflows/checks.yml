@@ -40,11 +40,13 @@ jobs:
             qt-host: linux
             qt-arch: linux_gcc_64
             qt-dir: gcc_64
+            python-arch: x64
           - runner: ubuntu-24.04-arm
             arch: aarch64
             qt-host: linux_arm64
             qt-arch: linux_gcc_arm64
             qt-dir: gcc_arm64
+            python-arch: arm64
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     env:
@@ -72,6 +74,14 @@ jobs:
       # selecting the SDK so its libraries/imports cannot mix with system Qt.
       - name: Required portable model seams (system Qt)
         run: python3 tests/release-gates.py --gate model-seams --required --output "$RUNNER_TEMP/gust-model-seams"
+      # Older Python can misclassify the official ARM Qt tools 7z as ZIP:
+      # https://github.com/miurahr/aqtinstall/issues/1042
+      - name: Select pinned SDK installer Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.14.0'
+          architecture: ${{ matrix.python-arch }}
+          check-latest: false
       - name: Select pinned public Qt SDK (no account, no host installation)
         working-directory: ${{ runner.temp }}
         env:

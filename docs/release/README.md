@@ -57,6 +57,9 @@ The supported Qt qualification floor is 6.11.2, also declared for both Qt Arch
 dependencies. The builder honors explicit `QMAKE`, records its version/prefix,
 and rejects older Qt. Hosted builds select the exact public 6.11.2 SDK for each
 native architecture; portable system-Qt seams run before SDK selection.
+The SDK installer uses pinned Python 3.14.0, whose ZIP detection avoids the
+older interpreter's false positive on the official ARM Qt tools 7z archive.
+This CI bootstrap requirement adds no Python SDK installer to the Arch package.
 
 When `crates/ops/src/bin/gust-archive-helper.rs` exists in the selected snapshot,
 the builder runs `cargo build --release --locked -p gust-ops --bin

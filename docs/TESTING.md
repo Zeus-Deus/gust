@@ -148,7 +148,12 @@ device transfers.
 native x86_64/aarch64 release builds with staging checks. Portable seams run first
 using Ubuntu's Qt 6.4.2. The app and artifact jobs then select public Qt 6.11.2
 (`linux_gcc_64` / `linux_gcc_arm64`) using pinned aqtinstall 3.3.0 in private runner
-storage, without an account or system Qt replacement. Installer failures retain
+storage, without an account or system Qt replacement. SDK installation uses
+Python 3.14.0 on both native architectures: older Python can misclassify the
+official ARM Qt tools 7z archive as ZIP, producing `BadZipFile`
+([upstream report](https://github.com/miurahr/aqtinstall/issues/1042#issuecomment-5329253499)).
+This selects only the hosted CI toolchain; the Arch package uses its distribution
+Qt and does not run aqt. Installer failures retain
 raw output/tracebacks privately and expose only an exit code, fixed exception
 classes and prerequisite flags. SDK metadata dry runs do not prove archive
 extraction or a usable installed SDK. The unquoted `public`
