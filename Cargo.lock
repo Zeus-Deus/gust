@@ -339,6 +339,7 @@ dependencies = [
  "gust-ops",
  "gust-remote",
  "gust-thumbs",
+ "serde_json",
 ]
 
 [[package]]

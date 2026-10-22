@@ -125,7 +125,7 @@ if [[ "$MOUSE_OK" -ne 1 ]]; then
 else
   say "37b · clicking it asks for Trust in words, and keeps asking until it is tapped"
   wclick left "$(pt_wait placePoints "device:$IPHONE")"
-  if wait_dev "Unlock your iPhone and tap Trust" 8; then ok "the row says: Unlock your iPhone and tap Trust"; else bad "while untrusted the row says: $(devs)"; fi
+  if wait_dev "Unlock your Apple device and tap Trust" 8; then ok "the row says: Unlock your Apple device and tap Trust"; else bad "while untrusted the row says: $(devs)"; fi
   shot 37b-iphone-trust
   sleep 4
   [[ "$(grep -c '^answer 1' "$T/gio-calls" 2>/dev/null)" -ge 1 ]] && ok "Gust answered gio's question with Try again on its own" || bad "the question was never answered ($(cat "$T/gio-calls" 2>/dev/null))"
@@ -154,7 +154,12 @@ else
   wclick left "$(pt_wait menuPoints "Open app files")"
   sleep 2.0; wait_for "d['model']['settled']" "True" 10 >/dev/null
   expect "the app files are shown" "d['model']['location']" "$M/afc:host=$UDID,port=3"
+  expect_contains "app files leave the device in a settled Open state" "' ;; '.join(d['devices'])" "Open · right-click to eject"
   t="$(title)"; [[ "$t" == "Alex's iPhone · app files — Gust" ]] && ok "titled: $t" || bad "the title is '$t'"
+  wclick right "$(pt_wait placePoints "device:$IPHONE")"
+  wclick left "$(pt_wait menuPoints "Open photos and files")"
+  wait_for "d['model']['location']" "$M/afc:host=$UDID" 10 >/dev/null
+  expect "Photos menu returns to media, not the last app folder" "d['model']['location']" "$M/afc:host=$UDID"
 
   say "37e · Eject leaves the phone and says it is safe to unplug"
   goto "$M/afc:host=$UDID/DCIM"; wait_for "d['model']['settled']" "True" 10 >/dev/null
@@ -170,13 +175,16 @@ else
   rm -f "$T/trusted" "$T/gio-calls"
   wclick left "$(pt_wait placePoints "device:$IPHONE")"
   wait_dev "tap Trust" 8 || bad "it did not ask for Trust again"
+  expect "Trust guidance is prominent in Connect" "d['connectOpen']" "True"
+  key Escape  # Closing the panel is not cancellation; the row's second click is.
   wclick left "$(pt_wait placePoints "device:$IPHONE")"; sleep 4.5
   grep -q '^answer 2' "$T/gio-calls" && ok "a second click answered Cancel" || bad "Cancel was never sent ($(cat "$T/gio-calls"))"
   if wait_dev "Alex's iPhone|Click to open" 5; then ok "and the row went back to Click to open"; else bad "after stopping: $(devs)"; fi
   touch "$T/refuse"
   wclick left "$(pt_wait placePoints "device:$IPHONE")"
-  if wait_dev "This iPhone said no" 6; then ok "Don't Trust is told plainly: This iPhone said no…"; else bad "after Don't Trust: $(devs)"; fi
+  if wait_dev "This Apple device said no" 6; then ok "Don't Trust is told plainly: This Apple device said no…"; else bad "after Don't Trust: $(devs)"; fi
   shot 37f-iphone-said-no
+  key Escape  # The retained failure must not block the next device's controls.
   rm -f "$T/refuse"
 fi
 
@@ -191,12 +199,18 @@ if [[ "$MOUSE_OK" -eq 1 ]]; then
   shot 37g-android-open
 fi
 
-say "37h · unplugging removes it; a missing backend is named, with the command"
+say "37h · unplugging removes it; missing support has a visible setup action"
 unplug 1-2 7
 if wait_dev "Pixel 8" 1; then sleep 3; fi
 [[ "$(devs)" != *"Pixel 8"* ]] && ok "the Pixel is gone from Devices once unplugged" || bad "still listed: $(devs)"
 rm -f "$MNTS/afc.mount"; touch "$USB/001/poke"
-if wait_dev "Needs gvfs-afc — sudo pacman -S gvfs-afc" 6; then ok "without iPhone support it says: Needs gvfs-afc — sudo pacman -S gvfs-afc"; else bad "without gvfs-afc: $(devs)"; fi
+if wait_dev "Set up device" 6; then ok "missing support is a setup action, not a terminal command"; else bad "without gvfs-afc: $(devs)"; fi
+if [[ "$MOUSE_OK" -eq 1 ]]; then
+  wclick left "$(pt_wait placePoints "device:$IPHONE")"
+  expect "missing phone support opens Connect" "d['connectOpen']" "True"
+  wait_for "'setup-install:apple' in d['connectPoints']" "True" 10 >/dev/null
+  expect "Apple support has a visible Install action" "'setup-install:apple' in d['connectPoints']" "True"
+fi
 shot 37h-needs-package
 
 unset QA_PATH_PREPEND QA_ENV

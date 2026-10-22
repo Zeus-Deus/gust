@@ -49,7 +49,7 @@ Window {
             }
             // Mounts and connections finish on a worker; every tab reports
             // here, so a result still lands if the user switched tabs.
-            onPlace_done: (op, name, message) => win.placeDone(op, name, message)
+            onPlace_done: (op, name, message) => win.placeDone(op, name, message, tabModel)
             onPaste_ready: (message, allowImage) => win.pasteFinished(tabModel, message, allowImage)
             onDevices_changed: {
                 win.refreshDevices()
@@ -59,6 +59,7 @@ Window {
         }
         onObjectAdded: win.refreshActiveModel()
         onObjectRemoved: (index, object) => {
+            win.forgetConnectionOwner(object)
             win.forgetConflictOwner(object)
             win.refreshActiveModel()
         }
@@ -245,14 +246,15 @@ Window {
             win.qaDump("share-bad-address")
             return
         }
+        const supportKey = text.trim().toLowerCase().startsWith("nfs://") ? "nfs" : "smb"
+        if (!win.requireSupport(supportKey)) { prompt.close(); return }
         win.shareAddress = text
         // NFS authorises by address, not by account. Asking for a username
         // and password it will never send would be theatre.
         if (text.trim().toLowerCase().startsWith("nfs://")) {
             prompt.close()
             win.shareUser = ""
-            const nerr = dirModel.share_mount(text, "", "", "")
-            if (nerr !== "") win.alertText = nerr
+            win.connectShare(text, "", "")
             win.shareAddress = ""
             return
         }
@@ -275,29 +277,43 @@ Window {
     }
 
     function sharePasswordEntered(text) {
-        const err = dirModel.share_mount(win.shareAddress, win.shareUser, "", text)
+        win.connectShare(win.shareAddress, win.shareUser, text)
         // Whatever happened, the secret does not stay in QML.
         prompt.secret = false
         win.shareAddress = ""
         win.shareUser = ""
-        if (err !== "") win.alertText = err
+    }
+    function connectShare(address, user, password) {
+        const supportKey = address.trim().toLowerCase().startsWith("nfs://") ? "nfs" : "smb"
+        if (!win.requireSupport(supportKey)) return
+        if (!win.beginPlaceFeedback("share", "", qsTr("Connecting to shared folder…"))) return
+        connectPanel.supportKey = supportKey
+        const model = win.connectionOwner
+        const error = model.share_mount(address, user, "", password)
+        if (error !== "") { win.alertText = error; win.finishPlaceFeedback("share", "", error, model) }
     }
 
     /// A mount, connect, eject or disconnect finished on its worker.
     /// "" is success; "ASK:" is a decision only the user can make.
-    function placeDone(op, name, message) {
+    function placeDone(op, name, message, owner) {
         if (op === "paste-image") {
             if (message !== "") win.alertText = message
             else { win.alertText = ""; hints.message = name }
             win.qaDump("paste-image" + (message === "" ? "" : "-failed"))
             return
         }
+        if (!message.startsWith("ASKKEY:") && !message.startsWith("ASK:"))
+            win.finishPlaceFeedback(op, name, message, owner)
         if (op === "tailnet-connect" && message.startsWith("ASKKEY:")) {
             // First connection to this device: show its SSH key and let the
             // user decide. Nothing is trusted on their behalf.
             let k = {}
             try { k = JSON.parse(message.substring(7)) } catch (e) { k = {} }
-            win.pendingTailnet = { name: k.name, target: k.target }
+            const model = owner || win.connectionOwner
+            win.finishPlaceFeedback(op, name, qsTr("Check the SSH fingerprints before connecting."), model)
+            connectPanel.feedbackTitle = qsTr("Verify this computer's SSH identity")
+            connectPanel.feedbackFailed = false
+            win.pendingTailnet = { name: k.name, target: k.target, model: model }
             win.pendingTailnetUser = k.user || ""
             confirm.purpose = "tailnetkey"
             confirm.open(qsTr("First connection to %1").arg(k.name),
@@ -326,7 +342,7 @@ Window {
         } else if (message !== "") {
             win.alertText = message
         }
-        if (op.startsWith("device") || op.startsWith("phone")) dirModel.request_devices()
+        if (op.startsWith("device") || op.startsWith("phone") || op === "setup-install") dirModel.request_devices()
         win.refreshPlaces()
         win.qaDump("place-" + op + (message === "" ? "" : "-failed"))
     }
@@ -571,18 +587,35 @@ Window {
     /// A phone row was clicked: browse it if it is open; while it waits for
     /// Trust, a second click stops waiting; otherwise open it (gio asks the
     /// phone; Gust answers the Trust question until the person taps it).
-    function openPhone(id, stateKey) {
+    function openPhone(id, stateKey, apps, fromMenu) {
         const d = win.deviceList.find((x) => x.name === id)
-        if (stateKey === "open" && d && d.mountPoint) { dirModel.navigate(d.mountPoint); return }
+        const requirement = d && (win.placesInfo.setup || []).find(r => r.key === d.phone)
+        if (d && (requirement ? requirement.packages.length > 0 : stateKey === "needs-package")) {
+            connectPanel.showSupport(d.phone)
+            return
+        }
+        if (!apps && !fromMenu && stateKey === "open" && d && d.mountPoint) { dirModel.navigate(d.mountPoint); return }
         if (stateKey === "trust" || stateKey === "unlock" || stateKey === "opening") {
+            if (fromMenu) {
+                connectPanel.showFeedback(qsTr("Waiting for your device"), qsTr("Keep it unlocked and finish any Trust prompt on its screen."), false)
+                return
+            }
             dirModel.phone_cancel(id)
             hints.message = qsTr("Stopped waiting for the phone")
             return
         }
-        // Everything else (ready, needs a package, said no, failed) tries
-        // again: a package installed since is found, and the reason is
-        // told again if it still does not open.
-        dirModel.phone_open(id, false)
+        if (!d) {
+            connectPanel.showFeedback(qsTr("Device is no longer connected"), qsTr("Reconnect it, then choose it under Devices."), false)
+            return
+        }
+        if (!win.beginPlaceFeedback("phone-open", id, qsTr("Opening %1…").arg(d.label))) return
+        connectPanel.supportKey = d.phone
+        connectPanel.feedbackBody = d.phone === "apple"
+            ? qsTr("Unlock your device and tap Trust on its screen if asked. Gust never accepts Trust for you. Close this panel and choose the device again to stop waiting.")
+            : qsTr("Keep your device unlocked. On Android, choose File transfer in its USB notification. Close this panel and choose the device again to stop waiting.")
+        const model = win.connectionOwner
+        const error = model.phone_open(id, apps === true)
+        if (error !== "") win.finishPlaceFeedback("phone-open", id, error, model)
         win.qaDump("phone-open")
     }
 
@@ -640,8 +673,38 @@ Window {
                 if (p.lost) lost.push(p.name)
             }
         }
-        win.connectedPlaces = on
+        const sidebarPlaces = []
+        for (const c of (info.computers || [])) {
+            const mounted = c.routes.filter(r => r.connected)
+            if (mounted.length === 0) continue
+            const r = mounted.find(r => !r.lost) || mounted[0]
+            sidebarPlaces.push({kind: r.kind, name: r.name, label: c.name, path: r.path, lost: r.lost})
+            for (const other of mounted) {
+                if (other === r || !other.lost) continue
+                sidebarPlaces.push({kind: other.kind, name: other.name,
+                    label: qsTr("%1 · %2").arg(c.name).arg(other.name), path: other.path, lost: true})
+            }
+        }
+        for (const p of (info.cloud || []))
+            if (p.connected) sidebarPlaces.push({kind: "cloud", name: p.name, path: p.path, lost: p.lost})
+        win.connectedPlaces = sidebarPlaces
         win.lostPlaces = lost
+        const lostKeys = on.filter(p => p.lost).map(p => p.kind + ":" + p.name)
+        const recovery = connectPanel.recoveryCandidate(win.seenLostRoutes, dirModel.location)
+        win.seenLostRoutes = lostKeys
+        // Never replace a pending decision or interrupt a running file job.
+        // The Connections picker remains available when a suggestion is deferred.
+        if (recovery !== "" && !confirm.visible && !connectionRecovery.visible && !prompt.visible && !prompt.claimingFocus
+            && !connectPanel.open && !palette.visible && !quickLook.open && !conflictDialog.visible
+            && !contextMenu.open && !settingsPanel.open && !renameCard.open && !trashPanel.open
+            && !recentPanel.open && !filterInput.activeFocus && !searchInput.activeFocus
+            && win.runningJobModels().length === 0) {
+            connectionRecovery.routeKey = recovery
+            connectionRecovery.open(qsTr("Connection lost"),
+                qsTr("Another connection to this computer is known. Choose a connection to browse again. "
+                     + "Its own SSH identity, account and folder will be checked; interrupted file operations are not retried."),
+                qsTr("Choose connection"), false)
+        }
         win.qaDump("places")
     }
     Connections {
@@ -652,10 +715,73 @@ Window {
     /// Connect a place from the Connect panel. A Tailscale device first
     /// asks which login to use; the rest connect as configured.
     property var pendingTailnet: null
+    property var connectionOwner: null
+    function beginPlaceFeedback(op, name, title, owner) {
+        if (connectPanel.busy) { connectPanel.showFeedback("", "", false); return false }
+        const model = owner || dirModel
+        if (!model) return false
+        if (model.place_busy) {
+            connectPanel.showFeedback(qsTr("Another connection is still in progress"),
+                qsTr("Wait for it to finish before starting another connection."), false)
+            return false
+        }
+        if (!connectPanel.beginFeedback(op, name, title)) return false
+        win.connectionOwner = model
+        win.alertText = ""
+        return true
+    }
+    function finishPlaceFeedback(op, name, message, owner) {
+        if (!win.connectionOwner || (owner && owner !== win.connectionOwner)) return
+        if (connectPanel.completeFeedback(op, name, message)) {
+            win.connectionOwner = null
+            if (op === "setup-install") {
+                connectPanel.feedbackTitle = message === "" ? qsTr("Support is ready") : qsTr("Setup did not finish")
+                if (message === "") connectPanel.feedbackBody = name === "apple"
+                    ? qsTr("Reconnect your device, unlock it and tap Trust if asked. Then choose it under Devices. Nothing was opened automatically.")
+                    : qsTr("Choose your computer, cloud storage or device again to connect. Nothing was connected automatically.")
+                win.refreshPlaces()
+            }
+        }
+    }
+    function installSupport(key) {
+        if (connectPanel.busy) { connectPanel.showFeedback("", "", false); return }
+        connectPanel.showSupport(key)
+        if (!connectPanel.missingSupport || !connectPanel.requirement.installable) return
+        if (!win.beginPlaceFeedback("setup-install", key, qsTr("Installing connection support…"))) return
+        connectPanel.feedbackBody = qsTr("Approve the system's authorization prompt. Keep Gust open until setup finishes. Closing this panel does not stop package installation.")
+        const model = win.connectionOwner
+        const error = model.install_support(key)
+        if (error !== "") win.finishPlaceFeedback("setup-install", key, error, model)
+    }
+    function forgetConnectionOwner(model) {
+        if (win.pendingTailnet && win.pendingTailnet.model === model) win.pendingTailnet = null
+        if (win.connectionOwner !== model) return
+        const pending = connectPanel.operation
+        if (pending) connectPanel.completeFeedback(pending.op, pending.name,
+            qsTr("The tab that started this attempt was closed. Its connection outcome is unknown; choose Check again before reconnecting."))
+        win.connectionOwner = null
+    }
+    function requireSupport(key) {
+        const requirement = (win.placesInfo.setup || []).find(r => r.key === key)
+        if ((requirement && requirement.packages.length > 0) || (key === "ssh" && win.placesInfo.sshfs === false)) {
+            connectPanel.showSupport(key)
+            return false
+        }
+        return true
+    }
     function connectPlace(kind, name, target, user) {
-        if (kind === "ssh") { win.runAction("remote-on:" + name); return }
-        if (kind === "cloud") { win.runAction("cloud-on:" + name); return }
-        win.pendingTailnet = { name: name, target: target }
+        if (!win.requireSupport(kind === "cloud" ? "cloud" : "ssh")) return
+        if (kind === "ssh" || kind === "cloud") {
+            const op = kind === "ssh" ? "remote-connect" : "cloud-connect"
+            if (!win.beginPlaceFeedback(op, name, qsTr("Connecting to %1…").arg(name))) return
+            connectPanel.supportKey = kind === "cloud" ? "cloud" : "ssh"
+            const model = win.connectionOwner
+            const error = kind === "ssh" ? model.remote_connect(name) : model.cloud_connect(name)
+            if (error !== "") { win.alertText = error; win.finishPlaceFeedback(op, name, error, model) }
+            return
+        }
+        if (connectPanel.busy) { connectPanel.showFeedback("", "", false); return }
+        win.pendingTailnet = { name: name, target: target, model: dirModel }
         prompt.mode = "tailnet-user"
         prompt.secret = false
         prompt.openWith(qsTr("Log in to %1 as").arg(name), user,
@@ -664,12 +790,21 @@ Window {
     }
     function tailnetUserEntered(text) {
         const t = win.pendingTailnet
-        if (!t) { prompt.close(); return }
         prompt.close()
-        connectPanel.hide()
-        const err = dirModel.tailnet_connect(t.name, t.target, text, false)
         win.pendingTailnetUser = text
-        if (err !== "") { win.alertText = err; win.pendingTailnet = null }
+        win.startTailnetAttempt(t, text, false)
+    }
+    function startTailnetAttempt(t, user, trust) {
+        win.pendingTailnet = null
+        if (!t || !t.model) {
+            connectPanel.showFeedback(qsTr("Connection not started"),
+                qsTr("That connection is no longer available. Choose the computer again."), false)
+            return
+        }
+        if (!win.beginPlaceFeedback("tailnet-connect", t.name, qsTr("Connecting to %1…").arg(t.name), t.model)) return
+        connectPanel.supportKey = "ssh"
+        const error = t.model.tailnet_connect(t.name, t.target, user, trust)
+        if (error !== "") { win.alertText = error; win.finishPlaceFeedback("tailnet-connect", t.name, error, t.model) }
     }
     property string pendingTailnetUser: ""
     function disconnectPlace(kind, name) {
@@ -684,6 +819,13 @@ Window {
     // Mounted places whose server no longer answers. Still mounted (so
     // Disconnect is what clears them) but never shown as "connected".
     property var lostPlaces: []
+    property var seenLostRoutes: []
+    Timer {
+        interval: 10000
+        repeat: true
+        running: win.connectedPlaces.length > 0 && win.active && !connectPanel.open && !connectionRecovery.visible
+        onTriggered: if (dirModel && !dirModel.place_busy) win.refreshPlaces()
+    }
     width: 1180
     height: 720
     minimumWidth: 520
@@ -880,7 +1022,7 @@ Window {
     // context menu, a confirm or conflict dialog), a file created or deleted
     // by another program must not shift the rows under it: the rename would
     // hit the wrong file. Live updates wait, and land when it closes.
-    readonly property bool liveHold: palette.visible || confirm.visible || settingsPanel.open || trashPanel.open || recentPanel.open || connectPanel.open
+    readonly property bool liveHold: palette.visible || confirm.visible || connectionRecovery.visible || settingsPanel.open || trashPanel.open || recentPanel.open || connectPanel.open
                                      || contextMenu.open || conflictDialog.visible
                                      || prompt.visible || prompt.claimingFocus
     onLiveHoldChanged: {
@@ -1153,7 +1295,7 @@ Window {
         // it opens it does not count as visible. The palette closing in that
         // window used to steal the keyboard, leaving a prompt on screen that
         // could not be typed into.
-        if (palette.visible || confirm.visible || contextMenu.open
+        if (palette.visible || confirm.visible || connectionRecovery.visible || contextMenu.open
             || conflictDialog.visible || settingsPanel.open || trashPanel.open || recentPanel.open || connectPanel.open
             || prompt.visible || prompt.claimingFocus || renameCard.open)
             return
@@ -1392,8 +1534,10 @@ Window {
             if (d) win.openDevice(d.path, d.mounted)
         }
         else if (a === "dv-eject") win.ejectDevice(win.deviceMenuPath)
-        else if (a === "ph-open") dirModel.phone_open(win.phoneMenuId, false)
-        else if (a === "ph-apps") dirModel.phone_open(win.phoneMenuId, true)
+        else if (a === "ph-open" || a === "ph-apps") {
+            const phone = win.deviceList.find(d => d.name === win.phoneMenuId)
+            win.openPhone(win.phoneMenuId, phone ? phone.stateKey : "", a === "ph-apps", true)
+        }
         else if (a === "ph-eject") {
             const err = dirModel.phone_eject(win.phoneMenuId)
             if (err !== "") win.alertText = err
@@ -1551,9 +1695,7 @@ Window {
             win.qaDump("grep")
         }
         else if (a.startsWith("cloud-on:")) {
-            const cname = a.substring(9)
-            const cerr = dirModel.cloud_connect(cname)
-            if (cerr !== "") win.alertText = cerr
+            win.connectPlace("cloud", a.substring(9), "", "")
         }
         else if (a.startsWith("cloud-off:")) {
             const cname2 = a.substring(10)
@@ -1564,19 +1706,21 @@ Window {
             if (cerr2 !== "") win.alertText = cerr2
         }
         else if (a === "cloud-setup") {
+            if (connectPanel.busy) { connectPanel.showFeedback("", "", false); return }
+            if (!win.requireSupport("cloud")) return
+            connectPanel.supportKey = "cloud"
             // rclone's own config tool, in a terminal. Gust never asks
             // for a cloud password and never sees one.
             const serr = dirModel.cloud_setup()
             if (serr !== "") win.alertText = serr
-            else hints.message = qsTr("Set up your storage in the terminal, "
-                                     + "then run :cloud again")
+            const instruction = qsTr("Finish rclone config in the terminal, then choose Check again to see your storage.")
+            connectPanel.showFeedback(serr !== "" ? qsTr("Cloud storage setup needs attention") : qsTr("Continue setup in your terminal"),
+                serr || instruction, serr !== "")
+            if (serr === "") hints.message = instruction
             win.qaDump("cloud-setup")
         }
         else if (a.startsWith("remote-on:")) {
-            const alias = a.substring(10)
-            // Runs on a worker; the window stays usable meanwhile.
-            const err = dirModel.remote_connect(alias)
-            if (err !== "") win.alertText = err
+            win.connectPlace("ssh", a.substring(10), "", "")
         }
         else if (a.startsWith("remote-off:")) {
             const alias2 = a.substring(11)
@@ -2649,7 +2793,7 @@ Window {
             // stale behind a message some earlier keystroke left here.
             selection: win.selectionText
             alert: win.alertText !== "" ? win.alertText : dirModel.notice
-            dialog: confirm.visible
+            dialog: confirm.visible || connectionRecovery.visible
             onStatusChanged: win.qaDump("hint")
             onMessageChanged: win.qaDump("hint")
             // A message belongs to the folder it was said in: leaving it, or
@@ -3153,12 +3297,15 @@ Window {
         id: connectPanel
         places: win.placesInfo
         onConnectRequested: (kind, name, target, user) => {
-            if (kind !== "tailnet") connectPanel.hide()
             win.connectPlace(kind, name, target, user)
         }
+        onRefreshRequested: win.refreshPlaces()
         onOpenRequested: (path) => { connectPanel.hide(); dirModel.navigate(path) }
         onDisconnectRequested: (kind, name) => win.disconnectPlace(kind, name)
-        onActionRequested: (a) => { connectPanel.hide(); win.runAction(a) }
+        onActionRequested: (a) => {
+            if (a.startsWith("setup-install:")) win.installSupport(a.substring(14))
+            else win.runAction(a)
+        }
         onClosed: { win.focusList(); win.qaDump("connect-closed") }
         onVisibleChanged: win.qaDump("connect")
     }
@@ -3286,13 +3433,24 @@ Window {
     }
 
     ConfirmDialog {
+        id: connectionRecovery
+        preferCancel: true
+        property string routeKey: ""
+        onAccepted: {
+            const key = routeKey
+            Qt.callLater(() => connectPanel.showRoutes(key))
+        }
+        onClosed: win.focusList()
+    }
+
+    ConfirmDialog {
         id: confirm
         objectName: "confirmDialog"
         // What this confirmation is FOR. Two different questions must never
         // share one handler by accident.
         property string purpose: "trash"
         onVisibleChanged: win.qaDump("confirm")
-        onClosed: win.focusList()
+        onClosed: { if (connectPanel.open) connectPanel.refocus(); else win.focusList() }
         onAccepted: {
             if (confirm.purpose === "run") {
                 const r = win.pendingRunRow
@@ -3309,10 +3467,7 @@ Window {
             }
             if (confirm.purpose === "tailnetkey") {
                 const t = win.pendingTailnet
-                win.pendingTailnet = null
-                if (!t) return
-                const e = dirModel.tailnet_connect(t.name, t.target, win.pendingTailnetUser, true)
-                if (e !== "") win.alertText = e
+                win.startTailnetAttempt(t, win.pendingTailnetUser, true)
                 win.qaDump("tailnet-trusted")
                 return
             }
@@ -3383,6 +3538,7 @@ Window {
             if (confirm.purpose === "tailnetkey") {
                 // Cancel: nothing recorded, nothing connected.
                 win.pendingTailnet = null
+                connectPanel.showFeedback(qsTr("Not connected"), qsTr("No SSH key was trusted and no connection was started."), false)
                 hints.message = qsTr("Not connected")
                 win.qaDump("tailnet-key-cancelled")
                 return
@@ -3634,7 +3790,14 @@ Window {
             devices: win.deviceList.map((x) => x.label + "|" + x.state),
             connectedPlaces: win.connectedPlaces.map(p => p.name),
             lostPlaces: win.lostPlaces,
+            connectionRecoveryOpen: connectionRecovery.visible,
+            connectionRecoveryButtons: connectionRecovery.buttonCenters(),
+            connectRouteKey: connectPanel.routeKey,
+            connectRows: connectPanel.rows,
             connectOpen: connectPanel.open,
+            connectFeedbackTitle: connectPanel.statusTitle,
+            connectFeedbackBody: connectPanel.statusBody,
+            connectBusy: connectPanel.busy,
             connectPoints: connectPanel.open ? connectPanel.buttonPoints() : ({}),
             places: win.placesInfo,
             tabCenters: win.tabCenters(),

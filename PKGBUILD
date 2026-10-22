@@ -20,11 +20,16 @@ license=('MIT')
 # "undefined symbol: rust$cxxqtlib1$cxxbridge1$...$qguiapplication_exec".
 # Arch enables LTO by default, so this must be explicit.
 options=(!lto)
-depends=('qt6-base' 'qt6-declarative' 'dbus')
+# Connection and device helpers ship with Gust; connecting remains explicit.
+depends=(
+  'qt6-base' 'qt6-declarative' 'dbus'
+  'openssh' 'sshfs' 'fuse3' 'rclone'
+  'gvfs' 'gvfs-afc' 'gvfs-smb' 'gvfs-nfs' 'gvfs-mtp' 'gvfs-gphoto2'
+  'usbmuxd' 'polkit'
+)
 # xdg-desktop-portal is needed only for the opt-in Open/Save dialogs.
 makedepends=('rust' 'cargo' 'cmake' 'just')
-# Every external program Gust calls, and what is missing without it.
-# Checked against every Command::new in crates/ (none are required to start).
+# Optional feature helpers; connection and device helpers are required above.
 optdepends=(
   'wl-clipboard: copy and paste with other applications'
   'bubblewrap: sandboxed thumbnail rendering'
@@ -33,12 +38,6 @@ optdepends=(
   'ffmpegthumbnailer: video thumbnails'
   'libarchive: open, extract and create archives (bsdtar)'
   'udisks2: mount and eject USB drives and discs'
-  'sshfs: browse other computers over SSH'
-  'fuse3: disconnect SSH and cloud places cleanly (fusermount3)'
-  'rclone: cloud storage accounts'
-  'gvfs: network shares (SMB, NFS)'
-  'gvfs-smb: Windows and Samba shares'
-  'gvfs-nfs: NFS shares'
   'xdg-utils: open files with their default application'
   'xdg-desktop-portal: let other apps use gust for Open and Save dialogs'
 )

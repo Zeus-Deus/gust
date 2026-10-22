@@ -21,15 +21,19 @@ license=('MIT')
 options=(!lto)
 # Linked libraries, checked with ldd on the built binary: Qt6 Core, Gui,
 # Qml, Network, DBus — all from these two packages.
-depends=('qt6-base' 'qt6-declarative' 'gcc-libs' 'glibc')
+# Connection and device helpers ship with Gust; connecting remains explicit.
+depends=(
+  'qt6-base' 'qt6-declarative' 'gcc-libs' 'glibc'
+  'openssh' 'sshfs' 'fuse3' 'rclone'
+  'gvfs' 'gvfs-afc' 'gvfs-smb' 'gvfs-nfs' 'gvfs-mtp' 'gvfs-gphoto2'
+  'usbmuxd' 'polkit'
+)
 # cxx-qt builds its C++ with the cc crate (no cmake), and just is not used by
 # build()/check()/package().
 makedepends=('rust' 'cargo')
-# Every external program Gust runs (checked against each Command::new and
-# which() in crates/), and what is missing without it.
+# Optional feature helpers; connection and device helpers are required above.
 optdepends=(
   'wl-clipboard: copy and paste with other applications, paste image as file'
-  'polkit: Open as administrator (pkexec)'
   'xdg-terminal-exec: Run… for programs, Open terminal here'
   'xdg-utils: open files with their default application'
   'zoxide: frequent folders in Ctrl+L folder jump'
@@ -42,14 +46,7 @@ optdepends=(
   'poppler: PDF pages in Quick Look'
   'libarchive: browse, extract and compress archives (bsdtar)'
   'udisks2: mount and eject USB drives and discs'
-  'openssh: other computers over SSH (ssh, ssh-keygen)'
-  'sshfs: browse other computers over SSH'
-  'fuse3: disconnect SSH and cloud places cleanly (fusermount3)'
-  'rclone: cloud storage accounts'
   'tailscale: list Tailscale devices to connect to'
-  'gvfs: network shares (SMB, NFS)'
-  'gvfs-smb: Windows and Samba shares'
-  'gvfs-nfs: NFS shares'
   'xdg-desktop-portal: let other apps use Gust for Open and Save dialogs'
 )
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")

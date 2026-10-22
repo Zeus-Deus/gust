@@ -259,6 +259,10 @@ pub mod qobject {
         /// credential itself and never sees one.
         #[qinvokable]
         fn cloud_setup(self: &DirModel) -> QString;
+        /// Install an allowlisted capability on a worker through polkit.
+        /// No device is connected, trusted or browsed by installation.
+        #[qinvokable]
+        fn install_support(self: Pin<&mut DirModel>, key: QString) -> QString;
 
         #[qinvokable]
         fn breadcrumbs(self: &DirModel) -> QStringList;
@@ -1053,6 +1057,9 @@ pub struct DirModelRust {
     jump_rev: i32,
     jump_completion: QString,
     places_json: QString,
+    /// Coalesce periodic and explicit refreshes; never publish overlapping snapshots.
+    places_refreshing: bool,
+    places_again: bool,
     jump_cands: Vec<gust_core::jump::Candidate>,
     /// Cancels a running hash (Quick Look closed, another file asked).
     hash_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -1118,6 +1125,14 @@ enum PlaceOutcome {
     Failed(String),
     /// Continue on the GUI thread (e.g. leave a mount, then unmount it).
     Then(Box<dyn FnOnce(Pin<&mut qobject::DirModel>) + Send>),
+}
+
+/// A worker panic is an unknown outcome, not permission to retry its effects.
+fn run_place_work<F>(work: F) -> std::thread::Result<PlaceOutcome>
+where
+    F: FnOnce() -> PlaceOutcome,
+{
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(work))
 }
 
 /// Is this the administrator window (root, started through pkexec)? Set
@@ -1302,6 +1317,8 @@ impl DirModelRust {
             jump_rev: 0,
             jump_completion: QString::default(),
             places_json: QString::from("{}"),
+            places_refreshing: false,
+            places_again: false,
             jump_cands: Vec::new(),
             hash_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             find_cancel: CancelToken::new(),
@@ -1521,7 +1538,19 @@ impl qobject::DirModel {
         let spawned = std::thread::Builder::new()
             .name(format!("gust-{op}"))
             .spawn(move || {
-                let outcome = work();
+                let outcome = match run_place_work(work) {
+                    Ok(outcome) => outcome,
+                    Err(_) => {
+                        let message = "The connection worker stopped unexpectedly. Its outcome is unknown. Choose Check again before retrying.".to_string();
+                        if op == "phone-open" {
+                            Self::set_phone_state(
+                                &name,
+                                gust_remote::phones::PhoneState::Failed(message.clone()),
+                            );
+                        }
+                        PlaceOutcome::Failed(message)
+                    }
+                };
                 let _ = thread.queue(move |mut model| {
                     model.as_mut().set_place_busy(false);
                     let (opq, nameq) = (QString::from(op), QString::from(&name));
@@ -3488,6 +3517,9 @@ impl qobject::DirModel {
 
     fn phone_open(self: Pin<&mut Self>, id: QString, apps: bool) -> QString {
         use gust_remote::phones::{mount, scan, PhoneState};
+        if self.as_ref().place_busy {
+            return QString::from("Another connection is still in progress.");
+        }
         let id = id.to_string();
         let Some(thread) = self.as_ref().qt_thread_handle() else {
             return QString::default();
@@ -3495,9 +3527,7 @@ impl qobject::DirModel {
         if let Ok(mut c) = phone_cancels().lock() {
             c.remove(&id);
         }
-        Self::set_phone_state(&id, PhoneState::Opening);
         let refresh = thread.clone();
-        let _ = refresh.queue(|model| model.request_devices());
         self.place_op(
             "phone-open",
             id.clone(),
@@ -3517,6 +3547,8 @@ impl qobject::DirModel {
                         }
                     }
                 }
+                Self::set_phone_state(&id, PhoneState::Opening);
+                let _ = refresh.queue(|model| model.request_devices());
                 let cancel_id = id.clone();
                 let cancelled = move || {
                     phone_cancels()
@@ -3536,9 +3568,7 @@ impl qobject::DirModel {
                     &cancelled,
                 ) {
                     Ok(path) => {
-                        if !apps {
-                            Self::set_phone_state(&id, PhoneState::Open(path.clone()));
-                        }
+                        Self::set_phone_state(&id, PhoneState::Open(path.clone()));
                         let name = gust_remote::phones::display_name(
                             &phone,
                             &gust_remote::phones::friendly_names(),
@@ -4229,19 +4259,32 @@ impl qobject::DirModel {
 
     // --- every connectable place (DESIGN §6.4.1) --------------------------
 
-    fn request_places(self: Pin<&mut Self>) {
+    fn request_places(mut self: Pin<&mut Self>) {
+        if self.as_ref().places_refreshing {
+            self.as_mut().rust_mut().places_again = true;
+            return;
+        }
         let Some(thread) = self.as_ref().qt_thread_handle() else {
             return;
         };
-        std::thread::Builder::new()
+        self.as_mut().rust_mut().places_refreshing = true;
+        let spawned = std::thread::Builder::new()
             .name("gust-places".into())
             .spawn(move || {
                 let json = Self::places_snapshot();
                 let _ = thread.queue(move |mut model| {
+                    model.as_mut().rust_mut().places_refreshing = false;
+                    let again = std::mem::take(&mut model.as_mut().rust_mut().places_again);
                     model.as_mut().set_places_json(QString::from(&json));
+                    if again {
+                        model.as_mut().request_places();
+                    }
                 });
-            })
-            .ok();
+            });
+        if spawned.is_err() {
+            self.as_mut().rust_mut().places_refreshing = false;
+            self.as_mut().rust_mut().places_again = false;
+        }
     }
 
     /// SSH hosts, Tailscale devices and cloud remotes, with their state.
@@ -4249,89 +4292,183 @@ impl qobject::DirModel {
     /// local tailscaled socket, rclone's config. No device is contacted
     /// except mounted places, each probed by a killable child.
     fn places_snapshot() -> String {
-        use gust_remote::{mount, tailscale};
-        let probe = |p: &std::path::Path| {
-            !gust_core::stall::probe(p, std::time::Duration::from_millis(500)).is_responsive()
+        use gust_remote::{computers, mount, ssh_config, tailscale};
+        use std::sync::{Mutex, OnceLock};
+        static PEERS: OnceLock<Mutex<tailscale::PeerCache>> = OnceLock::new();
+        static KEYS: OnceLock<Mutex<computers::TrustedKeyCache>> = OnceLock::new();
+        let current = tailscale::peers(std::time::Duration::from_secs(3));
+        let snapshot = PEERS
+            .get_or_init(|| Mutex::new(tailscale::PeerCache::default()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .update(current);
+        let local_user = std::env::var("USER").unwrap_or_default();
+        let local_user = if tailscale::safe_user(&local_user) {
+            local_user
+        } else {
+            String::new()
         };
-        let mut ssh = Vec::new();
-        if let Some(cfg) = gust_remote::ssh_config::user_config_path() {
-            for h in gust_remote::ssh_config::parse_ssh_config(&cfg)
-                .iter()
-                .take(50)
-            {
-                let mp = mount::mount_point_for(&h.alias);
-                let on = mp.as_ref().is_some_and(|p| mount::is_mounted(p));
-                let lost = on && mp.as_ref().is_some_and(|p| probe(p));
-                ssh.push(format!(
-                    r#"{{"name":{},"detail":{},"connected":{on},"lost":{lost},"path":{}}}"#,
-                    Self::json_str(&h.alias),
-                    Self::json_str(h.hostname.as_deref().unwrap_or(&h.alias)),
-                    Self::json_str(
-                        &mp.map(|p| p.to_string_lossy().into_owned())
-                            .unwrap_or_default()
-                    ),
-                ));
-            }
+        let hosts = ssh_config::user_config_path()
+            .map(|p| ssh_config::parse_ssh_config(&p))
+            .unwrap_or_default();
+        let mut routes = Vec::new();
+        for h in hosts.iter().take(50) {
+            let explicit: Vec<_> = h
+                .hostname
+                .as_ref()
+                .filter(|host| tailscale::safe_target(host))
+                .map(|host| computers::HostEndpoint {
+                    host: host.clone(),
+                    port: h.port.unwrap_or(22),
+                })
+                .into_iter()
+                .collect();
+            // Saved aliases are executed with -F, exactly as before this feature;
+            // their system-wide config is not part of that existing execution path.
+            let certain = h.identity_certain && !h.has_proxy;
+            let policy = computers::route_policy(
+                &explicit,
+                &snapshot.peers,
+                snapshot.available,
+                certain,
+                h.has_proxy,
+            );
+            routes.push(computers::IdentifiedRoute {
+                route: computers::ComputerRoute {
+                    kind: computers::RouteKind::Ssh,
+                    name: h.alias.clone(),
+                    target: h.alias.clone(),
+                    detail: h.hostname.clone().unwrap_or_else(|| h.alias.clone()),
+                    user: h.user.clone(),
+                    path: mount::mount_point_for(&h.alias)
+                        .map(|p| p.to_string_lossy().into_owned()),
+                    port: h.port,
+                    remote_path: h.remote_path.clone(),
+                    connected: false,
+                    lost: false,
+                    online: policy.online,
+                    available: true,
+                    requires_tailnet: policy.requires_tailnet,
+                    endpoint_ids: policy.endpoint_ids,
+                },
+                endpoints: if certain { explicit } else { Vec::new() },
+                trusted_host_keys: Vec::new(),
+            });
         }
         let users = tailscale::users_path();
-        let (mut tail, mut tail_err) = (Vec::new(), String::new());
-        match tailscale::peers(std::time::Duration::from_secs(3)) {
-            Ok(peers) => {
-                for p in peers.iter().take(200) {
-                    let mp = tailscale::mount_point(&p.name);
-                    let on = mp.as_ref().is_some_and(|m| mount::is_mounted(m));
-                    let lost = on && mp.as_ref().is_some_and(|m| probe(m));
-                    let user = users
-                        .as_ref()
-                        .and_then(|u| tailscale::remembered_user(u, &p.name))
-                        .unwrap_or_default();
-                    tail.push(format!(
-                        r#"{{"name":{},"detail":{},"os":{},"online":{},"connected":{on},"lost":{lost},"user":{},"path":{}}}"#,
-                        Self::json_str(&p.name),
-                        Self::json_str(&p.target),
-                        Self::json_str(&p.os),
-                        p.online,
-                        Self::json_str(&user),
-                        Self::json_str(&mp.map(|m| m.to_string_lossy().into_owned()).unwrap_or_default()),
-                    ));
+        for peer in snapshot.peers.iter().take(200) {
+            let user = users
+                .as_ref()
+                .and_then(|p| tailscale::remembered_user(p, &peer.name))
+                .unwrap_or_else(|| local_user.clone());
+            let endpoints: Vec<_> = std::iter::once(peer.target.clone())
+                .chain(peer.ips.clone())
+                .chain(peer.dns_name.clone())
+                .map(|host| computers::HostEndpoint { host, port: 22 })
+                .collect();
+            let policy = computers::route_policy(
+                &endpoints,
+                &snapshot.peers,
+                snapshot.available,
+                true,
+                false,
+            );
+            routes.push(computers::IdentifiedRoute {
+                route: computers::ComputerRoute {
+                    kind: computers::RouteKind::Tailscale,
+                    name: peer.name.clone(),
+                    target: peer.target.clone(),
+                    detail: peer.target.clone(),
+                    user: Some(user),
+                    path: tailscale::mount_point(&peer.name)
+                        .map(|p| p.to_string_lossy().into_owned()),
+                    port: None,
+                    remote_path: None,
+                    connected: false,
+                    lost: false,
+                    online: peer.online,
+                    available: snapshot.available,
+                    requires_tailnet: true,
+                    endpoint_ids: policy.endpoint_ids,
+                },
+                endpoints,
+                trusted_host_keys: Vec::new(),
+            });
+        }
+        // Gather all local identity evidence BEFORE probing mounts. Cached results
+        // remain stable when a dead filesystem consumes its separate probe budget.
+        if let Some(kh) = tailscale::known_hosts_path() {
+            let endpoints: Vec<_> = routes
+                .iter()
+                .flat_map(|r| r.endpoints.iter().cloned())
+                .collect();
+            let found = KEYS
+                .get_or_init(|| Mutex::new(computers::TrustedKeyCache::default()))
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .lookup_batch(&kh, &endpoints, std::time::Duration::from_millis(750));
+            let mut found = found.into_iter();
+            for route in &mut routes {
+                for _ in &route.endpoints {
+                    for key in found.next().and_then(Result::ok).unwrap_or_default() {
+                        if !route.trusted_host_keys.contains(&key) {
+                            route.trusted_host_keys.push(key);
+                        }
+                    }
                 }
             }
-            Err(e) => tail_err = e.message(),
         }
-        let (mut cloud, mut cloud_err) = (Vec::new(), String::new());
+        for input in &mut routes {
+            let r = &mut input.route;
+            if let Some(path) = r.path.as_ref().map(std::path::Path::new) {
+                r.connected = mount::is_mounted(path);
+                r.lost = r.connected
+                    && ((r.kind == computers::RouteKind::Tailscale && !snapshot.available)
+                        || !gust_core::stall::probe(path, std::time::Duration::from_millis(500))
+                            .is_responsive());
+                if r.connected && !r.lost {
+                    r.online = true;
+                }
+            }
+        }
+        let ssh: Vec<_> = routes
+            .iter()
+            .filter(|r| r.route.kind == computers::RouteKind::Ssh)
+            .map(|r| r.route.clone())
+            .collect();
+        let tail: Vec<_> = routes
+            .iter()
+            .filter(|r| r.route.kind == computers::RouteKind::Tailscale)
+            .map(|r| {
+                let mut value = serde_json::to_value(&r.route).unwrap_or_default();
+                value["os"] = serde_json::json!(snapshot
+                    .peers
+                    .iter()
+                    .find(|p| p.name == r.route.name)
+                    .map(|p| p.os.as_str())
+                    .unwrap_or(""));
+                value
+            })
+            .collect();
+        let (mut cloud, mut cloud_error) = (Vec::new(), String::new());
         match gust_remote::cloud::list_remotes(None) {
-            Ok(rs) => {
-                for r in rs.iter().take(50) {
-                    let mp = Self::cloud_mount_point(&r.name);
-                    let on = mp.as_ref().is_some_and(|m| mount::is_mounted(m));
-                    cloud.push(format!(
-                        r#"{{"name":{},"detail":{},"connected":{on},"lost":false,"path":{}}}"#,
-                        Self::json_str(&r.name),
-                        Self::json_str(&r.backend),
-                        Self::json_str(
-                            &mp.map(|m| m.to_string_lossy().into_owned())
-                                .unwrap_or_default()
-                        ),
-                    ));
+            Ok(remotes) => {
+                for remote in remotes.iter().take(50) {
+                    let path = Self::cloud_mount_point(&remote.name);
+                    let connected = path.as_ref().is_some_and(|p| mount::is_mounted(p));
+                    cloud.push(
+                        serde_json::json!({"name": remote.name, "detail": remote.backend,
+                    "connected": connected, "lost": false,
+                    "path": path.map(|p| p.to_string_lossy().into_owned()).unwrap_or_default()}),
+                    );
                 }
             }
-            Err(e) => cloud_err = e.message(),
+            Err(error) => cloud_error = error.message(),
         }
-        let local_user = std::env::var("USER").unwrap_or_default();
-        format!(
-            r#"{{"ssh":[{}],"tailnet":[{}],"tailnetError":{},"cloud":[{}],"cloudError":{},"sshfs":{},"localUser":{}}}"#,
-            ssh.join(","),
-            tail.join(","),
-            Self::json_str(&tail_err),
-            cloud.join(","),
-            Self::json_str(&cloud_err),
-            gust_remote::mount::Backend::Sshfs.available(),
-            Self::json_str(if tailscale::safe_user(&local_user) {
-                &local_user
-            } else {
-                ""
-            }),
-        )
+        serde_json::json!({"computers": computers::group_computers(routes), "ssh": ssh, "tailnet": tail,
+            "tailnetError": snapshot.error, "cloud": cloud, "cloudError": cloud_error,
+            "sshfs": mount::Backend::Sshfs.available(), "setup": gust_remote::setup::snapshot(),
+            "localUser": local_user}).to_string()
     }
 
     /// Host keys shown to the user, by target: a "Trust and connect"
@@ -5911,6 +6048,23 @@ impl qobject::DirModel {
             Ok(_opener) => QString::from("file"),
             Err(e) => QString::from(&format!("blocked:{e}")),
         }
+    }
+
+    fn install_support(self: Pin<&mut Self>, key: QString) -> QString {
+        if self.as_ref().place_busy {
+            return QString::from("Another connection or setup is still in progress.");
+        }
+        let key = key.to_string();
+        self.place_op(
+            "setup-install",
+            key.clone(),
+            "Installing connection support…".into(),
+            move || match gust_remote::setup::install(&key) {
+                Ok(()) => PlaceOutcome::Done("Connection support is ready".into()),
+                Err(message) => PlaceOutcome::Failed(message),
+            },
+        );
+        QString::default()
     }
 
     /// Launch rclone's own configuration tool. Every provider's setup

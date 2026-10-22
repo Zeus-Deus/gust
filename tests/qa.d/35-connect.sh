@@ -85,6 +85,11 @@ shot 35b-host-key
 wclick left "$(state "' '.join(map(str, d['confirmButtons']['cancel']))")"; sleep 1
 mounted "$NAS" && bad "Cancel still connected" || ok "Cancel connected nothing"
 [[ ! -s "$FIXTURE/.ssh/known_hosts" ]] && ok "and recorded no key" || bad "Cancel wrote a key: $(cat "$FIXTURE/.ssh/known_hosts")"
+wait_for "d['connectOpen']" "True" 10 >/dev/null
+expect "Cancel keeps the connection feedback in context" "d['connectFeedbackTitle']" "Not connected"
+expect_contains "Cancel explains that no key was trusted" "d['connectFeedbackBody']" "No SSH key was trusted"
+key Escape
+wait_for "d['connectOpen']" "False" 10 >/dev/null
 
 say "35c · Trust and connect: the device opens like a folder"
 wclick left "$(pt_of placePoints connect)"
@@ -144,6 +149,13 @@ say "35f · a computer from the SSH config, from the panel"
 wclick left "$(pt_of placePoints connect)"
 wait_for "d['connectOpen']" "True" 10 >/dev/null
 wclick left "$(pt_of connectPoints ssh:box)"
+# If discovery can prove that box and studio share a computer, explicitly
+# choose box's saved config. A custom host-key policy may keep them separate.
+if [[ "$(state "len(next(c['routes'] for c in d['places']['computers'] if any(r['kind']=='ssh' and r['name']=='box' for r in c['routes'])))")" -gt 1 ]]; then
+  wait_for "d['connectRouteKey']" "ssh:box" 10 >/dev/null
+  expect "one computer offers both connection routes" "len([r for r in d['connectRows'] if r['type']=='place'])" "2"
+  wclick left "$(pt_of connectPoints ssh:box)"
+fi
 wait_for "d['model']['location']" "$BOX" 60 >/dev/null
 expect "Connect opened box"                          "d['model']['location']" "$BOX"
 [[ "$(cat "$BOX/Shared/hello.txt" 2>/dev/null)" == "hello from studio" ]] \

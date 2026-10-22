@@ -282,6 +282,63 @@ turned off; a key that later changes is refused as for any SSH host.
 Connected places of every kind appear under Remote in the sidebar: click
 to browse, drop files on them (§6.1, a copy across drives), right-click to
 open in a new tab or disconnect.
+Grouping never hides an additional mounted-but-lost route: it remains a
+separate sidebar recovery/disconnect target even after another route connects.
+
+#### Computers and connection routes
+
+The Connect panel lists a computer once, with its SSH-config and Tailscale
+connections underneath. Both use SSH; Tailscale is a network route, not a
+second file-transfer protocol. Discovery groups only matching explicit
+endpoints or overlapping trusted SSH host keys, never matching display
+names or DNS guesses. Unknown conditional, wildcard, proxy or host-key policy
+settings keep an alias separate rather than guessing its effective endpoint.
+Previously trusted host-key lookups are cached against the file's identity
+and revision, outside the mount-probe budget. Shared host keys can also come
+from cloned machines: a group is a presentation hint, not proof that accounts
+or filesystems are interchangeable. Every address stays visible in its picker.
+Grouping is presentation, not a grant of trust:
+each route keeps its own account, folder, port, SSH configuration and
+host-key checks. SSH aliases are still passed verbatim to OpenSSH.
+
+A computer with several routes offers **Connections…**. Its route picker
+shows the actual address and account, which route is connected or lost,
+and whether Tailscale is unavailable. Selecting another route is an
+explicit new connection; Gust never falls back silently outside a VPN,
+works around an authentication/key failure, remounts a place underneath
+open file handles, or replays an interrupted copy/move/delete. Two entries
+pointing at the same Tailscale endpoint are not an independent fallback.
+
+A lost connection with another known route offers **Choose connection**,
+with Cancel as the default. The picker keeps the failed route visible and
+explains that existing file operations are not retried. Discovery retains
+the last local-daemon peer snapshot for the lifetime of the process when
+Tailscale stops, marked unavailable, so disabling it does not erase the
+connection choices. This is not a claim that a peer is reachable, nor a
+persistent device inventory. No new device is contacted just by looking.
+
+#### Connection feedback
+
+Connection prerequisites and errors live in a prominent, wrapping notice inside
+Connect, not only in the status line. Missing sshfs explains how to install it
+and offers **Check again**; Gust never installs packages or runs privileged
+commands automatically. Checking again refreshes discovery, never connects.
+Each attempt retains its capability key so a newly discovered missing helper
+can still expose Install support. A worker panic completes feedback with an
+explicit unknown-outcome failure, never an app-wide permanent busy state;
+it neither retries nor claims to have undone external effects.
+An explicit attempt keeps the panel open with the named operation in progress,
+blocks duplicate attempts, and retains failures until the next action. Only a
+matching completion from the initiating model clears its progress. Successful
+connections close the panel; closing it manually does not cancel an attempt or
+allow its later failure to steal focus. SSH, Tailscale, cloud setup and network
+shares use the same feedback surface without retaining credentials.
+
+**SSHFS upload limitation:** if a mount does not support atomic no-replace
+rename, Gust refuses publication rather than risk replacing another file.
+Browsing and downloading can still work; the local source is retained after
+this refusal. Connecting successfully does not imply upload support. Gust
+never substitutes an overwrite-capable rename or replays the refused operation.
 
 ## 6.5 Permanent delete
 
@@ -737,19 +794,45 @@ on `/dev/bus/usb/<bus>/` says when something was plugged in or pulled.
   in the row what the person has to do ("Unlock your iPhone and tap
   Trust"). A second click stops waiting and answers Cancel. "Don't Trust"
   is told plainly, with how to be asked again.
-- A missing backend is named with its command (`Needs gvfs-afc — sudo
-  pacman -S gvfs-afc`). Gust never installs packages itself. Android needs
-  `gvfs-mtp` (on Omarchy by default); iPhone needs `gvfs-afc`, which pulls
-  in `usbmuxd`.
+- Opening is published only by an admitted worker after the requested device
+  interface is validated. Busy refusals, unsupported app-files requests and
+  worker-start failures leave the previous phone state intact; a worker panic
+  becomes an explicit failed/unknown state rather than an orphaned Opening.
+- The supported Arch package installs the SSH, cloud, SMB/NFS and USB-device
+  helpers as dependencies, including `gvfs-afc`/`usbmuxd` for Apple devices,
+  `gvfs-mtp` for Android and `gvfs-gphoto2` for cameras. These are part of
+  the file manager experience, not optional terminal homework.
+- Source builds and older installations show missing capabilities prominently
+  in Connect. A phone with missing support opens this setup surface instead
+  of attempting a mount. **Install support** names the packages first and
+  invokes only an allowlisted capability through the system's polkit prompt;
+  Gust never runs as root, collects an administrator password or builds a
+  shell command from a device name/address. Installations are serialized
+  across tabs and results are tied to their initiating model. Failure/cancel
+  stays visible and Check again is discovery-only. Unsupported systems get
+  explicit package-manager guidance instead of a nonworking install button.
+- Installation never connects a device, repeats an interrupted operation or
+  accepts Trust. On success capabilities are refreshed and the person chooses
+  Connect/Open again. An already attached Apple device may need reconnecting
+  so the newly installed udev rule starts usbmuxd. Unlock/Trust remains a
+  decision on the device. Only iOS-exposed media and app file-sharing areas
+  are accessible; this is not unrestricted access to every app or iCloud.
+- Physical-device qualification must respect its authorization boundary:
+  USB detection, pairing validation and a service handshake without directory
+  listing do not establish photo browsing or file-transfer qualification.
 - Eject leaves every folder of the phone the window is in, unmounts photos
   and app files, and is never forced; it refuses while a transfer runs.
 
 **Proven with stand-ins, not with a phone.** `just qa` §37 replaces sysfs,
 the udev database and `gio` with a fake tree and a script that speaks gio's
 own question protocol; everything from detection to eject is Gust's real
-code. A physical iPhone/iPad/Android round trip is still the owner's to do.
+code. Browsing and transfers on physical devices remain unqualified. Separately,
+USB detection, pairing validation, a trusted session and an AFC service handshake
+were verified on one physical iPhone without directory listings, file metadata
+queries, file reads/writes or opening photos. That connection-only check does
+not establish transfer support on every Apple model.
 
-**This has not been qualified against physical hardware.** The VM used for
+**Physical USB storage remains unqualified.** The VM used for
 qualification has no USB device: its only removable block device is an empty
 virtual optical drive, which is exactly one of the cases above but not the
 common one. The discovery logic is unit-tested against captured `lsblk`

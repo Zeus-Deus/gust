@@ -11,6 +11,8 @@ Rectangle {
     property string body: ""
     property string confirmText: "Confirm"
     property bool dangerous: false
+    /// Non-destructive questions may also need Cancel as the safe default.
+    property bool preferCancel: false
     signal accepted()
     signal rejected()
     /// Emitted whenever the dialog stops being visible. The window uses it to
@@ -36,7 +38,7 @@ Rectangle {
         title = t; body = b; confirmText = c; dangerous = danger
         visible = true
         // Cancel takes focus for a dangerous action.
-        if (danger) cancelButton.forceActiveFocus()
+        if (danger || root.preferCancel) cancelButton.forceActiveFocus()
         else confirmButton.forceActiveFocus()
     }
     function close() {
@@ -102,7 +104,7 @@ Rectangle {
                     border.color: activeFocus ? Tokens.accent
                                               : Tokens.withAlpha(Tokens.border, Tokens.borderAlpha)
                     radius: Tokens.radius
-                    focus: root.dangerous
+                    focus: root.dangerous || root.preferCancel
                     activeFocusOnTab: true
                     objectName: "cancelButton"
 
