@@ -460,3 +460,21 @@ fn existing_home_inventory_is_read_only_and_returns_the_validated_location() {
     assert_eq!(FileIdentity::of_path(l.trash.root()).unwrap(), before);
     assert_eq!(l.list().unwrap().len(), 1);
 }
+#[test]
+fn receipt_cache_charge_counts_private_inventory_and_never_accesses_disk() {
+    let f = Fixture::new();
+    let l = f.location();
+    let tree = f.0.join("work/tree");
+    fs::create_dir(&tree).unwrap();
+    for i in 0..10 {
+        fs::write(tree.join(format!("file-{i}")), b"data").unwrap();
+    }
+    let r = l.trash_path(&tree, &cancel()).unwrap();
+    assert_eq!(r.inventory_len(), 11);
+    let bytes = r.retained_bytes();
+    assert!(bytes >= 11 * 2048);
+    assert!(r.clone().retained_bytes() >= 11 * 2048);
+    fs::remove_dir_all(&f.0).unwrap();
+    assert_eq!(r.inventory_len(), 11);
+    assert_eq!(r.retained_bytes(), bytes);
+}

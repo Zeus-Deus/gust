@@ -1663,3 +1663,10 @@ info. Every internal step uses existing durable pending intent and no-replace
 identity checks. Info inodes survive Undo/Redo, and new descendants, replaced
 parents, records or occupied names refuse. APP still owns forward markers and
 capacity/barrier reservation before effects and holds History through admission.
+
+
+`TrashReceipt::inventory_len()` and `retained_bytes()` are memory-only cache
+accounting. The charge includes all owned path/slot capacities, info capacity
+and a conservative per-tree-node allowance; it is not an allocator/RSS reading.
+APP bounds the aggregate cache and reports limits instead of retaining an
+unbounded set of individually bounded receipts.

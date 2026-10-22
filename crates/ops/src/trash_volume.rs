@@ -955,6 +955,35 @@ fn recovery_vault(info: &DirHandle, info_path: &Path) -> io::Result<(DirHandle, 
     ))
 }
 impl TrashReceipt {
+    /// Complete retained subtree count; no filesystem access.
+    pub fn inventory_len(&self) -> usize {
+        self.tree.len()
+    }
+    /// Conservative cache accounting charge, not an allocator/RSS reading.
+    /// Includes every owned path/slot capacity, info buffer capacity and a
+    /// per-node allowance for BTreeMap allocation/slack. Saturates on overflow.
+    pub fn retained_bytes(&self) -> usize {
+        let capacities = [
+            self.item.original.capacity(),
+            self.item.trashed_name.capacity(),
+            self.item.info_file.capacity(),
+            self.location.trash.files.capacity(),
+            self.location.trash.info.capacity(),
+            self.location.topdir.as_ref().map_or(0, PathBuf::capacity),
+            self.canonical.trash.files.capacity(),
+            self.canonical.trash.info.capacity(),
+            self.canonical.topdir.as_ref().map_or(0, PathBuf::capacity),
+            self.original.capacity(),
+            self.name.capacity(),
+            self.info_bytes.capacity(),
+        ];
+        let owned = capacities
+            .into_iter()
+            .fold(std::mem::size_of::<Self>(), usize::saturating_add);
+        self.tree.keys().fold(owned, |total, path| {
+            total.saturating_add(path.capacity()).saturating_add(2048)
+        })
+    }
     /// Worker-only read-only preflight. If false, reserve a durable history
     /// barrier before restoring missing parents. Races still require the
     /// caller's forward marker and the terminal receipt's history flag.
