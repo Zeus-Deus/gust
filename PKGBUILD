@@ -5,8 +5,9 @@
 # - Nothing here changes a user's defaults. `gust --default on` is an
 #   explicit, per-user, reversible action (docs/DESIGN.md §6.2); a package
 #   install must never silently take over the file manager association.
-# - The optional dependencies are genuinely optional: Gust degrades
-#   gracefully and says why when they are missing (plan §8).
+# - Every program Gust calls is a dependency, so a fresh install works with
+#   nothing else to set up. Gust still degrades gracefully and says why if
+#   one is removed later (plan §8).
 
 pkgname=gust
 pkgver=0.1.0
@@ -26,20 +27,19 @@ depends=(
   'openssh' 'sshfs' 'fuse3' 'rclone'
   'gvfs' 'gvfs-afc' 'gvfs-smb' 'gvfs-nfs' 'gvfs-mtp' 'gvfs-gphoto2'
   'usbmuxd' 'polkit'
+  # Clipboard, Open with, terminal and folder jump.
+  'wl-clipboard' 'xdg-utils' 'xdg-terminal-exec' 'zoxide'
+  # Sandboxed thumbnails and Quick Look previews.
+  'bubblewrap' 'util-linux' 'imagemagick' 'ffmpegthumbnailer' 'ffmpeg'
+  'pipewire-audio' 'poppler'
+  # Archives, USB drives and discs, Open/Save dialogs for other apps.
+  'libarchive' 'udisks2' 'xdg-desktop-portal'
 )
-# xdg-desktop-portal is needed only for the opt-in Open/Save dialogs.
 makedepends=('rust' 'cargo' 'cmake' 'just')
-# Optional feature helpers; connection and device helpers are required above.
+# Tailscale is a network service with its own account: Gust lists its devices
+# when you already run it, but never installs it for you.
 optdepends=(
-  'wl-clipboard: copy and paste with other applications'
-  'bubblewrap: sandboxed thumbnail rendering'
-  'util-linux: resource limits for thumbnail helpers, device list'
-  'imagemagick: image thumbnails'
-  'ffmpegthumbnailer: video thumbnails'
-  'libarchive: open, extract and create archives (bsdtar)'
-  'udisks2: mount and eject USB drives and discs'
-  'xdg-utils: open files with their default application'
-  'xdg-desktop-portal: let other apps use gust for Open and Save dialogs'
+  'tailscale: list Tailscale devices to connect to'
 )
 source=("$pkgname-$pkgver.tar.gz")
 sha256sums=('SKIP')

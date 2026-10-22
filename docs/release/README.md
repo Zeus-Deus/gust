@@ -65,9 +65,15 @@ From source:
 Needs Rust 1.90+, Qt 6 (qt6-base, qt6-declarative) and a Wayland session.
 The Arch package includes the connection and device helpers: OpenSSH, SSHFS,
 FUSE 3, rclone, GVfs with AFC, SMB, NFS, MTP and gphoto2 backends, usbmuxd,
-and polkit. They are required dependencies in both package manifests, not
-optional extras. Unrelated helpers (thumbnails, archives and other features)
-remain in `PKGBUILD`'s `optdepends`; Gust explains when one is missing.
+and polkit. Every other program Gust calls ships with it too: clipboard
+(wl-clipboard), Open with (xdg-utils), terminal and folder jump
+(xdg-terminal-exec, zoxide), sandboxed thumbnails and previews (bubblewrap,
+util-linux, ImageMagick, ffmpegthumbnailer, FFmpeg, PipeWire, Poppler),
+archives (libarchive), USB drives (udisks2) and Open/Save dialogs
+(xdg-desktop-portal). Installing the package is all a user needs to do. Only
+Tailscale stays optional: it is a network service with its own account, and
+Gust lists its devices when you already run it. A source build that lacks a
+helper still works and explains what is missing.
 
 ### Connections and phones
 

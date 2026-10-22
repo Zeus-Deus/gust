@@ -17,6 +17,16 @@ REQUIRED = {
     "openssh", "sshfs", "fuse3", "rclone", "gvfs", "gvfs-afc",
     "gvfs-smb", "gvfs-nfs", "gvfs-mtp", "gvfs-gphoto2", "usbmuxd", "polkit",
 }
+# Every other program Gust calls ships with it, so a fresh install has
+# clipboard, thumbnails, previews, archives, drives and Open with working.
+FEATURES = {
+    "wl-clipboard", "xdg-terminal-exec", "xdg-utils", "zoxide", "bubblewrap",
+    "util-linux", "imagemagick", "ffmpegthumbnailer", "ffmpeg",
+    "pipewire-audio", "poppler", "libarchive", "udisks2", "xdg-desktop-portal",
+}
+# Tailscale is a network service with its own account; Gust lists its
+# devices when the user already runs it and never installs it for them.
+USER_CHOSEN = {"tailscale"}
 
 
 def shell_array(source: str, name: str) -> list[str]:
@@ -79,6 +89,19 @@ class SetupPackagingTests(unittest.TestCase):
                 required = package_names(shell_array(manifest.read_text(), "depends"))
                 self.assertFalse(REQUIRED - required,
                                  f"missing required helpers: {sorted(REQUIRED - required)}")
+
+    def test_feature_helpers_are_required_in_both_manifests(self):
+        for manifest in MANIFESTS:
+            with self.subTest(manifest=str(manifest.relative_to(ROOT))):
+                required = package_names(shell_array(manifest.read_text(), "depends"))
+                self.assertFalse(FEATURES - required,
+                                 f"missing feature helpers: {sorted(FEATURES - required)}")
+
+    def test_only_user_chosen_services_stay_optional(self):
+        for manifest in MANIFESTS:
+            with self.subTest(manifest=str(manifest.relative_to(ROOT))):
+                optional = package_names(shell_array(manifest.read_text(), "optdepends"))
+                self.assertEqual(optional, USER_CHOSEN)
 
     def test_required_helpers_are_not_duplicated_in_optional_dependencies(self):
         for manifest in MANIFESTS:
