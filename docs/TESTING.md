@@ -189,6 +189,11 @@ unqualified. CI does not change host namespace policy or bypass isolation.
 Artifact staging runs independently of library observation only after successful
 SDK/app and sandbox admission, and never after cancellation. A failing library
 or sandbox step keeps the job red even if a separate artifact check passes.
+The frozen SMB availability test needs both successful `gio --help` and
+`/usr/share/gvfs/mounts/smb.mount`. Hosted Ubuntu provisioning explicitly includes
+`libglib2.0-bin` and `gvfs-backends` for those prerequisites; GLib development
+headers alone are insufficient. This availability test does not start a fixture,
+authenticate or mount a share, and its success cannot qualify a provider.
 Full `--required` fixtures,
 KVM-only models, desktop/theme, benchmark and hardware/provider qualification
 remain separately required before release; hosted build success cannot certify

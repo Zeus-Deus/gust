@@ -1490,6 +1490,8 @@ desktop evidence is not qualification of a new binary, architecture or provider.
   admission. Refusal is fatal; no unsandboxed fallback or host-policy change
   qualifies it. Independent artifact staging requires successful SDK/app and
   sandbox admission, and cannot turn a failed library gate into a pass.
+  The frozen SMB availability fixture requires a successful `gio --help` and
+  the installed SMB backend descriptor; their presence does not qualify a mount.
 - Native and theme gates require an explicitly dedicated disposable desktop,
   their actual tools and the installed binary. They must not start on an
   ordinary shared desktop. The desktop runner owns `/tmp/gust-qa.lock`; callers
