@@ -174,6 +174,23 @@ print({'QT_VERSION': os.environ['QT_FIXTURE_VERSION'],
             with self.assertRaises(ValueError):
                 package.build.qt.selected()
 
+    def test_installer_failure_exposes_only_fixed_classes_flags_and_exit(self):
+        log = self.root / "installer.log"
+        log.write_text("aqt.exceptions.ArchiveExtractionError: private-marker /private/host/file\n"
+                       "ValueError: private-marker https://private.invalid/secret\n"
+                       "UnlistedPrivateError: host-identity\nNo matching distribution found\n")
+        result = subprocess.run([sys.executable, str(ROOT / "packaging/qt-contract.py"),
+            "--diagnose-installer", str(log), "--phase", "sdk", "--exit-code", "1"],
+            capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0)  # Formatter; caller retains failure.
+        summary = json.loads(result.stdout)
+        self.assertEqual(summary["status"], "fail")
+        self.assertEqual(summary["installer_exit"], 1)
+        self.assertEqual(summary["exception_classes"], ["ArchiveExtractionError", "ValueError"])
+        self.assertTrue(summary["pip_distribution_unavailable"])
+        for private in ("private-marker", "/private/", "host-identity", "UnlistedPrivateError", "https:", str(self.root)):
+            self.assertNotIn(private, result.stdout + result.stderr)
+
     def test_required_app_gate_reports_old_qt_as_skip_and_fails_without_building(self):
         env = dict(self.env, QT_FIXTURE_VERSION="6.4.2")
         result = subprocess.run([sys.executable, str(ROOT / "tests/release-gates.py"),
@@ -229,9 +246,10 @@ print({'QT_VERSION': os.environ['QT_FIXTURE_VERSION'],
 
 class BuilderCancellationTests(unittest.TestCase):
     def test_builder_cancellation_retires_owned_group_before_private_lease_release(self):
-        for cancellation, startup in ((signal.SIGINT, False), (signal.SIGTERM, False),
-                                      (signal.SIGTERM, True)):
-            with self.subTest(signal=cancellation, startup=startup), tempfile.TemporaryDirectory(prefix="gust-builder-cancel-") as temporary:
+        for cancellation, startup, cleanup in ((signal.SIGINT, False, "ordinary"),
+                (signal.SIGTERM, False, "ordinary"), (signal.SIGTERM, True, "ordinary"),
+                (signal.SIGTERM, False, "second-signal"), (signal.SIGTERM, False, "retirement")):
+            with self.subTest(signal=cancellation, startup=startup, cleanup=cleanup), tempfile.TemporaryDirectory(prefix="gust-builder-cancel-") as temporary:
                 root = Path(temporary)
                 source = root / "source"
                 (source / "packaging").mkdir(parents=True)
@@ -273,6 +291,25 @@ base = Path(sys.argv[1])
 spec = importlib.util.spec_from_file_location('builder', base / 'source/packaging/build-artifact.py')
 module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
 module.qt.selected = lambda: {'version': '6.11.2', 'qmake': '/synthetic/qmake'}
+if sys.argv[3] == 'second-signal':
+    original_cleanup = module.owned.terminate_owned_group
+    def interrupted_cleanup(child):
+        (base / 'cleanup-entry').touch()
+        # The former first handler transition was outside its cleanup try.
+        # Inject there deterministically; cleanup now changes no handlers.
+        os.kill(os.getpid(), signal.SIGTERM)
+        return original_cleanup(child)
+    module.owned.terminate_owned_group = interrupted_cleanup
+if sys.argv[3] == 'retirement':
+    original_live = module.owned.live_group
+    original_clock = module.owned.time.monotonic
+    def uncertain_retirement(group):
+        (base / 'retirement-pending').touch()
+        return not (base / 'retirement-release').exists() or original_live(group)
+    module.owned.live_group = uncertain_retirement
+    # Advance beyond the former 10-second deadline as soon as observation
+    # becomes uncertain, without waiting or changing another process's clock.
+    module.owned.time.monotonic = lambda: original_clock() + (100 if (base / 'retirement-pending').exists() else 0)
 if sys.argv[2] == 'startup':
     original = module.owned.subprocess.Popen
     def interrupted_start(*args, **kwargs):
@@ -285,7 +322,7 @@ if sys.argv[2] == 'startup':
 sys.exit(module.main(build_lock=base / 'lease'))
 """)
                 sentinel = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
-                owner = subprocess.Popen([sys.executable, str(wrapper), str(root), "startup" if startup else "wait"],
+                owner = subprocess.Popen([sys.executable, str(wrapper), str(root), "startup" if startup else "wait", cleanup],
                     env=dict(os.environ, PATH=str(root) + os.pathsep + os.environ["PATH"], FIXTURE=str(root)),
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
                 pids = []
@@ -296,13 +333,20 @@ sys.exit(module.main(build_lock=base / 'lease'))
                     pids = list(map(int, (root / "pids").read_text().split()))
                     if not startup:
                         owner.send_signal(cancellation)
+                    marker = "cleanup-entry" if cleanup == "second-signal" else (
+                        "retirement-pending" if cleanup == "retirement" else "stopping")
                     deadline = time.monotonic() + 5
-                    while not (root / "stopping").exists() and time.monotonic() < deadline:
+                    while not (root / marker).exists() and time.monotonic() < deadline:
                         time.sleep(0.01)
-                    self.assertTrue((root / "stopping").exists())
+                    self.assertTrue((root / marker).exists())
+                    if cleanup == "retirement":
+                        time.sleep(0.1)
                     with (root / "lease").open("a") as lease:
                         with self.assertRaises(BlockingIOError):
                             fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        self.assertIsNone(owner.poll())
+                        if cleanup == "retirement":
+                            (root / "retirement-release").touch()
                         public, errors = owner.communicate(timeout=5)
                         self.assertEqual(owner.returncode, 130)
                         fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -313,6 +357,7 @@ sys.exit(module.main(build_lock=base / 'lease'))
                     self.assertNotIn(str(root), public + errors)
                     self.assertFalse((source / "target/release/gust-build.json").exists())
                 finally:
+                    (root / "retirement-release").touch()
                     if owner.poll() is None:
                         owner.kill(); owner.wait()
                     if pids:

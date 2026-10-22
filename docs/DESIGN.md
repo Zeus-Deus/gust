@@ -1479,6 +1479,8 @@ desktop evidence is not qualification of a new binary, architecture or provider.
   stops the owned child process group before releasing its build lease.
   The artifact builder uses that same boundary, including deferred cancellation
   during process startup and descendants outliving their immediate parent.
+  Cancellation stays deferred throughout cleanup; an unestablished retirement
+  retains the lease rather than returning a timeout and releasing ownership.
   Public failure details are bounded Rust error codes, locked crate identifiers,
   counts and fixed categories; diagnostic prose/paths remain private.
 - Native and theme gates require an explicitly dedicated disposable desktop,

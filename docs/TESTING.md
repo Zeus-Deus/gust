@@ -148,7 +148,10 @@ device transfers.
 native x86_64/aarch64 release builds with staging checks. Portable seams run first
 using Ubuntu's Qt 6.4.2. The app and artifact jobs then select public Qt 6.11.2
 (`linux_gcc_64` / `linux_gcc_arm64`) using pinned aqtinstall 3.3.0 in private runner
-storage, without an account or system Qt replacement. The unquoted `public`
+storage, without an account or system Qt replacement. Installer failures retain
+raw output/tracebacks privately and expose only an exit code, fixed exception
+classes and prerequisite flags. SDK metadata dry runs do not prove archive
+extraction or a usable installed SDK. The unquoted `public`
 property in this source snapshot is rejected by Qt 6.4.2's QML parser; an isolated
 quoted-key control compiles. The chosen qualification floor does not claim to
 identify the earliest compatible Qt release. No UI source is changed by CI.

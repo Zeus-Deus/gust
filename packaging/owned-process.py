@@ -28,53 +28,63 @@ def live_group(group):
 
 
 def terminate_owned_group(child):
-    handlers = {sig: signal.signal(sig, signal.SIG_IGN)
-                for sig in (signal.SIGINT, signal.SIGTERM)}
+    # run() keeps its non-raising cancellation handler installed throughout
+    # entry, TERM, escalation and retirement. There is no handler transition
+    # here for a second signal to interrupt.
     try:
+        os.killpg(child.pid, signal.SIGTERM)
+    except OSError:
+        pass
+    try:
+        child.wait(timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    try:
+        os.killpg(child.pid, signal.SIGKILL)
+    except OSError:
+        pass
+    # A timeout or unavailable retirement observation is not permission to
+    # release the caller's lease. Keep ownership and retry observation until
+    # established; do not repeatedly signal a potentially recycled group ID.
+    while True:
         try:
-            os.killpg(child.pid, signal.SIGTERM)
-        except ProcessLookupError:
+            child.wait(timeout=0.2)
+            if not live_group(child.pid):
+                return
+        except (OSError, ValueError, IndexError, subprocess.TimeoutExpired):
             pass
-        try:
-            child.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            pass
-        # The immediate parent can exit while a descendant ignores TERM.
-        try:
-            os.killpg(child.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        child.wait()
-        deadline = time.monotonic() + 10
-        while live_group(child.pid):
-            if time.monotonic() >= deadline:
-                raise subprocess.TimeoutExpired("owned group termination", 10)
-            time.sleep(0.01)
-    finally:
-        for sig, handler in handlers.items():
-            signal.signal(sig, handler)
+        time.sleep(0.05)
 
 
 def run(command, *, cwd, env, log, timeout=None):
     pending = False
 
-    def defer_startup_cancel(signum, frame):
+    def defer_cancel(signum, frame):
         nonlocal pending
         pending = True
 
-    # Defer Python cancellation during Popen startup until we own its PID.
-    # Unlike blocking signals, this leaves the child's signal mask untouched.
-    handlers = {sig: signal.signal(sig, defer_startup_cancel)
+    # Defer cancellation for the entire ownership lifetime, including Popen
+    # startup and cleanup entry. Polling observes cancellation without an
+    # exception-raising signal handler that could interrupt retirement.
+    handlers = {sig: signal.signal(sig, defer_cancel)
                 for sig in (signal.SIGINT, signal.SIGTERM)}
     child = None
     try:
         child = subprocess.Popen(command, cwd=cwd, env=env, stdout=log,
                                  stderr=subprocess.STDOUT, start_new_session=True)
-        for sig in handlers:
-            signal.signal(sig, cancel_on_signal)
-        if pending:
-            raise KeyboardInterrupt
-        return child.wait(timeout=timeout)
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while True:
+            if pending:
+                raise KeyboardInterrupt
+            try:
+                code = child.wait(timeout=0.2)
+            except subprocess.TimeoutExpired:
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise subprocess.TimeoutExpired(command, timeout)
+            else:
+                if pending:
+                    raise KeyboardInterrupt
+                return code
     except BaseException:
         if child is not None:
             terminate_owned_group(child)

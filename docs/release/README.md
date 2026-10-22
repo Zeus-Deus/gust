@@ -49,6 +49,8 @@ needed if the lease is busy; do not nest locks.
 Cancellation during startup or execution terminates the owned Cargo group,
 escalates for surviving descendants and waits for retirement before releasing
 the build lease. A cancelled build writes no successful receipt.
+If retirement cannot yet be established, cleanup keeps the lease and retries;
+neither a second cancellation signal nor a retirement deadline releases it.
 The digest validates `crates/app/ui -> ../../ui` and hashes the selected QML
 contents; redirected or unaccounted source symlinks invalidate provenance.
 The supported Qt qualification floor is 6.11.2, also declared for both Qt Arch

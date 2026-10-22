@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Select and record Qt without changing system packages or UI source."""
 
+import argparse
 import json
 import os
 from pathlib import Path
@@ -10,6 +11,31 @@ import subprocess
 import sys
 
 MINIMUM = (6, 11, 2)
+INSTALLER_ERRORS = frozenset((
+    "ArchiveDownloadError", "ArchiveChecksumError", "ChecksumDownloadFailure",
+    "ArchiveConnectionError", "ArchiveListError", "NoPackageFound", "EmptyMetadata",
+    "CliInputError", "ArchiveExtractionError", "UpdaterError", "OutOfMemory",
+    "OutOfDiskSpace", "DiskAccessNotPermitted", "Bad7zFile", "BadZipFile",
+    "ConnectionError", "SSLError", "ReadTimeout", "TimeoutError", "PermissionError",
+    "FileNotFoundError", "OSError", "ValueError", "UnicodeDecodeError", "EOFError",
+))
+
+
+def installer_failure(path, phase, code):
+    if not isinstance(code, int) or not 0 < code < 256:
+        raise ValueError("expected an actual installer failure")
+    with path.open("rb") as log:
+        content = log.read(8 * 1024 * 1024 + 1)
+    text = content[:8 * 1024 * 1024].decode("utf-8", errors="replace")
+    # Only fixed identifiers/booleans leave the private installer log. The
+    # pinned aqt's private traceback exposes its typed exception without any
+    # need to publish URLs, arguments, paths, host details or exception prose.
+    errors = sorted(set(re.findall(r"\b(?:" + "|".join(sorted(INSTALLER_ERRORS)) + r")\b", text)))
+    return {"status": "fail", "phase": phase, "installer_exit": code,
+            "exception_classes": errors, "log_truncated": len(content) > 8 * 1024 * 1024,
+            "pip_distribution_unavailable": "No matching distribution found" in text,
+            "pip_dependency_conflict": "ResolutionImpossible" in text,
+            "disk_full": "No space left on device" in text or "Disk quota exceeded" in text}
 
 
 def version(value):
@@ -42,8 +68,16 @@ def selected():
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--diagnose-installer", type=Path)
+    parser.add_argument("--phase", choices=("bootstrap", "sdk"), default="sdk")
+    parser.add_argument("--exit-code", type=int)
+    args = parser.parse_args()
     try:
-        print(json.dumps({"status": "pass", "qt_version": selected()["version"]}))
+        if args.diagnose_installer:
+            print(json.dumps(installer_failure(args.diagnose_installer, args.phase, args.exit_code)))
+        else:
+            print(json.dumps({"status": "pass", "qt_version": selected()["version"]}))
     except (OSError, ValueError, subprocess.SubprocessError):
-        print(json.dumps({"status": "fail", "reason": "Qt selection/version mismatch"}))
+        print(json.dumps({"status": "fail", "reason": "Qt selection or installer accounting failed"}))
         sys.exit(1)

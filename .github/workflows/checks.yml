@@ -73,15 +73,25 @@ jobs:
       - name: Required portable model seams (system Qt)
         run: python3 tests/release-gates.py --gate model-seams --required --output "$RUNNER_TEMP/gust-model-seams"
       - name: Select pinned public Qt SDK (no account, no host installation)
+        working-directory: ${{ runner.temp }}
         env:
           SDK_ROOT: ${{ runner.temp }}/gust-qt/6.11.2/${{ matrix.qt-dir }}
         run: |
           python3 -m venv "$RUNNER_TEMP/qt-installer"
-          if ! "$RUNNER_TEMP/qt-installer/bin/pip" install 'aqtinstall==3.3.0' 'py7zr==1.1.0' >"$RUNNER_TEMP/qt-installer.log" 2>&1; then
-            echo 'Pinned Qt installer failed'; exit 1
+          if "$RUNNER_TEMP/qt-installer/bin/pip" install 'aqtinstall==3.3.0' 'py7zr==1.1.0' >"$RUNNER_TEMP/qt-installer.log" 2>&1; then
+            :
+          else
+            code=$?
+            python3 "$GITHUB_WORKSPACE/packaging/qt-contract.py" --diagnose-installer "$RUNNER_TEMP/qt-installer.log" --phase bootstrap --exit-code "$code"
+            exit "$code"
           fi
-          if ! "$RUNNER_TEMP/qt-installer/bin/aqt" install-qt '${{ matrix.qt-host }}' desktop 6.11.2 '${{ matrix.qt-arch }}' --outputdir "$RUNNER_TEMP/gust-qt" --archives qtbase qtdeclarative qtsvg qttools qtwayland icu --modules qtshadertools >>"$RUNNER_TEMP/qt-installer.log" 2>&1; then
-            echo 'Pinned Qt SDK download failed'; exit 1
+          printf '[aqt]\nprint_stacktrace_on_error = true\n' >"$RUNNER_TEMP/qt-installer.ini"
+          if "$RUNNER_TEMP/qt-installer/bin/aqt" --config "$RUNNER_TEMP/qt-installer.ini" install-qt '${{ matrix.qt-host }}' desktop 6.11.2 '${{ matrix.qt-arch }}' --outputdir "$RUNNER_TEMP/gust-qt" --archives qtbase qtdeclarative qtsvg qttools qtwayland icu --modules qtshadertools >>"$RUNNER_TEMP/qt-installer.log" 2>&1; then
+            :
+          else
+            code=$?
+            python3 "$GITHUB_WORKSPACE/packaging/qt-contract.py" --diagnose-installer "$RUNNER_TEMP/qt-installer.log" --phase sdk --exit-code "$code"
+            exit "$code"
           fi
           echo "QMAKE=$SDK_ROOT/bin/qmake" >>"$GITHUB_ENV"
           echo "GUST_EXPECT_QT_ROOT=$SDK_ROOT" >>"$GITHUB_ENV"
