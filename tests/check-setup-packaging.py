@@ -6,8 +6,13 @@ Only Python's standard library is needed; no device or network access occurs.
 """
 
 from pathlib import Path
+import json
+import os
 import re
 import shlex
+import subprocess
+import sys
+import tempfile
 import unittest
 
 
@@ -100,6 +105,38 @@ class SetupPackagingTests(unittest.TestCase):
         self.assertIn('https://codeload.github.com/Zeus-Deus/gust/tar.gz/$_commit', source)
         self.assertRegex(source, r"(?m)^sha256sums=\('[0-9a-f]{64}'\)$")
         self.assertNotIn("<owner>", source)
+
+    def test_qt_qualification_floor_is_declared_in_both_recipes(self):
+        for manifest in MANIFESTS:
+            dependencies = shell_array(manifest.read_text(), "depends")
+            self.assertIn("qt6-base>=6.11.2", dependencies)
+            self.assertIn("qt6-declarative>=6.11.2", dependencies)
+
+    def test_installed_dependency_gate_invokes_versioned_constraints(self):
+        with tempfile.TemporaryDirectory(prefix="gust-dependency-test-") as temporary:
+            root = Path(temporary)
+            pacman = root / "pacman"
+            pacman.write_text("""#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+Path(os.environ['CAPTURE']).write_text(json.dumps(sys.argv[1:]))
+# Simulate an installed version failing the declared requirement. No runtime
+# helper fixtures, especially absolute helper paths, are created or executed.
+sys.exit(1)
+""")
+            pacman.chmod(0o755)
+            capture = root / "arguments"
+            result = subprocess.run([sys.executable, str(ROOT / "packaging/check-dependencies.py"),
+                "--installed"], env=dict(os.environ, PATH=str(root) + os.pathsep + os.environ["PATH"],
+                CAPTURE=str(capture)), capture_output=True, text=True, timeout=15)
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(json.loads(result.stdout)["status"], "fail")
+            invoked = json.loads(capture.read_text())
+            self.assertEqual(invoked[0], "-T")
+            self.assertIn("qt6-base>=6.11.2", invoked)
+            self.assertIn("qt6-declarative>=6.11.2", invoked)
+            self.assertIn("glib2>=2.66", invoked)
+            self.assertNotIn(str(root), result.stdout + result.stderr)
 
     def test_connection_helpers_are_required_in_both_manifests(self):
         for manifest in MANIFESTS:

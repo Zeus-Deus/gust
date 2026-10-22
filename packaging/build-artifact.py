@@ -7,6 +7,7 @@ do not wrap this command in another acquisition of /tmp/gust-build.lock.
 
 import fcntl
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -15,6 +16,12 @@ import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
+spec = importlib.util.spec_from_file_location("qt_contract", ROOT / "packaging/qt-contract.py")
+qt = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(qt)
+spec = importlib.util.spec_from_file_location("owned_process", ROOT / "packaging/owned-process.py")
+owned = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(owned)
 
 
 def source_revision(root=ROOT):
@@ -50,13 +57,13 @@ def source_digest(root=ROOT):
     return digest.hexdigest()
 
 
-def main():
+def main(*, build_lock=Path("/tmp/gust-build.lock")):
     os.umask(0o077)
     target = ROOT / "target/release"
     target.mkdir(parents=True, exist_ok=True)
     receipt = target / "gust-build.json"
     try:
-        with open("/tmp/gust-build.lock", "a") as lock:
+        with build_lock.open("a") as lock:
             try:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
@@ -64,8 +71,10 @@ def main():
                 return 75
             receipt.unlink(missing_ok=True)
             before = source_digest()
+            selected_qt = qt.selected()
             env = dict(os.environ, CARGO_TARGET_DIR=str(ROOT / "target"),
-                       CARGO_BUILD_JOBS=os.environ.get("CARGO_BUILD_JOBS", "2"))
+                       CARGO_BUILD_JOBS=os.environ.get("CARGO_BUILD_JOBS", "2"),
+                       QMAKE=selected_qt["qmake"])
             registry = Path(os.environ.get("CARGO_HOME", str(Path.home() / ".cargo"))) / "registry"
             env["RUSTFLAGS"] = (os.environ.get("RUSTFLAGS", "")
                 + f" --remap-path-prefix={ROOT}=/usr/src/gust"
@@ -77,14 +86,20 @@ def main():
                 names.append("gust-archive-helper")
             with (target / "gust-build.log").open("w") as log:
                 for command in commands:
-                    subprocess.run(command, cwd=ROOT, env=env, stdout=log, stderr=log, check=True)
+                    code = owned.run(command, cwd=ROOT, env=env, log=log)
+                    if code:
+                        raise subprocess.CalledProcessError(code, command)
             if source_digest() != before:
                 raise ValueError("source changed during build")
             record = {"schema": 1, "source_sha256": before,
                 "revision": source_revision(),
+                "qt": selected_qt,
                 "executables": {name: hashlib.sha256((target / name).read_bytes()).hexdigest() for name in names}}
             receipt.write_text(json.dumps(record, indent=2) + "\n")
             receipt.chmod(0o600)
+    except KeyboardInterrupt:
+        print(json.dumps({"status": "fail", "reason": "artifact build cancelled; owned processes stopped"}))
+        return 130
     except (OSError, ValueError, subprocess.SubprocessError):
         print(json.dumps({"status": "fail", "reason": "artifact build failed"}))
         return 1

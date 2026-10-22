@@ -34,10 +34,13 @@ native acceptance.
 
 ## Build and run
 
-Requires Rust 1.90 or newer, Qt 6 development packages, a C++ compiler, pkg-config
-and libdbus development files. New native GIO/archive-helper integrations also
+Requires Rust 1.90 or newer, Qt 6.11.2 or newer development packages, a C++ compiler,
+pkg-config and libdbus development files. New native GIO/archive-helper integrations also
 need GLib/GIO and libarchive development libraries. Qt model tests need Qt Test
 and the relevant QML modules. The package recipe lists runtime helpers.
+Qt 6.11.2 is the supported qualification floor; Ubuntu 24.04's system Qt 6.4.2
+cannot compile this snapshot's QML. Native CI selects an exact public SDK for
+each architecture; its build/staging result does not qualify an Arch installation.
 
 ```sh
 cargo build --locked -p gust-app

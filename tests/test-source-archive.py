@@ -16,7 +16,9 @@ spec.loader.exec_module(source)
 REVISION = "a" * 40
 PREFIX = "gust-" + REVISION
 REQUIRED = ("tests/run-tests.py", "packaging/build-artifact.py", "packaging/check-package.py",
-            "packaging/check-source.py", "packaging/runtime-files.json", "crates/ops/src/bin/gust-archive-helper.rs")
+            "packaging/check-source.py", "packaging/runtime-files.json", "packaging/qt-contract.py",
+            "packaging/owned-process.py",
+            "crates/ops/src/bin/gust-archive-helper.rs")
 
 
 def fixture(*, omit=None, extra=None, link="../../ui"):

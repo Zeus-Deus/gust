@@ -53,6 +53,7 @@ def verify(root, source=ROOT, architecture=None, *, require_receipt=True):
         provenance = json.loads((source / "target/release/gust-build.json").read_text())
         if provenance["source_sha256"] != build.source_digest(source):
             raise ValueError("build receipt does not match current source")
+        build.qt.version(provenance["qt"]["version"])
     receipt = []
     for item in runtime_files(source):
         installed = regular_beneath(root, item["path"])
@@ -73,6 +74,42 @@ def verify(root, source=ROOT, architecture=None, *, require_receipt=True):
                 raise ValueError("runtime executable architecture/format drift")
         receipt.append({"path": item["path"], "sha256": digest, "mode": item["mode"]})
     return receipt
+
+
+def verify_linkage(root, source, log, qt_root=None):
+    recorded = json.loads((source / "target/release/gust-build.json").read_text())["qt"]
+    built_version = build.qt.version(recorded["version"])
+    if qt_root is not None and Path(recorded["prefix"]).resolve() != qt_root.resolve():
+        raise ValueError("build and runtime Qt SDK roots differ")
+    versions = set()
+    qt_count = 0
+    for item in runtime_files(source):
+        if not item["path"].startswith("usr/bin/"):
+            continue
+        result = subprocess.run(["ldd", str(root / item["path"])],
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                text=True, timeout=30)
+        log.write(result.stdout)
+        if result.returncode or "not found" in result.stdout:
+            raise ValueError("unresolved runtime library")
+        for line in result.stdout.splitlines():
+            if not re.match(r"\s*libQt6", line):
+                continue
+            match = re.fullmatch(r"\s*libQt6[\w-]+\.so\.6\s+=>\s+(.+?)\s+\(0x[0-9a-fA-F]+\)\s*", line)
+            if not match:
+                raise ValueError("unrecognized Qt library resolution")
+            library = Path(match[1]).resolve(strict=True)
+            release = re.fullmatch(r"libQt6[\w-]+\.so\.(6\.\d+\.\d+)", library.name)
+            if not release or build.qt.version(release[1]) < built_version:
+                raise ValueError("runtime Qt is older than build Qt")
+            if qt_root is not None and not library.is_relative_to(qt_root.resolve()):
+                raise ValueError("runtime Qt resolved outside selected SDK")
+            versions.add(release[1])
+            qt_count += 1
+    if not qt_count or len(versions) != 1:
+        raise ValueError("missing or mixed Qt runtime versions")
+    return {"qt_libraries": qt_count, "qt_version": versions.pop(),
+            "selected_sdk_checked": qt_root is not None}
 
 
 def stage(output, source=ROOT):
@@ -118,15 +155,10 @@ def main():
             raise ValueError("select --stage or --root")
         receipt = verify(root, source, architecture=args.architecture)
         with (output / "libraries.log").open("w") as log:
-            for item in runtime_files(source):
-                if item["path"].startswith("usr/bin/"):
-                    result = subprocess.run(["ldd", str(root / item["path"])],
-                                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                            text=True, timeout=30)
-                    log.write(result.stdout)
-                    if result.returncode or "not found" in result.stdout:
-                        raise ValueError("unresolved runtime library")
+            sdk = os.environ.get("GUST_EXPECT_QT_ROOT")
+            linkage = verify_linkage(root, source, log, Path(sdk) if sdk else None)
         (output / "receipt.json").write_text(json.dumps({"files": receipt,
+            "linkage": linkage,
             "architecture": args.architecture or platform.machine(),
             "scope": "staged files and host dynamic libraries; not desktop/provider qualification"}, indent=2) + "\n")
     except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:

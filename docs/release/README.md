@@ -46,8 +46,15 @@ default, records the source-input digest and actual executable hashes, and remap
 checkout/registry paths. Raw build logs/receipts stay local under `target/release`.
 Changes during a build invalidate the receipt. A separately coordinated build is
 needed if the lease is busy; do not nest locks.
+Cancellation during startup or execution terminates the owned Cargo group,
+escalates for surviving descendants and waits for retirement before releasing
+the build lease. A cancelled build writes no successful receipt.
 The digest validates `crates/app/ui -> ../../ui` and hashes the selected QML
 contents; redirected or unaccounted source symlinks invalidate provenance.
+The supported Qt qualification floor is 6.11.2, also declared for both Qt Arch
+dependencies. The builder honors explicit `QMAKE`, records its version/prefix,
+and rejects older Qt. Hosted builds select the exact public 6.11.2 SDK for each
+native architecture; portable system-Qt seams run before SDK selection.
 
 When `crates/ops/src/bin/gust-archive-helper.rs` exists in the selected snapshot,
 the builder runs `cargo build --release --locked -p gust-ops --bin
@@ -64,6 +71,11 @@ or installed root against the same build (`--source` selects the recorded source
 tree, defaulting to the checkout). Symlinked runtime files, missing
 helpers, replaced binaries, stale source receipts and wrong architectures fail.
 A development-tree launch or recipe text check is not this installed check.
+Qt runtime libraries must meet the build version and use one common Qt release.
+`GUST_EXPECT_QT_ROOT` additionally requires all Qt linkage inside that selected
+SDK, matching its build receipt. SDK resolution does not prove the installed
+Arch dependency closure. The dependency gate passes full recipe constraints to
+`pacman -T`; merely finding an older package name cannot satisfy the Qt floor.
 
 `package()` stages the executable(s), desktop entry, inert portal/service files,
 license and README. It does not copy audit logs, receipts or screenshots. A clean

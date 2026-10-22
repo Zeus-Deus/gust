@@ -37,8 +37,14 @@ jobs:
         include:
           - runner: ubuntu-24.04
             arch: x86_64
+            qt-host: linux
+            qt-arch: linux_gcc_64
+            qt-dir: gcc_64
           - runner: ubuntu-24.04-arm
             arch: aarch64
+            qt-host: linux_arm64
+            qt-arch: linux_gcc_arm64
+            qt-dir: gcc_arm64
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     env:
@@ -53,7 +59,7 @@ jobs:
       - name: Build and model prerequisites (ephemeral runner)
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends just openssl pkg-config libdbus-1-dev libclang-dev libarchive-dev libglib2.0-dev qt6-base-dev qt6-declarative-dev qt6-declarative-dev-tools qml6-module-qttest qml6-module-qtquick qml6-module-qtquick-window qml6-module-qtquick-shapes qml6-module-qtqml qml6-module-qtqml-models qml6-module-qtqml-workerscript
+          sudo apt-get install -y --no-install-recommends just openssl pkg-config python3-venv libdbus-1-dev libclang-dev libarchive-dev libglib2.0-dev libgl1-mesa-dev libxkbcommon-dev libxcb-cursor0 libxkbcommon-x11-0 qt6-base-dev qt6-declarative-dev qt6-declarative-dev-tools qml6-module-qttest qml6-module-qtquick qml6-module-qtquick-window qml6-module-qtquick-shapes qml6-module-qtqml qml6-module-qtqml-models qml6-module-qtqml-workerscript
           rustup toolchain install stable --profile minimal --component rustfmt
           rustup default stable
       - name: Rust formatting
@@ -62,8 +68,30 @@ jobs:
           just --list >/dev/null
           ./tests/lint-qml.sh
           ./tests/lint-strings.sh
-      - name: Required app tests and portable model seams
-        run: python3 tests/release-gates.py --gate app --gate model-seams --required --output "$RUNNER_TEMP/gust-app"
+      # These harnesses explicitly use Ubuntu's qmltestrunner. Run them before
+      # selecting the SDK so its libraries/imports cannot mix with system Qt.
+      - name: Required portable model seams (system Qt)
+        run: python3 tests/release-gates.py --gate model-seams --required --output "$RUNNER_TEMP/gust-model-seams"
+      - name: Select pinned public Qt SDK (no account, no host installation)
+        env:
+          SDK_ROOT: ${{ runner.temp }}/gust-qt/6.11.2/${{ matrix.qt-dir }}
+        run: |
+          python3 -m venv "$RUNNER_TEMP/qt-installer"
+          if ! "$RUNNER_TEMP/qt-installer/bin/pip" install 'aqtinstall==3.3.0' 'py7zr==1.1.0' >"$RUNNER_TEMP/qt-installer.log" 2>&1; then
+            echo 'Pinned Qt installer failed'; exit 1
+          fi
+          if ! "$RUNNER_TEMP/qt-installer/bin/aqt" install-qt '${{ matrix.qt-host }}' desktop 6.11.2 '${{ matrix.qt-arch }}' --outputdir "$RUNNER_TEMP/gust-qt" --archives qtbase qtdeclarative qtsvg qttools qtwayland icu --modules qtshadertools >>"$RUNNER_TEMP/qt-installer.log" 2>&1; then
+            echo 'Pinned Qt SDK download failed'; exit 1
+          fi
+          echo "QMAKE=$SDK_ROOT/bin/qmake" >>"$GITHUB_ENV"
+          echo "GUST_EXPECT_QT_ROOT=$SDK_ROOT" >>"$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$SDK_ROOT/lib" >>"$GITHUB_ENV"
+          echo "QT_PLUGIN_PATH=$SDK_ROOT/plugins" >>"$GITHUB_ENV"
+          echo "QML_IMPORT_PATH=$SDK_ROOT/qml" >>"$GITHUB_ENV"
+      - name: Validate selected Qt SDK
+        run: python3 packaging/qt-contract.py
+      - name: Required app tests (selected SDK)
+        run: python3 tests/release-gates.py --gate app --required --output "$RUNNER_TEMP/gust-app"
       - name: Library observation (unprovisioned fixtures are reported as skips)
         run: ./tests/run-tests.sh
       - name: Verify declared archive, build it and validate staged files and linking

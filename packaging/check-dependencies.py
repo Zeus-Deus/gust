@@ -51,7 +51,9 @@ def main():
             if not shutil.which("pacman"):
                 print(json.dumps({"status": "skip", "reason": "Arch package database unavailable"}))
                 return 77
-            result = subprocess.run(["pacman", "-T", *sorted(required)],
+            # Retain declared versions; package-name presence cannot qualify Qt.
+            requirements = setup.shell_array((ROOT / "PKGBUILD").read_text(), "depends")
+            result = subprocess.run(["pacman", "-T", *requirements],
                                     capture_output=True, text=True, timeout=30)
             if result.returncode or any(not shutil.which(name) for name in policy["required"]):
                 raise ValueError("installed runtime dependency missing")

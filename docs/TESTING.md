@@ -71,7 +71,9 @@ Benchmark and hardware/provider acceptance remain separate coordinated work;
 this runner never turns their historical evidence into a current pass.
 
 `library-unit` selects that package unit scope; `libraries` includes integration/doc tests.
-`app` runs the app Rust tests and requires Qt build tools. `model-seams` runs the
+`app` runs the app Rust tests and requires Qt >= 6.11.2 build tools. An explicit
+`QMAKE` is authoritative; a missing/old selection cannot fall back to system Qt.
+`model-seams` runs the
 portable ConnectPanel and phone-worker source-extraction harnesses. `models` also
 requests tab, pane and insertion harnesses; their existing KVM/UID-1000 admission
 is preserved. These seams substitute external model I/O/CXX transport and do not
@@ -143,10 +145,24 @@ state, codec functionality, user authorization, TLS/provider behavior or physica
 device transfers.
 
 `.github/workflows/checks.yml` runs required source/app/portable seam checks and
-native x86_64/aarch64 release builds with staging checks. The artifact jobs fetch and
+native x86_64/aarch64 release builds with staging checks. Portable seams run first
+using Ubuntu's Qt 6.4.2. The app and artifact jobs then select public Qt 6.11.2
+(`linux_gcc_64` / `linux_gcc_arm64`) using pinned aqtinstall 3.3.0 in private runner
+storage, without an account or system Qt replacement. The unquoted `public`
+property in this source snapshot is rejected by Qt 6.4.2's QML parser; an isolated
+quoted-key control compiles. The chosen qualification floor does not claim to
+identify the earliest compatible Qt release. No UI source is changed by CI.
+This snapshot also uses `Shape.preferredRendererType`, which the
+[Qt documentation](https://doc.qt.io/qt-6/qml-qtquick-shapes-shape.html#preferredRendererType-prop)
+dates to Qt 6.6; fixing the one grammar error would not establish Qt 6.4 support.
+The artifact jobs fetch and
 verify the recipe's declared source archive, build that extracted source, then
 stage it with the reviewed recipe; a checkout alias cannot satisfy source-pin
-qualification. Library observation reports unprovisioned fixture skips explicitly.
+qualification. Build receipts record Qt selection. Staging checks reject missing,
+mixed or older Qt libraries and require resolution inside the selected SDK. This
+proves only that SDK's staging environment; the Arch package gate separately
+checks the declared versioned runtime dependencies.
+Library observation reports unprovisioned fixture skips explicitly.
 Full `--required` fixtures,
 KVM-only models, desktop/theme, benchmark and hardware/provider qualification
 remain separately required before release; hosted build success cannot certify

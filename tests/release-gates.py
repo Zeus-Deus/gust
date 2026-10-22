@@ -8,6 +8,7 @@ SKIP, including a busy lease. No gate installs packages or provisions services.
 import argparse
 import csv
 import fcntl
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -18,37 +19,17 @@ import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
+spec = importlib.util.spec_from_file_location("qt_contract", ROOT / "packaging/qt-contract.py")
+qt = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(qt)
 GATES = ("static", "library-unit", "libraries", "app", "model-seams", "models", "installed",
          "dependencies", "native", "themes")
 
 
-def terminate_owned_group(child):
-    # Cancellation must finish cleanup before the lease is released. Ignore
-    # further terminal/cancel signals only during this bounded cleanup.
-    handlers = {sig: signal.signal(sig, signal.SIG_IGN)
-                for sig in (signal.SIGINT, signal.SIGTERM)}
-    try:
-        try:
-            os.killpg(child.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-        try:
-            child.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            pass
-        # The group leader can exit before an uncooperative descendant.
-        try:
-            os.killpg(child.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        child.wait()
-    finally:
-        for sig, handler in handlers.items():
-            signal.signal(sig, handler)
-
-
-def cancel_on_signal(signum, frame):
-    raise KeyboardInterrupt
+spec = importlib.util.spec_from_file_location("owned_process", ROOT / "packaging/owned-process.py")
+owned = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(owned)
+cancel_on_signal = owned.cancel_on_signal
 
 
 class Gates:
@@ -79,17 +60,7 @@ class Gates:
                 child_env = dict(os.environ if env is None else env)
                 if build:
                     child_env.setdefault("CARGO_BUILD_JOBS", "2")
-                child = subprocess.Popen(command, cwd=ROOT, env=child_env, stdout=log,
-                                         stderr=subprocess.STDOUT, start_new_session=True)
-                try:
-                    child.wait(timeout=1800)
-                except subprocess.TimeoutExpired:
-                    terminate_owned_group(child)
-                    return 1
-                except BaseException:
-                    terminate_owned_group(child)
-                    raise
-            return child.returncode
+                return owned.run(command, cwd=ROOT, env=child_env, log=log, timeout=1800)
         except FileNotFoundError:
             return 77
         except subprocess.TimeoutExpired:
@@ -109,15 +80,19 @@ class Gates:
         if not shutil.which("cargo"):
             self.result(gate, "SKIP", "Cargo unavailable")
             return
-        if gate == "app" and not shutil.which("qmake6"):
-            self.result(gate, "SKIP", "Qt build tools unavailable")
-            return
+        env = dict(os.environ)
+        if gate == "app":
+            try:
+                env["QMAKE"] = qt.selected()["qmake"]
+            except (OSError, ValueError, subprocess.SubprocessError):
+                self.result(gate, "SKIP", "Qt 6.11.2 or newer build tools unavailable")
+                return
         args = ["--app"] if gate == "app" else []
         if gate == "library-unit":
             args += ["--package-unit"]
         if self.args.required:
             args += ["--required"]
-        code = self.command(gate, [str(ROOT / "tests/run-tests.sh"), *args], build=True)
+        code = self.command(gate, [str(ROOT / "tests/run-tests.sh"), *args], build=True, env=env)
         if code in {75, 77}:
             self.result(gate, "SKIP", "build prerequisite or lease unavailable")
             return

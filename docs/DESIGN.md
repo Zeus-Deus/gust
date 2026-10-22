@@ -1477,6 +1477,8 @@ desktop evidence is not qualification of a new binary, architecture or provider.
   records that exclusion; it never enables ignored tests or counts a benchmark
   as passed. Other ignored/skipped cases still fail required mode. Cancellation
   stops the owned child process group before releasing its build lease.
+  The artifact builder uses that same boundary, including deferred cancellation
+  during process startup and descendants outliving their immediate parent.
   Public failure details are bounded Rust error codes, locked crate identifiers,
   counts and fixed categories; diagnostic prose/paths remain private.
 - Native and theme gates require an explicitly dedicated disposable desktop,
@@ -1490,6 +1492,11 @@ desktop evidence is not qualification of a new binary, architecture or provider.
 - Package validation checks the staged/installed files, executable formats,
   dynamic library resolution and dependency metadata. A source recipe or a
   successful development-tree launch does not qualify an installed artifact.
+  The supported qualification floor is Qt 6.11.2. Native CI selects that exact
+  SDK for each architecture after the system-Qt portable seams. Build receipts
+  record the selected Qt version; staging rejects older/mixed Qt libraries and
+  requires the selected SDK's library root when testing an SDK build. This is
+  SDK staging evidence, separate from installed Arch dependency qualification.
   The ops archive helper is a separate runtime executable, linked with
   libarchive, built with `cargo build -p gust-ops --bin gust-archive-helper`;
   installations using that contract must include it beside Gust in `/usr/bin`.
