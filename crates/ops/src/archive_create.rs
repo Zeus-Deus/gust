@@ -227,6 +227,7 @@ pub(crate) fn create_recorded(
                 size: if regular { source.identity.size } else { 0 },
                 link: source.link.clone(),
                 hardlink: false,
+                mtime: Some((source.identity.mtime, source.identity.mtime_nsec as u32)),
             }),
             cancel,
         )?;
@@ -304,6 +305,16 @@ pub(crate) fn create_recorded(
             .get(&path)
             .ok_or_else(|| failed("Created archive has an unexpected member."))?;
         let kind = expected.identity.mode & 0o170000;
+        let expected_nsec = match input.format {
+            ArchiveFormat::TarZstd => expected.identity.mtime_nsec as u32,
+            ArchiveFormat::Zip => 0,
+            ArchiveFormat::SevenZip => (expected.identity.mtime_nsec as u32 / 100) * 100,
+        };
+        if member.mtime != Some((expected.identity.mtime, expected_nsec)) {
+            return Err(failed(
+                "Created archive did not preserve supported timestamp precision.",
+            ));
+        }
         if !seen.insert(path)
             || member.mode & 0o170000 != kind
             || (kind == 0o100000 && member.size != expected.identity.size)
@@ -322,6 +333,7 @@ pub(crate) fn create_recorded(
     let expected = FileIdentity::from_stat(&rustix::fs::fstat(&output)?);
     let ticket = observer.intent(&staged_path, input.destination, Some(expected))?;
     progress(ArchivePhase::Publishing, sources.len(), bytes_done);
+    check(cancel, started)?;
     crate::anchor::rename_noreplace(&staging.dir, output_name, &parent, &destination_name)
         .map_err(|e| {
             if e.kind() == std::io::ErrorKind::AlreadyExists {
@@ -571,5 +583,94 @@ impl Drop for Writer {
                     });
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::journal::{Job, JobKind, JobState, Journal, JournalUpdate};
+    struct Observer<'a>(&'a Journal);
+    impl PublicationObserver for Observer<'_> {
+        fn intent(
+            &mut self,
+            source: &Path,
+            destination: &Path,
+            expected: Option<FileIdentity>,
+        ) -> Result<usize, ArchiveError> {
+            self.0.record_update(&JournalUpdate::ArchiveIntent {
+                id: "cancel-publication".into(),
+                index: 0,
+                source: source.as_os_str().as_bytes().to_vec(),
+                destination: destination.as_os_str().as_bytes().to_vec(),
+                expected: expected.map(Into::into),
+            })?;
+            Ok(0)
+        }
+        fn committed(&mut self, _: usize, _: FileIdentity) -> Result<(), ArchiveError> {
+            panic!("Cancelled publication must not commit")
+        }
+    }
+    struct Fixture(PathBuf);
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    #[test]
+    fn cancellation_after_a_durable_intent_leaves_no_public_output() {
+        let root = std::env::temp_dir().join(format!(
+            "gust-create-intent-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("source")).unwrap();
+        let fixture = Fixture(root);
+        std::fs::write(fixture.0.join("source/file"), b"preserve").unwrap();
+        let destination = fixture.0.join("new.zip");
+        let journal = Journal::new(fixture.0.join("journal"));
+        journal
+            .record(&Job::new("cancel-publication", JobKind::Compress))
+            .unwrap();
+        let cancel = CancelToken::new();
+        let mut seen = false;
+        let result = create_recorded(
+            CreateInput {
+                directory: &fixture.0.join("source"),
+                names: &["file".into()],
+                destination: &destination,
+                format: ArchiveFormat::Zip,
+                password: None,
+            },
+            &cancel,
+            &mut |phase, _, _| {
+                if phase == ArchivePhase::Publishing {
+                    let latest = journal.load();
+                    let pending = latest.last().unwrap();
+                    assert_eq!(pending.state, JobState::Committing);
+                    assert_eq!(pending.entries.len(), 1);
+                    assert!(!pending.entries[0].done);
+                    assert!(!destination.exists());
+                    seen = true;
+                    cancel.cancel();
+                }
+            },
+            &mut Observer(&journal),
+        );
+        assert!(seen);
+        assert_eq!(result, Err(ArchiveError::Cancelled));
+        assert!(!destination.exists());
+        assert_eq!(
+            std::fs::read(fixture.0.join("source/file")).unwrap(),
+            b"preserve"
+        );
+        assert!(!journal.load().last().unwrap().entries[0].done);
+        assert!(!std::fs::read_dir(&fixture.0).unwrap().flatten().any(|e| e
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".gust-extract-")));
     }
 }

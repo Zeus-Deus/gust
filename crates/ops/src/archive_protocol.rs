@@ -30,6 +30,8 @@ pub struct Member {
     pub size: u64,
     pub link: Option<Vec<u8>>,
     pub hardlink: bool,
+    #[serde(default)]
+    pub mtime: Option<(i64, u32)>,
 }
 
 pub fn write_frame(writer: &mut impl std::io::Write, frame: &Frame) -> std::io::Result<()> {

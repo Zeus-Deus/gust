@@ -950,12 +950,15 @@ password. Creation supports TarZstd, Zip and SevenZip through the sandbox helper
 password creation uses AES-256; password creation for the other formats is
 explicitly unsupported by the current writer. Sources are enumerated through
 held no-follow descriptors, bounded to 200,000 entries/32 MiB metadata/16 GiB
-input, and revalidated before publication. Regular files must supply exactly
-their admitted size and unchanged identity; links are stored, never followed.
+input, and revalidated before publication. Captured mtime/nanoseconds travel
+with each member; TAR preserves nanoseconds, ZIP Unix seconds, and 7z 100 ns
+precision. Missing times are not invented. Cancellation/deadline is checked
+after the durable intent and publication callback, immediately before rename.
+Regular files must supply exactly their admitted size and unchanged identity; links are stored, never followed.
 The parent streams bounded frames; the helper sees no source path or writable
 location except an exclusively owned output file and a private 256 MiB
-tmpfs spool (required by the 7z writer). Spool exhaustion fails closed. A completed writer is
-closed, its complete inventory checked, and the output fsynced before one
+tmpfs spool (required by the 7z writer). Spool exhaustion fails closed.
+A completed writer is closed, its complete inventory checked, and the output fsynced before one
 journaled atomic no-replace publication. Cancellation never deletes sources.
 The ordinary result record has JobKind::Compress and the created file identity;
 extracted is None. A partial publication error retains its precise receipt.

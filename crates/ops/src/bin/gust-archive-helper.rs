@@ -1,7 +1,7 @@
-//! The only archive decoder. The caller must put this process in the sandbox.
-//! It never extracts to disk and never prints library diagnostics or secrets.
+//! Sandbox-only archive codec. Decoding never extracts to disk; creation
+//! writes only the parent-owned output. Diagnostics and secrets stay private.
 use gust_ops::archive::protocol::{self, Frame, Member, ReadRequest};
-use std::ffi::{c_char, c_int, c_void, CStr, CString};
+use std::ffi::{c_char, c_int, c_long, c_void, CStr, CString};
 use std::io::{Read, Write};
 
 #[link(name = "archive")]
@@ -20,6 +20,9 @@ unsafe extern "C" {
     fn archive_entry_pathname(entry: *mut c_void) -> *const c_char;
     fn archive_entry_mode(entry: *mut c_void) -> u32;
     fn archive_entry_size(entry: *mut c_void) -> i64;
+    fn archive_entry_mtime_is_set(entry: *mut c_void) -> c_int;
+    fn archive_entry_mtime(entry: *mut c_void) -> i64;
+    fn archive_entry_mtime_nsec(entry: *mut c_void) -> c_long;
     fn archive_entry_hardlink(entry: *mut c_void) -> *const c_char;
     fn archive_entry_symlink(entry: *mut c_void) -> *const c_char;
 }
@@ -141,6 +144,14 @@ fn run() -> Result<(), ()> {
                     Some(bytes(link)?)
                 },
                 hardlink: !hard.is_null(),
+                mtime: if archive_entry_mtime_is_set(entry) > 0 {
+                    Some((
+                        archive_entry_mtime(entry),
+                        u32::try_from(archive_entry_mtime_nsec(entry)).map_err(|_| ())?,
+                    ))
+                } else {
+                    None
+                },
             };
             protocol::write_frame(&mut output, &Frame::Header(member)).map_err(|_| ())?;
             let mut decision = [0];
@@ -207,7 +218,7 @@ fn main() {
 #[link(name = "archive")]
 unsafe extern "C" {
     fn archive_write_new() -> *mut c_void;
-    fn archive_write_set_format_pax_restricted(a: *mut c_void) -> c_int;
+    fn archive_write_set_format_pax(a: *mut c_void) -> c_int;
     fn archive_write_add_filter_zstd(a: *mut c_void) -> c_int;
     fn archive_write_set_format_zip(a: *mut c_void) -> c_int;
     fn archive_write_set_format_7zip(a: *mut c_void) -> c_int;
@@ -224,6 +235,7 @@ unsafe extern "C" {
     fn archive_entry_set_pathname(entry: *mut c_void, name: *const c_char);
     fn archive_entry_set_mode(entry: *mut c_void, mode: u32);
     fn archive_entry_set_size(entry: *mut c_void, size: i64);
+    fn archive_entry_set_mtime(entry: *mut c_void, seconds: i64, nanoseconds: c_long);
     fn archive_entry_set_symlink(entry: *mut c_void, target: *const c_char);
 }
 struct WriterArchive(*mut c_void);
@@ -257,7 +269,7 @@ fn write_archive() -> Result<(), ()> {
         }
         let format = match request.format {
             WriteFormat::TarZstd => {
-                if archive_write_set_format_pax_restricted(archive.0) != 0 {
+                if archive_write_set_format_pax(archive.0) != 0 {
                     return Err(());
                 }
                 archive_write_add_filter_zstd(archive.0)
@@ -308,6 +320,12 @@ fn write_archive() -> Result<(), ()> {
                     archive_entry_set_pathname(entry.0, name.as_ptr());
                     archive_entry_set_mode(entry.0, member.mode & !0o6000);
                     archive_entry_set_size(entry.0, member.size as i64);
+                    if let Some((seconds, nanoseconds)) = member.mtime {
+                        if nanoseconds >= 1_000_000_000 {
+                            return Err(());
+                        }
+                        archive_entry_set_mtime(entry.0, seconds, nanoseconds.into());
+                    }
                     if let Some(target) = &target {
                         archive_entry_set_symlink(entry.0, target.as_ptr());
                     }

@@ -243,3 +243,139 @@ fn links_are_stored_without_reading_targets_and_unsupported_encryption_has_no_ef
     ));
     assert!(!f.0.join("unsupported.7z").exists());
 }
+
+#[test]
+fn cancellation_at_publication_preserves_source_and_absent_destination() {
+    let f = Fixture::new();
+    let destination = f.0.join("cancel-at-publish.zip");
+    let cancel = CancelToken::new();
+    let mut publishing = false;
+    let result = io::create_with(
+        &f.0.join("source"),
+        &f.names(),
+        &destination,
+        ArchiveFormat::Zip,
+        None,
+        &cancel,
+        &mut |phase, _, _| {
+            if phase == ArchivePhase::Publishing {
+                assert!(!destination.exists());
+                publishing = true;
+                cancel.cancel();
+            }
+        },
+    );
+    assert!(publishing);
+    assert_eq!(result, Err(ArchiveError::Cancelled));
+    assert!(!destination.exists());
+    assert_eq!(
+        std::fs::read(f.0.join("source/folder/file")).unwrap(),
+        b"contents\n"
+    );
+}
+
+/// An independent native metadata reader inside its own read-only sandbox:
+/// assertions do not trust the writer's frames or Gust's member conversion.
+fn independent_mtimes(path: &std::path::Path) -> Vec<(String, i64, i64)> {
+    use std::{
+        os::{fd::AsRawFd, unix::process::CommandExt},
+        process::{Command, Stdio},
+    };
+    let inherited = std::fs::File::open(path).unwrap();
+    let mut command = Command::new("/usr/bin/bwrap");
+    command.args(["--unshare-all","--die-with-parent","--clearenv","--setenv","LC_ALL","C.UTF-8","--ro-bind","/usr","/usr","--symlink","usr/lib","/lib","--symlink","usr/lib","/lib64","--proc","/proc","--dev","/dev","--ro-bind-fd"]).arg(inherited.as_raw_fd().to_string()).arg("/input").args(["/usr/bin/prlimit","--as=536870912","--cpu=10","--nofile=64","--fsize=0","--","/usr/bin/python3","-B","-c",r#"
+import ctypes as c,json
+lib=c.CDLL('libarchive.so');p=c.c_void_p
+lib.archive_read_new.restype=p
+for name in ['archive_read_support_filter_all','archive_read_support_format_all','archive_read_data_skip','archive_read_free']:
+ getattr(lib,name).argtypes=[p]
+lib.archive_read_open_filename.argtypes=[p,c.c_char_p,c.c_size_t]
+lib.archive_read_next_header.argtypes=[p,c.POINTER(p)]
+lib.archive_entry_pathname.argtypes=[p];lib.archive_entry_pathname.restype=c.c_char_p
+lib.archive_entry_mtime.argtypes=[p];lib.archive_entry_mtime.restype=c.c_int64
+lib.archive_entry_mtime_nsec.argtypes=[p];lib.archive_entry_mtime_nsec.restype=c.c_long
+lib.archive_entry_mtime_is_set.argtypes=[p]
+a=lib.archive_read_new();assert a
+assert lib.archive_read_support_filter_all(a)==0
+assert lib.archive_read_support_format_all(a)==0
+assert lib.archive_read_open_filename(a,b'/input',65536)==0
+out=[]
+while True:
+ e=p();status=lib.archive_read_next_header(a,c.byref(e))
+ if status==1:break
+ assert status==0 and e.value
+ assert lib.archive_entry_mtime_is_set(e)>0
+ out.append((lib.archive_entry_pathname(e).rstrip(b'/').hex(),lib.archive_entry_mtime(e),lib.archive_entry_mtime_nsec(e)))
+ assert lib.archive_read_data_skip(a)==0
+lib.archive_read_free(a)
+print(json.dumps(out))
+"#]).stdin(Stdio::null()).stderr(Stdio::null());
+    // SAFETY: only async-signal-safe fcntl on this child-owned input fd.
+    unsafe {
+        command.pre_exec(move || {
+            rustix::io::fcntl_setfd(&inherited, rustix::io::FdFlags::empty())
+                .map_err(std::io::Error::from)
+        });
+    }
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "independent metadata reader failed"
+    );
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+#[test]
+fn all_formats_keep_admitted_file_directory_and_link_timestamps() {
+    let f = Fixture::new();
+    let source = f.0.join("source");
+    std::os::unix::fs::symlink("folder/file", source.join("stamp-link")).unwrap();
+    let mut names = f.names();
+    names.push("stamp-link".into());
+    let stamp = rustix::fs::Timespec {
+        tv_sec: 1_700_000_123,
+        tv_nsec: 456_789_100,
+    };
+    let times = rustix::fs::Timestamps {
+        last_access: stamp,
+        last_modification: stamp,
+    };
+    for path in [
+        "folder/file",
+        "-dash",
+        "line\nbreak",
+        "stamp-link",
+        "folder",
+    ] {
+        let (parent, name) = gust_ops::resolve_parent(&source.join(path)).unwrap();
+        rustix::fs::utimensat(
+            parent.as_fd(),
+            name,
+            &times,
+            rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+        )
+        .unwrap();
+    }
+    for (format, extension, nsec) in [
+        (ArchiveFormat::TarZstd, "tar.zst", 456_789_100),
+        (ArchiveFormat::Zip, "zip", 0),
+        (ArchiveFormat::SevenZip, "7z", 456_789_100),
+    ] {
+        let destination = f.0.join(format!("timestamps.{extension}"));
+        io::create_with(
+            &source,
+            &names,
+            &destination,
+            format,
+            None,
+            &CancelToken::new(),
+            &mut |_, _, _| {},
+        )
+        .unwrap();
+        let rows = independent_mtimes(&destination);
+        assert_eq!(rows.len(), 5);
+        for (_, seconds, nanoseconds) in rows {
+            assert_eq!(seconds, stamp.tv_sec, "{extension}");
+            assert_eq!(nanoseconds, nsec, "{extension}");
+        }
+    }
+}
