@@ -14,7 +14,7 @@ just theme-matrix  # 4. every installed Omarchy theme renders
 `.github/workflows/ci.yml` runs on pull requests, pushes to `master`, and
 manual dispatch. Its `Check` job runs formatting, `just lint`, the library
 test runner, and a debug build of the complete Rust/Qt application on Ubuntu
-26.04 with Qt 6.10. Ubuntu 24.04's Qt 6.4 cannot compile the existing QML.
+26.04 with Qt 6.10, which supports the Qt Quick features Gust already uses.
 Dependencies are locked to `Cargo.lock` for compilation and tests.
 
 One job shares build outputs between lint, tests and the app build. Cargo
