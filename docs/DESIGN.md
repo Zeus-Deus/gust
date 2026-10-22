@@ -1588,15 +1588,6 @@ path as partial/current work; it never unlinks that mutable name. Fresh paired
 stats cannot distinguish Gust's failed bytes from a later same-inode edit.
 No successful creation receipt is returned for that uncertain result.
 
-If a mode inverse explicitly restores readable/searchable permissions on an
-unreadable directory with recorded lineage, preflight checks its exact root
-and attribute but defers traversal. Durable pending intent precedes the actual
-requested mode change, then complete inventory validation is mandatory before
-completion. On validation failure, restore the prior mode only while root
-identity/revision and the just-written mode still match; report Partial and
-retain the pending fence. Other traversal errors remain refusals. No permission
-change is performed solely to admit a forward history receipt.
-
 Nested permission batches reconcile directory lineage only from the batch's
 recorded mode transitions and each verified applied inode. Preflight derives
 the expected current modes from Applied/Undone status, including older stored
@@ -1609,3 +1600,12 @@ explicit barrier rather than a partial inverse that silently omits that root.
 Ownership inverse policy matches the forward guard: privileged regular files
 refuse during admission/preflight, before pending or effects; owned setgid
 directories remain eligible with exact identity, group and lineage checks.
+
+If a mode inverse explicitly restores readable/searchable permissions on an
+unreadable directory with recorded lineage, preflight checks its exact root
+and attribute but defers traversal. Durable pending intent precedes the actual
+requested mode change, then complete inventory validation is mandatory before
+completion. On validation failure, restore the prior mode only while root
+identity/revision and the just-written mode still match; report Partial and
+retain the pending fence. Other traversal errors remain refusals. No permission
+change is performed solely to admit a forward history receipt.
