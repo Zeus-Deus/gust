@@ -151,7 +151,8 @@ impl MountInfo {
         while let Some(start) = pending.pop() {
             let mut current = start;
             let mut unresolved = false;
-            // Follow only a unique overmount chain at this exact point.
+            // Absolute lookup starts at the process's held root, not its cover.
+            // Root stacks are ambiguous without that anchor; only descend elsewhere.
             loop {
                 let record = &records[current];
                 let covering = children
@@ -159,7 +160,7 @@ impl MountInfo {
                     .and_then(|groups| groups.get(&record.mount_point));
                 match covering.map(Vec::as_slice) {
                     None => break,
-                    Some([child]) => current = *child,
+                    Some([child]) if current != root => current = *child,
                     _ => {
                         ambiguous.push(record.mount_point.clone());
                         unresolved = true;
