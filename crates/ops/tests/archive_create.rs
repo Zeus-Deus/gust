@@ -333,7 +333,7 @@ fn all_formats_keep_admitted_file_directory_and_link_timestamps() {
     names.push("stamp-link".into());
     let stamp = rustix::fs::Timespec {
         tv_sec: 1_700_000_123,
-        tv_nsec: 456_789_100,
+        tv_nsec: 456_789_123,
     };
     let times = rustix::fs::Timestamps {
         last_access: stamp,
@@ -356,7 +356,7 @@ fn all_formats_keep_admitted_file_directory_and_link_timestamps() {
         .unwrap();
     }
     for (format, extension, nsec) in [
-        (ArchiveFormat::TarZstd, "tar.zst", 456_789_100),
+        (ArchiveFormat::TarZstd, "tar.zst", 456_789_123),
         (ArchiveFormat::Zip, "zip", 0),
         (ArchiveFormat::SevenZip, "7z", 456_789_100),
     ] {
@@ -378,4 +378,68 @@ fn all_formats_keep_admitted_file_directory_and_link_timestamps() {
             assert_eq!(nanoseconds, nsec, "{extension}");
         }
     }
+}
+
+fn unsupported_date_refuses_before_any_payload(format: ArchiveFormat, seconds: i64) {
+    let f = Fixture::new();
+    let source = f.0.join("source");
+    std::fs::write(source.join("a-first"), b"payload must not stream").unwrap();
+    let invalid = source.join("z-date");
+    std::fs::write(&invalid, b"keep source").unwrap();
+    let stamp = rustix::fs::Timespec {
+        tv_sec: seconds,
+        tv_nsec: 123_456_789,
+    };
+    let times = rustix::fs::Timestamps {
+        last_access: stamp,
+        last_modification: stamp,
+    };
+    let (parent, name) = gust_ops::resolve_parent(&invalid).unwrap();
+    rustix::fs::utimensat(
+        parent.as_fd(),
+        name,
+        &times,
+        rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+    )
+    .unwrap();
+    assert_eq!(
+        gust_ops::FileIdentity::of_path(&invalid).unwrap().mtime,
+        seconds
+    );
+    let destination = f.0.join("unused.archive");
+    let mut callbacks = Vec::new();
+    let result = io::create_with(
+        &source,
+        &["a-first".into(), "z-date".into()],
+        &destination,
+        format,
+        None,
+        &CancelToken::new(),
+        &mut |phase, _, bytes| callbacks.push((phase, bytes)),
+    );
+    assert_eq!(
+        result,
+        Err(ArchiveError::UnsupportedTimestamp {
+            format,
+            member: "z-date".into(),
+            seconds,
+            nanoseconds: 123_456_789
+        })
+    );
+    assert!(callbacks.is_empty(), "payload started: {callbacks:?}");
+    assert!(!destination.exists());
+    assert_eq!(std::fs::read(invalid).unwrap(), b"keep source");
+    assert_eq!(
+        std::fs::read_dir(&f.0).unwrap().count(),
+        1,
+        "no staging was admitted"
+    );
+}
+#[test]
+fn negative_7z_date_is_typed_before_payload_streaming() {
+    unsupported_date_refuses_before_any_payload(ArchiveFormat::SevenZip, -1);
+}
+#[test]
+fn wide_zip_date_is_typed_before_payload_streaming() {
+    unsupported_date_refuses_before_any_payload(ArchiveFormat::Zip, 4_294_967_296);
 }

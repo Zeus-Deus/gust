@@ -321,7 +321,7 @@ fn write_archive() -> Result<(), ()> {
                     archive_entry_set_mode(entry.0, member.mode & !0o6000);
                     archive_entry_set_size(entry.0, member.size as i64);
                     if let Some((seconds, nanoseconds)) = member.mtime {
-                        if nanoseconds >= 1_000_000_000 {
+                        if !request.format.supports_timestamp(seconds, nanoseconds) {
                             return Err(());
                         }
                         archive_entry_set_mtime(entry.0, seconds, nanoseconds.into());

@@ -967,6 +967,21 @@ redacted secret type and transported only on helper stdin, never argv, env,
 logs or files. Unsupported encryption modes fail explicitly. Multipart
 archives are outside this contract.
 
+### Archive writer date admission
+
+Creation validates every admitted member timestamp before creating staging or
+starting the writer/payload stream. `ArchiveError::UnsupportedTimestamp` carries
+the selected format, relative byte-path and exact source seconds/nanoseconds.
+No source date is clamped or discarded. Current supported ranges are inclusive:
+TAR+Zstd seconds `i64::MIN+1..=i64::MAX`, normalized nanoseconds; ZIP seconds
+`0..=2147483647`, normalized source nanoseconds with whole-second output; 7z
+seconds `0..=1833029933770`, with nanoseconds at the final second limited to
+`955161599` (100 ns output precision). The ZIP range is deliberately conservative
+across signed/unsigned 32-bit timestamp readers. TAR's minimum integer and
+negative 7z dates are excluded because the native path cannot preserve them.
+The helper applies the same bounds before each native header. Complete output
+timestamp comparison remains mandatory, including nanosecond precision.
+
 ### An owned new extraction folder
 
 `ArchiveRequest::ExtractIntoNew` carries the same fields as Extract, but its

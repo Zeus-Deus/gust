@@ -2,7 +2,7 @@
 use super::{
     io::{ArchiveError, ArchiveFormat, ArchivePassword, Extracted, PublicationObserver},
     jobs::ArchivePhase,
-    protocol::{self, Member, WriteFormat, WriteFrame, WriteReply, WriteRequest},
+    protocol::{self, Member, WriteFrame, WriteReply, WriteRequest},
     stage,
 };
 use crate::anchor::{DirHandle, FileIdentity};
@@ -183,6 +183,22 @@ pub(crate) fn create_recorded(
         }
     }
     let sources = inventory(&root, input.names, cancel, started)?;
+    for (path, source) in &sources {
+        let seconds = source.identity.mtime;
+        let nanoseconds = u32::try_from(source.identity.mtime_nsec).unwrap_or(u32::MAX);
+        if !input
+            .format
+            .writer_format()
+            .supports_timestamp(seconds, nanoseconds)
+        {
+            return Err(ArchiveError::UnsupportedTimestamp {
+                format: input.format,
+                member: path.clone(),
+                seconds,
+                nanoseconds,
+            });
+        }
+    }
     let (parent, destination_name) = crate::anchor::resolve_parent(input.destination)?;
     match parent.stat_child(&destination_name) {
         Ok(_) => return Err(ArchiveError::DestinationExists),
@@ -472,11 +488,7 @@ impl Writer {
             started,
         };
         let mut request = WriteRequest {
-            format: match format {
-                ArchiveFormat::TarZstd => WriteFormat::TarZstd,
-                ArchiveFormat::Zip => WriteFormat::Zip,
-                ArchiveFormat::SevenZip => WriteFormat::SevenZip,
-            },
+            format: format.writer_format(),
             password: password.map(|s| s.bytes().to_vec()).unwrap_or_default(),
         };
         let mut bytes = serde_json::to_vec(&request).map_err(std::io::Error::from)?;
@@ -615,6 +627,100 @@ mod tests {
     impl Drop for Fixture {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    #[test]
+    fn native_writer_bounds_and_sub_tick_precision_round_trip() {
+        let root = std::env::temp_dir().join(format!(
+            "gust-date-bounds-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let fixture = Fixture(root);
+        let cancel = CancelToken::new();
+        for (index, format) in [
+            ArchiveFormat::TarZstd,
+            ArchiveFormat::Zip,
+            ArchiveFormat::SevenZip,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (minimum, maximum) = format.creation_timestamp_range();
+            let wire = format.writer_format();
+            assert!(!wire.supports_timestamp(0, 1_000_000_000));
+            assert!(!wire.supports_timestamp(minimum.0 - 1, 0));
+            if maximum.1 < 999_999_999 {
+                assert!(!wire.supports_timestamp(maximum.0, maximum.1 + 1));
+            }
+            if maximum.0 != i64::MAX {
+                assert!(!wire.supports_timestamp(maximum.0 + 1, 0));
+            }
+            for (case, (seconds, nanoseconds)) in
+                [minimum, maximum, (1, 123)].into_iter().enumerate()
+            {
+                let path = fixture.0.join(format!("{index}-{case}.archive"));
+                let output = std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create_new(true)
+                    .open(&path)
+                    .unwrap();
+                let mut writer =
+                    Writer::open(&output, format, None, &cancel, Instant::now()).unwrap();
+                writer
+                    .send(
+                        &WriteFrame::Header(Member {
+                            name: b"member".to_vec(),
+                            mode: 0o100600,
+                            size: 0,
+                            link: None,
+                            hardlink: false,
+                            mtime: Some((seconds, nanoseconds)),
+                        }),
+                        &cancel,
+                    )
+                    .unwrap();
+                writer.send(&WriteFrame::EndMember, &cancel).unwrap();
+                writer.finish(&cancel).unwrap();
+                let read =
+                    super::super::io::enumerate(&path, &Default::default(), &cancel).unwrap();
+                let expected_nsec = match format {
+                    ArchiveFormat::TarZstd => nanoseconds,
+                    ArchiveFormat::Zip => 0,
+                    ArchiveFormat::SevenZip => nanoseconds / 100 * 100,
+                };
+                assert_eq!(read.len(), 1);
+                assert_eq!(read[0].mtime, Some((seconds, expected_nsec)), "{format:?}");
+            }
+            let path = fixture.0.join(format!("{index}-invalid.archive"));
+            let output = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .open(path)
+                .unwrap();
+            let mut writer = Writer::open(&output, format, None, &cancel, Instant::now()).unwrap();
+            assert!(
+                writer
+                    .send(
+                        &WriteFrame::Header(Member {
+                            name: b"member".to_vec(),
+                            mode: 0o100600,
+                            size: 0,
+                            link: None,
+                            hardlink: false,
+                            mtime: Some((minimum.0 - 1, 0))
+                        }),
+                        &cancel
+                    )
+                    .is_err(),
+                "helper must reject unsupported metadata before accepting payload"
+            );
         }
     }
     #[test]

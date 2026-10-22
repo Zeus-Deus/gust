@@ -31,6 +31,12 @@ pub enum ArchiveError {
     PasswordRequired,
     IncorrectPassword,
     DestinationExists,
+    UnsupportedTimestamp {
+        format: ArchiveFormat,
+        member: PathBuf,
+        seconds: i64,
+        nanoseconds: u32,
+    },
     Unsupported(String),
     Failed(String),
     Cancelled,
@@ -49,6 +55,14 @@ impl ArchiveError {
                 "Archives need a working bubblewrap and prlimit sandbox.".into()
             }
             Self::DestinationExists => "The destination already exists; choose a new name.".into(),
+            Self::UnsupportedTimestamp { format, member, .. } => {
+                let name = match format {
+                    ArchiveFormat::TarZstd => "TAR+Zstd",
+                    ArchiveFormat::Zip => "ZIP (1970–2038)",
+                    ArchiveFormat::SevenZip => "7z",
+                };
+                format!("{} has a date outside the supported {name} creation range; choose another archive format.", member.display())
+            }
             Self::PasswordRequired => "This archive needs a password.".into(),
             Self::IncorrectPassword => "The archive password was not accepted.".into(),
             Self::Unsupported(name) => format!("Gust cannot read {name} as an archive."),
@@ -115,6 +129,20 @@ pub enum ArchiveFormat {
     TarZstd,
     Zip,
     SevenZip,
+}
+impl ArchiveFormat {
+    pub(crate) fn writer_format(self) -> super::protocol::WriteFormat {
+        match self {
+            Self::TarZstd => super::protocol::WriteFormat::TarZstd,
+            Self::Zip => super::protocol::WriteFormat::Zip,
+            Self::SevenZip => super::protocol::WriteFormat::SevenZip,
+        }
+    }
+    /// Inclusive supported source timestamps; output precision is format-specific.
+    /// ZIP deliberately uses the common signed/unsigned 32-bit reader interval.
+    pub fn creation_timestamp_range(self) -> ((i64, u32), (i64, u32)) {
+        self.writer_format().timestamp_range()
+    }
 }
 
 pub(super) fn helper_path() -> Option<PathBuf> {
