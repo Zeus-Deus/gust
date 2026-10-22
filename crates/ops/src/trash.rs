@@ -11,6 +11,8 @@
 
 #[path = "trash_volume.rs"]
 mod volume;
+pub(crate) use volume::lineage::Binding as TrashLineageBinding;
+pub(crate) use volume::{authenticated_info, verify_info_original};
 pub use volume::{
     locations, select_location, RestoredReceipt, TrashLocation, TrashPartial, TrashReceipt,
 };

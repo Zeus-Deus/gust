@@ -1711,3 +1711,15 @@ renamed or replaced after initial admission refuses with retained intent,
 including receipts acquired while that parent was absent. Only the initially
 missing-parent branch may create parents; its terminal receipt always requires
 the existing caller history barrier.
+
+Validated directory lineage and native Trash information remain coherent via
+private, bounded revision certificates. A typed Trash history record binds the
+canonical data/info directories, exact Info identity/bytes and its data step.
+Before returning refreshed data to Trash, durable inverse pending precedes an
+exclusive certificate containing that already-admitted complete inventory.
+The original Info inode and bytes are never rewritten. Native listing and
+receipt acquisition accept an otherwise stale root revision only when this
+certificate, exact Info and the complete current inventory all match, including
+every descendant revision and mode. Untracked edits do not gain authority.
+Certificates use no-replace publication and remain retained; collisions,
+unreadable records and metadata limits refuse, with pending/evidence preserved.

@@ -1,4 +1,6 @@
 //! Descriptor-bound per-volume Trash and identity receipts.
+#[path = "trash_lineage.rs"]
+pub(crate) mod lineage;
 use super::{TrashDir, TrashEntry, TrashedItem};
 use crate::{
     anchor::{self, DirHandle, FileIdentity},
@@ -257,6 +259,39 @@ fn parse_info(
         identity,
     ))
 }
+pub(crate) fn authenticated_info(
+    parent: &DirHandle,
+    name: &OsStr,
+) -> io::Result<(FileIdentity, Vec<u8>)> {
+    let (_, identity, bytes) = open_info(parent, name)?;
+    Ok((identity, bytes))
+}
+pub(crate) fn verify_info_original(bytes: &[u8], base: &Path, original: &Path) -> io::Result<()> {
+    // Home paths are absolute, volume paths are relative to a bound topdir.
+    // A legacy record's exact original path establishes that relative root.
+    let raw = bytes
+        .split(|b| *b == b'\n')
+        .find_map(|line| line.strip_prefix(b"Path="))
+        .ok_or_else(|| invalid("Missing Trash path"))?;
+    let path = PathBuf::from(OsString::from_vec(decode(raw)?));
+    let topdir = if path.is_absolute() {
+        None
+    } else {
+        let mut root = original.to_path_buf();
+        for _ in path.components() {
+            root.pop();
+        }
+        Some(root)
+    };
+    let location = TrashLocation {
+        trash: TrashDir::at(base),
+        topdir,
+    };
+    if parse_info(bytes, &location)?.0 != original {
+        return Err(invalid("Legacy Trash original changed"));
+    }
+    Ok(())
+}
 impl TrashLocation {
     fn handles(&self, create: bool) -> io::Result<(DirHandle, DirHandle)> {
         let mounts = mounts()?;
@@ -451,7 +486,17 @@ impl TrashLocation {
             .get(&path)
             .ok_or_else(|| invalid("Missing Trash data"))?;
         if recorded.is_some_and(|id| !id.matches(&data)) {
-            return Err(invalid("Trash slot was replaced or changed"));
+            let binding = lineage::Binding::new(
+                self,
+                name,
+                FileIdentity::from_stat(&files.stat_self()?),
+                FileIdentity::from_stat(&info.stat_self()?),
+                info_id,
+                bytes.clone(),
+            );
+            if !binding.matches(&info, &tree, &mut 0)? {
+                return Err(invalid("Trash slot was replaced or changed"));
+            }
         }
         let receipt = TrashReceipt {
             item: TrashedItem {
@@ -617,6 +662,7 @@ impl TrashLocation {
         let mut out = Vec::new();
         let mut seen = 0usize;
         let mut metadata = 0usize;
+        let mut lineage_nodes = 0usize;
         for entry in rustix::fs::Dir::read_from(info.as_fd())? {
             seen += 1;
             if seen > 200_002 {
@@ -628,7 +674,7 @@ impl TrashLocation {
             };
             let name = OsStr::from_bytes(raw);
             let iname = info_name(name)?;
-            let Ok((_, _, bytes)) = open_info(&info, &iname) else {
+            let Ok((_, info_id, bytes)) = open_info(&info, &iname) else {
                 continue;
             };
             metadata = metadata.saturating_add(bytes.len());
@@ -642,7 +688,30 @@ impl TrashLocation {
                 continue;
             };
             if recorded.is_some_and(|id| !id.matches(&FileIdentity::from_stat(&stat))) {
-                continue;
+                let tree = history_tree::snapshot_at(
+                    &files,
+                    name,
+                    &self.trash.files.join(name),
+                    &CancelToken::new(),
+                )?;
+                lineage_nodes = lineage_nodes.saturating_add(tree.len());
+                metadata = tree.keys().fold(metadata, |total, path| {
+                    total.saturating_add(path.as_os_str().as_bytes().len() + 128)
+                });
+                if metadata > 32 * 1024 * 1024 || lineage_nodes > 200_000 {
+                    return Err(invalid("Trash listing exceeds lineage limit"));
+                }
+                let binding = lineage::Binding::new(
+                    self,
+                    name,
+                    FileIdentity::from_stat(&files.stat_self()?),
+                    FileIdentity::from_stat(&info.stat_self()?),
+                    info_id,
+                    bytes,
+                );
+                if !binding.matches(&info, &tree, &mut metadata)? {
+                    continue;
+                }
             }
             out.push(TrashEntry {
                 trashed_name: name.to_os_string(),
@@ -1069,10 +1138,25 @@ impl TrashReceipt {
         same_dir(&files, self.files_dir)?;
         same_dir(&info, self.info_dir)?;
         let (original, _, recorded) = parse_info(&self.info_bytes, &self.canonical)?;
-        if original != self.original || recorded.is_some_and(|id| !id.matches(&self.data)) {
+        if original != self.original {
             return Err(invalid("Trash receipt has invalid original binding"));
         }
+        if recorded.is_some_and(|id| !id.matches(&self.data))
+            && !self.lineage_binding().matches(&info, &self.tree, &mut 0)?
+        {
+            return Err(invalid("Trash receipt has no matching directory lineage"));
+        }
         Ok((files, info))
+    }
+    pub(crate) fn lineage_binding(&self) -> lineage::Binding {
+        lineage::Binding::new(
+            &self.canonical,
+            &self.name,
+            self.files_dir,
+            self.info_dir,
+            self.info,
+            self.info_bytes.clone(),
+        )
     }
     pub(crate) fn verify(&self, cancel: &CancelToken) -> io::Result<()> {
         let (files, info) = self.bindings()?;
@@ -1380,6 +1464,33 @@ mod tests {
             assert!(inventory_roots(&mounts)
                 .unwrap()
                 .contains(&PathBuf::from("/synthetic/home")));
+        }
+    }
+    #[test]
+    fn root_stacks_refuse_all_trash_paths_before_discovery() {
+        for kind in ["fuse.sshfs", "nfs4", "cifs"] {
+            for root_parent in [0, 1] {
+                for child in [false, true] {
+                    let mut rows = vec![(1, root_parent, "/", "ext4"), (2, 1, "/", "tmpfs")];
+                    if child {
+                        rows.push((3, 1, "/synthetic/remote", kind));
+                    } else {
+                        rows[0].3 = kind;
+                    }
+                    for reverse in [false, true] {
+                        let mounts = parse_mounts(&table(&rows, reverse)).unwrap();
+                        assert!(local_path(Path::new("/synthetic/remote/file"), &mounts).is_err());
+                        assert!(local_path(Path::new("/synthetic/local/file"), &mounts).is_err());
+                        assert!(inventory_roots(&mounts).is_err());
+                        SHARED_OPEN_PROBE.with(|probe| probe.set(Some(false)));
+                        let _ = candidates(Path::new("/synthetic/local"), &mounts);
+                        assert_eq!(
+                            SHARED_OPEN_PROBE.with(|probe| probe.replace(None)),
+                            Some(false)
+                        );
+                    }
+                }
+            }
         }
     }
     #[test]

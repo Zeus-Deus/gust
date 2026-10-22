@@ -358,6 +358,239 @@ fn restored_trash_root_excludes_retained_child_vault_across_reopen() {
         .to_string_lossy()
         .starts_with(".gust-undo-")));
 }
+fn refreshed_directory_cycle(
+    restoration: bool,
+) -> (
+    Fixture,
+    TrashLocation,
+    gust_ops::trash::TrashReceipt,
+    FileIdentity,
+    Vec<u8>,
+) {
+    refreshed_directory_cycle_with_legacy(restoration, false)
+}
+fn refreshed_directory_cycle_with_legacy(
+    restoration: bool,
+    legacy: bool,
+) -> (
+    Fixture,
+    TrashLocation,
+    gust_ops::trash::TrashReceipt,
+    FileIdentity,
+    Vec<u8>,
+) {
+    let f = Fixture::new();
+    let location = f.location();
+    let folder = f.0.join("work/tree");
+    fs::create_dir(&folder).unwrap();
+    fs::write(folder.join("before"), b"original").unwrap();
+    let mut history = f.history();
+    if !restoration {
+        let renamed =
+            gust_ops::attrs::rename_recorded(&folder.join("before"), OsStr::new("after")).unwrap();
+        history.record_renames("Rename child", &[renamed]).unwrap();
+    }
+    let receipt = location.trash_path(&folder, &cancel()).unwrap();
+    let info = FileIdentity::of_path(&receipt.item.info_file).unwrap();
+    let bytes = fs::read(&receipt.item.info_file).unwrap();
+    if restoration {
+        let restored = location.restore(&receipt, &cancel()).unwrap();
+        history
+            .record_restored("Restore tree", &[restored])
+            .unwrap();
+        let renamed =
+            gust_ops::attrs::rename_recorded(&folder.join("before"), OsStr::new("after")).unwrap();
+        history.record_renames("Rename child", &[renamed]).unwrap();
+    } else {
+        history
+            .record_trash("Trash tree", std::slice::from_ref(&receipt))
+            .unwrap();
+        history.undo(&cancel()).unwrap();
+    }
+    drop(history);
+    if legacy {
+        let store = f.0.join("state/history.json");
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&store).unwrap()).unwrap();
+        for entry in value["records"].as_array_mut().unwrap() {
+            entry.as_object_mut().unwrap().remove("native_trash");
+        }
+        fs::write(store, serde_json::to_vec(&value).unwrap()).unwrap();
+    }
+    let mut history = f.history();
+    history.undo(&cancel()).unwrap();
+    drop(history);
+    let mut history = f.history();
+    if restoration {
+        history.undo(&cancel()).unwrap();
+    } else {
+        history.redo(&cancel()).unwrap();
+        drop(history);
+        history = f.history();
+        history.redo(&cancel()).unwrap();
+    }
+    assert_eq!(
+        FileIdentity::of_path(&receipt.item.info_file).unwrap(),
+        info
+    );
+    assert_eq!(fs::read(&receipt.item.info_file).unwrap(), bytes);
+    drop(history);
+    (f, location, receipt, info, bytes)
+}
+#[test]
+fn trash_directory_lineage_remains_native_acquirable_after_history_reopen() {
+    let (_f, location, old, info, bytes) = refreshed_directory_cycle(false);
+    assert_eq!(
+        location.list().unwrap().len(),
+        1,
+        "validated Trash lineage must remain visible"
+    );
+    let receipt = location
+        .receipt_named(&old.item.trashed_name, &cancel())
+        .unwrap();
+    location.restore(&receipt, &cancel()).unwrap();
+    assert_eq!(
+        fs::read(old.item.original.join("after")).unwrap(),
+        b"original"
+    );
+    assert_eq!(
+        info,
+        FileIdentity::of_path(
+            &location
+                .trash
+                .info
+                .read_dir()
+                .unwrap()
+                .filter_map(Result::ok)
+                .find(|entry| entry.path().join("info").exists())
+                .unwrap()
+                .path()
+                .join("info")
+        )
+        .unwrap()
+    );
+    assert_eq!(bytes, receipt_bytes_after_restore(&location));
+}
+fn receipt_bytes_after_restore(location: &TrashLocation) -> Vec<u8> {
+    let retained = fs::read_dir(&location.trash.info)
+        .unwrap()
+        .filter_map(Result::ok)
+        .find(|entry| entry.path().join("info").exists())
+        .unwrap();
+    fs::read(retained.path().join("info")).unwrap()
+}
+#[test]
+fn restored_directory_lineage_remains_native_acquirable_after_history_reopen() {
+    let (_f, location, old, _, _) = refreshed_directory_cycle(true);
+    assert_eq!(
+        location.list().unwrap().len(),
+        1,
+        "validated Restore lineage must remain visible"
+    );
+    let receipt = location
+        .receipt_named(&old.item.trashed_name, &cancel())
+        .unwrap();
+    location.restore(&receipt, &cancel()).unwrap();
+    assert_eq!(
+        fs::read(old.item.original.join("before")).unwrap(),
+        b"original"
+    );
+}
+#[test]
+fn native_refreshed_lineage_rejects_untracked_changes() {
+    for kind in 0..3 {
+        let (_f, location, old, _, _) = refreshed_directory_cycle(false);
+        let data = location.trash.files.join(&old.item.trashed_name);
+        match kind {
+            0 => fs::write(data.join("after"), b"later work").unwrap(),
+            1 => fs::write(data.join("new"), b"later work").unwrap(),
+            _ => fs::write(&old.item.info_file, b"later record").unwrap(),
+        }
+        assert!(location
+            .receipt_named(&old.item.trashed_name, &cancel())
+            .is_err());
+        assert!(location.list().unwrap().is_empty());
+        assert!(data.exists());
+        assert!(old.item.info_file.exists());
+    }
+}
+#[test]
+fn legacy_typed_trash_inventory_keeps_its_native_binding_across_reopen() {
+    for restoration in [false, true] {
+        let (_f, location, old, _, _) = refreshed_directory_cycle_with_legacy(restoration, true);
+        assert_eq!(location.list().unwrap().len(), 1);
+        let receipt = location
+            .receipt_named(&old.item.trashed_name, &cancel())
+            .unwrap();
+        location.restore(&receipt, &cancel()).unwrap();
+    }
+}
+#[test]
+fn changed_lineage_certificate_never_adopts_data_or_replaces_evidence() {
+    let (f, location, old, info, bytes) = refreshed_directory_cycle(false);
+    let receipt = location
+        .receipt_named(&old.item.trashed_name, &cancel())
+        .unwrap();
+    let certificate = fs::read_dir(location.trash.info.join(".gust-lineage"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    fs::write(&certificate, b"later certificate").unwrap();
+    assert!(location.restore(&receipt, &cancel()).is_err());
+    assert!(location
+        .receipt_named(&old.item.trashed_name, &cancel())
+        .is_err());
+    assert!(location.list().is_err());
+    let mut history = f.history();
+    history.undo(&cancel()).unwrap();
+    assert!(history.redo(&cancel()).is_err());
+    drop(history);
+    let mut history = f.history();
+    assert!(history
+        .entries()
+        .iter()
+        .any(|entry| entry.status == gust_ops::history::HistoryStatus::Interrupted));
+    assert!(matches!(
+        history.undo(&cancel()),
+        Err(HistoryError::Barrier(_))
+    ));
+    assert_eq!(
+        fs::read(old.item.original.join("after")).unwrap(),
+        b"original"
+    );
+    assert_eq!(fs::read(&certificate).unwrap(), b"later certificate");
+    assert_eq!(FileIdentity::of_path(&old.item.info_file).unwrap(), info);
+    assert_eq!(fs::read(&old.item.info_file).unwrap(), bytes);
+}
+#[test]
+fn retained_lineage_limit_fences_before_data_returns_to_trash() {
+    let (f, location, old, info, bytes) = refreshed_directory_cycle(false);
+    let mut history = f.history();
+    history.undo(&cancel()).unwrap();
+    history.undo(&cancel()).unwrap();
+    history.redo(&cancel()).unwrap();
+    let certificates = location.trash.info.join(".gust-lineage");
+    for i in 0..4095 {
+        fs::write(certificates.join(format!("retained-{i}")), b"").unwrap();
+    }
+    assert!(history.redo(&cancel()).is_err());
+    drop(history);
+    assert!(f
+        .history()
+        .entries()
+        .iter()
+        .any(|entry| entry.status == gust_ops::history::HistoryStatus::Interrupted));
+    assert_eq!(
+        fs::read(old.item.original.join("after")).unwrap(),
+        b"original"
+    );
+    assert!(!location.trash.files.join(&old.item.trashed_name).exists());
+    assert_eq!(FileIdentity::of_path(&old.item.info_file).unwrap(), info);
+    assert_eq!(fs::read(&old.item.info_file).unwrap(), bytes);
+    assert_eq!(fs::read_dir(certificates).unwrap().count(), 4096);
+}
 #[test]
 fn history_occupied_original_and_info_refuse_before_any_step() {
     for occupied_info in [false, true] {
