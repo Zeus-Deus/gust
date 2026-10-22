@@ -111,6 +111,15 @@ def main():
         wait_for(lambda: command("get_property", "path") == str(media / name), name)
         checks.append(f"Opened {name!r}")
 
+    def expect_playing(name):
+        expect_file(name)
+        wait_for(lambda: not command("get_property", "pause"), f"{name} is not paused", timeout=3)
+        wait_for(lambda: command("get_property", "time-pos") is not None, f"{name} playback position")
+        before = command("get_property", "time-pos")
+        wait_for(lambda: command("get_property", "time-pos") > before + 0.4,
+                 f"{name} playback advances", timeout=3)
+        checks.append(f"Playback advances for {name!r}")
+
     def open_selected():
         nonlocal player
         key("Return")
@@ -121,6 +130,12 @@ def main():
             return f"PPid:\t{app.pid}\n" in status
         player = wait_for(lambda: [c for c in json.loads(run("hyprctl", "clients", "-j"))
                                   if owned_player(c)], "media window")[0]
+        # The window and IPC socket can precede mpv's startup key bindings.
+        wait_for(lambda: any(binding.get("key") == "RIGHT"
+                             and binding.get("cmd") == "playlist-next weak"
+                             and not binding.get("is_weak")
+                             for binding in command("get_property", "input-bindings")),
+                 "media navigation bindings")
         focus(f'pid:{player["pid"]}')
 
     def close_player():
@@ -172,12 +187,18 @@ def main():
         expect_file("40-video.mp4")
         screenshot("video.png")
         wait_for(lambda: command("get_property", "eof-reached"), "video stays open after ending")
+        key("Left")
+        expect_playing("30-audio.wav")
+        key("Right")
+        expect_playing("40-video.mp4")
+        wait_for(lambda: command("get_property", "eof-reached"), "video stays open after ending again")
         key("Right")
         expect_file(images[2])
         key("Right")
         expect_file(images[2])
         key("Left")
-        expect_file("40-video.mp4")
+        expect_playing("40-video.mp4")
+        screenshot("post-eof-video.png")
         close_player()
         key("slash")
         run("wtype", "image")

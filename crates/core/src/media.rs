@@ -53,6 +53,8 @@ impl Playlist {
             "--force-window=yes",
             "--image-display-duration=inf",
             "--keep-open=always",
+            // EOF must not carry an automatic pause into neighbouring media.
+            "--keep-open-pause=no",
             "--loop-playlist=no",
             "--shuffle=no",
             "--autocreate-playlist=no",

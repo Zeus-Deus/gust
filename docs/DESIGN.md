@@ -1094,6 +1094,7 @@ apply, and folders, programs and other documents are skipped. Left / Right
 select the previous / next file and stop at either end; Shift+Left / Right
 seek five seconds, Space pauses, Escape closes. Images stay up until the
 user navigates; completed audio/video stays open too.
+Finishing a clip does not pause playback of the next file.
 
 The model builds this snapshot from names and cached entry kinds only.
 On a worker, Gust streams a file-URI M3U playlist to mpv's stdin, avoiding
