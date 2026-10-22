@@ -1451,3 +1451,8 @@ Untrusted bytes (thumbnail decoding, archive listing) run under
 and a private output directory — or the feature is unavailable. Parent
 validates helper output through a held descriptor: regular file, size bound,
 expected format, no symlink/FIFO.
+
+With `/usr` bound read-only, both archive and thumbnail sandboxes map `/lib`
+to `usr/lib` and `/lib64` to `usr/lib64`. Preserve the host's `lib64` alias:
+Arch and Ubuntu place the ELF interpreter differently, and redirecting both
+aliases to `usr/lib` prevents sandboxed executables from starting on Ubuntu.

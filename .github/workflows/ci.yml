@@ -75,10 +75,13 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get -o Dir::Cache::archives="$RUNNER_TEMP/gust-apt-cache" \
             install -y --no-install-recommends \
-            just libarchive-tools libdbus-1-dev libwayland-dev \
+            bubblewrap gvfs-backends just libarchive-tools \
+            libdbus-1-dev libglib2.0-bin libwayland-dev util-linux \
             qt6-base-dev qt6-declarative-dev qt6-declarative-dev-tools
           test -x /usr/lib/qt6/bin/qmllint
           bsdtar --version
+          gio --help > /dev/null
+          test -f /usr/share/gvfs/mounts/smb.mount
           qmake6 -query QT_VERSION
 
       # Save after installation so a later compile failure still warms the cache.

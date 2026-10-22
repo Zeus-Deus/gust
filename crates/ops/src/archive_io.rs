@@ -176,7 +176,7 @@ pub fn list_command(path: &Path, sandbox: bool) -> std::io::Result<Command> {
         "usr/lib",
         "/lib",
         "--symlink",
-        "usr/lib",
+        "usr/lib64",
         "/lib64",
         "--symlink",
         "usr/bin",
