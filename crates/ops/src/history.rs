@@ -651,7 +651,9 @@ impl History {
                 return Err(HistoryError::IdentityUnknown(e.source.clone()));
             };
             if preexisting.contains(path) {
-                continue;
+                return Err(HistoryError::Unsupported(
+                    "A completed pre-existing destination needs a complete merge inverse or an explicit barrier.".into(),
+                ));
             }
             let mut nodes = Vec::new();
             for (p, id) in job
@@ -783,6 +785,24 @@ impl History {
         if record.entry.kind == HistoryKind::Barrier {
             return Err(HistoryError::Barrier(record.entry.id));
         }
+        // Derive current modes from the admitted transitions, not a fresh
+        // snapshot. This also repairs older stored batch lineage before the
+        // mandatory full preflight checks every identity/revision/key.
+        let modes: Vec<_> = record
+            .steps
+            .iter()
+            .filter_map(|step| match step {
+                Step::Attr {
+                    identity,
+                    before: Attr::Mode(before),
+                    after: Attr::Mode(after),
+                    ..
+                } => Some((*identity, if undo { *after } else { *before })),
+                _ => None,
+            })
+            .collect();
+        reconcile_mode_lineages(&mut record.steps, &modes);
+
         if record.entry.kind == HistoryKind::Trash && record.native_trash.is_empty() {
             record.native_trash = legacy_native_bindings(&record)?;
             self.store.records[index].native_trash = record.native_trash.clone();
@@ -857,6 +877,7 @@ impl History {
                 } => {
                     parent.open()?;
                     let file = open_attr(&path.path(), identity)?;
+                    check_attribute_write(&file, if undo { before } else { after })?;
                     if let Some(lineage) = lineage {
                         if !deferred_mode_lineage(&file, if undo { before } else { after })? {
                             verify_tree(&path.path(), lineage, cancel)?;
@@ -870,10 +891,12 @@ impl History {
                 }
             }
         }
+        self.store.records[index].steps = record.steps.clone();
         let mut touched = Vec::new();
         for i in indices {
             checkpoint(cancel)?;
             let mut step = self.store.records[index].steps[i].clone();
+            let mut verified_mode = None;
             match &mut step {
                 Step::Move {
                     present,
@@ -1057,6 +1080,9 @@ impl History {
                         if !identity.matches(&current) {
                             return Err(HistoryError::Changed(path.path()));
                         }
+                        if matches!(value, Attr::Mode(_)) {
+                            verified_mode = Some((*identity, current.mode));
+                        }
                         if let Some(lineage) = &mut next_lineage {
                             if let Some(root) =
                                 lineage.iter_mut().find(|node| node.relative.0.is_empty())
@@ -1100,6 +1126,9 @@ impl History {
                 }
             }
             self.store.records[index].steps[i] = step;
+            if let Some(mode) = verified_mode {
+                reconcile_mode_lineages(&mut self.store.records[index].steps, &[mode]);
+            }
             self.save()?;
         }
         self.store.cursor = if undo { index } else { index + 1 };
@@ -1446,6 +1475,7 @@ fn attr_step(
     let now = FileIdentity::of_path(path)?;
     verify_ident(path, id, &now)?;
     let file = open_attr(path, &now.into())?;
+    check_attribute_write(&file, &before)?;
     if read_attr(&file, &after)? != after {
         return Err(HistoryError::Changed(path.to_path_buf()));
     }
@@ -1511,7 +1541,17 @@ fn read_attr(file: &File, kind: &Attr) -> Result<Attr, HistoryError> {
         }
     })
 }
+fn check_attribute_write(file: &File, value: &Attr) -> Result<(), HistoryError> {
+    let mode = rustix::fs::fstat(file)?.st_mode;
+    if matches!(value, Attr::Owner(..)) && mode & 0o170000 == 0o100000 && mode & 0o6000 != 0 {
+        return Err(HistoryError::Unsupported(
+            "Privileged regular-file owner changes are refused.".into(),
+        ));
+    }
+    Ok(())
+}
 fn write_attr(file: &File, value: &Attr) -> Result<(), HistoryError> {
+    check_attribute_write(file, value)?;
     match value {
         Attr::Mode(mode) => {
             if metadata_only(file)? {
@@ -1531,11 +1571,6 @@ fn write_attr(file: &File, value: &Attr) -> Result<(), HistoryError> {
             }
         }
         Attr::Owner(uid, gid) => {
-            if rustix::fs::fstat(file)?.st_mode & 0o6000 != 0 {
-                return Err(HistoryError::Unsupported(
-                    "Privileged owner changes are refused.".into(),
-                ));
-            }
             let uid = Some(rustix::process::Uid::from_raw(*uid));
             let gid = Some(rustix::process::Gid::from_raw(*gid));
             if metadata_only(file)? {
@@ -1556,6 +1591,34 @@ fn write_attr(file: &File, value: &Attr) -> Result<(), HistoryError> {
         },
     }
     Ok(())
+}
+fn reconcile_mode_lineages(steps: &mut [Step], modes: &[(RecordedIdentity, u32)]) {
+    let key = |identity: &RecordedIdentity| {
+        (
+            identity.dev,
+            identity.ino,
+            identity.mtime,
+            identity.mtime_nsec,
+            identity.size,
+        )
+    };
+    let modes: BTreeMap<_, _> = modes
+        .iter()
+        .map(|(identity, mode)| (key(identity), *mode))
+        .collect();
+    for step in steps {
+        if let Step::Attr {
+            lineage: Some(lineage),
+            ..
+        } = step
+        {
+            for node in lineage {
+                if let Some(mode) = modes.get(&key(&node.identity)) {
+                    node.mode = (node.mode & !0o7777) | (mode & 0o7777);
+                }
+            }
+        }
+    }
 }
 
 fn verified_receipt_root(
