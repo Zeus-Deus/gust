@@ -612,6 +612,31 @@ never decodes an untrusted byte in Gust's own process.
 - A file named like audio that is not audio says "Cannot play: …" and
   shows no controls.
 
+### 6.9.2 Structured preview payloads (core)
+
+`structured::parse(bytes, format, window, limits, cancel)` returns plain-data,
+serializable text/table/tree payloads for Text, JSON, CSV, TSV and TOML.
+`compare` returns a bounded line diff. Payloads are text, never HTML, active
+links or commands. UTF-8 BOM is consumed; other BOM encodings are explicitly
+unsupported, invalid UTF-8 and binary input are distinct states. CSV/TSV use
+logical records (quoted delimiters/newlines and doubled quotes), not physical
+line splits. Row windows retain absolute zero-based row/line offsets and the
+total count of the bounded input; a truncated source never claims a complete
+file count. Byte/row/column/cell/node/depth/diff-work bounds are disclosed by
+name. Malformed structured input is Invalid, and an input cut at a byte bound
+is never presented as a fully validated document. Cancellation clears payloads.
+JSON node paths use escaped JSON pointers, separately from their display value.
+
+`structured::read_source(path, max_bytes, cancel)` is worker-only: no-follow,
+nonblocking open, regular files only, one extra byte to distinguish exact
+limits, metadata before/after and current-path identity checks. It returns
+`PreviewSource` with bytes, explicit truncation and nanosecond `FileStamp`
+(device/inode/size/mtime/ctime); `PreviewSource::parse` carries the read limit
+into the payload. Changed/replaced inputs are refused. These stamps are cache
+and stale-preview fences, not operation/Undo authority. Remote callers still
+need explicit opt-in and stall isolation; cancellation cannot interrupt a
+blocked kernel syscall. Existing Quick Look APIs remain compatibility paths.
+
 ## 6.10 Scoped content search (`:grep`)
 
 `:find` matches names; `:grep` matches *contents* (plan §2, §4). Both are

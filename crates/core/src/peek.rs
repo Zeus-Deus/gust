@@ -6,7 +6,6 @@
 
 use crate::mime::{category_for_name, Category};
 use std::ffi::OsStr;
-use std::io::Read;
 use std::path::Path;
 
 /// At most this much of a file is read for a text peek.
@@ -95,7 +94,7 @@ pub fn sanitise_line(raw: &[u8]) -> String {
     let mut out = String::with_capacity(raw.len());
     for chunk in raw.utf8_chunks() {
         for c in chunk.valid().chars() {
-            let bidi = matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}');
+            let bidi = matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{200e}' | '\u{200f}' | '\u{061c}');
             match c {
                 '\t' => out.push_str("    "),
                 // Control characters and bidi overrides become a visible dot
@@ -157,21 +156,42 @@ pub fn kind_words(name: &OsStr) -> String {
 
 /// Read a bounded text peek. Returns the lines and whether it was cut short.
 pub fn peek_text(path: &Path) -> Option<(Vec<String>, bool)> {
-    let f = std::fs::File::open(path).ok()?;
-    let mut buf = Vec::new();
-    f.take(MAX_PEEK_BYTES).read_to_end(&mut buf).ok()?;
-    // A NUL means this is not text after all, whatever the name says.
-    if buf.contains(&0) {
-        return None;
+    peek_text_with_cancel(path, &crate::CancelToken::new())
+}
+
+/// Worker-only compatibility text read with cancellation and exact bounds.
+pub fn peek_text_with_cancel(
+    path: &Path,
+    cancel: &crate::CancelToken,
+) -> Option<(Vec<String>, bool)> {
+    use crate::structured::{
+        read_source, PreviewFormat, PreviewLimits, PreviewPayload, PreviewState, PreviewWindow,
+    };
+    let source = read_source(path, MAX_PEEK_BYTES as usize, cancel).ok()?;
+    let limits = PreviewLimits {
+        max_bytes: MAX_PEEK_BYTES as usize,
+        max_rows: MAX_PEEK_LINES,
+        max_cell_bytes: MAX_PEEK_BYTES as usize,
+        ..PreviewLimits::default()
+    };
+    let result = source.parse(
+        PreviewFormat::Text,
+        PreviewWindow {
+            start: 0,
+            count: MAX_PEEK_LINES,
+        },
+        &limits,
+        cancel,
+    );
+    let truncated = match result.state {
+        PreviewState::Complete => false,
+        PreviewState::Truncated(_) => true,
+        _ => return None,
+    };
+    match result.payload? {
+        PreviewPayload::Text { lines, .. } => Some((lines, truncated)),
+        _ => None,
     }
-    let total_lines = buf.split(|b| *b == b'\n').count();
-    let lines: Vec<String> = buf
-        .split(|b| *b == b'\n')
-        .take(MAX_PEEK_LINES)
-        .map(sanitise_line)
-        .collect();
-    let truncated = total_lines > MAX_PEEK_LINES || buf.len() as u64 >= MAX_PEEK_BYTES;
-    Some((lines, truncated))
 }
 
 /// Look at one path and report what it is.
@@ -181,7 +201,7 @@ pub fn peek_text(path: &Path) -> Option<(Vec<String>, bool)> {
 pub fn peek(path: &Path) -> Peek {
     let name = path
         .file_name()
-        .map(|n| n.to_string_lossy().to_string())
+        .map(crate::location::escape_for_display)
         .unwrap_or_default();
     let link_meta = std::fs::symlink_metadata(path).ok();
     let is_link = link_meta
@@ -190,7 +210,7 @@ pub fn peek(path: &Path) -> Peek {
 
     if is_link {
         let target = std::fs::read_link(path)
-            .map(|t| t.to_string_lossy().to_string())
+            .map(|t| crate::location::escape_for_display(t.as_os_str()))
             .unwrap_or_else(|_| "?".into());
         use std::os::unix::fs::PermissionsExt;
         let mode = link_meta
