@@ -12,7 +12,7 @@
 //! check of the SSH key that device serves, written to known_hosts only
 //! when the user says yes.
 
-use crate::helper::{self, CallContext};
+use crate::helper::{self, CallContext, ErrorCode, RemoteError};
 use gust_core::lister::CancelToken;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -324,16 +324,29 @@ pub fn scan_host_keys_with_context(
     if lines.is_empty() {
         return Err("That device did not answer on SSH. Is SSH turned on there?".into());
     }
-    let mut fingerprints = Vec::new();
-    for l in &lines {
+    complete_scan(lines, ctx, started, fingerprint).map_err(|e| e.message)
+}
+
+fn complete_scan(
+    lines: Vec<String>,
+    ctx: &CallContext<'_>,
+    started: std::time::Instant,
+    mut fingerprint: impl FnMut(&str, &CallContext<'_>) -> Result<String, RemoteError>,
+) -> Result<ScannedKeys, RemoteError> {
+    let mut fingerprints = Vec::with_capacity(lines.len());
+    for line in &lines {
         let remaining = CallContext {
             cancel: ctx.cancel,
             timeout: ctx.timeout.saturating_sub(started.elapsed()),
         };
-        if let Some(fp) = fingerprint(l, &remaining) {
-            fingerprints.push(fp);
-        }
+        remaining.check()?;
+        fingerprints.push(fingerprint(line, &remaining)?);
     }
+    CallContext {
+        cancel: ctx.cancel,
+        timeout: ctx.timeout.saturating_sub(started.elapsed()),
+    }
+    .check()?;
     Ok(ScannedKeys {
         lines,
         fingerprints,
@@ -359,21 +372,50 @@ pub fn keyscan_lines(text: &str, host: &str) -> Vec<String> {
         .collect()
 }
 
-fn fingerprint(line: &str, ctx: &CallContext<'_>) -> Option<String> {
+fn fingerprint(line: &str, ctx: &CallContext<'_>) -> Result<String, RemoteError> {
     let mut command = Command::new("ssh-keygen");
-    command.args(["-l", "-f", "-"]);
-    let out = helper::run(command, line.as_bytes(), ctx).ok()?;
+    command.args(["-l", "-E", "sha256", "-f", "-"]);
+    fingerprint_command(command, line, ctx)
+}
+
+fn fingerprint_command(
+    command: Command,
+    line: &str,
+    ctx: &CallContext<'_>,
+) -> Result<String, RemoteError> {
+    let invalid = || RemoteError::new(ErrorCode::Protocol);
+    let out = helper::run(command, line.as_bytes(), ctx)?;
+    if !out.status.success() {
+        return Err(invalid());
+    }
     // "256 SHA256:abc… host (ED25519)"
-    let s = String::from_utf8_lossy(&out.stdout);
+    let s = std::str::from_utf8(&out.stdout).map_err(|_| invalid())?;
+    if s.lines().count() != 1 {
+        return Err(invalid());
+    }
     let mut f = s.split_whitespace();
-    let _bits = f.next()?;
-    let fp = f.next()?;
-    let kind = s.split_whitespace().last()?;
+    let bits = f.next().ok_or_else(invalid)?;
+    if !matches!(bits.parse::<u32>(), Ok(n) if n > 0) {
+        return Err(invalid());
+    }
+    let fp = f.next().ok_or_else(invalid)?;
+    let hash = fp.strip_prefix("SHA256:").ok_or_else(invalid)?;
+    if hash.len() != 43
+        || !hash
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'+' | b'/'))
+    {
+        return Err(invalid());
+    }
+    let kind = f
+        .last()
+        .and_then(|k| k.strip_prefix('(')?.strip_suffix(')'))
+        .filter(|k| !k.is_empty() && k.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-'))
+        .ok_or_else(invalid)?;
     // The key type on its own line above its hash: joined on one line, the
     // 50-character hash filled the dialog's width and "(ED25519)" wrapped
     // onto a line of its own, looking like a separate key.
-    let kind = kind.trim_start_matches('(').trim_end_matches(')');
-    Some(format!("{kind}\n{fp}"))
+    Ok(format!("{kind}\n{fp}"))
 }
 
 /// Record keys the user accepted. Appends; never rewrites the file.
@@ -473,6 +515,149 @@ pub fn remember_user(path: &Path, device: &str, user: &str) -> std::io::Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const FINGERPRINT: &str =
+        "256 SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA fixture (ED25519)";
+    fn fingerprint_fixture(script: &str, ctx: &CallContext<'_>) -> Result<String, RemoteError> {
+        let mut command = Command::new("sh");
+        command.args(["-c", script, "fixture", FINGERPRINT]);
+        fingerprint_command(command, "fixture ssh-ed25519 AAAA", ctx)
+    }
+    fn scanned_lines() -> Vec<String> {
+        vec!["key-one".into(), "key-two".into()]
+    }
+
+    #[test]
+    fn fingerprint_offerings_require_successful_nonblank_output_for_every_key() {
+        let cancel = CancelToken::new();
+        let ctx = CallContext {
+            cancel: &cancel,
+            timeout: Duration::from_secs(3),
+        };
+        let good = "printf '%s\\n' \"$1\"";
+        let complete = complete_scan(
+            scanned_lines(),
+            &ctx,
+            std::time::Instant::now(),
+            |_, remaining| fingerprint_fixture(good, remaining),
+        )
+        .unwrap();
+        assert_eq!(complete.lines.len(), 2);
+        assert_eq!(complete.fingerprints.len(), 2);
+        for bad in [
+            "exit 1",
+            "true",
+            "printf '%s\\n' malformed",
+            "printf '%s\\n%s\\n' \"$1\" \"$1\"",
+            "printf '%s\\n' \"$1\"; exit 7",
+        ] {
+            let mut calls = 0;
+            let error = complete_scan(
+                scanned_lines(),
+                &ctx,
+                std::time::Instant::now(),
+                |_, remaining| {
+                    calls += 1;
+                    fingerprint_fixture(if calls == 1 { good } else { bad }, remaining)
+                },
+            )
+            .unwrap_err();
+            assert_eq!(error.code, ErrorCode::Protocol);
+            assert_eq!(calls, 2);
+        }
+    }
+    #[test]
+    fn fingerprint_cancellation_after_keyscan_or_on_a_later_key_rejects_all_keys() {
+        for cancel_at in [0, 1, 2] {
+            let cancel = CancelToken::new();
+            if cancel_at == 0 {
+                cancel.cancel();
+            }
+            let ctx = CallContext {
+                cancel: &cancel,
+                timeout: Duration::from_secs(3),
+            };
+            let mut calls = 0;
+            let error = complete_scan(
+                scanned_lines(),
+                &ctx,
+                std::time::Instant::now(),
+                |_, remaining| {
+                    calls += 1;
+                    if calls == cancel_at {
+                        cancel.cancel();
+                    }
+                    fingerprint_fixture("printf '%s\\n' \"$1\"", remaining)
+                },
+            )
+            .unwrap_err();
+            assert_eq!(error.code, ErrorCode::Cancelled);
+            assert_eq!(calls, cancel_at);
+        }
+        // Cancellation after the final helper response still cannot publish
+        // a trust offer while the caller is closing its connection operation.
+        let cancel = CancelToken::new();
+        let ctx = CallContext {
+            cancel: &cancel,
+            timeout: Duration::from_secs(3),
+        };
+        let mut calls = 0;
+        let error = complete_scan(
+            scanned_lines(),
+            &ctx,
+            std::time::Instant::now(),
+            |_, remaining| {
+                let fp = fingerprint_fixture("printf '%s\\n' \"$1\"", remaining)?;
+                calls += 1;
+                if calls == 2 {
+                    cancel.cancel();
+                }
+                Ok(fp)
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.code, ErrorCode::Cancelled);
+    }
+    #[test]
+    fn fingerprint_budget_exhaustion_after_keyscan_and_on_a_later_helper_rejects_all_keys() {
+        let cancel = CancelToken::new();
+        let ctx = CallContext {
+            cancel: &cancel,
+            timeout: Duration::from_secs(1),
+        };
+        let error = complete_scan(
+            scanned_lines(),
+            &ctx,
+            std::time::Instant::now() - Duration::from_secs(2),
+            |_, _| panic!("expired keyscan budget started a fingerprint helper"),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, ErrorCode::Timeout);
+        let ctx = CallContext {
+            cancel: &cancel,
+            timeout: Duration::from_millis(150),
+        };
+        let mut calls = 0;
+        let error = complete_scan(
+            scanned_lines(),
+            &ctx,
+            std::time::Instant::now(),
+            |_, remaining| {
+                calls += 1;
+                fingerprint_fixture(
+                    if calls == 1 {
+                        "printf '%s\\n' \"$1\""
+                    } else {
+                        "exec sleep 30"
+                    },
+                    remaining,
+                )
+            },
+        )
+        .unwrap_err();
+        assert_eq!(calls, 2);
+        assert_eq!(error.code, ErrorCode::Timeout);
+    }
 
     const STATUS: &str = r#"{
       "BackendState": "Running",

@@ -166,7 +166,31 @@ pub(crate) fn run_borrowed(
         &|| ctx.cancel.is_cancelled(),
         false,
         &mut |_| None,
+        Completion::Terminate,
     )
+}
+
+/// SSHFS's successful starter hands off both a daemon in a new session and an
+/// SSH transport in the starter's group. Neither may be killed on acceptance.
+pub(crate) fn run_daemon_startup(
+    mut command: Command,
+    ctx: &CallContext<'_>,
+) -> Result<Output, RemoteError> {
+    run_inner(
+        &mut command,
+        &[],
+        ctx.timeout,
+        &|| ctx.cancel.is_cancelled(),
+        false,
+        &mut |_| None,
+        Completion::DaemonStartup,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum Completion {
+    Terminate,
+    DaemonStartup,
 }
 
 /// Interactive adapter for the existing phone question protocol. The callback
@@ -178,7 +202,15 @@ pub(crate) fn run_interactive(
     cancelled: &dyn Fn() -> bool,
     respond: &mut dyn FnMut(&[u8]) -> Option<Vec<u8>>,
 ) -> Result<Output, RemoteError> {
-    run_inner(command, input, timeout, cancelled, true, respond)
+    run_inner(
+        command,
+        input,
+        timeout,
+        cancelled,
+        true,
+        respond,
+        Completion::Terminate,
+    )
 }
 fn run_inner(
     command: &mut Command,
@@ -187,6 +219,7 @@ fn run_inner(
     cancelled: &dyn Fn() -> bool,
     interactive: bool,
     respond: &mut dyn FnMut(&[u8]) -> Option<Vec<u8>>,
+    completion: Completion,
 ) -> Result<Output, RemoteError> {
     let started = Instant::now();
     if cancelled() {
@@ -357,7 +390,14 @@ fn run_inner(
             let _ = rustix::event::poll(&mut fds, Some(&timespec));
         }
     }));
-    retire(owned);
+    if matches!(completion, Completion::DaemonStartup)
+        && matches!(&result, Ok(Ok(output)) if output.status.success())
+    {
+        // try_wait already reaped the starter; release its admission slot only.
+        drop(owned);
+    } else {
+        retire(owned);
+    }
     match result {
         Ok(result) => result,
         Err(panic) => std::panic::resume_unwind(panic),
@@ -367,6 +407,158 @@ fn run_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::net::{UnixListener, UnixStream};
+
+    // A daemon in a new session plus a transport in the starter's group, as in
+    // SSHFS. Only fixture-owned Unix sockets are used; no mount or SSH service.
+    const STARTER: &str = r#"
+import os, subprocess, sys, time
+transport = '''
+import os, socket, sys
+s = socket.socket(socket.AF_UNIX)
+s.settimeout(4)
+s.connect(sys.argv[1])
+s.sendall(sys.argv[2].encode())
+os.write(int(sys.argv[3]), b'R')
+os.close(int(sys.argv[3]))
+try:
+    while True:
+        data = s.recv(1)
+        if data != b'p': break
+        s.sendall(b'p')
+finally:
+    s.close()
+'''
+mode, address = sys.argv[1:]
+for role in (['t', 'd'] if mode == 'success' else ['t']):
+    r, w = os.pipe()
+    subprocess.Popen([sys.executable, '-c', transport, address, role, str(w)],
+        pass_fds=(w,), start_new_session=(role == 'd'),
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    os.close(w)
+    assert os.read(r, 1) == b'R'
+    os.close(r)
+if mode in ('timeout', 'cancel'): time.sleep(30)
+sys.exit(7 if mode == 'failure' else 0)
+"#;
+
+    struct StarterFixture {
+        root: std::path::PathBuf,
+        listener: UnixListener,
+    }
+    impl StarterFixture {
+        fn new(mode: &str) -> Self {
+            let root =
+                std::env::temp_dir().join(format!("gust-starter-{}-{mode}", std::process::id()));
+            std::fs::create_dir(&root).unwrap();
+            let listener = UnixListener::bind(root.join("socket")).unwrap();
+            listener.set_nonblocking(true).unwrap();
+            Self { root, listener }
+        }
+        fn command(&self, mode: &str) -> Command {
+            let mut command = Command::new("python3");
+            command
+                .args(["-c", STARTER, mode])
+                .arg(self.root.join("socket"));
+            command
+        }
+        fn accept(&self) -> UnixStream {
+            let started = Instant::now();
+            loop {
+                match self.listener.accept() {
+                    Ok((stream, _)) => {
+                        stream
+                            .set_read_timeout(Some(Duration::from_secs(1)))
+                            .unwrap();
+                        stream
+                            .set_write_timeout(Some(Duration::from_secs(1)))
+                            .unwrap();
+                        return stream;
+                    }
+                    Err(e)
+                        if e.kind() == std::io::ErrorKind::WouldBlock
+                            && started.elapsed() < Duration::from_secs(3) =>
+                    {
+                        std::thread::sleep(Duration::from_millis(5))
+                    }
+                    Err(e) => panic!("fixture connection: {e}"),
+                }
+            }
+        }
+    }
+    impl Drop for StarterFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+    fn responds(stream: &mut UnixStream) -> bool {
+        let mut role = [0];
+        let mut reply = [0];
+        let alive = stream.read_exact(&mut role).is_ok()
+            && stream.write_all(b"p").is_ok()
+            && stream.read_exact(&mut reply).is_ok()
+            && reply == *b"p";
+        // Both children exit on this owned protocol; even a failed assertion
+        // cannot leave a detached fixture daemon running indefinitely.
+        let _ = stream.write_all(b"q");
+        alive
+    }
+    #[test]
+    fn successful_daemon_startup_preserves_daemon_and_original_group_transport() {
+        let fixture = StarterFixture::new("success");
+        let output = run_daemon_startup(
+            fixture.command("success"),
+            &CallContext {
+                cancel: &CancelToken::new(),
+                timeout: Duration::from_secs(3),
+            },
+        );
+        let alive = [
+            responds(&mut fixture.accept()),
+            responds(&mut fixture.accept()),
+        ];
+        assert!(output.unwrap().status.success());
+        assert_eq!(alive, [true, true]);
+    }
+    #[test]
+    fn unsuccessful_or_interrupted_daemon_startup_terminates_transport() {
+        for mode in ["failure", "timeout", "cancel"] {
+            let fixture = StarterFixture::new(mode);
+            let command = fixture.command(mode);
+            let cancel = CancelToken::new();
+            let worker_cancel = cancel.clone();
+            let worker = std::thread::spawn(move || {
+                run_daemon_startup(
+                    command,
+                    &CallContext {
+                        cancel: &worker_cancel,
+                        timeout: if mode == "timeout" {
+                            Duration::from_millis(250)
+                        } else {
+                            Duration::from_secs(3)
+                        },
+                    },
+                )
+            });
+            let mut stream = fixture.accept();
+            if mode == "cancel" {
+                cancel.cancel();
+            }
+            let output = worker.join().unwrap();
+            assert!(!responds(&mut stream), "{mode} left transport alive");
+            match mode {
+                "failure" => assert_eq!(output.unwrap().status.code(), Some(7)),
+                _ => assert_eq!(
+                    output.err().unwrap().code,
+                    if mode == "cancel" {
+                        ErrorCode::Cancelled
+                    } else {
+                        ErrorCode::Timeout
+                    }
+                ),
+            }
+        }
+    }
     #[test]
     fn drains_both_pipes_and_bounds_descendant_held_pipe() {
         let token = CancelToken::new();

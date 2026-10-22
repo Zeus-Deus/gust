@@ -1503,3 +1503,12 @@ settings are removed from owned helpers so they cannot persist session secrets.
 receiver PIN through the same private request pipe; the default `localsend`
 adapter supplies no PIN. A rejected PIN is an actionable authentication result,
 never a request to change receiver settings or weaken TLS.
+
+Successful SSHFS daemon startup explicitly hands off the accepted filesystem and
+its SSH transport; normal helper retirement must not signal those descendants.
+Only a successful starter exit with drained pipes permits this handoff. Failed,
+cancelled or timed-out startup retains bounded process-group cleanup. Ordinary
+one-shot helpers still terminate leftover descendants even after a successful exit.
+Host-key scans offer keys for trust only when every key has a fingerprint. Any
+fingerprint helper failure, cancellation or shared-budget exhaustion rejects the
+whole scan; no undisplayed key may remain in a successful trust offer.
