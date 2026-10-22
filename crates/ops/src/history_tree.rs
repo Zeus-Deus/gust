@@ -20,6 +20,16 @@ pub(crate) fn snapshot(
     root: &Path,
     cancel: &CancelToken,
 ) -> io::Result<BTreeMap<PathBuf, FileIdentity>> {
+    let (parent, name) = anchor::resolve_parent(root)?;
+    snapshot_at(&parent, &name, root, cancel)
+}
+
+pub(crate) fn snapshot_at(
+    parent: &DirHandle,
+    name: &OsStr,
+    root: &Path,
+    cancel: &CancelToken,
+) -> io::Result<BTreeMap<PathBuf, FileIdentity>> {
     fn check(cancel: &CancelToken) -> io::Result<()> {
         if cancel.is_cancelled() {
             Err(io::Error::new(
@@ -83,9 +93,8 @@ pub(crate) fn snapshot(
         }
         Ok(())
     }
-    let (parent, name) = anchor::resolve_parent(root)?;
     let mut out = BTreeMap::new();
-    walk(&parent, &name, root, 0, &mut out, &mut 0, cancel)?;
+    walk(parent, name, root, 0, &mut out, &mut 0, cancel)?;
     Ok(out)
 }
 

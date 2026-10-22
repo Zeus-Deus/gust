@@ -282,3 +282,164 @@ fn folder_and_link_creation_refuse_symlinked_parents_and_occupied_names() {
         PathBuf::from("absent")
     );
 }
+
+#[test]
+fn permission_history_handles_owned_unreadable_files_and_directories() {
+    let f = Fixture::new();
+    let file = f.create(OsStr::new("file"));
+    let mut h = f.open();
+    std::fs::set_permissions(&file.path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let changed = attrs::set_modes(
+        std::slice::from_ref(&file.path),
+        attrs::ModeSpec::Exact(0o000),
+    );
+    assert!(changed.failed.is_empty());
+    h.record_modes("Unreadable", &changed.changed).unwrap();
+    h.undo(&CancelToken::new()).unwrap();
+    assert_eq!(
+        std::fs::metadata(&file.path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    h.redo(&CancelToken::new()).unwrap();
+    assert_eq!(
+        std::fs::metadata(&file.path).unwrap().permissions().mode() & 0o777,
+        0o0
+    );
+    let changed = attrs::set_modes(
+        std::slice::from_ref(&file.path),
+        attrs::ModeSpec::Exact(0o600),
+    );
+    h.record_modes("Readable", &changed.changed).unwrap();
+    h.undo(&CancelToken::new()).unwrap();
+    h.redo(&CancelToken::new()).unwrap();
+    let dir = f.0.join("work/dir");
+    std::fs::create_dir(&dir).unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let changed = attrs::set_modes(std::slice::from_ref(&dir), attrs::ModeSpec::Exact(0o000));
+    h.record_modes("Directory unreadable", &changed.changed)
+        .unwrap();
+    h.undo(&CancelToken::new()).unwrap();
+    h.redo(&CancelToken::new()).unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+}
+#[test]
+fn hard_link_tag_aliases_are_one_reversible_attribute_transition() {
+    let f = Fixture::new();
+    let file = f.create(OsStr::new("one"));
+    let alias = f.0.join("work/two");
+    std::fs::hard_link(&file.path, &alias).unwrap();
+    let paths = vec![file.path.clone(), alias.clone()];
+    let changes = gust_ops::tags::set_tags(&paths, gust_ops::tags::TagOp::Toggle(1));
+    assert_eq!(changes.changed.len(), 2);
+    let mut h = f.open();
+    h.record_tags("Two aliases", &changes.changed).unwrap();
+    h.undo(&CancelToken::new()).unwrap();
+    for path in &paths {
+        assert_eq!(gust_core::tags::read_raw(path).unwrap(), None);
+    }
+    drop(h);
+    let mut h = f.open();
+    assert_eq!(h.entries()[0].status, HistoryStatus::Undone);
+    h.redo(&CancelToken::new()).unwrap();
+    for path in &paths {
+        assert!(gust_core::tags::read_raw(path).unwrap().is_some());
+    }
+}
+#[test]
+fn real_new_extraction_receipt_survives_a_tracked_child_rename_round_trip() {
+    use gust_ops::archive::{
+        io::{self, ArchiveFormat},
+        jobs::{start_journalled, ArchiveRequest},
+    };
+    let f = Fixture::new();
+    let source = f.0.join("source");
+    std::fs::create_dir(&source).unwrap();
+    std::fs::write(source.join("before"), b"contents").unwrap();
+    let archive = f.0.join("input.zip");
+    io::create_with(
+        &source,
+        &["before".into()],
+        &archive,
+        ArchiveFormat::Zip,
+        None,
+        &CancelToken::new(),
+        &mut |_, _, _| {},
+    )
+    .unwrap();
+    let mut h = f.open();
+    let destination = f.0.join("work/out");
+    let mut job = start_journalled(
+        "extract",
+        ArchiveRequest::ExtractIntoNew {
+            archive,
+            destination: destination.clone(),
+            policy: Default::default(),
+            password: None,
+        },
+        gust_ops::Journal::new(f.0.join("state/journal")),
+    )
+    .unwrap();
+    let result = job.wait().result.unwrap().unwrap();
+    assert_eq!(
+        result.record.subtree_identities.last().unwrap().0,
+        destination
+    );
+    h.record_job("Extracted", &result.record).unwrap();
+    let renamed = attrs::rename_recorded(&destination.join("before"), OsStr::new("after")).unwrap();
+    h.record_renames("Renamed", &[renamed]).unwrap();
+    let undone = h.undo_many(2, &CancelToken::new());
+    assert!(undone.refusal.is_none(), "{undone:?}");
+    assert_eq!(undone.completed.len(), 2);
+    assert!(!destination.exists());
+}
+#[test]
+fn directory_attributes_reconcile_only_fully_undone_tracked_children() {
+    let f = Fixture::new();
+    let directory = f.0.join("work/dir");
+    std::fs::create_dir(&directory).unwrap();
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let changes = attrs::set_modes(
+        std::slice::from_ref(&directory),
+        attrs::ModeSpec::Exact(0o700),
+    );
+    let mut h = f.open();
+    h.record_modes("Directory mode", &changes.changed).unwrap();
+    let child = create::create_from_bytes(&directory, OsStr::new("child"), b"safe").unwrap();
+    h.record_created("Child", &[child]).unwrap();
+    let undone = h.undo_many(2, &CancelToken::new());
+    assert!(undone.refusal.is_none(), "{undone:?}");
+    assert_eq!(
+        std::fs::metadata(&directory).unwrap().permissions().mode() & 0o777,
+        0o755
+    );
+    let redone = h.redo_many(2, &CancelToken::new());
+    assert!(redone.refusal.is_none(), "{redone:?}");
+    assert_eq!(std::fs::read(directory.join("child")).unwrap(), b"safe");
+}
+
+#[test]
+fn directory_attribute_refresh_refuses_untracked_new_work() {
+    let f = Fixture::new();
+    let directory = f.0.join("work/dir");
+    std::fs::create_dir(&directory).unwrap();
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let changes = attrs::set_modes(
+        std::slice::from_ref(&directory),
+        attrs::ModeSpec::Exact(0o700),
+    );
+    let mut h = f.open();
+    h.record_modes("Directory mode", &changes.changed).unwrap();
+    let child = create::create_from_bytes(&directory, OsStr::new("child"), b"tracked").unwrap();
+    h.record_created("Child", &[child]).unwrap();
+    std::fs::write(directory.join("later"), b"new work").unwrap();
+    h.undo(&CancelToken::new()).unwrap();
+    assert!(matches!(
+        h.undo(&CancelToken::new()),
+        Err(HistoryError::Changed(_) | HistoryError::NewWork(_))
+    ));
+    assert_eq!(std::fs::read(directory.join("later")).unwrap(), b"new work");
+    assert_eq!(
+        std::fs::metadata(directory).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+}

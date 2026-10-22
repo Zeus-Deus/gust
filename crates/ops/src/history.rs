@@ -52,6 +52,11 @@ pub enum HistoryError {
     Barrier(String),
     Unsupported(String),
     Io(String),
+    Partial {
+        from: PathBuf,
+        at: PathBuf,
+        cause: String,
+    },
 }
 impl std::fmt::Display for HistoryError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -69,6 +74,12 @@ impl std::fmt::Display for HistoryError {
                 "Recovery is fenced by {id}; inspect the recorded intent before continuing."
             ),
             Self::Unsupported(s) | Self::Io(s) => f.write_str(s),
+            Self::Partial { from, at, cause } => write!(
+                f,
+                "Recovery changed names; inspect {} and {}: {cause}",
+                from.display(),
+                at.display()
+            ),
         }
     }
 }
@@ -152,6 +163,8 @@ enum Step {
         identity: RecordedIdentity,
         before: Attr,
         after: Attr,
+        #[serde(default)]
+        lineage: Option<Tree>,
     },
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -360,6 +373,7 @@ impl History {
         steps: Vec<Step>,
     ) -> Result<HistoryEntry, HistoryError> {
         self.fence()?;
+        let steps = normalize_attribute_aliases(steps)?;
         if label.is_empty()
             || label.len() > 4096
             || self.store.records.len() + self.store.retired.len() >= 1000
@@ -410,10 +424,12 @@ impl History {
             if id.size != c.len || id.mode & 0o170000 != 0o100000 {
                 return Err(HistoryError::Changed(c.path.clone()));
             }
+            #[cfg(test)]
+            run_hook(&BEFORE_ADMISSION_INVENTORY);
             steps.push(move_step(
                 &c.path,
                 None,
-                tree(&c.path, &CancelToken::new())?,
+                verified_receipt_root(&c.path, c.ident, c.len, id.mode)?,
             )?);
         }
         self.admit(label, HistoryKind::Create, steps)
@@ -452,10 +468,17 @@ impl History {
             {
                 return Err(HistoryError::Changed(c.link.clone()));
             }
+            #[cfg(test)]
+            run_hook(&BEFORE_ADMISSION_INVENTORY);
             steps.push(move_step(
                 &c.link,
                 None,
-                tree(&c.link, &CancelToken::new())?,
+                verified_receipt_root(
+                    &c.link,
+                    c.ident,
+                    c.target.as_os_str().as_bytes().len() as u64,
+                    id.mode,
+                )?,
             )?);
         }
         self.admit(label, HistoryKind::Create, steps)
@@ -691,8 +714,8 @@ impl History {
                                 .ok_or_else(|| HistoryError::IdentityUnknown(present.path()))?,
                         )
                     };
-                    parent.open()?;
-                    verify_tree(&from, tree, cancel)?;
+                    let held_parent = parent.open()?;
+                    verify_tree_at(&held_parent, &from, tree, cancel)?;
                     occupied.insert(from.clone());
                     if let Some(to) = to {
                         let (p, n) = anchor::resolve_parent(&to)?;
@@ -715,9 +738,13 @@ impl History {
                     identity,
                     before,
                     after,
+                    lineage,
                 } => {
                     parent.open()?;
                     let file = open_attr(&path.path(), identity)?;
+                    if let Some(lineage) = lineage {
+                        verify_tree(&path.path(), lineage, cancel)?;
+                    }
                     if read_attr(&file, if undo { after } else { before })?
                         != *(if undo { after } else { before })
                     {
@@ -818,7 +845,9 @@ impl History {
                     };
                     let source = source_parent.open()?;
                     let target = target_parent.open()?;
-                    verify_tree(&from, tree, cancel)?;
+                    verify_tree_at(&source, &from, tree, cancel)?;
+                    #[cfg(test)]
+                    run_hook(&BEFORE_INVERSE_RENAME);
                     anchor::rename_noreplace(
                         &source,
                         from.file_name()
@@ -834,7 +863,33 @@ impl History {
                             e.into()
                         }
                     })?;
-                    verify_tree(&to, tree, cancel)?;
+                    let moved = target
+                        .stat_child(
+                            to.file_name()
+                                .ok_or_else(|| HistoryError::IdentityUnknown(to.clone()))?,
+                        )
+                        .map(|stat| FileIdentity::from_stat(&stat))
+                        .map_err(|error| HistoryError::Partial {
+                            from: from.clone(),
+                            at: to.clone(),
+                            cause: error.to_string(),
+                        })?;
+                    if let Err(cause) = verify_tree_at(&target, &to, tree, cancel) {
+                        match restore_mismatching_move(&target, &to, &source, &from, &moved) {
+                            Ok(()) => {
+                                rustix::fs::fsync(source.as_fd())?;
+                                rustix::fs::fsync(target.as_fd())?;
+                                return Err(HistoryError::Changed(from));
+                            }
+                            Err(recovery) => {
+                                return Err(HistoryError::Partial {
+                                    from,
+                                    at: to,
+                                    cause: format!("{cause}; {recovery}"),
+                                })
+                            }
+                        }
+                    }
                     rustix::fs::fsync(source.as_fd())?;
                     rustix::fs::fsync(target.as_fd())?;
                     touched.extend([from, to]);
@@ -845,6 +900,7 @@ impl History {
                     identity,
                     before,
                     after,
+                    lineage,
                 } => {
                     self.store.pending = Some(Pending {
                         id: record.entry.id.clone(),
@@ -865,9 +921,18 @@ impl History {
                         return Err(HistoryError::Changed(path.path()));
                     }
                     write_attr(&file, value)?;
-                    file.sync_all()?;
+                    sync_attribute(&file, parent)?;
                     if read_attr(&file, value)? != *value {
                         return Err(HistoryError::Changed(path.path()));
+                    }
+                    if let Some(lineage) = lineage {
+                        let current = FileIdentity::from_stat(&rustix::fs::fstat(&file)?);
+                        if let Some(root) =
+                            lineage.iter_mut().find(|node| node.relative.0.is_empty())
+                        {
+                            root.identity = current.into();
+                            root.mode = current.mode;
+                        }
                     }
                 }
             }
@@ -892,12 +957,9 @@ impl History {
             .records
             .iter()
             .flat_map(|r| r.steps.iter())
-            .filter_map(|s| {
-                if let Step::Move { present, .. } = s {
-                    Some(present.path())
-                } else {
-                    None
-                }
+            .map(|s| match s {
+                Step::Move { present, .. } => present.path(),
+                Step::Attr { path, .. } => path.path(),
             })
             .collect();
         for parent in from.ancestors().skip(1) {
@@ -917,54 +979,43 @@ impl History {
     fn refresh_known_ancestors(&mut self, touched: &[PathBuf], cancel: &CancelToken) {
         for record in &mut self.store.records {
             for step in &mut record.steps {
-                if let Step::Move {
-                    present,
-                    restore,
-                    vault,
-                    tree,
-                    ..
-                } = step
-                {
-                    let root = if record.entry.status == HistoryStatus::Applied {
-                        present.path()
-                    } else {
-                        match restore
-                            .as_ref()
-                            .map(SavedPath::path)
-                            .or_else(|| vault.as_ref().map(|v| v.path.path().join("item")))
-                        {
-                            Some(p) => p,
-                            None => continue,
-                        }
-                    };
-                    if !touched.iter().any(|p| p != &root && p.starts_with(&root)) {
-                        continue;
+                match step {
+                    Step::Move {
+                        present,
+                        restore,
+                        vault,
+                        tree,
+                        ..
+                    } => {
+                        let root = if record.entry.status == HistoryStatus::Applied {
+                            present.path()
+                        } else {
+                            let Some(root) = restore
+                                .as_ref()
+                                .map(SavedPath::path)
+                                .or_else(|| vault.as_ref().map(|v| v.path.path().join("item")))
+                            else {
+                                continue;
+                            };
+                            root
+                        };
+                        refresh_lineage(tree, &root, touched, cancel);
                     }
-                    let Ok(now) = tree_at(&root, cancel) else {
-                        continue;
-                    };
-                    if now.len() != tree.len() {
-                        continue;
-                    }
-                    let consistent = tree.iter().zip(&now).all(|(a, b)| {
-                        a.relative == b.relative
-                            && a.identity.dev == b.identity.dev
-                            && a.identity.ino == b.identity.ino
-                            && a.mode == b.mode
-                            && (a.mode & 0o170000 == 0o040000 || a.identity == b.identity)
-                    });
-                    if consistent {
-                        for (a, b) in tree.iter_mut().zip(now) {
-                            let path = root.join(a.relative.path());
-                            if a.mode & 0o170000 == 0o040000
-                                && touched
-                                    .iter()
-                                    .any(|p| p.parent().is_some_and(|parent| parent == path))
+                    Step::Attr {
+                        path,
+                        identity,
+                        lineage: Some(lineage),
+                        ..
+                    } => {
+                        if refresh_lineage(lineage, &path.path(), touched, cancel) {
+                            if let Some(root) =
+                                lineage.iter().find(|node| node.relative.0.is_empty())
                             {
-                                a.identity = b.identity;
+                                *identity = root.identity;
                             }
                         }
                     }
+                    _ => {}
                 }
             }
         }
@@ -1007,7 +1058,9 @@ fn tree(root: &Path, cancel: &CancelToken) -> Result<Tree, HistoryError> {
     tree_at(root, cancel)
 }
 fn verify_tree(root: &Path, expected: &Tree, cancel: &CancelToken) -> Result<(), HistoryError> {
-    let current = tree(root, cancel)?;
+    compare_tree(root, expected, tree(root, cancel)?)
+}
+fn compare_tree(root: &Path, expected: &Tree, current: Tree) -> Result<(), HistoryError> {
     let map: BTreeMap<_, _> = expected.iter().map(|n| (&n.relative.0, n)).collect();
     if expected.is_empty() {
         return Err(HistoryError::IdentityUnknown(root.to_path_buf()));
@@ -1030,7 +1083,8 @@ fn verify_tree(root: &Path, expected: &Tree, cancel: &CancelToken) -> Result<(),
     }
     Ok(())
 }
-fn move_step(present: &Path, restore: Option<&Path>, tree: Tree) -> Result<Step, HistoryError> {
+fn move_step(present: &Path, restore: Option<&Path>, mut tree: Tree) -> Result<Step, HistoryError> {
+    tree.sort_by(|a, b| a.relative.0.cmp(&b.relative.0));
     if let Some(restore) = restore {
         let source_dev = FileIdentity::of_path(present)?.dev;
         let target = Parent::of(
@@ -1071,6 +1125,19 @@ fn attr_step(
     if read_attr(&file, &after)? != after {
         return Err(HistoryError::Changed(path.to_path_buf()));
     }
+    let lineage = if now.mode & 0o170000 == 0o040000 && !metadata_only(&file)? {
+        let observed = tree(path, &CancelToken::new())?;
+        let root = observed
+            .iter()
+            .find(|node| node.relative.0.is_empty())
+            .ok_or_else(|| HistoryError::IdentityUnknown(path.to_path_buf()))?;
+        if !root.identity.matches(&now) || root.mode != now.mode {
+            return Err(HistoryError::Changed(path.to_path_buf()));
+        }
+        Some(observed)
+    } else {
+        None
+    };
     Ok(Step::Attr {
         path: SavedPath::new(path),
         parent: Parent::of(
@@ -1080,16 +1147,21 @@ fn attr_step(
         identity: now.into(),
         before,
         after,
+        lineage,
     })
 }
 fn open_attr(path: &Path, expected: &RecordedIdentity) -> Result<File, HistoryError> {
     let (parent, name) = anchor::resolve_parent(path)?;
-    let file = File::from(rustix::fs::openat(
-        parent.as_fd(),
-        name,
-        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
-        Mode::empty(),
-    )?);
+    let flags = OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
+    let fd = match rustix::fs::openat(parent.as_fd(), &name, OFlags::RDONLY | flags, Mode::empty())
+    {
+        Ok(fd) => fd,
+        Err(rustix::io::Errno::ACCESS) => {
+            rustix::fs::openat(parent.as_fd(), &name, OFlags::PATH | flags, Mode::empty())?
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let file = File::from(fd);
     let now = FileIdentity::from_stat(&rustix::fs::fstat(&file)?);
     if !expected.matches(&now) || !matches!(now.mode & 0o170000, 0o100000 | 0o040000) {
         return Err(HistoryError::Changed(path.to_path_buf()));
@@ -1117,18 +1189,36 @@ fn read_attr(file: &File, kind: &Attr) -> Result<Attr, HistoryError> {
 }
 fn write_attr(file: &File, value: &Attr) -> Result<(), HistoryError> {
     match value {
-        Attr::Mode(mode) => rustix::fs::fchmod(file, Mode::from_bits_truncate(*mode))?,
+        Attr::Mode(mode) => {
+            if metadata_only(file)? {
+                use std::os::fd::AsRawFd;
+                // This kernel-owned magic link addresses our still-held O_PATH
+                // descriptor. It grants no read access and cannot adopt a new
+                // object at the original name. rustix's chmodat implementation
+                // does not yet support fchmodat2/AT_EMPTY_PATH.
+                rustix::fs::chmodat(
+                    rustix::fs::CWD,
+                    format!("/proc/self/fd/{}", file.as_raw_fd()),
+                    Mode::from_bits_truncate(*mode),
+                    rustix::fs::AtFlags::empty(),
+                )?;
+            } else {
+                rustix::fs::fchmod(file, Mode::from_bits_truncate(*mode))?;
+            }
+        }
         Attr::Owner(uid, gid) => {
             if rustix::fs::fstat(file)?.st_mode & 0o6000 != 0 {
                 return Err(HistoryError::Unsupported(
                     "Privileged owner changes are refused.".into(),
                 ));
             }
-            rustix::fs::fchown(
-                file,
-                Some(rustix::process::Uid::from_raw(*uid)),
-                Some(rustix::process::Gid::from_raw(*gid)),
-            )?;
+            let uid = Some(rustix::process::Uid::from_raw(*uid));
+            let gid = Some(rustix::process::Gid::from_raw(*gid));
+            if metadata_only(file)? {
+                rustix::fs::chownat(file, "", uid, gid, rustix::fs::AtFlags::EMPTY_PATH)?;
+            } else {
+                rustix::fs::fchown(file, uid, gid)?;
+            }
         }
         Attr::Tags(Some(bytes)) => rustix::fs::fsetxattr(
             file,
@@ -1142,6 +1232,194 @@ fn write_attr(file: &File, value: &Attr) -> Result<(), HistoryError> {
         },
     }
     Ok(())
+}
+
+fn verified_receipt_root(
+    path: &Path,
+    ident: crate::attrs::Ident,
+    size: u64,
+    mode: u32,
+) -> Result<Tree, HistoryError> {
+    let expected = vec![TreeNode {
+        relative: SavedPath::new(Path::new("")),
+        identity: RecordedIdentity {
+            dev: ident.dev,
+            ino: ident.ino,
+            mtime: ident.mtime,
+            mtime_nsec: ident.mtime_nsec,
+            size,
+        },
+        mode,
+    }];
+    verify_tree(path, &expected, &CancelToken::new())?;
+    Ok(expected)
+}
+fn normalize_attribute_aliases(steps: Vec<Step>) -> Result<Vec<Step>, HistoryError> {
+    let mut out: Vec<Step> = Vec::new();
+    let mut seen = BTreeMap::new();
+    for step in steps {
+        if let Step::Attr {
+            path,
+            identity,
+            before,
+            after,
+            ..
+        } = &step
+        {
+            let kind = match before {
+                Attr::Mode(_) => 0,
+                Attr::Owner(..) => 1,
+                Attr::Tags(_) => 2,
+            };
+            let key = (identity.dev, identity.ino, kind);
+            if let Some(index) = seen.get(&key) {
+                if let Step::Attr {
+                    identity: other,
+                    before: old,
+                    after: new,
+                    ..
+                } = &out[*index]
+                {
+                    if identity != other || before != old || after != new {
+                        return Err(HistoryError::Unsupported(format!(
+                            "Attribute aliases disagree at {}",
+                            path.path().display()
+                        )));
+                    }
+                    continue;
+                }
+            }
+            seen.insert(key, out.len());
+        }
+        out.push(step);
+    }
+    Ok(out)
+}
+fn verify_tree_at(
+    parent: &DirHandle,
+    root: &Path,
+    expected: &Tree,
+    cancel: &CancelToken,
+) -> Result<(), HistoryError> {
+    let name = root
+        .file_name()
+        .ok_or_else(|| HistoryError::IdentityUnknown(root.to_path_buf()))?;
+    let snapshot =
+        crate::history_tree::snapshot_at(parent, name, root, cancel).map_err(|error| {
+            if cancel.is_cancelled() {
+                HistoryError::Cancelled
+            } else {
+                HistoryError::Io(error.to_string())
+            }
+        })?;
+    let current = snapshot
+        .into_iter()
+        .map(|(path, id)| {
+            Ok(TreeNode {
+                relative: SavedPath::new(
+                    path.strip_prefix(root)
+                        .map_err(|_| HistoryError::IdentityUnknown(path.clone()))?,
+                ),
+                identity: id.into(),
+                mode: id.mode,
+            })
+        })
+        .collect::<Result<_, HistoryError>>()?;
+    compare_tree(root, expected, current)
+}
+fn restore_mismatching_move(
+    target: &DirHandle,
+    to: &Path,
+    source: &DirHandle,
+    from: &Path,
+    moved: &FileIdentity,
+) -> Result<(), HistoryError> {
+    let to_name = to
+        .file_name()
+        .ok_or_else(|| HistoryError::IdentityUnknown(to.to_path_buf()))?;
+    let from_name = from
+        .file_name()
+        .ok_or_else(|| HistoryError::IdentityUnknown(from.to_path_buf()))?;
+    if !moved.matches(&FileIdentity::from_stat(&target.stat_child(to_name)?)) {
+        return Err(HistoryError::Changed(to.to_path_buf()));
+    }
+    #[cfg(test)]
+    run_hook(&BEFORE_INVERSE_RECOVERY);
+    anchor::rename_noreplace(target, to_name, source, from_name)?;
+    if !moved.matches(&FileIdentity::from_stat(&source.stat_child(from_name)?)) {
+        return Err(HistoryError::Changed(from.to_path_buf()));
+    }
+    Ok(())
+}
+fn refresh_lineage(
+    tree: &mut Tree,
+    root: &Path,
+    touched: &[PathBuf],
+    cancel: &CancelToken,
+) -> bool {
+    if !touched
+        .iter()
+        .any(|path| path != root && path.starts_with(root))
+    {
+        return false;
+    }
+    let Ok(now) = tree_at(root, cancel) else {
+        return false;
+    };
+    let keyed: BTreeMap<_, _> = now.iter().map(|node| (&node.relative.0, node)).collect();
+    if keyed.len() != tree.len() {
+        return false;
+    }
+    if !tree.iter().all(|old| {
+        keyed.get(&old.relative.0).is_some_and(|new| {
+            old.identity.dev == new.identity.dev
+                && old.identity.ino == new.identity.ino
+                && old.mode == new.mode
+                && (old.mode & 0o170000 == 0o040000 || old.identity == new.identity)
+        })
+    }) {
+        return false;
+    }
+    for old in tree.iter_mut() {
+        if old.mode & 0o170000 == 0o040000
+            && touched
+                .iter()
+                .any(|path| path.parent() == Some(root.join(old.relative.path()).as_path()))
+        {
+            if let Some(new) = keyed.get(&old.relative.0) {
+                old.identity = new.identity;
+            }
+        }
+    }
+    true
+}
+fn metadata_only(file: &File) -> Result<bool, HistoryError> {
+    Ok(rustix::fs::fcntl_getfl(file)?.contains(OFlags::PATH))
+}
+fn sync_attribute(file: &File, parent: &Parent) -> Result<(), HistoryError> {
+    if metadata_only(file)? {
+        rustix::fs::syncfs(parent.open()?.as_fd())?;
+    } else {
+        file.sync_all()?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+type RaceHook = std::cell::RefCell<Option<Box<dyn FnOnce()>>>;
+#[cfg(test)]
+thread_local! {
+    static BEFORE_ADMISSION_INVENTORY: RaceHook = const { std::cell::RefCell::new(None) };
+    static BEFORE_INVERSE_RENAME: RaceHook = const { std::cell::RefCell::new(None) };
+    static BEFORE_INVERSE_RECOVERY: RaceHook = const { std::cell::RefCell::new(None) };
+}
+#[cfg(test)]
+fn run_hook(hook: &'static std::thread::LocalKey<RaceHook>) {
+    hook.with(|cell| {
+        if let Some(run) = cell.borrow_mut().take() {
+            run();
+        }
+    });
 }
 
 #[cfg(test)]
@@ -1185,5 +1463,133 @@ mod recovery_tests {
         assert!(!root.join("work/file").exists());
         drop(history);
         std::fs::remove_dir_all(root).unwrap();
+    }
+    struct Fixture(PathBuf);
+    impl Fixture {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!("gust-history-race-{}", unique()));
+            std::fs::create_dir_all(path.join("work")).unwrap();
+            Self(path)
+        }
+        fn history(&self) -> History {
+            History::open(self.0.join("state/history")).unwrap()
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    #[test]
+    fn created_admission_does_not_adopt_a_replacement_at_inventory_boundary() {
+        let f = Fixture::new();
+        let made = crate::create::create_from_bytes(
+            &f.0.join("work"),
+            std::ffi::OsStr::new("file"),
+            b"original",
+        )
+        .unwrap();
+        let path = made.path.clone();
+        let saved = f.0.join("work/saved");
+        let saved_in_hook = saved.clone();
+        BEFORE_ADMISSION_INVENTORY.with(|h| {
+            *h.borrow_mut() = Some(Box::new(move || {
+                std::fs::rename(&path, &saved_in_hook).unwrap();
+                std::fs::write(&path, b"later!!!").unwrap();
+            }))
+        });
+        let mut history = f.history();
+        assert!(history.record_created("Created", &[made]).is_err());
+        assert!(history.entries().is_empty());
+        assert_eq!(std::fs::read(f.0.join("work/file")).unwrap(), b"later!!!");
+        assert_eq!(std::fs::read(saved).unwrap(), b"original");
+    }
+    #[test]
+    fn link_admission_does_not_adopt_a_regular_replacement() {
+        let f = Fixture::new();
+        let made = crate::attrs::create_link(
+            &f.0.join("target"),
+            &f.0.join("work"),
+            std::ffi::OsStr::new("link"),
+        )
+        .unwrap();
+        let path = made.link.clone();
+        let saved = f.0.join("work/saved-link");
+        BEFORE_ADMISSION_INVENTORY.with(|h| {
+            *h.borrow_mut() = Some(Box::new(move || {
+                std::fs::rename(&path, &saved).unwrap();
+                std::fs::write(&path, b"later work").unwrap();
+            }))
+        });
+        let mut history = f.history();
+        assert!(history.record_links("Link", &[made]).is_err());
+        assert!(history.entries().is_empty());
+        assert_eq!(std::fs::read(f.0.join("work/link")).unwrap(), b"later work");
+    }
+    #[test]
+    fn a_racing_wrong_source_is_restored_without_hiding_later_work() {
+        let f = Fixture::new();
+        let made = crate::create::create_from_bytes(
+            &f.0.join("work"),
+            std::ffi::OsStr::new("file"),
+            b"original",
+        )
+        .unwrap();
+        let path = made.path.clone();
+        let saved = f.0.join("work/saved");
+        let saved_in_hook = saved.clone();
+        let mut history = f.history();
+        history.record_created("Created", &[made]).unwrap();
+        BEFORE_INVERSE_RENAME.with(|h| {
+            *h.borrow_mut() = Some(Box::new(move || {
+                std::fs::rename(&path, &saved_in_hook).unwrap();
+                std::fs::write(&path, b"later work").unwrap();
+            }))
+        });
+        assert!(history.undo(&CancelToken::new()).is_err());
+        assert_eq!(std::fs::read(f.0.join("work/file")).unwrap(), b"later work");
+        assert_eq!(std::fs::read(saved).unwrap(), b"original");
+    }
+
+    #[test]
+    fn occupied_race_recovery_reports_both_locations_and_keeps_the_fence() {
+        let f = Fixture::new();
+        let made = crate::create::create_from_bytes(
+            &f.0.join("work"),
+            std::ffi::OsStr::new("file"),
+            b"original",
+        )
+        .unwrap();
+        let path = made.path.clone();
+        let recovery_path = path.clone();
+        let saved = f.0.join("work/saved");
+        let mut history = f.history();
+        let entry = history.record_created("Created", &[made]).unwrap();
+        BEFORE_INVERSE_RENAME.with(|h| {
+            *h.borrow_mut() = Some(Box::new(move || {
+                std::fs::rename(&path, &saved).unwrap();
+                std::fs::write(&path, b"racing source").unwrap();
+            }))
+        });
+        BEFORE_INVERSE_RECOVERY.with(|h| {
+            *h.borrow_mut() = Some(Box::new(move || {
+                std::fs::write(&recovery_path, b"new occupant").unwrap();
+            }))
+        });
+        let error = history.undo(&CancelToken::new()).unwrap_err();
+        let HistoryError::Partial { from, at, .. } = error else {
+            panic!("Expected explicit partial recovery, got {error:?}");
+        };
+        assert_eq!(from, f.0.join("work/file"));
+        assert_eq!(std::fs::read(&from).unwrap(), b"new occupant");
+        assert_eq!(std::fs::read(&at).unwrap(), b"racing source");
+        assert_eq!(std::fs::read(f.0.join("work/saved")).unwrap(), b"original");
+        drop(history);
+        let mut history = f.history();
+        assert_eq!(history.entries()[0].status, HistoryStatus::Interrupted);
+        assert_eq!(
+            history.undo(&CancelToken::new()),
+            Err(HistoryError::Barrier(entry.id))
+        );
     }
 }

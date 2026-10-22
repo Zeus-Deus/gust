@@ -1546,6 +1546,22 @@ tracked inverses may refresh older ancestor receipts only after exact inventory,
 all inode identities and every non-directory identity still match. Untracked
 new work prevents this refresh and blocks the older inverse.
 
+Admission keeps the original receipt's root identity as authority; a later
+inventory only verifies it. Inventories are compared by relative byte-path
+keys, including root-last extraction receipts. Directory attribute entries
+retain complete lineage before refreshing directory revisions after tracked
+child inverses. Attribute aliases for one inode and identical transition are
+coalesced; disagreeing transitions refuse before inverse effects.
+
+An inverse source-name race is checked against the held destination parent.
+A mismatching moved object is restored with identity checks and no-replace;
+an occupied recovery name yields `HistoryError::Partial { from, at, cause }`
+and preserves both objects and the durable pending fence. This does not
+exclude every concurrent writer after verification. Owned unreadable modes
+use metadata-only descriptors and descriptor-relative metadata syscalls,
+without temporarily granting read access; their metadata is synced through
+the held filesystem. Unsupported kernel operations refuse explicitly.
+
 
 ### Owned new-folder and link receipts
 
