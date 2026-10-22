@@ -776,7 +776,11 @@ most 4 MiB / 65,536 records; explicit Limit/Invalid/Ambiguous/NoMount errors nev
 publish a truncated inventory. `MountRecord` exposes id, parent_id, raw
 mount_point and fs_type; `resolve` returns the visible record and
 `visible_mounts` supplies the read-only inventory. Parent IDs select a unique
-same-path overmount leaf, including autofs covered by a local mount. Nested
+same-path non-root overmount leaf, including autofs covered by a local mount. A
+stack at the starting `/` is globally Ambiguous for both resolution and
+inventory: absolute lookup begins at the process's held filesystem root, not
+necessarily at that stack's leaf. Mountinfo alone cannot authorize selecting a
+local root cover and discarding the held root's remote children. Nested
 records attached to a covered ancestor are hidden, even when the covering
 ancestor path has no duplicate record. Unresolved sibling stacks fence only
 their subtree for resolution; an inventory containing such a region returns
