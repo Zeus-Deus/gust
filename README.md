@@ -1,86 +1,95 @@
 # GUST
 
-A fast, calm file manager for Omarchy. One Rust binary, Qt Quick UI (cxx-qt), MIT.
+A Rust and Qt Quick file manager for Omarchy, with theme tokens adapted from
+Omarchy and a fallback palette for other desktops. MIT licensed.
 
-<p align="center">
-  <img src="docs/screens/readme/gust-dark-grid.png" alt="Gust in Grid view, dark theme: drawn folders and labelled file pages" width="49%">
-  <img src="docs/screens/readme/gust-light-grid.png" alt="Gust in Grid view, light theme" width="49%">
-</p>
-<p align="center">
-  <img src="docs/screens/readme/gust-dark-rows.png" alt="Gust in Rows view: name, kind, size, modified, with read-only, no-access, mount and link badges" width="80%">
-</p>
+Gust is under active development. The source includes working application paths
+for the features below; that is distinct from qualification of a particular
+installed build, device or account. See [testing](docs/TESTING.md) for the gates
+and their prerequisites.
 
-> **Status: M1 complete, M2 started.** Listing, three views, navigation, filter,
-> search, theming, keyboard and the safety primitives are proven on a real
-> Omarchy desktop, and Trash + Undo are wired end to end. Copy/move/rename have
-> tested engines but no UI path yet; remote is scaffolding only. Section
-> [What is proven](#what-is-actually-proven) says exactly what has been run.
+## Current source scope
+
+- Rows, Grid and Columns views; tabs, two panes, keyboard navigation,
+  type-ahead, filtering and scoped filename/content search.
+- Copy, move, duplicate, rename and bulk rename; conflict choices including
+  directory merge; drag and drop and file clipboard integration.
+- Trash/restore and identity-checked undo for supported operations. Permanent
+  deletion is a separate confirmed action with no undo.
+- Colour tags stored in extended attributes, permission/ownership controls,
+  bookmarks, recent places and session preferences.
+- Quick Look for text, Markdown, images, PDF pages, audio and video frames;
+  sandboxed thumbnail helpers. Availability depends on installed tools/codecs.
+- Explicit SSHFS, rclone and GVfs connections; Tailscale discovery; phone,
+  camera and removable-volume actions; Open/Save portal integration.
+- Archive listing/extraction and tar.zst creation. Archive containment and
+  recovery are being strengthened; a displayed preview is not proof that
+  extraction is complete or safe for every archive.
+
+Phone fixtures are stand-ins. Physical phone browsing/transfers, physical USB
+mount/eject and individual cloud accounts need their own qualification. A
+successful mount does not establish upload, atomic rename or recovery support.
+New backend contracts become user features only after app/UI consumption and
+native acceptance.
 
 ## Build and run
 
+Requires Rust 1.90 or newer, Qt 6 development packages, a C++ compiler, pkg-config
+and libdbus development files. New native GIO/archive-helper integrations also
+need GLib/GIO and libarchive development libraries. Qt model tests need Qt Test
+and the relevant QML modules. The package recipe lists runtime helpers.
+
+```sh
+cargo build --locked -p gust-app
+./target/debug/gust
 ```
-just build      # cargo build --workspace
-just test       # library tests (no display needed)
-just lint       # fmt, clippy, QML token discipline
-just qa         # drives the REAL window with REAL key events
-just theme-matrix   # screenshots every installed Omarchy theme
+
+The ops archive helper, when present in the chosen source revision, is a second
+runtime executable. Build and stage release artifacts with the recorded build
+workflow described in [release preparation](docs/release/README.md).
+
+```sh
+just test           # library/fixture results, including actual skips
+just test-app       # Qt app Rust tests through the same accounting
+just test-all       # workspace Rust tests through the same accounting
+just check-release  # runner, containment and packaging contracts
+just lint           # Rust and source lint checks (requires just/Qt)
 ```
 
-Requires Rust 1.90+, Qt 6.11, and a Wayland session for the QA targets.
+`just test-required` rejects missing fixtures, ignored tests and empty test runs.
+It does not provision servers, change credentials or enable the live clipboard.
+Desktop/theme acceptance needs a separately selected synthetic session; see
+[testing](docs/TESTING.md). Raw logs and screenshots stay local.
 
-## Layout
+## Safety and qualification
 
-| Path | What lives there |
-| --- | --- |
-| `crates/core` | listing, watch, sort, MIME, search, theme tokens — no Qt |
-| `crates/ops` | copy/move/trash/rename, jobs, undo journal, archive policy |
-| `crates/remote` | SSH config parsing, capability probing, upload tracking |
-| `crates/thumbs` | freedesktop cache + sandboxed thumbnailer contract |
-| `crates/app` | cxx-qt bridge, models, main |
-| `ui/` | QML views; `ui/Tokens.qml` is the only place values are defined |
-| `docs/DESIGN.md` | types and protocols shared between crates — change it first |
-| `tests/` | fixture builder, desktop QA, theme matrix, screenshot assertions |
+Staged publication, no-clobber checks, target/subtree identity validation and
+explicit confirmations protect specific operations. Tests exercise those
+boundaries; they do not establish a general guarantee against data loss.
+Thumbnail/audio helpers use bubblewrap and prlimit. Missing sandbox support must
+remain an explicit unavailable capability. Filesystem work is being moved off
+the UI thread; the design's threading rules are requirements, not a claim that
+every current handler already satisfies them.
 
-## The rules this code actually follows
-
-- **No colour, font, radius or spacing literal in QML.** Tokens only, read from
-  `~/.local/state/omarchy/current/theme/{colors,shell}.toml`. `just lint` fails
-  the build if a literal appears. A theme that omits a token gets a complete
-  built-in fallback, never a magenta hole.
-- **Destructive paths ship with a test for the confirmation and the undo.**
-  Trash and permanent delete have different wording and different confirmations;
-  an irreversible delete focuses Cancel.
-- **Undo verifies subtree identity.** Root inode+mtime is not a fingerprint:
-  every descendant is checked, and undo refuses if anything changed or new work
-  appeared.
-- **Untrusted bytes run sandboxed or not at all** — `bwrap --unshare-all` plus
-  `prlimit`, with the parent validating helper output through a held descriptor.
-- **No secret in argv, env, logs or config files.**
-- **The UI thread never touches the filesystem**; every listing carries a
-  cancel token and a generation so stale results are dropped.
-- **Executables never launch from browsing.** Activation returns
-  `blocked:executable needs a deliberate Run action`.
-
-## What is actually proven
-
-Everything below was run on Omarchy 4.0.3 (Qt 6.11.2, Rust 1.98.1,
-cxx-qt 0.10.0) in an authorised VM, against a throwaway fixture.
-
-| Gate | Evidence |
-| --- | --- |
-| Library behaviour | 141 tests, `just test` |
-| Desktop interaction | 61 assertions driving the real window with real key events, `just qa` |
-| Theme coverage | all 22 installed themes render with their own colours, `just theme-matrix` |
-| Token discipline | `just lint` rejects QML literals and `QtQuick.Controls` |
-
-Trash is wired end to end: confirm → the file moves to the freedesktop trash →
-Ctrl+Z restores it, and undo refuses (preserving both files) if new work has
-taken the original path. Not yet done, and not claimed: copy/move/rename in the
-UI, remote backends, thumbnails, tabs and panes, drag and drop, packaging. See
-`docs/STATUS.md` for the honest per-feature list.
+Hosted CI checks source contracts, app/model seams and native builds/staged
+artifacts on x86_64 and aarch64. It does not establish an installed Arch package,
+real desktop/theme matrix, benchmark result or hardware/provider pass. Historical
+benchmark and desktop notes describe their recorded revisions only.
 
 ## Omarchy integration
 
-Gust is an ordinary application: stable app id, XDG paths, no imports from
-Omarchy's private shell tree. It reads theme tokens through its own adapter and
-watches the parent of `current` so an atomic theme swap is observed.
+Installing the prepared package does not select Gust as the default, mount
+anything, pair a phone or enable services. `gust --default on` is an explicit
+per-user action; `gust --default off` attempts the recorded rollback while
+preserving later edits. Portal selection is separate and explicit.
+
+The source recipe is prepared for review; this document does not claim a
+published release or registry package. [Release preparation](docs/release/README.md)
+describes immutable sources, checksums and installed-artifact checks.
+
+## Layout
+
+`crates/core`: listing/search/theme; `crates/ops`: operations/recovery;
+`crates/remote`: connections; `crates/thumbs`: preview helpers;
+`crates/app`: Qt bridge/models; `ui/`: QML;
+[docs/DESIGN.md](docs/DESIGN.md): shared contracts; `tests/`: orchestration.

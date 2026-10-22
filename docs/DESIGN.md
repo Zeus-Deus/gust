@@ -1461,3 +1461,37 @@ Untrusted bytes (thumbnail decoding, archive listing) run under
 and a private output directory — or the feature is unavailable. Parent
 validates helper output through a held descriptor: regular file, size bound,
 expected format, no symlink/FIFO.
+
+## 12. Release qualification and shared test runners
+
+Release evidence distinguishes source checks, model seams, native desktop
+acceptance and an installed package. None substitutes for another. Historical
+desktop evidence is not qualification of a new binary, architecture or provider.
+
+- Each shared test invocation owns a private log and skip ledger. The summary
+  records whether tests actually ran, Cargo's exit status, runtime skips and
+  ignored tests. Required mode fails on skips, ignored tests or no observed
+  tests, even when a child command returns zero. App Rust tests use the same
+  accounting as library tests; Qt model scripts remain separately named seams.
+- Native and theme gates require an explicitly dedicated disposable desktop,
+  their actual tools and the installed binary. They must not start on an
+  ordinary shared desktop. The desktop runner owns `/tmp/gust-qa.lock`; callers
+  must not wrap it in a second acquisition. A missing prerequisite is SKIP,
+  never PASS, and makes a required qualification fail.
+- Package validation checks the staged/installed files, executable formats,
+  dynamic library resolution and dependency metadata. A source recipe or a
+  successful development-tree launch does not qualify an installed artifact.
+  The ops archive helper is a separate runtime executable, linked with
+  libarchive, built with `cargo build -p gust-ops --bin gust-archive-helper`;
+  installations using that contract must include it beside Gust in `/usr/bin`.
+- Source recipes identify a full revision, fetchable URL and verified SHA-256.
+  Preparing a recipe does not publish a release or package. Both advertised
+  Linux architectures need native compilation; desktop/provider qualification
+  is recorded separately for each architecture rather than inferred.
+- Raw logs, source receipts, screenshots and theme captures stay private and
+  outside Git/public CI artifacts. Public checks expose sanitized counts and
+  prerequisite categories only, never home paths, filenames or host identities.
+
+Ownership: release owns shared orchestration/packaging, app owns app-local test
+scripts and native model contracts, UI owns its feature-specific desktop checks.
+New runtime helpers/dependencies must be handed to release before qualification.

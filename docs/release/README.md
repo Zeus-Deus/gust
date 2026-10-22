@@ -1,137 +1,98 @@
-# Gust
+# Release preparation (no publication)
 
-A fast, calm file manager for Omarchy. One Rust binary, a Qt Quick window that
-takes its colours, fonts and borders from your Omarchy theme, and a file engine
-that never loses data.
+The root `PKGBUILD` is canonical; `docs/release/PKGBUILD` must be byte-for-byte
+identical. These are reviewable source recipes, not a published registry entry.
+No install hook changes defaults, mounts a volume, pairs a phone or starts a
+service. Runtime prerequisites are not hardware or provider qualification.
 
-> Draft for v0.1.0. Not published.
+## Immutable source metadata
 
-<p align="center">
-  <img src="docs/screens/readme/gust-dark-grid.png" alt="Gust in Grid view, dark theme: drawn folders and labelled file pages" width="49%">
-  <img src="docs/screens/readme/gust-light-grid.png" alt="Gust in Grid view, light theme" width="49%">
-</p>
-<p align="center">
-  <img src="docs/screens/readme/gust-dark-rows.png" alt="Gust in Rows view: name, kind, size, modified, with read-only, no-access, mount and link badges" width="80%">
-</p>
+`_commit` is a full source revision, `source` fetches its GitHub archive from the
+actual upstream repository and `sha256sums` verifies those bytes. The snapshot
+package version combines the workspace version, revision count and commit. It
+does not invent an upstream release tag. Refresh metadata only after the source
+commit is available remotely:
 
-## Why Gust
+```sh
+python3 packaging/pin-source.py FULL_SOURCE_COMMIT
+python3 tests/check-setup-packaging.py
+makepkg --printsrcinfo
+```
 
-- **Fast where it shows.** A 100,000-file folder settles in about 0.4 s on a
-  plain VM, about half the time of the next fastest file manager in Flea's own
-  field bench. Details are read only for the rows on screen, and folder sizes
-  only for the folders you can see. Full table: `bench/RESULTS.md`.
-- **Looks like Omarchy.** Every colour, font and spacing value comes from the
-  current theme, and switching themes recolours the open window. All 22 bundled
-  themes pass a contrast test (4.5:1 for primary text, 3:1 for secondary).
-- **Never loses data.** Copies are staged and renamed into place atomically.
-  Every destructive action asks first, and Ctrl+Z undoes it. Undo checks that
-  the file is still the one it changed (device, inode, mtime) and refuses if
-  it is not.
-- **Keyboard first, mouse friendly.** Type-ahead, `/` filter, `:` command
-  palette, Ctrl+L folder jump, four key presets (Standard, Vim, Mac, Windows),
-  and `?` for the full key map. Right-click, drag and drop, rubber-band
-  selection and the mouse side buttons all work.
+The pinning tool downloads within a size budget, inspects Cargo metadata without
+extracting or executing it, requires the skip-aware runner and updates both
+recipes. Review the exact source revision/checksum diff. It does not tag,
+publish a release/package, change repository settings or submit to a registry.
+A metadata-only commit may pin its preceding source commit; qualification must
+record both the source pin and the PR head. Lockfiles pin Rust dependencies;
+reproducing a source snapshot is distinct from bit-identical output across
+unrecorded compiler, Qt and system-library versions.
 
-## What it does
+## Build, stage and inspect the real files
 
-- Rows, Grid and Columns views, tabs, and a split view (F3).
-- Copy, move, rename, duplicate, trash and restore, with conflict prompts
-  (replace / keep both / skip).
-- Pause and resume long transfers from the transfer card.
-- Right-button drag offers Copy here, Move here or Link here.
-- Paste an image from the clipboard as a file.
-- Make links. Change permissions and owner/group, for one item or many.
-- Quick Look (Space) for text and images, with SHA-256 on request.
-- Archives: browse, extract and compress, behind traversal and bomb checks.
-- Other computers (SSH), Tailscale devices, Windows and NFS shares, and rclone cloud remotes, all from one Connect… list.
-- Custom actions from `~/.config/gust/actions/*.toml`. These run as argv,
-  never through a shell.
-- Open as administrator: a separate window, clearly marked, started through
-  polkit. It manages files but never opens or runs them.
-- Settings: reopen last session's tabs, density, hidden files, key preset.
+```sh
+python3 packaging/build-artifact.py
+python3 packaging/check-package.py --stage --output /tmp/gust-package-fresh
+python3 packaging/check-dependencies.py --installed
+```
 
-## Install
+The builder owns the nonblocking build lease, uses at most two Cargo jobs by
+default, records the source-input digest and actual executable hashes, and remaps
+checkout/registry paths. Raw build logs/receipts stay local under `target/release`.
+Changes during a build invalidate the receipt. A separately coordinated build is
+needed if the lease is busy; do not nest locks.
 
-Arch / Omarchy (from the AUR, once published):
+When `crates/ops/src/bin/gust-archive-helper.rs` exists in the selected snapshot,
+the builder runs `cargo build --release --locked -p gust-ops --bin
+gust-archive-helper` as well as the app build. `package()` installs that helper
+beside Gust at `/usr/bin/gust-archive-helper`. A snapshot that predates the helper
+cannot qualify the new archive contract. The parent still needs bwrap/prlimit;
+shipping the helper alone does not establish sandbox containment.
 
-    yay -S gust
+The staging check executes the actual audited `package()` function into a fresh
+private root, verifies its exact file set against `packaging/runtime-files.json`,
+then checks modes, source/configuration bytes, executable build receipts, ELF
+machine type and resolved dynamic libraries. `--root` verifies an existing staged
+or installed root against the same build. Symlinked runtime files, missing
+helpers, replaced binaries, stale source receipts and wrong architectures fail.
+A development-tree launch or recipe text check is not this installed check.
 
-From source:
+`package()` stages the executable(s), desktop entry, inert portal/service files,
+license and README. It does not copy audit logs, receipts or screenshots. A clean
+Arch `makepkg` build/install and its dependency closure still need separate
+qualification; Ubuntu hosted staging is useful compatibility evidence only.
 
-    git clone <repository> gust && cd gust
-    cargo build --release --locked
-    install -Dm755 target/release/gust ~/.local/bin/gust
+## Dependency contracts
 
-Needs Rust 1.90+, Qt 6 (qt6-base, qt6-declarative) and a Wayland session.
-The Arch package includes the connection and device helpers: OpenSSH, SSHFS,
-FUSE 3, rclone, GVfs with AFC, SMB, NFS, MTP and gphoto2 backends, usbmuxd,
-and polkit. Every other program Gust calls ships with it too: clipboard
-(wl-clipboard), Open with (xdg-utils), terminal and folder jump
-(xdg-terminal-exec, zoxide), sandboxed thumbnails and previews (bubblewrap,
-util-linux, ImageMagick, ffmpegthumbnailer, FFmpeg, PipeWire, Poppler),
-archives (libarchive), USB drives (udisks2) and Open/Save dialogs
-(xdg-desktop-portal). Installing the package is all a user needs to do. Only
-Tailscale stays optional: it is a network service with its own account, and
-Gust lists its devices when you already run it. A source build that lacks a
-helper still works and explains what is missing.
+`packaging/helper-packages.json` maps literal subprocess helpers to required,
+optional or desktop-session providers. The drift check scans production literal
+`Command::new` and thumbnail-helper additions, and checks declared Arch packages.
+Computed argv, configured applications and transitive GVfs/codec helpers still
+require owner review; this is not an exhaustive static call graph.
 
-### Connections and phones
+The baseline package supplies Qt, D-Bus/GLib, SSHFS/rclone/GVfs backends, clipboard,
+preview and archive tools. Curl/GLib are included for the remote lane's native GIO
+and TLS-sharing integration; installing them does not claim that integration is
+already consumed in every app revision. GVfs FTP/WebDAV support is supplied by
+the matching installed GVfs build and must be tested with its actual backend.
+The mpv prerequisite matches the active neighboring-media integration; a package
+manifest alone does not qualify that unpublished UI flow.
 
-Open **Connect…** and choose a computer, share, cloud remote or attached device.
-A source build or older installation may be missing a helper: **Install
-support** shows the required packages before the system's polkit authorization
-prompt. Gust stays unprivileged and never asks you to type an administrator
-password into Gust. On unsupported systems it shows package-manager guidance.
-After installation, choose **Connect/Open** again yourself; **Check again**
-only refreshes discovery. Installing helpers never starts a connection or
-resumes a previous mount attempt.
+Optional preview contracts from the preview lane are `dcraw_emu` (LibRaw),
+`exiftool` (perl-image-exiftool), and headless LibreOffice conversion with the
+Writer/Impress/Calc filters (libreoffice-fresh). Capability/tool checks and real
+sandboxed codec fixtures must run on the integrated revision; these entries do
+not establish RAW/Office rendering, hardware decoding or a finished UI. Tailscale
+is also optional and requires the user's separately configured service/account.
+The seven existing setup capabilities remain owned by the remote lane.
 
-For an iPhone, iPad or iPod touch, unlock the device and accept **Trust** on
-the device when asked. If it was already attached when support was installed,
-reconnect it if necessary so usbmuxd can discover it. Apple access is limited
-to media and app file-sharing areas exposed by iOS. It is not access to every
-app's private data or all iCloud data, and it is not music-library sync.
-Android uses MTP; cameras use the gphoto2 backend.
+## Qualification handoff
 
-The Gust package has no install hooks that change file-manager defaults,
-mount devices, accept pairing/Trust, or enable/start services. Connections
-remain an explicit user action; installing usbmuxd does not bypass the
-phone's own unlock and Trust decisions.
-
-## Make it the default file manager
-
-    gust --default on      # take over inode/directory, remembering the old one
-    gust --default off     # put the previous one back exactly
-
-Nothing changes at install time.
-
-## Safety rules the code follows
-
-- No colour, font, radius or spacing literal in QML. `just lint` fails the
-  build if one appears.
-- Untrusted bytes (thumbnailers, archive listers) run under bubblewrap and
-  prlimit, or not at all.
-- No secret is ever put in argv, the environment, logs or config files.
-- The UI thread never touches the filesystem, and every remote call can be
-  cancelled.
-- Activating a file never runs it. Programs run only through **Run…**, behind
-  a confirmation where Cancel has focus.
-
-## Development
-
-    just build          # cargo build --workspace
-    just test           # library tests
-    just lint           # fmt, clippy, QML token rules
-    just qa             # drives the real window with real keys and pointer
-    just theme-matrix   # screenshots every installed Omarchy theme
-    just bench-field    # Flea's field bench, Gust as an entrant
-
-Layout: `crates/core` (listing, sort, search, theme), `crates/ops` (copy, move,
-trash, undo journal), `crates/remote` (mounts), `crates/thumbs` (sandboxed
-thumbnails), `crates/app` (Qt bridge), `ui/` (QML). Design notes are in
-`docs/DESIGN.md`, and every judgement call is in `docs/DECISIONS.md` with
-how to revert it.
-
-## License
-
-MIT.
+Use `tests/release-gates.py --required` with explicitly provisioned fixtures,
+installed root and the UI-owned native runner. Keep exact source/PR head, invoked
+checks, skips/failures, architectures and genuine runner limits in a private
+handoff. Theme/native captures stay local and outside Git. Public CI uploads no
+raw artifacts. Record fresh benchmark/hardware/provider results only when those
+checks actually ran; historical notes never substitute for them. No release,
+package publication, deployment, merge or shared-history rewrite is part of this
+preparation workflow.

@@ -1,0 +1,73 @@
+name: Source and artifact checks
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: source-checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contracts:
+    name: Runner and packaging contracts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Required source checks
+        run: python3 tests/release-gates.py --gate static --required --output "$RUNNER_TEMP/gust-contracts"
+      - name: Shell syntax
+        run: bash -n PKGBUILD tests/run-tests.sh tests/make-fixture.sh
+
+  native-build:
+    name: Native build and staged artifact (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_TERM_COLOR: never
+      QT_QPA_PLATFORM: offscreen
+      QT_QUICK_BACKEND: software
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Build and model prerequisites (ephemeral runner)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends just pkg-config libdbus-1-dev libclang-dev libarchive-dev libglib2.0-dev qt6-base-dev qt6-declarative-dev qt6-declarative-dev-tools qml6-module-qttest qml6-module-qtquick qml6-module-qtquick-window qml6-module-qtqml-workerscript
+          rustup toolchain install stable --profile minimal --component rustfmt
+          rustup default stable
+      - name: Rust formatting
+        run: |
+          cargo fmt --all -- --check
+          just --list >/dev/null
+          ./tests/lint-qml.sh
+          ./tests/lint-strings.sh
+      - name: Required app tests and portable model seams
+        run: python3 tests/release-gates.py --gate app --gate model-seams --required --output "$RUNNER_TEMP/gust-app"
+      - name: Library observation (unprovisioned fixtures are reported as skips)
+        run: ./tests/run-tests.sh
+      - name: Build recorded release artifact
+        run: python3 packaging/build-artifact.py
+      - name: Stage actual package and validate files, architecture and linking
+        run: python3 packaging/check-package.py --stage --architecture "${{ matrix.arch }}" --output "$RUNNER_TEMP/gust-package"
+      # No artifact upload: raw test logs, source receipts and native/theme
+      # evidence remain private. Hosted checks do not qualify a desktop,
+      # physical device, remote account or installed Arch dependency closure.
