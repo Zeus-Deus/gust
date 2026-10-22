@@ -1505,3 +1505,14 @@ Untrusted bytes (thumbnail decoding, archive listing) run under
 and a private output directory — or the feature is unavailable. Parent
 validates helper output through a held descriptor: regular file, size bound,
 expected format, no symlink/FIFO.
+
+
+## 7.2 Worker-owned job observers
+
+Cloneable `jobs::JobObserver` and `archive::jobs::ArchiveObserver` retain only
+memory snapshots and cancellation tokens. Observers never join or cancel on
+drop. The original handle remains worker-owned; its existing APIs stay intact.
+Job observers also expose pause/resume/is_paused/cancel_requested/record for
+existing progress controls. APP can hold a history admission lock and job
+handle on a worker until the terminal receipt, while GUI code polls an
+observer. Cancellation is acknowledged only by a terminal worker snapshot.
