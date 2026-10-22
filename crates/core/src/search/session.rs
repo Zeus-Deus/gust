@@ -729,6 +729,8 @@ impl SearchSession {
                     Ok(ft) if ft.is_dir() && self.scope.recursive => {
                         if depth + 1 >= self.scope.max_depth {
                             self.stats.depth_pruned += 1;
+                        } else if self.options.skip_generated && generated_name(&name) {
+                            self.stats.generated_pruned += 1;
                         } else {
                             let device = if self.restrict_device() {
                                 self.root_dev
@@ -742,7 +744,7 @@ impl SearchSession {
                             match child {
                                 Ok(dir)
                                     if self.options.skip_generated
-                                        && generated_tree(&dir.handle, &name) =>
+                                        && generated_tree(&dir.handle) =>
                                 {
                                     self.stats.generated_pruned += 1;
                                 }
@@ -838,10 +840,11 @@ impl SearchSession {
     }
 }
 
-fn generated_tree(dir: &fs::File, name: &std::ffi::OsStr) -> bool {
-    if name == "node_modules" || name == "__pycache__" {
-        return true;
-    }
+fn generated_name(name: &std::ffi::OsStr) -> bool {
+    name == "node_modules" || name == "__pycache__"
+}
+
+fn generated_tree(dir: &fs::File) -> bool {
     use std::io::Read;
     let flags = rustix::fs::OFlags::RDONLY
         | rustix::fs::OFlags::NOFOLLOW

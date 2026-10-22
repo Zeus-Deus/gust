@@ -505,3 +505,33 @@ fn projected_tag_errors_are_explicit_without_losing_filename_hits() {
         "projection does not accumulate errors or perform a new read"
     );
 }
+
+#[test]
+fn unreadable_named_generated_directories_are_pruned_without_permission_issues() {
+    use std::os::unix::fs::PermissionsExt;
+    if rustix::process::geteuid().as_raw() == 0 {
+        eprintln!("skipped: root bypasses the directory permissions under test");
+        return;
+    }
+    for name in ["node_modules", "__pycache__"] {
+        let fixture = Fixture::new(name);
+        let generated = fixture.0.join(name);
+        fs::create_dir(&generated).unwrap();
+        fs::write(generated.join("unrelated-hit-inside"), b"hidden by policy").unwrap();
+        fs::write(fixture.0.join("unrelated-hit"), b"visible").unwrap();
+        fs::set_permissions(&generated, fs::Permissions::from_mode(0o000)).unwrap();
+        let denied = fs::read_dir(&generated).unwrap_err();
+        let mut session = SearchSession::new(fixture.scope(), SearchOptions::default());
+        session.set_query(SearchQuery::filename("unrelated-hit"));
+        let report = finish(&mut session);
+        // Restore traversal before assertions so fixture cleanup also works on failure.
+        fs::set_permissions(&generated, fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(denied.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(report.state, SearchState::Complete, "{name}: {report:?}");
+        assert_eq!(report.stats.generated_pruned, 1, "{name}");
+        assert!(report.issues.is_empty(), "{name}: {:?}", report.issues);
+        assert_eq!(report.stats.issue_count, 0);
+        assert_eq!(report.hits.len(), 1);
+        assert_eq!(report.hits[0].path, fixture.0.join("unrelated-hit"));
+    }
+}

@@ -234,9 +234,11 @@ bounded issue details and total issue count. Running, Complete, Partial
 Depth counts root children as level one; depth zero admits no entries. Hidden
 directories are pruned unless requested. Symlinks are returned but never
 descended. Device boundaries, depth and generated-tree pruning are counted
-and disclosed. Generated-tree pruning is configurable; a cache marker must
-have the standard signature. Nonlocal providers are refused by this local
-walker. Network/FUSE local roots require `SearchOptions::allow_remote` for
+and disclosed. Generated-tree pruning is configurable. Known generated names
+are pruned before attempting to open their contents; cache markers are checked
+only after secure child admission and must have the standard signature.
+Nonlocal providers are refused by this local walker. Network/FUSE local roots
+require `SearchOptions::allow_remote` for
 this explicit root after the caller's stall guard. Reaching the configured
 depth is reported as Limited(Depth), with a pruned-directory count.
 
