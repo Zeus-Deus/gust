@@ -13,6 +13,7 @@ gust-core.workspace = true
 gust-ops.workspace = true
 gust-remote.workspace = true
 gust-thumbs.workspace = true
+serde_json.workspace = true
 cxx = "1.0"
 cxx-qt = "0.10"
 cxx-qt-lib = { version = "0.10", features = ["qt_full"] }

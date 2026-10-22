@@ -8,6 +8,7 @@
 
 pub mod capabilities;
 pub mod cloud;
+pub mod computers;
 pub mod disconnect;
 pub mod mount;
 pub mod phones;

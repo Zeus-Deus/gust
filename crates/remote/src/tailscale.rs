@@ -55,6 +55,55 @@ impl TailnetError {
     }
 }
 
+/// Last successful local inventory, retained only for this process. A stopped
+/// VPN must not erase known connection choices or claim cached peers are online.
+#[derive(Default)]
+pub struct PeerCache {
+    peers: Vec<TailnetPeer>,
+    available: bool,
+}
+
+pub struct PeerSnapshot {
+    pub peers: Vec<TailnetPeer>,
+    pub available: bool,
+    pub error: String,
+}
+
+impl PeerCache {
+    pub fn update(&mut self, result: Result<Vec<TailnetPeer>, TailnetError>) -> PeerSnapshot {
+        match result {
+            Ok(peers) => {
+                self.peers = peers.clone();
+                self.available = true;
+                PeerSnapshot {
+                    peers,
+                    available: true,
+                    error: String::new(),
+                }
+            }
+            Err(error) => {
+                if matches!(
+                    error,
+                    TailnetError::NotRunning(_) | TailnetError::NotInstalled
+                ) {
+                    self.available = false;
+                }
+                let mut peers = self.peers.clone();
+                if !self.available {
+                    for peer in &mut peers {
+                        peer.online = false;
+                    }
+                }
+                PeerSnapshot {
+                    peers,
+                    available: self.available,
+                    error: error.message(),
+                }
+            }
+        }
+    }
+}
+
 /// Read the tailnet from the local daemon. Bounded: a wedged daemon gives
 /// an error after `timeout`, never a hung caller.
 pub fn peers(timeout: Duration) -> Result<Vec<TailnetPeer>, TailnetError> {
@@ -456,6 +505,46 @@ mod tests {
         let s = STATUS.replace("\"MagicDNSEnabled\": true", "\"MagicDNSEnabled\": false");
         let p = parse_status(&s).unwrap();
         assert_eq!(p[0].target, "100.64.0.2");
+    }
+
+    #[test]
+    fn stopped_tailnet_retains_routes_but_marks_them_unavailable() {
+        let mut cache = PeerCache::default();
+        let running = cache.update(parse_status(STATUS));
+        assert!(running.available);
+        assert_eq!(running.peers.len(), 3);
+        let stopped = cache.update(Err(TailnetError::NotRunning("Stopped".into())));
+        assert!(!stopped.available);
+        assert_eq!(stopped.peers.len(), 3);
+        assert!(stopped.peers.iter().all(|p| !p.online));
+        assert!(stopped.error.contains("tailscale up"));
+        // A new successful inventory replaces, rather than resurrects, old devices.
+        let empty = cache.update(Ok(Vec::new()));
+        assert!(empty.available);
+        assert!(empty.peers.is_empty());
+    }
+
+    #[test]
+    fn a_transient_daemon_error_preserves_the_last_known_availability() {
+        let mut cache = PeerCache::default();
+        let peer = TailnetPeer {
+            name: "studio".into(),
+            target: "100.64.0.2".into(),
+            ips: vec!["100.64.0.2".into()],
+            dns_name: None,
+            os: "linux".into(),
+            online: true,
+        };
+        cache.update(Ok(vec![peer]));
+        let transient = cache.update(Err(TailnetError::Other("Timed out".into())));
+        assert!(transient.available);
+        assert!(transient.peers[0].online);
+        cache.update(Err(TailnetError::NotRunning("Stopped".into())));
+        assert!(
+            !cache
+                .update(Err(TailnetError::Other("Timed out".into())))
+                .available
+        );
     }
 
     #[test]

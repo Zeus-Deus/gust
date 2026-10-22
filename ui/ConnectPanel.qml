@@ -17,6 +17,15 @@ Item {
     /// The parsed places_json from the model.
     property var places: ({})
     property int current: 0
+    property string selectionKey: ""
+    /// One member's stable route key identifies the selected computer even
+    /// when discovery refreshes its objects or changes its display label.
+    property string routeKey: ""
+    readonly property var selectedComputer: {
+        for (const c of (root.places.computers || []))
+            if (c.routes.some(r => r.kind + ":" + r.name === root.routeKey)) return c
+        return null
+    }
 
     /// kind is "tailnet", "ssh" or "cloud".
     signal connectRequested(string kind, string name, string target, string user)
@@ -26,13 +35,59 @@ Item {
     signal closed()
 
     function show() {
+        root.routeKey = ""
+        root.selectionKey = ""
         root.current = 0
         root.open = true
         Qt.callLater(() => keys.forceActiveFocus())
     }
+    function showRoutes(key) {
+        root.routeKey = key
+        root.selectionKey = ""
+        root.current = 0
+        root.open = true
+        Qt.callLater(() => {
+            const usable = root.rows.findIndex(r => r.type === "place" && !r.lost
+                && (r.kind === "ssh" || r.available !== false) && r.online !== false)
+            if (usable >= 0) root.select(usable)
+            else root.step(1)
+            keys.forceActiveFocus()
+        })
+    }
+    function back() {
+        if (root.routeKey !== "") {
+            root.routeKey = ""
+            root.selectionKey = ""
+            root.current = 0
+            Qt.callLater(() => root.step(1))
+        } else root.hide()
+    }
     function hide() { root.open = false; root.closed() }
     /// Take the keyboard back (after a prompt on top of the panel closed).
     function refocus() { if (root.open) keys.forceActiveFocus() }
+
+    function independentAlternate(lost, candidate) {
+        if (candidate.kind + ":" + candidate.name === lost.kind + ":" + lost.name
+            || candidate.lost || candidate.available === false || candidate.online === false) return false
+        if (lost.requires_tailnet && candidate.requires_tailnet) return false
+        const endpoints = lost.endpoint_ids || []
+        if ((candidate.endpoint_ids || []).some(x => endpoints.indexOf(x) >= 0)) return false
+        return true
+    }
+
+    /// A recovery suggestion never starts a connection or changes a mount.
+    /// Only the currently browsed place may interrupt with a new suggestion.
+    function recoveryCandidate(alreadyLost, location) {
+        for (const c of (root.places.computers || [])) {
+            for (const r of c.routes) {
+                const key = r.kind + ":" + r.name
+                if (!r.connected || !r.lost || alreadyLost.indexOf(key) >= 0 || !r.path) continue
+                if (location !== r.path && !location.startsWith(r.path + "/")) continue
+                if (c.routes.some(x => root.independentAlternate(r, x))) return key
+            }
+        }
+        return ""
+    }
 
     /// The rows on screen: section headings, places, notes and actions.
     readonly property var rows: {
@@ -42,22 +97,35 @@ Item {
         if (p.sshfs === false)
             note(qsTr("Computers need sshfs to connect — install it to enable them"))
 
-        out.push({ type: "head", text: qsTr("Tailscale devices") })
-        const tn = p.tailnet || []
+        if (root.selectedComputer) {
+            out.push({ type: "action", action: "back", text: qsTr("Back to computers") })
+            note(qsTr("Each connection keeps its own account and folder. Interrupted file operations are not retried."))
+            if (p.tailnetError) note(p.tailnetError)
+            for (const r of root.selectedComputer.routes) {
+                const via = r.kind === "tailnet" ? qsTr("Tailscale") : qsTr("SSH config")
+                out.push(Object.assign({}, r, { type: "place", label: r.name + " · " + via,
+                    extra: r.available === false ? qsTr("unavailable")
+                           : r.kind === "tailnet" && !r.online ? qsTr("offline") : "" }))
+            }
+            return out
+        }
+        out.push({ type: "head", text: qsTr("Computers") })
         if (p.tailnetError) note(p.tailnetError)
-        else if (tn.length === 0) note(qsTr("No other devices on your tailnet"))
-        for (const d of tn)
-            out.push({ type: "place", kind: "tailnet", name: d.name, detail: d.detail,
-                       extra: d.os + (d.online ? "" : qsTr(" · offline")), online: d.online,
-                       connected: d.connected, lost: d.lost, path: d.path,
-                       user: d.user || p.localUser || "" })
-
-        out.push({ type: "head", text: qsTr("Computers (SSH config)") })
-        const ss = p.ssh || []
-        if (ss.length === 0) note(qsTr("No computers in ~/.ssh/config"))
-        for (const h of ss)
-            out.push({ type: "place", kind: "ssh", name: h.name, detail: h.detail, extra: "",
-                       online: true, connected: h.connected, lost: h.lost, path: h.path, user: "" })
+        const computers = p.computers || []
+        if (computers.length === 0) note(qsTr("No computers found in Tailscale or SSH config"))
+        for (const c of computers) {
+            const routes = c.routes || []
+            if (routes.length === 0) continue
+            const active = routes.find(r => r.connected && !r.lost)
+            const r = active || routes[0]
+            const vias = []
+            if (routes.some(x => x.kind === "tailnet")) vias.push(qsTr("Tailscale"))
+            if (routes.some(x => x.kind === "ssh")) vias.push(qsTr("SSH config"))
+            const description = vias.join(" · ")
+            out.push(Object.assign({}, r, { type: "place", label: c.name, computer: c,
+                detail: description, extra: active ? qsTr("via %1").arg(active.name) : "",
+                lost: !active && routes.some(x => x.lost) }))
+        }
 
         out.push({ type: "head", text: qsTr("Cloud storage (rclone)") })
         const cl = p.cloud || []
@@ -84,22 +152,45 @@ Item {
     }
     /// Rows that Enter can act on.
     function actionable(i) { return i >= 0 && i < rows.length && (rows[i].type === "place" || rows[i].type === "action") }
+    function select(i) {
+        root.current = i
+        const r = root.rows[i]
+        root.selectionKey = !r ? "" : r.type === "action" ? "action:" + r.action : r.kind + ":" + r.name
+    }
     function step(d) {
         let i = root.current
         for (let n = 0; n < rows.length; n++) {
             i = Math.max(0, Math.min(rows.length - 1, i + d))
-            if (actionable(i)) { root.current = i; list.positionViewAtIndex(i, ListView.Contain); return }
+            if (actionable(i)) { root.select(i); list.positionViewAtIndex(i, ListView.Contain); return }
         }
     }
-    onRowsChanged: if (!actionable(root.current)) Qt.callLater(() => root.step(1))
+    onRowsChanged: {
+        if (root.selectionKey === "") {
+            if (!actionable(root.current)) Qt.callLater(() => { if (root.selectionKey === "") root.step(1) })
+        } else {
+            root.current = root.rows.findIndex(r =>
+                r.type === "action" ? "action:" + r.action === root.selectionKey
+                : r.type === "place" && (r.kind + ":" + r.name === root.selectionKey
+                    || (r.computer && r.computer.routes.some(x => x.kind + ":" + x.name === root.selectionKey))))
+        }
+    }
 
     function activate(i) {
         const r = rows[i]
         if (!r) return
-        if (r.type === "action") { root.actionRequested(r.action); return }
+        if (r.type === "action") {
+            if (r.action === "back") root.back()
+            else root.actionRequested(r.action)
+            return
+        }
         if (r.type !== "place") return
-        if (r.connected && !r.lost) root.openRequested(r.path)
-        else root.connectRequested(r.kind, r.name, r.detail, r.user)
+        if (r.connected && !r.lost) { root.openRequested(r.path); return }
+        if (r.computer && r.computer.routes.length > 1) {
+            root.showRoutes(r.kind + ":" + r.name)
+            return
+        }
+        if (r.lost || (r.kind !== "ssh" && r.available === false)) return
+        root.connectRequested(r.kind, r.name, r.detail, r.user || root.places.localUser || "")
     }
 
     /// Window points of each row's buttons, "kind:name" for the main one and
@@ -135,7 +226,12 @@ Item {
         id: keys
         focus: root.open
         Keys.onPressed: (event) => {
-            if (event.key === Qt.Key_Escape) { root.hide(); event.accepted = true }
+            if (event.key === Qt.Key_Escape || event.key === Qt.Key_Left) { root.back(); event.accepted = true }
+            else if (event.key === Qt.Key_Right) {
+                const r = root.rows[root.current]
+                if (r && r.computer && r.computer.routes.length > 1) root.showRoutes(r.kind + ":" + r.name)
+                event.accepted = true
+            }
             else if (event.key === Qt.Key_Down) { root.step(1); event.accepted = true }
             else if (event.key === Qt.Key_Up) { root.step(-1); event.accepted = true }
             else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
@@ -170,7 +266,7 @@ Item {
             spacing: Tokens.spaceSm
             Text {
                 textFormat: Text.PlainText
-                text: qsTr("Connect")
+                text: root.selectedComputer ? qsTr("Connections to %1").arg(root.selectedComputer.name) : qsTr("Connect")
                 color: Tokens.foregroundBright
                 font.family: Tokens.fontFamily
                 font.pixelSize: Tokens.fontSubtitle
@@ -221,7 +317,7 @@ Item {
                     anchors.fill: parent
                     hoverEnabled: true
                     enabled: row.isPlace || row.isAction
-                    onClicked: root.current = row.index
+                    onClicked: root.select(row.index)
                     onDoubleClicked: root.activate(row.index)
                 }
 
@@ -264,7 +360,7 @@ Item {
                     anchors.verticalCenter: parent.verticalCenter
                     Text {
                         width: parent.width
-                        text: (row.isAction ? row.modelData.text : row.modelData.name) || ""
+                        text: (row.isAction ? row.modelData.text : row.modelData.label || row.modelData.name) || ""
                         color: row.isPlace && !row.modelData.online ? Tokens.foregroundDim : Tokens.foreground
                         font.family: Tokens.fontFamily
                         font.pixelSize: Tokens.fontBody
@@ -276,7 +372,11 @@ Item {
                         width: parent.width
                         // State in words, never colour alone.
                         text: !row.isPlace ? ""
-                              : [row.modelData.detail, row.modelData.extra,
+                              : [row.modelData.computer ? row.modelData.detail
+                                 : (row.modelData.user ? row.modelData.user + "@" : "") + row.modelData.detail
+                                   + (row.modelData.port ? ":" + row.modelData.port : ""),
+                                 row.modelData.computer ? "" : row.modelData.remote_path || qsTr("login folder"),
+                                 row.modelData.extra,
                                  row.modelData.lost ? qsTr("connection lost")
                                  : row.modelData.connected ? qsTr("connected") : ""]
                                 .filter(x => x).join("  ·  ")
@@ -295,6 +395,32 @@ Item {
                     anchors.rightMargin: Tokens.spaceLg
                     anchors.verticalCenter: parent.verticalCenter
                     spacing: Tokens.spaceSm
+                    Rectangle {
+                        visible: row.isPlace && !!row.modelData.computer
+                                 && row.modelData.computer.routes.length > 1
+                                 && row.modelData.connected && !row.modelData.lost
+                        width: routesLabel.implicitWidth + Tokens.spaceLg
+                        height: Tokens.controlHeight - Tokens.spaceSm
+                        color: "transparent"
+                        border.color: Tokens.withAlpha(Tokens.border, Tokens.borderAlpha)
+                        border.width: Tokens.borderWidth
+                        Text {
+                            id: routesLabel
+                            anchors.centerIn: parent
+                            text: qsTr("Connections…")
+                            textFormat: Text.PlainText
+                            color: Tokens.foreground
+                            font.family: Tokens.fontFamily
+                            font.pixelSize: Tokens.fontSmall
+                        }
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: root.showRoutes(row.modelData.kind + ":" + row.modelData.name)
+                        }
+                        Accessible.role: Accessible.Button
+                        Accessible.name: qsTr("Connections to %1").arg(row.modelData.label || "")
+                    }
                     Rectangle {
                         id: offBtn
                         objectName: "connectOff"
@@ -318,7 +444,7 @@ Item {
                             anchors.fill: parent
                             hoverEnabled: true
                             cursorShape: Qt.PointingHandCursor
-                            onClicked: { root.current = row.index; root.disconnectRequested(row.modelData.kind, row.modelData.name) }
+                            onClicked: { root.select(row.index); root.disconnectRequested(row.modelData.kind, row.modelData.name) }
                         }
                         Accessible.role: Accessible.Button
                         Accessible.name: qsTr("Disconnect %1").arg(row.modelData.name || "")
@@ -330,14 +456,19 @@ Item {
                         width: mainLabel.implicitWidth + Tokens.spaceLg * 2
                         height: Tokens.controlHeight - Tokens.spaceSm
                         color: mainMouse.containsMouse ? Tokens.withAlpha(Tokens.accent, 0.25) : "transparent"
+                        opacity: row.isPlace && row.modelData.available === false
+                                 && !(row.modelData.computer && row.modelData.computer.routes.length > 1) ? 0.5 : 1
                         border.color: Tokens.accent
                         border.width: Tokens.borderWidth
                         Text {
                             textFormat: Text.PlainText
                             id: mainLabel
                             anchors.centerIn: parent
-                            text: row.isAction ? qsTr("Set up")
-                                  : row.modelData.connected && !row.modelData.lost ? qsTr("Open") : qsTr("Connect")
+                            text: row.isAction ? (row.modelData.action === "back" ? qsTr("Back") : qsTr("Set up"))
+                                  : row.modelData.connected && !row.modelData.lost ? qsTr("Open")
+                                  : row.modelData.computer && row.modelData.computer.routes.length > 1 ? qsTr("Connections…")
+                                  : row.modelData.lost ? qsTr("Disconnect first")
+                                  : row.modelData.kind !== "ssh" && row.modelData.available === false ? qsTr("Unavailable") : qsTr("Connect")
                             color: Tokens.foreground
                             font.family: Tokens.fontFamily
                             font.pixelSize: Tokens.fontSmall
@@ -347,7 +478,7 @@ Item {
                             anchors.fill: parent
                             hoverEnabled: true
                             cursorShape: Qt.PointingHandCursor
-                            onClicked: { root.current = row.index; root.activate(row.index) }
+                            onClicked: { root.select(row.index); root.activate(row.index) }
                         }
                         Accessible.role: Accessible.Button
                         Accessible.name: mainLabel.text + " " + (row.modelData.name || row.modelData.text || "")
@@ -362,7 +493,7 @@ Item {
             anchors.right: parent.right
             anchors.bottom: parent.bottom
             anchors.margins: Tokens.spaceXl
-            text: qsTr("Enter connects or opens · Escape closes")
+            text: root.routeKey !== "" ? qsTr("Enter chooses · Escape goes back") : qsTr("Enter connects or opens · Escape closes")
             color: Tokens.foregroundDim
             font.family: Tokens.fontFamily
             font.pixelSize: Tokens.fontCaption

@@ -283,6 +283,38 @@ Connected places of every kind appear under Remote in the sidebar: click
 to browse, drop files on them (§6.1, a copy across drives), right-click to
 open in a new tab or disconnect.
 
+#### Computers and connection routes
+
+The Connect panel lists a computer once, with its SSH-config and Tailscale
+connections underneath. Both use SSH; Tailscale is a network route, not a
+second file-transfer protocol. Discovery groups only matching explicit
+endpoints or overlapping trusted SSH host keys, never matching display
+names or DNS guesses. Unknown conditional, wildcard, proxy or host-key policy
+settings keep an alias separate rather than guessing its effective endpoint.
+Previously trusted host-key lookups are cached against the file's identity
+and revision, outside the mount-probe budget. Shared host keys can also come
+from cloned machines: a group is a presentation hint, not proof that accounts
+or filesystems are interchangeable. Every address stays visible in its picker.
+Grouping is presentation, not a grant of trust:
+each route keeps its own account, folder, port, SSH configuration and
+host-key checks. SSH aliases are still passed verbatim to OpenSSH.
+
+A computer with several routes offers **Connections…**. Its route picker
+shows the actual address and account, which route is connected or lost,
+and whether Tailscale is unavailable. Selecting another route is an
+explicit new connection; Gust never falls back silently outside a VPN,
+works around an authentication/key failure, remounts a place underneath
+open file handles, or replays an interrupted copy/move/delete. Two entries
+pointing at the same Tailscale endpoint are not an independent fallback.
+
+A lost connection with another known route offers **Choose connection**,
+with Cancel as the default. The picker keeps the failed route visible and
+explains that existing file operations are not retried. Discovery retains
+the last local-daemon peer snapshot for the lifetime of the process when
+Tailscale stops, marked unavailable, so disabling it does not erase the
+connection choices. This is not a claim that a peer is reachable, nor a
+persistent device inventory. No new device is contacted just by looking.
+
 ## 6.5 Permanent delete
 
 The one operation with no undo. Reached only where Trash is genuinely

@@ -640,8 +640,33 @@ Window {
                 if (p.lost) lost.push(p.name)
             }
         }
-        win.connectedPlaces = on
+        const sidebarPlaces = []
+        for (const c of (info.computers || [])) {
+            const mounted = c.routes.filter(r => r.connected)
+            if (mounted.length === 0) continue
+            const r = mounted.find(r => !r.lost) || mounted[0]
+            sidebarPlaces.push({kind: r.kind, name: r.name, label: c.name, path: r.path, lost: r.lost})
+        }
+        for (const p of (info.cloud || []))
+            if (p.connected) sidebarPlaces.push({kind: "cloud", name: p.name, path: p.path, lost: p.lost})
+        win.connectedPlaces = sidebarPlaces
         win.lostPlaces = lost
+        const lostKeys = on.filter(p => p.lost).map(p => p.kind + ":" + p.name)
+        const recovery = connectPanel.recoveryCandidate(win.seenLostRoutes, dirModel.location)
+        win.seenLostRoutes = lostKeys
+        // Never replace a pending decision or interrupt a running file job.
+        // The Connections picker remains available when a suggestion is deferred.
+        if (recovery !== "" && !confirm.visible && !connectionRecovery.visible && !prompt.visible && !prompt.claimingFocus
+            && !connectPanel.open && !palette.visible && !quickLook.open && !conflictDialog.visible
+            && !contextMenu.open && !settingsPanel.open && !renameCard.open && !trashPanel.open
+            && !recentPanel.open && !filterInput.activeFocus && !searchInput.activeFocus
+            && win.runningJobModels().length === 0) {
+            connectionRecovery.routeKey = recovery
+            connectionRecovery.open(qsTr("Connection lost"),
+                qsTr("Another connection to this computer is known. Choose a connection to browse again. "
+                     + "Its own SSH identity, account and folder will be checked; interrupted file operations are not retried."),
+                qsTr("Choose connection"), false)
+        }
         win.qaDump("places")
     }
     Connections {
@@ -684,6 +709,13 @@ Window {
     // Mounted places whose server no longer answers. Still mounted (so
     // Disconnect is what clears them) but never shown as "connected".
     property var lostPlaces: []
+    property var seenLostRoutes: []
+    Timer {
+        interval: 10000
+        repeat: true
+        running: win.connectedPlaces.length > 0 && win.active && !connectPanel.open && !connectionRecovery.visible
+        onTriggered: if (dirModel && !dirModel.place_busy) win.refreshPlaces()
+    }
     width: 1180
     height: 720
     minimumWidth: 520
@@ -880,7 +912,7 @@ Window {
     // context menu, a confirm or conflict dialog), a file created or deleted
     // by another program must not shift the rows under it: the rename would
     // hit the wrong file. Live updates wait, and land when it closes.
-    readonly property bool liveHold: palette.visible || confirm.visible || settingsPanel.open || trashPanel.open || recentPanel.open || connectPanel.open
+    readonly property bool liveHold: palette.visible || confirm.visible || connectionRecovery.visible || settingsPanel.open || trashPanel.open || recentPanel.open || connectPanel.open
                                      || contextMenu.open || conflictDialog.visible
                                      || prompt.visible || prompt.claimingFocus
     onLiveHoldChanged: {
@@ -1153,7 +1185,7 @@ Window {
         // it opens it does not count as visible. The palette closing in that
         // window used to steal the keyboard, leaving a prompt on screen that
         // could not be typed into.
-        if (palette.visible || confirm.visible || contextMenu.open
+        if (palette.visible || confirm.visible || connectionRecovery.visible || contextMenu.open
             || conflictDialog.visible || settingsPanel.open || trashPanel.open || recentPanel.open || connectPanel.open
             || prompt.visible || prompt.claimingFocus || renameCard.open)
             return
@@ -2649,7 +2681,7 @@ Window {
             // stale behind a message some earlier keystroke left here.
             selection: win.selectionText
             alert: win.alertText !== "" ? win.alertText : dirModel.notice
-            dialog: confirm.visible
+            dialog: confirm.visible || connectionRecovery.visible
             onStatusChanged: win.qaDump("hint")
             onMessageChanged: win.qaDump("hint")
             // A message belongs to the folder it was said in: leaving it, or
@@ -3286,6 +3318,17 @@ Window {
     }
 
     ConfirmDialog {
+        id: connectionRecovery
+        preferCancel: true
+        property string routeKey: ""
+        onAccepted: {
+            const key = routeKey
+            Qt.callLater(() => connectPanel.showRoutes(key))
+        }
+        onClosed: win.focusList()
+    }
+
+    ConfirmDialog {
         id: confirm
         objectName: "confirmDialog"
         // What this confirmation is FOR. Two different questions must never
@@ -3634,6 +3677,10 @@ Window {
             devices: win.deviceList.map((x) => x.label + "|" + x.state),
             connectedPlaces: win.connectedPlaces.map(p => p.name),
             lostPlaces: win.lostPlaces,
+            connectionRecoveryOpen: connectionRecovery.visible,
+            connectionRecoveryButtons: connectionRecovery.buttonCenters(),
+            connectRouteKey: connectPanel.routeKey,
+            connectRows: connectPanel.rows,
             connectOpen: connectPanel.open,
             connectPoints: connectPanel.open ? connectPanel.buttonPoints() : ({}),
             places: win.placesInfo,

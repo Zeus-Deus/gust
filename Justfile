@@ -36,6 +36,10 @@ qa-model-routing:
 qa-tab-insertion:
     python3 crates/app/tests/tab_model_regressions.py --insertion --source . --output "${GUST_MODEL_QA_OUT:?Set a fresh evidence directory}/insertion"
 
+# Actual ConnectPanel route/keyboard tests; model I/O and theme are fixtures.
+qa-connections:
+    python3 crates/app/tests/connection_regressions.py --source . --output "${GUST_CONNECTION_QA_OUT:?Set a fresh evidence directory}"
+
 lint:
     cargo fmt --all -- --check
     # Rust lints, denied. Scoped to Gust's own crates: gust-app compiles

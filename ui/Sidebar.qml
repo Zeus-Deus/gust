@@ -465,7 +465,7 @@ Rectangle {
                     leftPadding: Tokens.rowPaddingX
                     width: column.width - Tokens.rowPaddingX
                     // Colour alone never carries the state (plan §2 mockup F).
-                    text: modelData.name + (modelData.lost ? qsTr("  ·  lost") : "")
+                    text: (modelData.label || modelData.name) + (modelData.lost ? qsTr("  ·  lost") : "")
                     color: modelData.lost ? Tokens.danger : Tokens.foreground
                     font.family: Tokens.fontFamily
                     font.pixelSize: Tokens.fontBody

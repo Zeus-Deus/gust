@@ -1,0 +1,120 @@
+import QtQuick
+import QtTest
+
+Item {
+    width: 1180
+    height: 720
+    Item {
+        id: win
+        anchors.fill: parent
+        property var placesInfo: ({})
+        property var connectedPlaces: []
+        property var lostPlaces: []
+        property var seenLostRoutes: []
+        property var dirModel: ({places_json: "{}", location: "/local"})
+        property var confirm: ({visible: false})
+        property var prompt: ({visible: false, claimingFocus: false})
+        QtObject { id: palette; property bool visible: false }
+        property var quickLook: ({open: false})
+        property var conflictDialog: ({visible: false})
+        property var contextMenu: ({open: false})
+        property var settingsPanel: ({open: false})
+        property var renameCard: ({open: false})
+        property var trashPanel: ({open: false})
+        property var recentPanel: ({open: false})
+        property var filterInput: ({activeFocus: false})
+        property var searchInput: ({activeFocus: false})
+        property int recoveryOpened: 0
+        QtObject {
+            id: connectionRecovery
+            property bool visible: false
+            property string routeKey: ""
+            function open(title, body, button, danger) { win.recoveryOpened += 1 }
+        }
+        function qaDump(tag) {}
+        function runningJobModels() { return [] }
+        @PLACES_ARRIVED@
+        ConnectPanel { id: connectPanel; places: win.placesInfo }
+    }
+    ConfirmDialog { id: recovery; preferCancel: true }
+    SignalSpy { id: accepted; target: recovery; signalName: "accepted" }
+    SignalSpy { id: rejected; target: recovery; signalName: "rejected" }
+    TestCase {
+    id: test
+    name: "ConnectionController"
+    when: windowShown
+    function route(kind, name, lost) {
+        return {kind: kind, name: name, detail: name, path: "/fixture/" + kind,
+                connected: true, lost: lost, online: true, available: true}
+    }
+    function init() {
+        win.seenLostRoutes = []; win.recoveryOpened = 0
+        win.filterInput = {activeFocus: false}; win.searchInput = {activeFocus: false}
+        accepted.clear(); rejected.clear()
+    }
+    function recoveryFixture() {
+        const ssh = route("ssh", "studio-lan", false)
+        const tail = route("tailnet", "studio", true)
+        win.dirModel = {location: tail.path, places_json: JSON.stringify({
+            computers: [{name: "Studio", routes: [ssh, tail]}], ssh: [ssh], tailnet: [tail], cloud: []})}
+    }
+    function test_filter_typing_does_not_lose_focus_to_recovery() {
+        recoveryFixture(); win.filterInput = {activeFocus: true}
+        win.placesArrived()
+        compare(win.recoveryOpened, 0)
+    }
+    function test_search_typing_does_not_lose_focus_to_recovery() {
+        recoveryFixture(); win.searchInput = {activeFocus: true}
+        win.placesArrived()
+        compare(win.recoveryOpened, 0)
+    }
+    function test_idle_recovery_only_offers_a_choice() {
+        recoveryFixture(); win.placesArrived()
+        compare(win.recoveryOpened, 1)
+        compare(connectionRecovery.routeKey, "tailnet:studio")
+    }
+    function cleanup() { recovery.close() }
+    function test_healthy_alternative_is_one_sidebar_computer() {
+        const ssh = route("ssh", "studio-lan", false)
+        const tail = route("tailnet", "studio", true)
+        win.dirModel = {location: "/local", places_json: JSON.stringify({
+            computers: [{name: "Studio", routes: [ssh, tail]}], ssh: [ssh], tailnet: [tail], cloud: []})}
+        win.placesArrived()
+        compare(win.connectedPlaces.length, 1, "A lost and a healthy route are still one computer")
+        compare(win.connectedPlaces[0].kind, "ssh")
+        compare(win.connectedPlaces[0].name, "studio-lan", "Actions retain route alias")
+        compare(win.connectedPlaces[0].label, "Studio", "Display retains computer name")
+        compare(win.connectedPlaces[0].lost, false)
+    }
+    function test_equal_labels_do_not_merge_unrelated_computers() {
+        const ssh = route("ssh", "studio", false)
+        const tail = route("tailnet", "studio", false)
+        win.dirModel = {location: "/local", places_json: JSON.stringify({
+            computers: [{name: "Studio", routes: [ssh]}, {name: "Studio", routes: [tail]}],
+            ssh: [ssh], tailnet: [tail], cloud: []})}
+        win.placesArrived()
+        compare(win.connectedPlaces.length, 2)
+    }
+    function test_recovery_enter_cancels_without_danger_styling() {
+        recovery.open("Connection lost", "Choose another connection", "Choose connection", false)
+        compare(recovery.dangerous, false)
+        keyClick(Qt.Key_Return)
+        compare(rejected.count, 1)
+        compare(accepted.count, 0)
+    }
+    function test_recovery_pointer_buttons_remain_distinct() {
+        recovery.open("Connection lost", "Choose another connection", "Choose connection", false)
+        waitForRendering(recovery)
+        let p = recovery.buttonCenters()
+        mouseClick(recovery, p.cancel[0], p.cancel[1])
+        compare(rejected.count, 1)
+        compare(accepted.count, 0)
+        recovery.open("Connection lost", "Choose another connection", "Choose connection", false)
+        waitForRendering(recovery)
+        p = recovery.buttonCenters()
+        mouseClick(recovery, p.confirm[0], p.confirm[1])
+        compare(accepted.count, 1)
+        compare(rejected.count, 1)
+    }
+    }
+}
