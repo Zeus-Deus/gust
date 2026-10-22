@@ -409,6 +409,12 @@ seam remains covered separately. A uniquely resolved local mount over autofs sta
 eligible; remote mounts and descendants hidden below them cannot borrow the type
 of a covered local mount. An ambiguous subtree does not reject unrelated siblings.
 
+The process's held filesystem root is also the starting point for absolute source
+lookup. A mount stacked at `/` must not hide a remote root or its remote children
+from source admission. CORE conservatively treats a starting-root same-point stack
+as globally ambiguous for resolution and inventory; source admission refuses every
+path in that snapshot. Ordinary non-root overmount behavior remains unchanged.
+
 ## 6.5 Permanent delete
 
 The one operation with no undo. Reached only where Trash is genuinely

@@ -867,6 +867,47 @@ mod tests {
         }
     }
     #[test]
+    fn held_process_root_overmount_never_admits_remote_sources() {
+        for fstype in ["fuse.custom-peer", "nfs4", "cifs"] {
+            for root_parent in [0, 1] {
+                for remote_root in [false, true] {
+                    let root_fs = if remote_root { fstype } else { "ext4" };
+                    let mut rows = vec![
+                        format!("1 {root_parent} 0:1 / / rw - {root_fs} root rw\n"),
+                        "3 1 0:3 / / rw - tmpfs cover rw\n".to_string(),
+                    ];
+                    if !remote_root {
+                        rows.push(format!("2 1 0:2 / /remote rw - {fstype} peer rw\n"));
+                    }
+                    let orders: &[&[usize]] = if remote_root {
+                        &[&[0, 1], &[1, 0]]
+                    } else {
+                        &[
+                            &[0, 1, 2],
+                            &[0, 2, 1],
+                            &[1, 0, 2],
+                            &[1, 2, 0],
+                            &[2, 0, 1],
+                            &[2, 1, 0],
+                        ]
+                    };
+                    for order in orders {
+                        let table: String = order.iter().map(|i| rows[*i].as_str()).collect();
+                        for path in ["/remote/payload.txt", "/unrelated/payload.txt"] {
+                            assert!(
+                                check_source_location_with(Path::new(path), |p| {
+                                    gust_core::stall::fstype_from_mountinfo(p, table.as_bytes())
+                                })
+                                .is_err(),
+                                "admitted ambiguous held-root path: {fstype}, parent={root_parent}, remote_root={remote_root}, order={order:?}, path={path}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+    #[test]
     fn prepare_cancellation_cleanup_keeps_original_failure_and_remaining_budget() {
         let root = fixture("prepare-cleanup");
         let source = root.join("sample");
