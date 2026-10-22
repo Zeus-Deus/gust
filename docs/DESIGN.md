@@ -946,8 +946,19 @@ not an assertion that frontend bindings are complete.
 
 `ArchiveRequest::Extract` carries archive/destination/policy/password;
 `Create` carries directory, byte-preserving names, destination, format and
-password. The format enum reserves TarZstd, Zip and SevenZip; creation is
-unavailable until its separately verified worker implementation lands.
+password. Creation supports TarZstd, Zip and SevenZip through the sandbox helper. ZIP
+password creation uses AES-256; password creation for the other formats is
+explicitly unsupported by the current writer. Sources are enumerated through
+held no-follow descriptors, bounded to 200,000 entries/32 MiB metadata/16 GiB
+input, and revalidated before publication. Regular files must supply exactly
+their admitted size and unchanged identity; links are stored, never followed.
+The parent streams bounded frames; the helper sees no source path or writable
+location except an exclusively owned output file and a private 256 MiB
+tmpfs spool (required by the 7z writer). Spool exhaustion fails closed. A completed writer is
+closed, its complete inventory checked, and the output fsynced before one
+journaled atomic no-replace publication. Cancellation never deletes sources.
+The ordinary result record has JobKind::Compress and the created file identity;
+extracted is None. A partial publication error retains its precise receipt.
 Passwords are moved into a
 redacted secret type and transported only on helper stdin, never argv, env,
 logs or files. Unsupported encryption modes fail explicitly. Multipart

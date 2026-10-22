@@ -7,6 +7,8 @@
 
 use std::path::{Component, Path, PathBuf};
 
+#[path = "archive_create.rs"]
+mod create;
 #[path = "archive_io.rs"]
 pub mod io;
 #[path = "archive_jobs.rs"]

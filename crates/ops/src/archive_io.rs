@@ -48,16 +48,19 @@ impl ArchiveError {
             Self::SandboxUnavailable => {
                 "Archives need a working bubblewrap and prlimit sandbox.".into()
             }
-            Self::DestinationExists => {
-                "The extraction folder already exists; choose a new name.".into()
-            }
+            Self::DestinationExists => "The destination already exists; choose a new name.".into(),
             Self::PasswordRequired => "This archive needs a password.".into(),
             Self::IncorrectPassword => "The archive password was not accepted.".into(),
             Self::Unsupported(name) => format!("Gust cannot read {name} as an archive."),
             Self::Failed(why) | Self::Limit(why) => why.clone(),
             Self::Cancelled => "Archive operation cancelled.".into(),
             Self::Partial { receipt, cause } => {
-                format!("{}; stopped: {}", receipt.summary(), cause.message())
+                format!(
+                    "Published {} files and {} folders; stopped: {}",
+                    receipt.files,
+                    receipt.dirs,
+                    cause.message()
+                )
             }
         }
     }
@@ -114,7 +117,7 @@ pub enum ArchiveFormat {
     SevenZip,
 }
 
-fn helper_path() -> Option<PathBuf> {
+pub(super) fn helper_path() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("GUST_ARCHIVE_HELPER") {
         let path = PathBuf::from(path);
         return path.is_absolute().then_some(path).filter(|p| p.is_file());
@@ -757,7 +760,7 @@ fn kind(member: &Member) -> ArchiveEntryKind {
         _ => ArchiveEntryKind::Special,
     }
 }
-fn member_path(bytes: &[u8]) -> Option<PathBuf> {
+pub(super) fn member_path(bytes: &[u8]) -> Option<PathBuf> {
     if bytes.len() > super::protocol::MAX_PATH || bytes.contains(&0) {
         return None;
     }
@@ -971,7 +974,7 @@ pub(crate) trait PublicationObserver {
         identity: crate::anchor::FileIdentity,
     ) -> Result<(), ArchiveError>;
 }
-struct VolatilePublication;
+pub(super) struct VolatilePublication;
 impl PublicationObserver for VolatilePublication {
     fn intent(
         &mut self,
@@ -1416,6 +1419,31 @@ pub(crate) fn extract_recorded(
         });
     }
     Ok(done)
+}
+
+/// Create an archive on a worker; the destination must be an unoccupied name.
+pub fn create_with(
+    directory: &Path,
+    names: &[std::ffi::OsString],
+    destination: &Path,
+    format: ArchiveFormat,
+    password: Option<&ArchivePassword>,
+    cancel: &CancelToken,
+    progress: &mut dyn FnMut(super::jobs::ArchivePhase, usize, u64),
+) -> Result<(), ArchiveError> {
+    super::create::create_recorded(
+        super::create::CreateInput {
+            directory,
+            names,
+            destination,
+            format,
+            password,
+        },
+        cancel,
+        progress,
+        &mut VolatilePublication,
+    )
+    .map(|_| ())
 }
 
 #[cfg(test)]

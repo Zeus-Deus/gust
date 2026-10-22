@@ -187,9 +187,165 @@ fn run() -> Result<(), ()> {
 }
 
 fn main() {
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--create")) {
+        if write_archive().is_err() {
+            let _ = protocol::write_message(
+                &mut std::io::stdout().lock(),
+                &protocol::WriteReply::Failed,
+            );
+            std::process::exit(1);
+        }
+        return;
+    }
     if run().is_err() {
         let _ = protocol::write_frame(&mut std::io::stdout().lock(), &Frame::Failed);
         std::process::exit(1);
     }
     let _ = std::io::stdout().flush();
+}
+
+#[link(name = "archive")]
+unsafe extern "C" {
+    fn archive_write_new() -> *mut c_void;
+    fn archive_write_set_format_pax_restricted(a: *mut c_void) -> c_int;
+    fn archive_write_add_filter_zstd(a: *mut c_void) -> c_int;
+    fn archive_write_set_format_zip(a: *mut c_void) -> c_int;
+    fn archive_write_set_format_7zip(a: *mut c_void) -> c_int;
+    fn archive_write_set_options(a: *mut c_void, options: *const c_char) -> c_int;
+    fn archive_write_set_passphrase(a: *mut c_void, password: *const c_char) -> c_int;
+    fn archive_write_open_filename(a: *mut c_void, path: *const c_char) -> c_int;
+    fn archive_write_header(a: *mut c_void, entry: *mut c_void) -> c_int;
+    fn archive_write_data(a: *mut c_void, data: *const c_void, len: usize) -> isize;
+    fn archive_write_finish_entry(a: *mut c_void) -> c_int;
+    fn archive_write_close(a: *mut c_void) -> c_int;
+    fn archive_write_free(a: *mut c_void) -> c_int;
+    fn archive_entry_new() -> *mut c_void;
+    fn archive_entry_free(entry: *mut c_void);
+    fn archive_entry_set_pathname(entry: *mut c_void, name: *const c_char);
+    fn archive_entry_set_mode(entry: *mut c_void, mode: u32);
+    fn archive_entry_set_size(entry: *mut c_void, size: i64);
+    fn archive_entry_set_symlink(entry: *mut c_void, target: *const c_char);
+}
+struct WriterArchive(*mut c_void);
+impl Drop for WriterArchive {
+    fn drop(&mut self) {
+        unsafe {
+            archive_write_free(self.0);
+        }
+    }
+}
+struct Entry(*mut c_void);
+impl Drop for Entry {
+    fn drop(&mut self) {
+        unsafe {
+            archive_entry_free(self.0);
+        }
+    }
+}
+fn write_archive() -> Result<(), ()> {
+    use protocol::{WriteFormat, WriteFrame, WriteReply, WriteRequest};
+    let mut input = std::io::stdin().lock();
+    let mut output = std::io::stdout().lock();
+    let mut request: WriteRequest = protocol::read_message(&mut input).map_err(|_| ())?;
+    let secret = CString::new(std::mem::take(&mut request.password)).map_err(|_| ())?;
+    // SAFETY: each native object and all backing strings are owned for every
+    // call; no pointers escape this isolated writer process.
+    unsafe {
+        let archive = WriterArchive(archive_write_new());
+        if archive.0.is_null() {
+            return Err(());
+        }
+        let format = match request.format {
+            WriteFormat::TarZstd => {
+                if archive_write_set_format_pax_restricted(archive.0) != 0 {
+                    return Err(());
+                }
+                archive_write_add_filter_zstd(archive.0)
+            }
+            WriteFormat::Zip => archive_write_set_format_zip(archive.0),
+            WriteFormat::SevenZip => archive_write_set_format_7zip(archive.0),
+        };
+        if format != 0 {
+            return Err(());
+        }
+        if !secret.as_bytes().is_empty()
+            && (!matches!(request.format, WriteFormat::Zip)
+                || archive_write_set_passphrase(archive.0, secret.as_ptr()) != 0
+                || archive_write_set_options(archive.0, c"zip:encryption=aes256".as_ptr()) != 0)
+        {
+            return Err(());
+        }
+        let mut secret = secret.into_bytes_with_nul();
+        protocol::wipe(&mut secret);
+        if archive_write_open_filename(archive.0, c"/output".as_ptr()) != 0 {
+            return Err(());
+        }
+        protocol::write_message(&mut output, &WriteReply::Ready).map_err(|_| ())?;
+        let mut remaining: Option<u64> = None;
+        let mut seen = 0;
+        let mut metadata = 0usize;
+        loop {
+            let frame: WriteFrame = protocol::read_message(&mut input).map_err(|_| ())?;
+            match frame {
+                WriteFrame::Header(member) if remaining.is_none() => {
+                    seen += 1;
+                    metadata = metadata.saturating_add(
+                        member.name.len() + member.link.as_ref().map_or(0, Vec::len) + 128,
+                    );
+                    if seen > protocol::MAX_HEADERS
+                        || metadata > protocol::MAX_METADATA
+                        || member.name.len() > protocol::MAX_PATH
+                        || member.size > i64::MAX as u64
+                    {
+                        return Err(());
+                    }
+                    let name = CString::new(member.name).map_err(|_| ())?;
+                    let target = member.link.map(CString::new).transpose().map_err(|_| ())?;
+                    let entry = Entry(archive_entry_new());
+                    if entry.0.is_null() {
+                        return Err(());
+                    }
+                    archive_entry_set_pathname(entry.0, name.as_ptr());
+                    archive_entry_set_mode(entry.0, member.mode & !0o6000);
+                    archive_entry_set_size(entry.0, member.size as i64);
+                    if let Some(target) = &target {
+                        archive_entry_set_symlink(entry.0, target.as_ptr());
+                    }
+                    if archive_write_header(archive.0, entry.0) != 0 {
+                        return Err(());
+                    }
+                    remaining = Some(member.size);
+                }
+                WriteFrame::Data(bytes)
+                    if remaining.is_some()
+                        && !bytes.is_empty()
+                        && bytes.len() <= protocol::DATA_CHUNK =>
+                {
+                    let left = remaining.as_mut().ok_or(())?;
+                    if bytes.len() as u64 > *left
+                        || archive_write_data(archive.0, bytes.as_ptr().cast(), bytes.len())
+                            != bytes.len() as isize
+                    {
+                        return Err(());
+                    }
+                    *left -= bytes.len() as u64;
+                }
+                WriteFrame::EndMember if remaining == Some(0) => {
+                    if archive_write_finish_entry(archive.0) != 0 {
+                        return Err(());
+                    }
+                    remaining = None;
+                }
+                WriteFrame::Finish if remaining.is_none() => {
+                    if archive_write_close(archive.0) != 0 {
+                        return Err(());
+                    }
+                    protocol::write_message(&mut output, &WriteReply::Done).map_err(|_| ())?;
+                    return Ok(());
+                }
+                _ => return Err(()),
+            }
+            protocol::write_message(&mut output, &WriteReply::Ready).map_err(|_| ())?;
+        }
+    }
 }
