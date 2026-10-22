@@ -1596,3 +1596,16 @@ completion. On validation failure, restore the prior mode only while root
 identity/revision and the just-written mode still match; report Partial and
 retain the pending fence. Other traversal errors remain refusals. No permission
 change is performed solely to admit a forward history receipt.
+
+Nested permission batches reconcile directory lineage only from the batch's
+recorded mode transitions and each verified applied inode. Preflight derives
+the expected current modes from Applied/Undone status, including older stored
+lineage, then retains complete inventory, identity and revision checks. Each
+successful mode step updates matching inode modes in the same batch's lineage;
+no current directory snapshot is adopted as new authority.
+
+A confirmed job with any completed pre-existing destination root requires an
+explicit barrier rather than a partial inverse that silently omits that root.
+Ownership inverse policy matches the forward guard: privileged regular files
+refuse during admission/preflight, before pending or effects; owned setgid
+directories remain eligible with exact identity, group and lineage checks.
