@@ -1484,8 +1484,8 @@ whole scan; no undisplayed key may remain in a successful trust offer.
 `remote::block::{mount,unlock,unmount,lock}` run only on a worker, using the
 existing bounded, cancellable owned helper runtime and `helper::CallContext`.
 They retain CORE's device argument builders and unlock parser. Mount returns a
-byte-preserving `PathBuf`; unlock returns the cleartext device string. Neither
-checks candidate metadata, creates a mount directory, probes a device, or performs
+`PathBuf` preserving accepted UTF-8 bytes; unlock returns the cleartext device
+string. Neither checks candidate metadata, creates a mount directory, probes a device, or performs
 automatic compensation. APP retains kernel-discovery/selection checks and passes
 one cancellation token plus the remaining overall budget across unlock and mount.
 
@@ -1496,9 +1496,17 @@ does not roll back a request already accepted by the device service. Callers mus
 check current device state before retrying an uncertain operation. Raw helper
 diagnostics are not returned or logged. Secret bytes are borrowed only for stdin;
 the caller retains and wipes its buffer. Existing input/output and helper-admission
-bounds apply. CLI output is read in the C locale; malformed replies never trigger
+bounds apply. Device-service CLI output uses English messages with an explicit
+UTF-8 locale and GLib charset overrides. Non-UTF-8 mount locations are unsupported
+by this text adapter and fail with `Protocol`/`Accepted`, rather than returning a
+converted or guessed path. Malformed replies never trigger
 path guesses or filesystem checks. Tests use private executable stand-ins, never
 the real device service, mounts or credentials.
+
+Noninteractive helpers borrow their initial stdin bytes for the duration of the
+owned call instead of copying them into a helper-owned allocation. The caller's
+secret buffer remains live until helper completion/retirement and is then wiped
+by the caller. Interactive response buffers retain their existing separate protocol.
 
 `block::list_devices(&CallContext) -> Result<Vec<gust_core::devices::Device>, BlockFailure>`
 is the worker-only bounded discovery adapter. It runs `lsblk` with CORE's existing

@@ -190,7 +190,13 @@ fn invoke(
         Action::Lock => devices::lock_args(device),
     };
     let mut command = Command::new(program);
-    command.args(args).env("LC_ALL", "C");
+    command
+        .args(args)
+        .env("LC_ALL", "C.UTF-8")
+        .env("LANGUAGE", "C")
+        .env("CHARSET", "UTF-8")
+        .env("G_FILENAME_ENCODING", "UTF-8")
+        .env_remove("G_BROKEN_FILENAMES");
     let output = helper::run(command, secret, ctx).map_err(|e| {
         let effect = match e.code {
             ErrorCode::MissingHelper | ErrorCode::Busy | ErrorCode::InvalidInput => {
@@ -240,6 +246,9 @@ fn mount_using(
         // Mount replies have no terminal period. Keep name bytes, spaces and
         // periods exactly, without stat/is_dir or a guessed destination.
         let bytes = &rest[split + 4..];
+        // g_print is a UTF-8 text interface, not a raw filename transport.
+        // Invalid names may be rendered differently by GLib and are unsupported.
+        std::str::from_utf8(bytes).ok()?;
         let path = PathBuf::from(OsString::from_vec(bytes.to_vec()));
         (valid_path(&path) && !bytes.contains(&0)).then_some(path)
     };
@@ -465,17 +474,69 @@ mod tests {
     }
 
     #[test]
-    fn mount_preserves_location_bytes_without_touching_the_reported_path() {
+    fn mount_preserves_glib_utf8_output_without_touching_the_reported_path() {
         let fixture = Fixture::new(
-            "import os,sys\nassert os.environ['LC_ALL']=='C'\nassert sys.argv[1:]==['mount','-b','/dev/mapper/fixture','--no-user-interaction']\nsys.stdout.buffer.write(b'Mounted /dev/dm-fixture at /synthetic/not-created/at place. \\xff\\n')",
+            "import ctypes,locale,sys\nlocale.setlocale(locale.LC_ALL,'')\nassert sys.argv[1:]==['mount','-b','/dev/mapper/fixture','--no-user-interaction']\nglib=ctypes.CDLL('libglib-2.0.so.0')\nglib.g_print.argtypes=[ctypes.c_char_p]\nglib.g_print(b'Mounted %s at %s\\n',ctypes.c_char_p(b'/dev/dm-fixture'),ctypes.c_char_p(b'/synthetic/not-created/caf\\xc3\\xa9 at place. '))",
         );
         let cancel = CancelToken::new();
         let path =
             mount_using(fixture.program(), "/dev/mapper/fixture", &context(&cancel)).unwrap();
         assert_eq!(
             path.as_os_str().as_bytes(),
-            b"/synthetic/not-created/at place. \xff"
+            "/synthetic/not-created/café at place. ".as_bytes()
         );
+    }
+
+    #[test]
+    fn mount_preserves_legacy_glib_charset_conversion() {
+        // GLib 2.80's print handler uses this conversion stage. Newer GLib
+        // prints UTF-8 directly, so exercise the legacy stage explicitly too.
+        let fixture = Fixture::new(
+            r#"
+import ctypes,locale,os
+locale.setlocale(locale.LC_ALL,'')
+glib=ctypes.CDLL('libglib-2.0.so.0')
+glib.g_get_charset.argtypes=[ctypes.POINTER(ctypes.c_char_p)]
+glib.g_convert_with_fallback.argtypes=[ctypes.c_char_p,ctypes.c_long,ctypes.c_char_p,ctypes.c_char_p,ctypes.c_char_p,ctypes.c_void_p,ctypes.c_void_p,ctypes.c_void_p]
+glib.g_convert_with_fallback.restype=ctypes.c_void_p
+glib.g_free.argtypes=[ctypes.c_void_p]
+handler_type=ctypes.CFUNCTYPE(None,ctypes.c_char_p)
+@handler_type
+def legacy_print(message):
+    charset=ctypes.c_char_p()
+    if glib.g_get_charset(ctypes.byref(charset)):
+        data=message
+    else:
+        converted=glib.g_convert_with_fallback(message,-1,charset.value,b'UTF-8',b'?',None,None,None)
+        assert converted
+        data=ctypes.string_at(converted)
+        glib.g_free(converted)
+    os.write(1,data)
+glib.g_set_print_handler.argtypes=[handler_type]
+glib.g_set_print_handler(legacy_print)
+glib.g_print.argtypes=[ctypes.c_char_p]
+glib.g_print(b'Mounted /dev/fixture at /synthetic/caf\xc3\xa9 at place.\n')
+"#,
+        );
+        let cancel = CancelToken::new();
+        assert_eq!(
+            mount_using(fixture.program(), "/dev/fixture", &context(&cancel)).unwrap(),
+            PathBuf::from("/synthetic/café at place.")
+        );
+    }
+
+    #[test]
+    fn mount_refuses_non_utf8_glib_or_raw_output_without_a_guessed_path() {
+        let cancel = CancelToken::new();
+        for body in [
+            "import ctypes,locale\nlocale.setlocale(locale.LC_ALL,'')\nglib=ctypes.CDLL('libglib-2.0.so.0')\nglib.g_print.argtypes=[ctypes.c_char_p]\nglib.g_print(b'Mounted /dev/fixture at %s\\n',ctypes.c_char_p(b'/synthetic/name\\xff'))",
+            "import sys\nsys.stdout.buffer.write(b'Mounted /dev/fixture at /synthetic/name\\xff\\n')",
+        ] {
+            let fixture = Fixture::new(body);
+            let e = mount_using(fixture.program(), "/dev/fixture", &context(&cancel)).unwrap_err();
+            assert_eq!(e.error.code, ErrorCode::Protocol);
+            assert_eq!(e.effect, BlockEffect::Accepted);
+        }
     }
 
     #[test]
