@@ -319,6 +319,46 @@ fn explicit_restore_history_roundtrips_data_and_original_record() {
     h.redo(&cancel()).unwrap();
 }
 #[test]
+fn restored_trash_root_excludes_retained_child_vault_across_reopen() {
+    let f = Fixture::new();
+    let location = f.location();
+    let folder = f.0.join("work/tree");
+    fs::create_dir(&folder).unwrap();
+    let created =
+        gust_ops::create::create_from_bytes(&folder, OsStr::new("file"), b"original").unwrap();
+    let mut history = f.history();
+    history.record_created("Create child", &[created]).unwrap();
+    let receipt = location.trash_path(&folder, &cancel()).unwrap();
+    let info = FileIdentity::of_path(&receipt.item.info_file).unwrap();
+    let bytes = fs::read(&receipt.item.info_file).unwrap();
+    history
+        .record_trash("Trash tree", std::slice::from_ref(&receipt))
+        .unwrap();
+    history.undo(&cancel()).unwrap();
+    drop(history);
+    let mut history = f.history();
+    history.undo(&cancel()).unwrap();
+    assert!(
+        fs::read_dir(&folder).unwrap().next().is_none(),
+        "owned vault belongs outside the restored root"
+    );
+    drop(history);
+    let mut history = f.history();
+    history.redo(&cancel()).unwrap();
+    history.redo(&cancel()).unwrap();
+    assert!(!folder.exists());
+    assert_eq!(
+        FileIdentity::of_path(&receipt.item.info_file).unwrap(),
+        info
+    );
+    assert_eq!(fs::read(&receipt.item.info_file).unwrap(), bytes);
+    assert!(fs::read_dir(f.0.join("work")).unwrap().any(|entry| entry
+        .unwrap()
+        .file_name()
+        .to_string_lossy()
+        .starts_with(".gust-undo-")));
+}
+#[test]
 fn history_occupied_original_and_info_refuse_before_any_step() {
     for occupied_info in [false, true] {
         let f = Fixture::new();

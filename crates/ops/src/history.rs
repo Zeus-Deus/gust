@@ -1075,16 +1075,31 @@ impl History {
     }
     fn vault_base(&self, from: &Path) -> Result<PathBuf, HistoryError> {
         let dev = FileIdentity::of_path(from)?.dev;
-        let roots: Vec<_> = self
-            .store
-            .records
-            .iter()
-            .flat_map(|r| r.steps.iter())
-            .map(|s| match s {
-                Step::Move { present, .. } => present.path(),
-                Step::Attr { path, .. } => path.path(),
-            })
-            .collect();
+        let mut roots = Vec::new();
+        for record in &self.store.records {
+            for step in &record.steps {
+                match step {
+                    Step::Move {
+                        present,
+                        restore,
+                        vault,
+                        ..
+                    } => {
+                        roots.push(present.path());
+                        if record.entry.status == HistoryStatus::Undone {
+                            if let Some(current) = restore
+                                .as_ref()
+                                .map(SavedPath::path)
+                                .or_else(|| vault.as_ref().map(|v| v.path.path().join("item")))
+                            {
+                                roots.push(current);
+                            }
+                        }
+                    }
+                    Step::Attr { path, .. } => roots.push(path.path()),
+                }
+            }
+        }
         for parent in from.ancestors().skip(1) {
             let dir = crate::history_tree::open_dir(parent)?;
             let s = dir.stat_self()?;

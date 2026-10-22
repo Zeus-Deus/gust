@@ -1695,3 +1695,15 @@ remain available outside an ambiguous subtree. Discovery establishes visible
 local roots before any candidate access and separately checks the shared,
 private, files and info paths before opening them. Snapshot checks do not
 promise atomic exclusion of concurrent mount changes or syscall deadlines.
+
+Undo vault placement excludes each retained entry's effective current root,
+including a Trash folder restored by an Undone entry. Empty vaults remain
+retained outside those roots; completing a child Redo never deletes a vault
+or relaxes the ancestor's complete inventory.
+
+Restore retains an initially existing target parent through its mutation and
+checks that the public parent path still names it before moving data. A parent
+renamed or replaced after initial admission refuses with retained intent,
+including receipts acquired while that parent was absent. Only the initially
+missing-parent branch may create parents; its terminal receipt always requires
+the existing caller history barrier.

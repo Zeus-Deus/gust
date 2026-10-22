@@ -510,17 +510,18 @@ impl TrashLocation {
         let target_name = original
             .file_name()
             .ok_or_else(|| invalid("Missing restore name"))?;
-        let created_parents = match history_tree::open_dir(parent_path) {
+        let initial_parent = match history_tree::open_dir(parent_path) {
             Ok(parent) => {
                 if let Some(expected) = receipt.original_parent {
                     inode_dir(&parent, expected)?;
                 }
                 ensure_absent(&parent, target_name)?;
-                false
+                Some(parent)
             }
-            Err(e) if e.kind() == io::ErrorKind::NotFound => true,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => None,
             Err(e) => return Err(e),
         };
+        let created_parents = initial_parent.is_none();
         // Prepare intent before creating missing original parents or moving data.
         let (vault, vault_path) = recovery_vault(&info, &self.trash.info)?;
         let retained_info = vault_path.join("info");
@@ -548,12 +549,26 @@ impl TrashLocation {
             rustix::fs::fsync(vault.as_fd())?;
             rustix::fs::fsync(info.as_fd())?;
             check(cancel)?;
-            let target = history_tree::ensure_dir(parent_path)?;
-            if !created_parents {
-                if let Some(expected) = receipt.original_parent {
-                    inode_dir(&target, expected)?;
+            #[cfg(test)]
+            BEFORE_RESTORE_PARENT.with(|hook| {
+                let hook = hook.borrow_mut().take();
+                if let Some(hook) = hook {
+                    hook()
                 }
-            }
+            });
+            let target = match initial_parent {
+                Some(target) => {
+                    // An absent-parent receipt may meet a newly existing parent.
+                    // Hold that exact object rather than recreating its public
+                    // path if another actor renames it after this admission.
+                    inode_dir(
+                        &history_tree::open_dir(parent_path)?,
+                        FileIdentity::from_stat(&target.stat_self()?),
+                    )?;
+                    target
+                }
+                None => history_tree::ensure_dir(parent_path)?,
+            };
             if target.stat_self()?.st_dev != receipt.data.dev {
                 return Err(io::Error::new(
                     io::ErrorKind::Unsupported,
@@ -884,6 +899,7 @@ type MoveHook = Box<dyn FnOnce()>;
 thread_local! {
     static AFTER_MOVE:std::cell::RefCell<Option<MoveHook>>=const { std::cell::RefCell::new(None) };
     static BEFORE_MOVE:std::cell::RefCell<Option<MoveHook>>=const { std::cell::RefCell::new(None) };
+    static BEFORE_RESTORE_PARENT:std::cell::RefCell<Option<MoveHook>>=const { std::cell::RefCell::new(None) };
 }
 /// NOREPLACE protects target occupancy. Held-parent pre/post inventories bind
 /// the source for the tested race; a mismatching move is restored only while
@@ -1141,6 +1157,53 @@ mod tests {
             topdir: None,
         };
         (root, l, file)
+    }
+    #[test]
+    fn absent_parent_receipt_never_recreates_a_parent_renamed_after_initial_open() {
+        let (root, location, file) = fixture();
+        let initial = location.trash_path(&file, &CancelToken::new()).unwrap();
+        let parent = file.parent().unwrap().to_path_buf();
+        fs::remove_dir(&parent).unwrap();
+        let receipt = location
+            .receipt_named(&initial.item.trashed_name, &CancelToken::new())
+            .unwrap();
+        assert!(receipt.original_parent.is_none());
+        fs::create_dir(&parent).unwrap();
+        let parent_id = FileIdentity::of_path(&parent).unwrap();
+        assert!(receipt
+            .restore_history_supported(&CancelToken::new())
+            .unwrap());
+        let kept = root.join("actor-parent");
+        BEFORE_RESTORE_PARENT.with(|hook| {
+            let parent = parent.clone();
+            let kept = kept.clone();
+            *hook.borrow_mut() = Some(Box::new(move || fs::rename(parent, kept).unwrap()));
+        });
+        let result = location.restore(&receipt, &CancelToken::new());
+        assert!(
+            result.is_err(),
+            "a renamed parent must refuse, not report a reversible recreation: {result:?}"
+        );
+        let error = result.unwrap_err();
+        assert!(error
+            .get_ref()
+            .unwrap()
+            .downcast_ref::<TrashPartial>()
+            .is_some());
+        assert!(!parent.exists());
+        assert_eq!(FileIdentity::of_path(&kept).unwrap(), parent_id);
+        assert_eq!(
+            fs::read(location.trash.files.join(&receipt.name)).unwrap(),
+            b"original"
+        );
+        assert_eq!(
+            fs::read(&receipt.item.info_file).unwrap(),
+            receipt.info_bytes
+        );
+        assert!(fs::read_dir(&location.trash.info)
+            .unwrap()
+            .any(|entry| entry.unwrap().path().join("intent.json").exists()));
+        fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn mismatching_source_is_restored_without_adopting_a_receipt() {
