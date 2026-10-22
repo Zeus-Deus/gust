@@ -75,8 +75,11 @@ preview and archive tools. Curl/OpenSSL/GLib are included for the remote lane's 
 and TLS-sharing integration; installing them does not claim that integration is
 already consumed in every app revision. GVfs FTP/WebDAV support is supplied by
 the matching installed GVfs build and must be tested with its actual backend.
-On Arch, the provider contract is GVfs's `ftp.mount`, `ftps.mount` and
-`http.mount` (including WebDAV types), not a nonexistent `dav.mount` file.
+On Arch, FTP/FTPS come from GVfs; WebDAV needs
+[`gvfs-dnssd`](https://archlinux.org/packages/extra/x86_64/gvfs-dnssd/), whose
+[file list](https://archlinux.org/packages/extra/x86_64/gvfs-dnssd/files/) includes
+`/usr/lib/gvfsd-dav` and `dav.mount`. `http.mount` alone does not establish WebDAV
+support. Missing backend files must remain an explicit unavailable capability.
 The mpv prerequisite matches the active neighboring-media integration; a package
 manifest alone does not qualify that unpublished UI flow.
 

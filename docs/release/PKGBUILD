@@ -5,9 +5,9 @@
 # - Nothing here changes a user's defaults. `gust --default on` is an
 #   explicit, per-user, reversible action (docs/DESIGN.md §6.2); a package
 #   install must never silently take over the file manager association.
-# - Every program Gust calls is a dependency, so a fresh install works with
-#   nothing else to set up. Gust still degrades gracefully and says why if
-#   one is removed later (plan §8).
+# - Common file-operation and connection helpers are dependencies. Optional
+#   preview capabilities are declared separately; tool/service availability
+#   still needs runtime qualification.
 
 pkgname=gust
 _commit=51949a44d468a36ecd9a13f5f4e156a2c982b4df
@@ -26,7 +26,7 @@ options=(!lto)
 depends=(
   'qt6-base' 'qt6-declarative' 'dbus' 'glibc' 'gcc-libs' 'glib2'
   'openssh' 'sshfs' 'fuse3' 'rclone'
-  'gvfs' 'gvfs-afc' 'gvfs-smb' 'gvfs-nfs' 'gvfs-mtp' 'gvfs-gphoto2'
+  'gvfs' 'gvfs-afc' 'gvfs-smb' 'gvfs-nfs' 'gvfs-mtp' 'gvfs-gphoto2' 'gvfs-dnssd'
   'usbmuxd' 'polkit'
   # Clipboard, Open with, terminal and folder jump.
   'wl-clipboard' 'xdg-utils' 'xdg-terminal-exec' 'zoxide'
