@@ -22,6 +22,35 @@ GATES = ("static", "library-unit", "libraries", "app", "model-seams", "models", 
          "dependencies", "native", "themes")
 
 
+def terminate_owned_group(child):
+    # Cancellation must finish cleanup before the lease is released. Ignore
+    # further terminal/cancel signals only during this bounded cleanup.
+    handlers = {sig: signal.signal(sig, signal.SIG_IGN)
+                for sig in (signal.SIGINT, signal.SIGTERM)}
+    try:
+        try:
+            os.killpg(child.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            child.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            pass
+        # The group leader can exit before an uncooperative descendant.
+        try:
+            os.killpg(child.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        child.wait()
+    finally:
+        for sig, handler in handlers.items():
+            signal.signal(sig, handler)
+
+
+def cancel_on_signal(signum, frame):
+    raise KeyboardInterrupt
+
+
 class Gates:
     def __init__(self, args):
         self.args = args
@@ -32,6 +61,7 @@ class Gates:
         self.output.mkdir(parents=True, mode=0o700)
         self.results = []
         self.installed_verified = None
+        self.build_lock = Path("/tmp/gust-build.lock")
 
     def result(self, name, status, reason=""):
         self.results.append({"gate": name, "status": status, "reason": reason})
@@ -40,7 +70,7 @@ class Gates:
         lock = None
         try:
             if build:
-                lock = open("/tmp/gust-build.lock", "a")
+                lock = self.build_lock.open("a")
                 try:
                     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 except BlockingIOError:
@@ -54,19 +84,11 @@ class Gates:
                 try:
                     child.wait(timeout=1800)
                 except subprocess.TimeoutExpired:
-                    # Stop only this check's process group before releasing
-                    # the build lease; a surviving compiler still owns work.
-                    os.killpg(child.pid, signal.SIGTERM)
-                    try:
-                        child.wait(timeout=10)
-                    except subprocess.TimeoutExpired:
-                        pass
-                    try:
-                        os.killpg(child.pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-                    child.wait()
+                    terminate_owned_group(child)
                     return 1
+                except BaseException:
+                    terminate_owned_group(child)
+                    raise
             return child.returncode
         except FileNotFoundError:
             return 77
@@ -92,7 +114,7 @@ class Gates:
             return
         args = ["--app"] if gate == "app" else []
         if gate == "library-unit":
-            args += ["--lib"]
+            args += ["--package-unit"]
         if self.args.required:
             args += ["--required"]
         code = self.command(gate, [str(ROOT / "tests/run-tests.sh"), *args], build=True)
@@ -210,6 +232,7 @@ class Gates:
             elif gate == "static":
                 for name, script in (("runner-contracts", "tests/test-release-runners.py"),
                     ("artifact-contracts", "tests/test-package-artifacts.py"),
+                    ("source-archive-contracts", "tests/test-source-archive.py"),
                     ("package-metadata", "tests/check-setup-packaging.py"),
                     ("dependency-metadata", "packaging/check-dependencies.py")):
                     self.invoke(name, [sys.executable, str(ROOT / script)])
@@ -253,7 +276,11 @@ def main():
     if args.installed_root:
         args.installed_root = args.installed_root.resolve()
     try:
+        signal.signal(signal.SIGTERM, cancel_on_signal)
         return Gates(args).run()
+    except KeyboardInterrupt:
+        print(json.dumps({"status": "FAIL", "reason": "gate cancelled; owned processes stopped"}))
+        return 130
     except (OSError, ValueError, subprocess.SubprocessError):
         print(json.dumps({"status": "FAIL", "reason": "gate admission or execution failed"}))
         return 1

@@ -2,11 +2,15 @@
 """Exercise the shared runner's process boundary with synthetic Cargo output."""
 
 import concurrent.futures
+import fcntl
 import json
 import os
 from pathlib import Path
 import subprocess
+import signal
+import sys
 import tempfile
+import time
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -86,6 +90,18 @@ sys.exit(23 if os.environ.get('CASE') == 'failure' else 0)
         self.assertIn("gust-testkit", capture["argv"])
         self.assertNotIn("gust-core", capture["argv"])
 
+    def test_package_unit_scope_filters_manual_benchmark_but_rejects_other_ignores(self):
+        result, summary = self.run_case("pass", "--workspace", "--package-unit", "--required", "--release")
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(summary["excluded_manual_benchmarks"], ["recursive::tests::copy_1000_small_files"])
+        argv = json.loads(next(self.root.glob("capture-*")).read_text())["argv"]
+        self.assertEqual(argv[-3:], ["--", "--skip", "recursive::tests::copy_1000_small_files"])
+        self.assertIn("--lib", argv)
+        self.assertNotIn("--ignored", argv)
+        result, summary = self.run_case("ignored", "--package-unit", "--required")
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(summary["ignored"], 1)
+
 
 class FixtureContainmentTests(unittest.TestCase):
     def test_fresh_fixture_is_built_and_sibling_data_is_untouched(self):
@@ -123,6 +139,65 @@ class FixtureContainmentTests(unittest.TestCase):
 
 
 class GateAdmissionTests(unittest.TestCase):
+    def test_cancel_stops_owned_descendants_before_releasing_lease(self):
+        # No Gust, compiler or shared lease is involved: exercise the real
+        # process boundary with a synthetic child/grandchild and a temp lock.
+        for cancellation in (signal.SIGINT, signal.SIGTERM):
+            with self.subTest(signal=cancellation), tempfile.TemporaryDirectory(prefix="gust-cancel-test-") as temporary:
+                root = Path(temporary)
+                child_script = root / "child.py"
+                child_script.write_text("""import os, subprocess, sys, time
+from pathlib import Path
+child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])
+Path(sys.argv[1]).write_text(str(os.getpid()) + ' ' + str(child.pid))
+time.sleep(30)
+""")
+                wrapper = root / "wrapper.py"
+                wrapper.write_text("""import importlib.util, signal, sys
+from pathlib import Path
+from types import SimpleNamespace
+spec = importlib.util.spec_from_file_location('gates', sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+signal.signal(signal.SIGTERM, module.cancel_on_signal)
+gate = module.Gates(SimpleNamespace(output=Path(sys.argv[2]) / 'out'))
+gate.build_lock = Path(sys.argv[2]) / 'lease'
+try:
+    gate.command('owned', [sys.executable, sys.argv[2] + '/child.py', sys.argv[2] + '/pids'], build=True)
+except KeyboardInterrupt:
+    sys.exit(130)
+""")
+                sentinel = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+                owner = subprocess.Popen([sys.executable, str(wrapper), str(ROOT / "tests/release-gates.py"), str(root)],
+                                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                pids = []
+                try:
+                    deadline = time.monotonic() + 5
+                    while not (root / "pids").exists() and time.monotonic() < deadline:
+                        time.sleep(0.02)
+                    pids = [int(pid) for pid in (root / "pids").read_text().split()]
+                    with (root / "lease").open("a") as lease:
+                        with self.assertRaises(BlockingIOError):
+                            fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        owner.send_signal(cancellation)
+                        self.assertEqual(owner.wait(timeout=5), 130)
+                        fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        for pid in pids:
+                            state = Path(f"/proc/{pid}/stat")
+                            self.assertTrue(not state.exists() or state.read_text().split()[2] == "Z")
+                    self.assertIsNone(sentinel.poll())
+                finally:
+                    if owner.poll() is None:
+                        owner.kill()
+                        owner.wait()
+                    if pids:
+                        try:
+                            os.killpg(pids[0], signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                    sentinel.terminate()
+                    sentinel.wait()
+
     def test_unavailable_native_is_skip_and_required_mode_fails(self):
         with tempfile.TemporaryDirectory(prefix="gust-gate-test-") as temporary:
             for required in (False, True):

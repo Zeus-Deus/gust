@@ -27,7 +27,8 @@ def inspect_archive(data, revision):
         version = tomllib.loads(archive.extractfile(member).read().decode())["workspace"]["package"]["version"]
         # A recipe must not pin a snapshot lacking the scripts it invokes.
         for required in ("tests/run-tests.py", "packaging/build-artifact.py",
-                         "packaging/check-package.py", "packaging/runtime-files.json"):
+                         "packaging/check-package.py", "packaging/check-source.py",
+                         "packaging/runtime-files.json", "crates/ops/src/bin/gust-archive-helper.rs"):
             if not archive.getmember(prefix + "/" + required).isfile():
                 raise ValueError("source snapshot predates the release tooling")
     if not re.fullmatch(r"\d+\.\d+\.\d+", version):

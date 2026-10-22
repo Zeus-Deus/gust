@@ -26,6 +26,8 @@ jobs:
         run: python3 tests/release-gates.py --gate static --required --output "$RUNNER_TEMP/gust-contracts"
       - name: Shell syntax
         run: bash -n PKGBUILD tests/run-tests.sh tests/make-fixture.sh
+      - name: Verify declared remote source archive
+        run: python3 packaging/check-source.py --output "$RUNNER_TEMP/gust-source"
 
   native-build:
     name: Native build and staged artifact (${{ matrix.arch }})
@@ -64,10 +66,8 @@ jobs:
         run: python3 tests/release-gates.py --gate app --gate model-seams --required --output "$RUNNER_TEMP/gust-app"
       - name: Library observation (unprovisioned fixtures are reported as skips)
         run: ./tests/run-tests.sh
-      - name: Build recorded release artifact
-        run: python3 packaging/build-artifact.py
-      - name: Stage actual package and validate files, architecture and linking
-        run: python3 packaging/check-package.py --stage --architecture "${{ matrix.arch }}" --output "$RUNNER_TEMP/gust-package"
+      - name: Verify declared archive, build it and validate staged files and linking
+        run: python3 packaging/check-source.py --build --architecture "${{ matrix.arch }}" --output "$RUNNER_TEMP/gust-source-package"
       # No artifact upload: raw test logs, source receipts and native/theme
       # evidence remain private. Hosted checks do not qualify a desktop,
       # physical device, remote account or installed Arch dependency closure.

@@ -31,6 +31,7 @@ test-app:
 check-release:
     python3 tests/test-release-runners.py
     python3 tests/test-package-artifacts.py
+    python3 tests/test-source-archive.py
     python3 tests/check-setup-packaging.py
     python3 packaging/check-dependencies.py
 

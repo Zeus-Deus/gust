@@ -10,6 +10,7 @@ acceptance. Historical source tests do not qualify a current installation.
 ```sh
 python3 tests/test-release-runners.py
 python3 tests/test-package-artifacts.py
+python3 tests/test-source-archive.py
 python3 tests/check-setup-packaging.py
 python3 packaging/check-dependencies.py
 ./tests/run-tests.sh
@@ -26,6 +27,12 @@ runtime skips are subtracted from libtest's pass count. Required mode sets
 accounting and a command that exits zero without observed tests. A compilation
 failure is a failure even if no test summary was printed. Filters still select
 only their stated tests; filtered-out tests are not evidence of coverage.
+
+`--package-unit` explicitly selects `--lib` and filters the one manual disk
+benchmark `recursive::tests::copy_1000_small_files`. Its exclusion is recorded in
+the summary, rather than counted as a pass. Every other ignored test still fails
+required mode. The benchmark needs a separately provisioned destination and its
+own measurement/acceptance; enabling all ignored tests cannot qualify it.
 
 The ledger can account only for tests using `gust_testkit::skip!`; crate owners
 must instrument new fixture early returns. Individual fixture flags such as
@@ -54,7 +61,7 @@ all implemented gate scopes are requested, including unavailable native gates.
 Benchmark and hardware/provider acceptance remain separate coordinated work;
 this runner never turns their historical evidence into a current pass.
 
-`library-unit` selects `--lib`; `libraries` includes integration/doc tests.
+`library-unit` selects that package unit scope; `libraries` includes integration/doc tests.
 `app` runs the app Rust tests and requires Qt build tools. `model-seams` runs the
 portable ConnectPanel and phone-worker source-extraction harnesses. `models` also
 requests tab, pane and insertion harnesses; their existing KVM/UID-1000 admission
@@ -117,8 +124,11 @@ state, codec functionality, user authorization, TLS/provider behavior or physica
 device transfers.
 
 `.github/workflows/checks.yml` runs required source/app/portable seam checks and
-native x86_64/aarch64 release builds with staging checks. Its library observation
-reports unprovisioned fixture skips explicitly. Full `--required` fixtures,
+native x86_64/aarch64 release builds with staging checks. The artifact jobs fetch and
+verify the recipe's declared source archive, build that extracted source, then
+stage it with the reviewed recipe; a checkout alias cannot satisfy source-pin
+qualification. Library observation reports unprovisioned fixture skips explicitly.
+Full `--required` fixtures,
 KVM-only models, desktop/theme, benchmark and hardware/provider qualification
 remain separately required before release; hosted build success cannot certify
 them. There are no screenshot, log or receipt uploads and no self-hosted jobs

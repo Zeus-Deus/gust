@@ -17,10 +17,11 @@ commit is available remotely:
 python3 packaging/pin-source.py FULL_SOURCE_COMMIT
 python3 tests/check-setup-packaging.py
 makepkg --printsrcinfo
+python3 packaging/check-source.py --output /tmp/gust-source-fresh
 ```
 
 The pinning tool downloads within a size budget, inspects Cargo metadata without
-extracting or executing it, requires the skip-aware runner and updates both
+extracting or executing it, requires the runner/builder/archive helper and updates both
 recipes. Review the exact source revision/checksum diff. It does not tag,
 publish a release/package, change repository settings or submit to a registry.
 A metadata-only commit may pin its preceding source commit; qualification must
@@ -31,6 +32,10 @@ unrecorded compiler, Qt and system-library versions.
 ## Build, stage and inspect the real files
 
 ```sh
+# Declared remote source: verifies checksum/version/tooling, builds that source,
+# then stages its outputs with the reviewed recipe.
+python3 packaging/check-source.py --build --output /tmp/gust-source-package-fresh
+# Current checkout only (separate evidence scope):
 python3 packaging/build-artifact.py
 python3 packaging/check-package.py --stage --output /tmp/gust-package-fresh
 python3 packaging/check-dependencies.py --installed
@@ -41,6 +46,8 @@ default, records the source-input digest and actual executable hashes, and remap
 checkout/registry paths. Raw build logs/receipts stay local under `target/release`.
 Changes during a build invalidate the receipt. A separately coordinated build is
 needed if the lease is busy; do not nest locks.
+The digest validates `crates/app/ui -> ../../ui` and hashes the selected QML
+contents; redirected or unaccounted source symlinks invalidate provenance.
 
 When `crates/ops/src/bin/gust-archive-helper.rs` exists in the selected snapshot,
 the builder runs `cargo build --release --locked -p gust-ops --bin
@@ -53,7 +60,8 @@ The staging check executes the actual audited `package()` function into a fresh
 private root, verifies its exact file set against `packaging/runtime-files.json`,
 then checks modes, source/configuration bytes, executable build receipts, ELF
 machine type and resolved dynamic libraries. `--root` verifies an existing staged
-or installed root against the same build. Symlinked runtime files, missing
+or installed root against the same build (`--source` selects the recorded source
+tree, defaulting to the checkout). Symlinked runtime files, missing
 helpers, replaced binaries, stale source receipts and wrong architectures fail.
 A development-tree launch or recipe text check is not this installed check.
 
@@ -61,6 +69,11 @@ A development-tree launch or recipe text check is not this installed check.
 license and README. It does not copy audit logs, receipts or screenshots. A clean
 Arch `makepkg` build/install and its dependency closure still need separate
 qualification; Ubuntu hosted staging is useful compatibility evidence only.
+
+The recipe's `check()` uses required workspace library-unit scope. It excludes
+only the named manual disk benchmark, records that exclusion and rejects all
+other ignored/skipped cases. Provision the remaining library fixtures explicitly;
+the package check is not a benchmark or native desktop pass.
 
 ## Dependency contracts
 

@@ -1473,6 +1473,10 @@ desktop evidence is not qualification of a new binary, architecture or provider.
   ignored tests. Required mode fails on skips, ignored tests or no observed
   tests, even when a child command returns zero. App Rust tests use the same
   accounting as library tests; Qt model scripts remain separately named seams.
+  Package unit scope explicitly filters the manual recursive-copy benchmark and
+  records that exclusion; it never enables ignored tests or counts a benchmark
+  as passed. Other ignored/skipped cases still fail required mode. Cancellation
+  stops the owned child process group before releasing its build lease.
 - Native and theme gates require an explicitly dedicated disposable desktop,
   their actual tools and the installed binary. They must not start on an
   ordinary shared desktop. The desktop runner owns `/tmp/gust-qa.lock`; callers
@@ -1485,6 +1489,9 @@ desktop evidence is not qualification of a new binary, architecture or provider.
   libarchive, built with `cargo build -p gust-ops --bin gust-archive-helper`;
   installations using that contract must include it beside Gust in `/usr/bin`.
 - Source recipes identify a full revision, fetchable URL and verified SHA-256.
+  Artifact CI builds the verified extracted archive, then stages with the
+  reviewed recipe; a checkout alias cannot qualify that source pin. Build
+  provenance validates the canonical app-to-QML symlink and selected contents.
   Preparing a recipe does not publish a release or package. Both advertised
   Linux architectures need native compilation; desktop/provider qualification
   is recorded separately for each architecture rather than inferred.

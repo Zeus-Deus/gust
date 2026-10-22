@@ -2,6 +2,7 @@
 """Prove that real staged runtime drift and helper omissions are rejected."""
 
 import importlib.util
+import hashlib
 import json
 from pathlib import Path
 import shutil
@@ -86,6 +87,42 @@ class PackageArtifactTests(unittest.TestCase):
         with self.assertRaises(OSError):
             self.verify()
         self.assertEqual(len(package.runtime_files(self.source)), 7)
+
+    def test_actual_recipe_refuses_missing_helper_then_stages_it_beside_gust(self):
+        helper = self.source / "crates/ops/src/bin/gust-archive-helper.rs"
+        helper.parent.mkdir(parents=True)
+        helper.write_text("// synthetic entrypoint\n")
+        missing = self.root / "missing-helper"
+        missing.mkdir()
+        with self.assertRaises(package.subprocess.CalledProcessError):
+            package.stage(missing, self.source)
+        shutil.copyfile(self.source / "target/release/gust", self.source / "target/release/gust-archive-helper")
+        complete = self.root / "complete-helper"
+        complete.mkdir()
+        staged = package.stage(complete, self.source)
+        self.assertEqual(len(package.verify(staged, self.source, "x86_64", require_receipt=False)), 7)
+        self.assertEqual((staged / "usr/bin/gust-archive-helper").stat().st_mode & 0o777, 0o755)
+
+    def test_redirected_qml_input_invalidates_real_receipt_check(self):
+        (self.source / "Cargo.toml").write_text("[workspace]\n")
+        (self.source / "Cargo.lock").write_text("# synthetic lock\n")
+        (self.source / "ui").mkdir()
+        (self.source / "ui/Main.qml").write_text("// original input\n")
+        (self.source / "crates/app").mkdir(parents=True)
+        link = self.source / "crates/app/ui"
+        link.symlink_to("../../ui", target_is_directory=True)
+        record = {"source_sha256": package.build.source_digest(self.source),
+                  "executables": {"gust": hashlib.sha256(
+                      (self.source / "target/release/gust").read_bytes()).hexdigest()}}
+        (self.source / "target/release/gust-build.json").write_text(json.dumps(record))
+        self.assertEqual(len(package.verify(self.stage, self.source, "x86_64")), 6)
+        outside = self.root / "different-qml"
+        outside.mkdir()
+        (outside / "Main.qml").write_text("// redirected input\n")
+        link.unlink()
+        link.symlink_to(outside, target_is_directory=True)
+        with self.assertRaises(ValueError):
+            package.verify(self.stage, self.source, "x86_64")
 
 
 if __name__ == "__main__":

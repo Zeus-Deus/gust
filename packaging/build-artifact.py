@@ -29,10 +29,20 @@ def source_revision(root=ROOT):
 
 def source_digest(root=ROOT):
     paths = [root / "Cargo.toml", root / "Cargo.lock"]
-    for folder in ("crates", "ui"):
-        paths.extend(path for path in (root / folder).rglob("*")
-                     if path.is_file() and path.suffix in {".rs", ".toml", ".qml", ".cpp", ".h", ".qrc"})
+    qml_link = root / "crates/app/ui"
+    if (not qml_link.is_symlink() or os.readlink(qml_link) != "../../ui"
+            or qml_link.resolve(strict=True) != (root / "ui").resolve(strict=True)
+            or (root / "ui").is_symlink()):
+        raise ValueError("unaccounted QML input root")
     digest = hashlib.sha256()
+    digest.update(b"crates/app/ui\0symlink\0../../ui\0")
+    for folder in ("crates", "ui"):
+        for path in (root / folder).rglob("*"):
+            if path.is_symlink():
+                if path != qml_link:
+                    raise ValueError("unaccounted source symlink")
+            elif path.is_file() and path.suffix in {".rs", ".toml", ".qml", ".cpp", ".h", ".qrc"}:
+                paths.append(path)
     for path in sorted(set(paths)):
         digest.update(str(path.relative_to(root)).encode() + b"\0")
         digest.update(path.read_bytes())

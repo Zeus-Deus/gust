@@ -16,6 +16,7 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGES = ("gust-core", "gust-ops", "gust-remote", "gust-thumbs", "gust-testkit")
+MANUAL_BENCHMARK = "recursive::tests::copy_1000_small_files"
 RESULT = re.compile(
     r"^test result: (?:ok|FAILED)\. (\d+) passed; (\d+) failed; (\d+) ignored;",
     re.MULTILINE,
@@ -55,6 +56,17 @@ def summarize(log, ledger, cargo_exit, required):
 
 
 def main(argv):
+    package_unit = "--package-unit" in argv
+    if package_unit:
+        argv.remove("--package-unit")
+        # This unconditional #[ignore] is a manual disk benchmark, not a unit
+        # test. Do not enable ignored tests: it silently returns without its
+        # separately provisioned destination. All other ignores still fail.
+        boundary = argv.index("--") if "--" in argv else len(argv)
+        argv.insert(boundary, "--lib")
+        if "--" not in argv:
+            argv.append("--")
+        argv += ["--skip", MANUAL_BENCHMARK]
     required = enabled(os.environ.get("GUST_ALL_REQUIRED", ""))
     if "--required" in argv:
         required = True
@@ -89,6 +101,8 @@ def main(argv):
         result = summarize(log, ledger.read_text(), process.returncode, required)
     except OSError:
         result = summarize("", "", 127, required)
+    result["scope"] = "package-library-unit" if package_unit else "selected-cargo-tests"
+    result["excluded_manual_benchmarks"] = [MANUAL_BENCHMARK] if package_unit else []
     (run / "summary.json").write_text(json.dumps(result, indent=2) + "\n")
     # Paths, test names and skip reasons are deliberately private.
     print(json.dumps(result, sort_keys=True))

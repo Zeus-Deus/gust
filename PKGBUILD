@@ -10,8 +10,8 @@
 #   still needs runtime qualification.
 
 pkgname=gust
-_commit=51949a44d468a36ecd9a13f5f4e156a2c982b4df
-pkgver=0.1.0.r98.g51949a44d468
+_commit=ddcbad97d41ad43007fa21ebc7c0f22150a4ecc9
+pkgver=0.1.0.r101.gddcbad97d41a
 pkgrel=1
 pkgdesc="A fast, calm file manager for Omarchy"
 arch=('x86_64' 'aarch64')
@@ -47,7 +47,7 @@ optdepends=(
   'libreoffice-fresh: sandboxed Office/HTML conversion (capability-gated)'
 )
 source=("$pkgname-$_commit.tar.gz::https://codeload.github.com/Zeus-Deus/gust/tar.gz/$_commit")
-sha256sums=('2a539105f2b190982b4e6df25e2d1d76ab41b498107af5cd26cd4251418ca590')
+sha256sums=('d8e3d49247b4f5cc82f56bf9a7b8c6654cc656332cc720f70e4240820c37e231')
 
 build() {
   cd "$pkgname-$_commit"
@@ -66,7 +66,7 @@ check() {
   cd "$pkgname-$_commit"
   # Library tests only: the desktop QA suite needs a Wayland session and is
   # run by `just qa` against the release artifact, not by makepkg.
-  ./tests/run-tests.sh --workspace --required --release --lib
+  ./tests/run-tests.sh --workspace --package-unit --required --release
 }
 
 package() {
