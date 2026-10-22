@@ -71,10 +71,12 @@ Computed argv, configured applications and transitive GVfs/codec helpers still
 require owner review; this is not an exhaustive static call graph.
 
 The baseline package supplies Qt, D-Bus/GLib, SSHFS/rclone/GVfs backends, clipboard,
-preview and archive tools. Curl/GLib are included for the remote lane's native GIO
+preview and archive tools. Curl/OpenSSL/GLib are included for the remote lane's native GIO
 and TLS-sharing integration; installing them does not claim that integration is
 already consumed in every app revision. GVfs FTP/WebDAV support is supplied by
 the matching installed GVfs build and must be tested with its actual backend.
+On Arch, the provider contract is GVfs's `ftp.mount`, `ftps.mount` and
+`http.mount` (including WebDAV types), not a nonexistent `dav.mount` file.
 The mpv prerequisite matches the active neighboring-media integration; a package
 manifest alone does not qualify that unpublished UI flow.
 
