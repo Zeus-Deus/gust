@@ -35,7 +35,7 @@ Path(os.environ['CAPTURE'] + '-' + str(os.getpid())).write_text(json.dumps({
     'argv': sys.argv[1:], 'ledger': os.environ['GUST_SKIP_LEDGER']}))
 if os.environ.get('CASE') == 'skip':
     Path(os.environ['GUST_SKIP_LEDGER']).write_text('SKIP\\tFIXTURE\\tcase\\tprivate fixture missing\\n')
-if os.environ.get('CASE') != 'empty':
+if os.environ.get('CASE') not in ('empty', 'build-script'):
     print('test result: ok. 2 passed; 0 failed; ' + ('1' if os.environ.get('CASE') == 'ignored' else '0') + ' ignored; 0 measured; 0 filtered out;')
 if os.environ.get('CASE') == 'diagnostic':
     print('error[E0425]: private-marker at /synthetic-private/location')
@@ -43,7 +43,12 @@ if os.environ.get('CASE') == 'diagnostic':
     print('error: could not compile `private-marker`')
     print('error: failed to run custom build command: private-marker')
     print('fatal error: private-marker')
-sys.exit(23 if os.environ.get('CASE') in ('failure', 'diagnostic') else 0)
+if os.environ.get('CASE') == 'build-script':
+    print('error: failed to run custom build command for `gust-app v0.1.0 (/synthetic-private/location)`')
+    print('error: failed to run custom build command for `private-marker v0.1.0`')
+    print('qmlcachegen failed for /synthetic-private/location: private-marker')
+    print('error occurred in cc-rs: private-marker')
+sys.exit(23 if os.environ.get('CASE') in ('failure', 'diagnostic', 'build-script') else 0)
 """)
         cargo.chmod(0o755)
 
@@ -122,6 +127,21 @@ sys.exit(23 if os.environ.get('CASE') in ('failure', 'diagnostic') else 0)
         self.assertTrue(summary["diagnostics"]["native_compiler_failure"])
         self.assertNotIn("private-marker", result.stdout + result.stderr)
         self.assertNotIn("/synthetic-private/", result.stdout + result.stderr)
+
+    def test_custom_build_header_reports_locked_crate_without_version_or_paths(self):
+        result, summary = self.run_case("build-script", "--app", "--required")
+        self.assertEqual(result.returncode, 1)
+        self.assertFalse(summary["tests_observed"])
+        self.assertEqual(summary["diagnostics"]["failed_crates"], ["gust-app"])
+        self.assertEqual(summary["diagnostics"]["rust_error_codes"], [])
+        self.assertTrue(summary["diagnostics"]["build_script_failure"])
+        self.assertTrue(summary["diagnostics"]["qml_generation_failure"])
+        self.assertTrue(summary["diagnostics"]["native_compiler_failure"])
+        self.assertFalse(summary["diagnostics"]["qt_detection_failure"])
+        self.assertFalse(summary["diagnostics"]["qt_tool_missing"])
+        self.assertNotIn("private-marker", result.stdout + result.stderr)
+        self.assertNotIn("/synthetic-private/", result.stdout + result.stderr)
+        self.assertNotIn("v0.1.0", result.stdout + result.stderr)
 
 
 class FixtureContainmentTests(unittest.TestCase):

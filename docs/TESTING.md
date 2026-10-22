@@ -30,7 +30,10 @@ only their stated tests; filtered-out tests are not evidence of coverage.
 
 Failure summaries additionally expose at most 16 Rust error codes and 16 crate
 names already present in Cargo.lock, plus build-script/native-compiler/test-process
-failure categories. Diagnostic prose, paths, source excerpts and panic payloads
+failure categories. Custom-build-command headers use the same locked-crate
+allowlist; fixed Qt detection/tool, QML generation and cc-rs markers expose only
+booleans. These are observed markers, not an inferred dependency diagnosis.
+Diagnostic prose, paths, source excerpts and panic payloads
 remain in the private log. Gate output preserves these bounded fields so a
 hosted failure can be investigated without publishing raw evidence.
 
