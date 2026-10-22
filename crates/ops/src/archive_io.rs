@@ -837,6 +837,19 @@ fn check_header_limits(
     Ok(())
 }
 
+fn process_umask() -> u32 {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|status| {
+            status.lines().find_map(|line| {
+                line.strip_prefix("Umask:")
+                    .and_then(|value| u32::from_str_radix(value.trim(), 8).ok())
+            })
+        })
+        .unwrap_or(0o077)
+        & 0o777
+}
+
 /// Worker-side extraction. All archive data is decoded in a sandbox; the
 /// parent creates only vetted names and checks actual bytes before each write.
 pub fn extract_with(
@@ -849,6 +862,7 @@ pub fn extract_with(
 ) -> Result<Extracted, ArchiveError> {
     use super::{jobs::ArchivePhase, stage};
     use std::collections::{BTreeMap, BTreeSet};
+    let mask = process_umask();
     let mut reader = Reader::open(archive, password, cancel)?;
     let staging = stage::Stage::create(dest)?;
     let mut done = Extracted::default();
@@ -978,6 +992,12 @@ pub fn extract_with(
             if member_bytes != member.size {
                 return Err(protocol_error());
             }
+            // Keep staging private while writing, then restore ordinary
+            // executable/rwx bits through the held fd before publication.
+            rustix::fs::fchmod(
+                &file,
+                rustix::fs::Mode::from_bits_truncate(member.mode & 0o777 & !mask),
+            )?;
             file.sync_all()?;
         }
         manifest.insert(relative, member);

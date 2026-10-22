@@ -337,3 +337,61 @@ fn publication_receipts_do_not_adopt_a_later_edit() {
         !expected.matches(&gust_ops::FileIdentity::of_path(&f.destination().join("file")).unwrap())
     );
 }
+
+#[test]
+fn executable_regular_files_and_hardlinks_keep_safe_modes() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let f = Fixture::new();
+    put(f.0.join("source/tool"), b"#!/bin/sh\nexit 0\n");
+    std::fs::set_permissions(
+        f.0.join("source/tool"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    std::fs::hard_link(f.0.join("source/tool"), f.0.join("source/tool-link")).unwrap();
+    let mut observed_private_stage = false;
+    let done = extract_with(
+        &f.archive(),
+        &f.destination(),
+        &ExtractPolicy::default(),
+        None,
+        &CancelToken::new(),
+        &mut |phase, _, _| {
+            if phase == ArchivePhase::Extracting {
+                for stage in std::fs::read_dir(f.destination()).unwrap().flatten() {
+                    if !stage
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".gust-extract-")
+                    {
+                        continue;
+                    }
+                    for file in std::fs::read_dir(stage.path()).unwrap().flatten() {
+                        let metadata = file.metadata().unwrap();
+                        if metadata.is_file() {
+                            assert_eq!(metadata.mode() & 0o777, 0o600);
+                            observed_private_stage = true;
+                        }
+                    }
+                }
+            }
+        },
+    )
+    .unwrap();
+    assert!(observed_private_stage);
+    assert_eq!(done.files, 2);
+    let mask = std::fs::read_to_string("/proc/self/status")
+        .unwrap()
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("Umask:")
+                .map(|s| u32::from_str_radix(s.trim(), 8).unwrap())
+        })
+        .unwrap();
+    let expected = 0o755 & !mask;
+    let original = std::fs::metadata(f.destination().join("tool")).unwrap();
+    let link = std::fs::metadata(f.destination().join("tool-link")).unwrap();
+    assert_eq!(original.mode() & 0o7777, expected);
+    assert_eq!(link.mode() & 0o7777, expected);
+    assert_eq!(original.ino(), link.ino());
+}

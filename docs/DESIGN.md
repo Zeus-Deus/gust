@@ -918,6 +918,10 @@ metadata and actual expanded-byte limits are enforced during the stream, with
 a wall deadline and cancellation that kills the helper. Malformed, duplicate,
 ambiguous or incomplete streams fail without publication. Special files,
 privileged modes, traversal and escaping links are refused and reported.
+Regular files stay 0600 while streaming. Before syncing/publication, their
+held descriptor receives the member's nonprivileged rwx bits filtered by the
+process umask (read from procfs without changing the process-global umask;
+private fallback 0077). Executable bits survive for regular files/hardlinks.
 
 Staging is created exclusively, mode 0700, relative to a held destination
 handle. Its owner retains device/inode; cleanup refuses a replaced staging
