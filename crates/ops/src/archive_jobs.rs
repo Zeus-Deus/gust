@@ -15,6 +15,12 @@ pub enum ArchiveRequest {
         policy: ExtractPolicy,
         password: Option<ArchivePassword>,
     },
+    ExtractIntoNew {
+        archive: PathBuf,
+        destination: PathBuf,
+        policy: ExtractPolicy,
+        password: Option<ArchivePassword>,
+    },
     Create {
         directory: PathBuf,
         names: Vec<OsString>,
@@ -122,7 +128,7 @@ fn start_inner(
     let worker = std::thread::Builder::new().name("gust-archive".into()).spawn(move || {
         let mut planned = Job::new(id.clone(), JobKind::Extract);
         match &request {
-            ArchiveRequest::Extract { archive, destination, .. } => { planned.planned = vec![archive.clone()]; planned.dest_dir = Some(destination.clone()); }
+            ArchiveRequest::Extract { archive, destination, .. } | ArchiveRequest::ExtractIntoNew { archive, destination, .. } => { planned.planned = vec![archive.clone()]; planned.dest_dir = Some(destination.clone()); }
             ArchiveRequest::Create { directory, names, destination, .. } => { planned.planned = names.iter().map(|n| directory.join(n)).collect(); planned.dest_dir = destination.parent().map(Path::to_path_buf); }
         }
         let mut observer = DurablePublication { journal, id: id.clone(), tickets: Vec::new(), shared: shared.clone() };
@@ -135,6 +141,11 @@ fn start_inner(
             match request {
                 ArchiveRequest::Extract { archive, destination, policy, password } => {
                     let extracted = super::io::extract_recorded(&archive, &destination, &policy, password.as_ref(), &token, &mut report, &mut observer)?;
+                    let record = extraction_record(id.clone(), &archive, &destination, &extracted);
+                    Ok(ArchiveResult { record, extracted: Some(extracted) })
+                }
+                ArchiveRequest::ExtractIntoNew { archive, destination, policy, password } => {
+                    let extracted = super::io::extract_new_recorded(&archive, &destination, &policy, password.as_ref(), &token, &mut report, &mut observer)?;
                     let record = extraction_record(id.clone(), &archive, &destination, &extracted);
                     Ok(ArchiveResult { record, extracted: Some(extracted) })
                 }

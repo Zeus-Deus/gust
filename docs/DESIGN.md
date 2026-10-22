@@ -953,6 +953,17 @@ redacted secret type and transported only on helper stdin, never argv, env,
 logs or files. Unsupported encryption modes fail explicitly. Multipart
 archives are outside this contract.
 
+### An owned new extraction folder
+
+`ArchiveRequest::ExtractIntoNew` carries the same fields as Extract, but its
+absolute destination must not exist and its parent must already exist. The
+worker builds and validates the whole folder in private staging under that
+parent, then durably records a root publication intent and publishes it with
+one atomic no-replace rename. Password/decode failures leave the requested
+folder absent. `ArchiveError::DestinationExists` never reuses another folder.
+The success/partial receipt includes the root and every created descendant;
+APP performs no mkdir before job admission or during polling.
+
 ### Durable archive admission and password outcomes
 
 `archive::jobs::start_journalled(id, request, Journal)` preserves the existing

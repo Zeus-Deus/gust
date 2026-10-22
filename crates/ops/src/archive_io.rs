@@ -30,6 +30,7 @@ pub enum ArchiveError {
     SandboxUnavailable,
     PasswordRequired,
     IncorrectPassword,
+    DestinationExists,
     Unsupported(String),
     Failed(String),
     Cancelled,
@@ -46,6 +47,9 @@ impl ArchiveError {
             Self::NoTool => "Archives need gust-archive-helper (libarchive/bsdtar support).".into(),
             Self::SandboxUnavailable => {
                 "Archives need a working bubblewrap and prlimit sandbox.".into()
+            }
+            Self::DestinationExists => {
+                "The extraction folder already exists; choose a new name.".into()
             }
             Self::PasswordRequired => "This archive needs a password.".into(),
             Self::IncorrectPassword => "The archive password was not accepted.".into(),
@@ -844,6 +848,101 @@ fn check_header_limits(
         ));
     }
     Ok(())
+}
+
+pub(crate) fn extract_new_recorded(
+    archive: &Path,
+    destination: &Path,
+    policy: &ExtractPolicy,
+    password: Option<&ArchivePassword>,
+    cancel: &CancelToken,
+    progress: &mut dyn FnMut(super::jobs::ArchivePhase, usize, u64),
+    observer: &mut dyn PublicationObserver,
+) -> Result<Extracted, ArchiveError> {
+    use super::stage;
+    let parent_path = destination.parent().ok_or_else(protocol_error)?;
+    let (parent, name) = crate::anchor::resolve_parent(destination)?;
+    crate::recursive::validate_name(&name).map_err(|e| ArchiveError::Failed(e.to_string()))?;
+    match parent.stat_child(&name) {
+        Ok(_) => return Err(ArchiveError::DestinationExists),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    let staging = stage::Stage::create(parent_path)?;
+    let parent_identity = parent.stat_self()?;
+    let staging_parent = staging.parent.stat_self()?;
+    if parent_identity.st_dev != staging_parent.st_dev
+        || parent_identity.st_ino != staging_parent.st_ino
+    {
+        return Err(ArchiveError::Failed(
+            "New extraction parent changed; nothing was published.".into(),
+        ));
+    }
+    let payload_name = std::ffi::OsStr::new("payload");
+    stage::parents(&staging.dir, Path::new(payload_name), true)?;
+    let payload = parent_path.join(&staging.name).join(payload_name);
+    let extracted = extract_with(archive, &payload, policy, password, cancel, progress);
+    let mut extracted = match extracted {
+        Ok(extracted) => extracted,
+        // Inner publication is still private staging; it has no user-visible
+        // partial receipt and the exclusively owned outer stage removes it.
+        Err(ArchiveError::Partial { cause, .. }) => return Err(*cause),
+        Err(error) => return Err(error),
+    };
+    if cancel.is_cancelled() {
+        return Err(ArchiveError::Cancelled);
+    }
+    let expected = crate::anchor::FileIdentity::from_stat(&staging.dir.stat_child(payload_name)?);
+    let current_parent = stage::open_dir(parent_path)?.stat_self()?;
+    if parent_identity.st_dev != current_parent.st_dev
+        || parent_identity.st_ino != current_parent.st_ino
+    {
+        return Err(ArchiveError::Failed(
+            "New extraction parent changed; nothing was published.".into(),
+        ));
+    }
+    let mapped = extracted
+        .published
+        .iter()
+        .map(|(path, identity)| {
+            Ok((
+                destination.join(path.strip_prefix(&payload).map_err(|_| protocol_error())?),
+                *identity,
+            ))
+        })
+        .collect::<Result<Vec<_>, ArchiveError>>()?;
+    let ticket = observer.intent(&payload, destination, Some(expected))?;
+    match crate::anchor::rename_noreplace(&staging.dir, payload_name, &parent, &name) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Err(ArchiveError::DestinationExists)
+        }
+        Err(error) => return Err(error.into()),
+    }
+    extracted.published = mapped;
+    extracted.dirs += 1;
+    extracted
+        .published
+        .push((destination.to_path_buf(), expected.into()));
+    let committed = (|| -> Result<(), ArchiveError> {
+        let actual = crate::anchor::FileIdentity::from_stat(&parent.stat_child(&name)?);
+        if !expected.matches(&actual) {
+            return Err(ArchiveError::Failed(
+                "New extraction folder changed during publication; all work was preserved.".into(),
+            ));
+        }
+        observer.committed(ticket, actual)?;
+        rustix::fs::fsync(parent.as_fd())?;
+        staging.cleanup()?;
+        Ok(())
+    })();
+    if let Err(cause) = committed {
+        return Err(ArchiveError::Partial {
+            receipt: extracted,
+            cause: Box::new(cause),
+        });
+    }
+    Ok(extracted)
 }
 
 fn process_umask() -> u32 {

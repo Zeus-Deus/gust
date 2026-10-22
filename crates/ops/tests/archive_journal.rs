@@ -226,3 +226,96 @@ fn encrypted_zip_has_typed_missing_wrong_and_successful_password_results() {
         b"payload"
     );
 }
+
+#[test]
+fn new_folder_is_one_owned_atomic_publication_with_an_undo_receipt() {
+    let f = Fixture::new();
+    let destination = f.0.join("new-folder");
+    let path = f.0.join("journal");
+    let mut handle = start_journalled(
+        "new-root",
+        ArchiveRequest::ExtractIntoNew {
+            archive: f.archive(),
+            destination: destination.clone(),
+            policy: ExtractPolicy::default(),
+            password: None,
+        },
+        Journal::new(&path),
+    )
+    .unwrap();
+    let state = handle.wait();
+    assert_eq!(state.phase, ArchivePhase::Confirmed, "{state:?}");
+    let result = state.result.unwrap().unwrap();
+    assert_eq!(
+        std::fs::read(destination.join("sub/file")).unwrap(),
+        b"payload"
+    );
+    assert_eq!(result.record.entries.len(), 1);
+    assert_eq!(
+        result.record.entries[0].destination.as_ref(),
+        Some(&destination)
+    );
+    assert_eq!(result.record.subtree_identities.len(), 3);
+    let text = std::fs::read_to_string(&path).unwrap();
+    let intents = text
+        .lines()
+        .filter(|line| line.contains("ArchiveIntent"))
+        .count();
+    assert_eq!(
+        intents, 1,
+        "only the final root publication is user-visible"
+    );
+    assert!(gust_ops::undo::apply_undo(&gust_ops::undo::plan_undo(&result.record)).is_complete());
+    assert!(!destination.exists());
+}
+
+#[test]
+fn new_folder_failures_never_reuse_existing_work_or_publish_private_output() {
+    let f = Fixture::new();
+    let destination = f.0.join("new-folder");
+    let mut limited = start_journalled(
+        "limited",
+        ArchiveRequest::ExtractIntoNew {
+            archive: f.archive(),
+            destination: destination.clone(),
+            policy: ExtractPolicy {
+                max_total_bytes: 0,
+                ..Default::default()
+            },
+            password: None,
+        },
+        Journal::new(f.0.join("journal")),
+    )
+    .unwrap();
+    assert!(matches!(
+        limited.wait().result.unwrap(),
+        Err(ArchiveError::Limit(_))
+    ));
+    assert!(!destination.exists());
+    assert!(!std::fs::read_dir(&f.0).unwrap().flatten().any(|e| e
+        .file_name()
+        .to_string_lossy()
+        .starts_with(".gust-extract-")));
+    std::fs::create_dir(&destination).unwrap();
+    std::fs::write(destination.join("new-work"), b"keep").unwrap();
+    let mut occupied = start_journalled(
+        "occupied",
+        ArchiveRequest::ExtractIntoNew {
+            archive: f.archive(),
+            destination: destination.clone(),
+            policy: ExtractPolicy::default(),
+            password: None,
+        },
+        Journal::new(f.0.join("journal")),
+    )
+    .unwrap();
+    assert!(matches!(
+        occupied.wait().result.unwrap(),
+        Err(ArchiveError::DestinationExists)
+    ));
+    assert_eq!(
+        std::fs::read(destination.join("new-work")).unwrap(),
+        b"keep"
+    );
+    assert_eq!(std::fs::read_dir(destination).unwrap().count(), 1);
+}
