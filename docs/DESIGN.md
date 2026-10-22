@@ -626,6 +626,11 @@ file count. Byte/row/column/cell/node/depth/diff-work bounds are disclosed by
 name. Malformed structured input is Invalid, and an input cut at a byte bound
 is never presented as a fully validated document. Cancellation clears payloads.
 JSON node paths use escaped JSON pointers, separately from their display value.
+Cell-byte limits apply to rendered text, including expanded tabs, replacement
+characters and escaped display paths. Clipping preserves UTF-8 boundaries and
+reports CellBytes when any rendered output is omitted. A shortened display path
+never replaces the raw JSON pointer identity; oversized raw pointers remain
+explicitly omitted as before.
 
 `structured::read_source(path, max_bytes, cancel)` is worker-only: no-follow,
 nonblocking open, regular files only, one extra byte to distinguish exact

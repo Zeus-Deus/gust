@@ -94,21 +94,22 @@ pub fn sanitise_line(raw: &[u8]) -> String {
     let mut out = String::with_capacity(raw.len());
     for chunk in raw.utf8_chunks() {
         for c in chunk.valid().chars() {
-            let bidi = matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{200e}' | '\u{200f}' | '\u{061c}');
-            match c {
-                '\t' => out.push_str("    "),
-                // Control characters and bidi overrides become a visible dot
-                // rather than escaping into the terminal, the theme, or a
-                // QML string, or reversing the rest of the line.
-                c if c.is_control() || bidi => out.push('·'),
-                c => out.push(c),
-            }
+            push_sanitised_char(&mut out, c);
         }
         if !chunk.invalid().is_empty() {
             out.push('·');
         }
     }
     out
+}
+
+pub(crate) fn push_sanitised_char(out: &mut String, c: char) {
+    let bidi = matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{200e}' | '\u{200f}' | '\u{061c}');
+    match c {
+        '\t' => out.push_str("    "),
+        c if c.is_control() || bidi => out.push('·'),
+        c => out.push(c),
+    }
 }
 
 /// Human words for what this file is, from its name only.

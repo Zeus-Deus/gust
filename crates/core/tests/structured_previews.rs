@@ -451,3 +451,124 @@ fn parser_recursion_guards_are_reported_as_depth_limits() {
         PreviewLimit::Depth
     ));
 }
+
+#[test]
+fn rendered_cells_respect_exact_byte_limits_across_payloads() {
+    for (raw, rendered) in [("\t", "    "), ("\u{1}", "·"), ("é", "é")] {
+        for max in 0..=rendered.len() + 1 {
+            let limits = PreviewLimits {
+                max_cell_bytes: max,
+                ..Default::default()
+            };
+            let mut end = max.min(rendered.len());
+            while !rendered.is_char_boundary(end) {
+                end -= 1;
+            }
+            let expected = &rendered[..end];
+            let truncated = max < rendered.len();
+            let mut cases = vec![(PreviewFormat::Text, raw.to_owned())];
+            for format in [PreviewFormat::Csv, PreviewFormat::Tsv] {
+                cases.push((format, format!("\"{raw}\"")));
+            }
+            cases.push((PreviewFormat::Json, serde_json::to_string(raw).unwrap()));
+            for (format, input) in cases {
+                let result = parse(
+                    input.as_bytes(),
+                    format,
+                    PreviewWindow::default(),
+                    &limits,
+                    &CancelToken::new(),
+                );
+                assert_eq!(
+                    has_limit(&result, PreviewLimit::CellBytes),
+                    truncated,
+                    "{format:?}, {raw:?}, {max}"
+                );
+                let values = match result.payload.unwrap() {
+                    PreviewPayload::Text { lines, .. } => lines,
+                    PreviewPayload::Table { rows, .. } => rows.into_iter().flatten().collect(),
+                    PreviewPayload::Tree { nodes } => nodes.into_iter().map(|n| n.value).collect(),
+                    _ => panic!("unexpected payload"),
+                };
+                assert_eq!(values, [expected], "{format:?}, {raw:?}, {max}");
+            }
+            let result = compare(raw.as_bytes(), raw.as_bytes(), &limits, &CancelToken::new());
+            assert_eq!(has_limit(&result, PreviewLimit::CellBytes), truncated);
+            match result.payload.unwrap() {
+                PreviewPayload::Diff { lines } => {
+                    assert_eq!(lines.len(), 1);
+                    assert_eq!(lines[0].text, expected, "diff, {raw:?}, {max}");
+                }
+                _ => panic!("diff expected"),
+            }
+        }
+    }
+    // The bound is on rendered bytes: bidi replacement can be shorter than input.
+    let result = parse(
+        "\u{202e}".as_bytes(),
+        PreviewFormat::Text,
+        PreviewWindow::default(),
+        &PreviewLimits {
+            max_cell_bytes: 2,
+            ..Default::default()
+        },
+        &CancelToken::new(),
+    );
+    assert_eq!(result.state, PreviewState::Complete);
+    assert!(matches!(result.payload, Some(PreviewPayload::Text { lines, .. }) if lines == ["·"]));
+
+    for max in [8, 12, 13] {
+        let result = parse(
+            br#"v = "\t\t\t""#,
+            PreviewFormat::Toml,
+            PreviewWindow::default(),
+            &PreviewLimits {
+                max_cell_bytes: max,
+                ..Default::default()
+            },
+            &CancelToken::new(),
+        );
+        assert_eq!(has_limit(&result, PreviewLimit::CellBytes), max < 12);
+        match result.payload.unwrap() {
+            PreviewPayload::Tree { nodes } => {
+                let node = nodes.iter().find(|node| node.path == "/v").unwrap();
+                assert_eq!(node.value, " ".repeat(max.min(12)));
+            }
+            _ => panic!("tree expected"),
+        }
+    }
+}
+
+#[test]
+fn rendered_tree_paths_are_bounded_without_changing_raw_pointer_identity() {
+    for key in ["\n", "\u{1}", "\u{202e}", "é\n"] {
+        let raw_path = format!("/{key}");
+        let display = gust_core::location::escape_for_display(std::ffi::OsStr::new(&raw_path));
+        let input = serde_json::to_vec(&std::collections::BTreeMap::from([(key, "x")])).unwrap();
+        for max in [display.len() - 1, display.len(), display.len() + 1] {
+            let result = parse(
+                &input,
+                PreviewFormat::Json,
+                PreviewWindow::default(),
+                &PreviewLimits {
+                    max_cell_bytes: max,
+                    ..Default::default()
+                },
+                &CancelToken::new(),
+            );
+            assert_eq!(
+                has_limit(&result, PreviewLimit::CellBytes),
+                max < display.len()
+            );
+            match result.payload.unwrap() {
+                PreviewPayload::Tree { nodes } => {
+                    let node = nodes.iter().find(|node| node.path == raw_path).unwrap();
+                    assert_eq!(node.path, raw_path);
+                    assert_eq!(node.display_path, display[..max.min(display.len())]);
+                    assert!(nodes.iter().all(|node| node.display_path.len() <= max));
+                }
+                _ => panic!("tree expected"),
+            }
+        }
+    }
+}

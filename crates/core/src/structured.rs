@@ -1,5 +1,5 @@
 //! Bounded plain-data preview payloads. No markup, decoder, subprocess or UI I/O.
-use crate::{lister::CancelToken, peek::sanitise_line};
+use crate::lister::CancelToken;
 use serde::Serialize;
 use std::io::Read;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
@@ -155,18 +155,38 @@ fn state(limits: Vec<PreviewLimit>) -> PreviewState {
     }
 }
 fn clip_text(text: &str, max: usize, limited: &mut Vec<PreviewLimit>) -> String {
-    let mut end = text.len().min(max);
-    while !text.is_char_boundary(end) {
-        end -= 1;
+    clip_display(text, max, limited, |out, c| {
+        if c == '\n' {
+            out.push(c);
+        } else {
+            crate::peek::push_sanitised_char(out, c);
+        }
+    })
+}
+fn clip_display(
+    text: &str,
+    max: usize,
+    limited: &mut Vec<PreviewLimit>,
+    push_char: impl Fn(&mut String, char),
+) -> String {
+    let mut out = String::with_capacity(text.len().min(max));
+    // Render one character at a time so expansion never allocates a full,
+    // over-budget display string. Both emitters share the existing UI policy.
+    let mut fragment = String::with_capacity(10);
+    for c in text.chars() {
+        fragment.clear();
+        push_char(&mut fragment, c);
+        let mut end = fragment.len().min(max - out.len());
+        while !fragment.is_char_boundary(end) {
+            end -= 1;
+        }
+        out.push_str(&fragment[..end]);
+        if end < fragment.len() {
+            add_limit(limited, PreviewLimit::CellBytes);
+            break;
+        }
     }
-    if end < text.len() {
-        add_limit(limited, PreviewLimit::CellBytes);
-    }
-    text[..end]
-        .split('\n')
-        .map(|line| sanitise_line(line.as_bytes()))
-        .collect::<Vec<_>>()
-        .join("\n")
+    out
 }
 fn utf8(bytes: &[u8], truncated: bool) -> Result<&str, PreviewState> {
     let bytes = bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes);
@@ -345,7 +365,12 @@ fn flatten(
     };
     nodes.push(PreviewNode {
         path: path.to_owned(),
-        display_path: crate::location::escape_for_display(std::ffi::OsStr::new(path)),
+        display_path: clip_display(
+            path,
+            limits.max_cell_bytes,
+            limited,
+            crate::location::push_escaped_display_char,
+        ),
         kind: kind.into(),
         value: clip_text(&display, limits.max_cell_bytes, limited),
         depth,

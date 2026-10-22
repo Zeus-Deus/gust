@@ -180,19 +180,23 @@ pub fn escape_for_display(s: &OsStr) -> String {
     let lossy = String::from_utf8_lossy(s.as_bytes());
     let mut out = String::with_capacity(lossy.len());
     for c in lossy.chars() {
-        let dangerous = matches!(c,
-            '\u{202A}'..='\u{202E}'   // LRE RLE PDF LRO RLO
-            | '\u{2066}'..='\u{2069}' // LRI RLI FSI PDI
-            | '\u{200E}' | '\u{200F}' // LRM RLM
-            | '\u{061C}'              // ALM
-        );
-        if c.is_control() || dangerous {
-            out.push_str(&format!("<U+{:04X}>", c as u32));
-        } else {
-            out.push(c);
-        }
+        push_escaped_display_char(&mut out, c);
     }
     out
+}
+
+pub(crate) fn push_escaped_display_char(out: &mut String, c: char) {
+    let dangerous = matches!(c,
+        '\u{202A}'..='\u{202E}'   // LRE RLE PDF LRO RLO
+        | '\u{2066}'..='\u{2069}' // LRI RLI FSI PDI
+        | '\u{200E}' | '\u{200F}' // LRM RLM
+        | '\u{061C}'              // ALM
+    );
+    if c.is_control() || dangerous {
+        out.push_str(&format!("<U+{:04X}>", c as u32));
+    } else {
+        out.push(c);
+    }
 }
 
 /// The place a path lives in, when it is somewhere Gust or the desktop
