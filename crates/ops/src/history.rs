@@ -418,6 +418,24 @@ impl History {
         }
         self.admit(label, HistoryKind::Create, steps)
     }
+    pub fn record_folders(
+        &mut self,
+        label: &str,
+        folders: &[crate::create::FolderCreated],
+    ) -> Result<HistoryEntry, HistoryError> {
+        let mut steps = Vec::new();
+        for folder in folders {
+            let expected = vec![TreeNode {
+                relative: SavedPath::new(Path::new("")),
+                identity: folder.identity.into(),
+                mode: folder.identity.mode,
+            }];
+            verify_tree(&folder.path, &expected, &CancelToken::new())?;
+            steps.push(move_step(&folder.path, None, expected)?);
+        }
+        self.admit(label, HistoryKind::Create, steps)
+    }
+
     pub fn record_links(
         &mut self,
         label: &str,

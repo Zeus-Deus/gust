@@ -228,14 +228,30 @@ pub fn create_link(target: &Path, dir: &Path, name: &OsStr) -> Result<LinkMade, 
         return Err("a link needs a full path to point at".into());
     }
     let link = dir.join(name);
-    match std::os::unix::fs::symlink(target, &link) {
+    let (parent, name) =
+        crate::anchor::resolve_parent(&link).map_err(|e| crate::engine::plain_io_message(&e))?;
+    match rustix::fs::symlinkat(target, parent.as_fd(), &name).map_err(std::io::Error::from) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
             return Err("something with that name already exists".into())
         }
         Err(e) => return Err(crate::engine::plain_io_message(&e)),
     }
-    let ident = ident(&link).map_err(|e| crate::engine::plain_io_message(&e))?;
+    let stat = parent
+        .stat_child(&name)
+        .map_err(|e| crate::engine::plain_io_message(&e))?;
+    let held_target = rustix::fs::readlinkat(parent.as_fd(), &name, Vec::new())
+        .map_err(|e| crate::engine::plain_io_message(&e.into()))?;
+    use std::os::unix::ffi::OsStrExt;
+    if held_target.to_bytes() != target.as_os_str().as_bytes() {
+        return Err("the created link changed; it was preserved".into());
+    }
+    let ident = Ident {
+        dev: stat.st_dev,
+        ino: stat.st_ino,
+        mtime: stat.st_mtime,
+        mtime_nsec: stat.st_mtime_nsec as i64,
+    };
     Ok(LinkMade {
         link,
         target: target.to_path_buf(),

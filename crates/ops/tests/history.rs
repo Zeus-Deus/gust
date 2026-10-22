@@ -239,3 +239,46 @@ fn cancel_and_barriers_stop_a_batch_without_skipping_earlier_steps() {
     assert!(!new.path.exists());
     assert!(f.0.join("work/old").exists());
 }
+
+#[test]
+fn owned_folder_receipts_are_empty_only_and_keep_descendant_history() {
+    let f = Fixture::new();
+    let made = create::new_folder_recorded(&f.0.join("work"), OsStr::new("folder")).unwrap();
+    let mut h = f.open();
+    h.record_folders("New folder", std::slice::from_ref(&made))
+        .unwrap();
+    let file = create::create_from_bytes(&made.path, OsStr::new("child"), b"retained").unwrap();
+    h.record_created("New child", &[file]).unwrap();
+    let result = h.undo_many(2, &CancelToken::new());
+    assert!(result.refusal.is_none(), "{result:?}");
+    assert!(!made.path.exists());
+    let result = h.redo_many(2, &CancelToken::new());
+    assert!(result.refusal.is_none(), "{result:?}");
+    assert_eq!(std::fs::read(made.path.join("child")).unwrap(), b"retained");
+    let second = create::new_folder_recorded(&f.0.join("work"), OsStr::new("late")).unwrap();
+    std::fs::write(second.path.join("user-work"), b"keep").unwrap();
+    assert!(matches!(
+        h.record_folders("Unadmitted folder", &[second]),
+        Err(HistoryError::NewWork(_))
+    ));
+}
+#[test]
+fn folder_and_link_creation_refuse_symlinked_parents_and_occupied_names() {
+    let f = Fixture::new();
+    std::os::unix::fs::symlink(f.0.join("work"), f.0.join("redirect")).unwrap();
+    assert!(create::new_folder_recorded(&f.0.join("redirect"), OsStr::new("new-folder")).is_err());
+    assert!(!f.0.join("work/new-folder").exists());
+    assert!(attrs::create_link(
+        &f.0.join("target"),
+        &f.0.join("redirect"),
+        OsStr::new("new-link")
+    )
+    .is_err());
+    assert!(f.0.join("work/new-link").symlink_metadata().is_err());
+    std::os::unix::fs::symlink("absent", f.0.join("work/taken")).unwrap();
+    assert!(create::new_folder_recorded(&f.0.join("work"), OsStr::new("taken")).is_err());
+    assert_eq!(
+        std::fs::read_link(f.0.join("work/taken")).unwrap(),
+        PathBuf::from("absent")
+    );
+}

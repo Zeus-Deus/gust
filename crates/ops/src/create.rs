@@ -9,6 +9,53 @@ use std::ffi::OsStr;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
+/// An empty folder and the identity captured while creating it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FolderCreated {
+    pub path: PathBuf,
+    pub(crate) identity: crate::anchor::FileIdentity,
+}
+
+pub fn new_folder_recorded(dir: &Path, name: &OsStr) -> Result<FolderCreated, String> {
+    crate::recursive::validate_name(name).map_err(|e| e.to_string())?;
+    let path = dir.join(name);
+    let make = || -> std::io::Result<FolderCreated> {
+        let (parent, name) = crate::anchor::resolve_parent(&path)?;
+        rustix::fs::mkdirat(
+            parent.as_fd(),
+            &name,
+            rustix::fs::Mode::from_bits_truncate(0o777),
+        )?;
+        let identity = crate::anchor::FileIdentity::from_stat(&parent.stat_child(&name)?);
+        let owned = parent.open_child_dir(&name)?;
+        if !identity.matches(&crate::anchor::FileIdentity::from_stat(&owned.stat_self()?)) {
+            return Err(std::io::Error::other(
+                "The new folder changed during creation; it was preserved.",
+            ));
+        }
+        for entry in rustix::fs::Dir::read_from(owned.as_fd())? {
+            let entry = entry?;
+            if !matches!(entry.file_name().to_bytes(), b"." | b"..") {
+                return Err(std::io::Error::other(
+                    "The new folder contains new work; it was preserved.",
+                ));
+            }
+        }
+        if !identity.matches(&crate::anchor::FileIdentity::from_stat(&owned.stat_self()?)) {
+            return Err(std::io::Error::other(
+                "The new folder changed during creation; it was preserved.",
+            ));
+        }
+        rustix::fs::fsync(owned.as_fd())?;
+        rustix::fs::fsync(parent.as_fd())?;
+        Ok(FolderCreated {
+            path: path.clone(),
+            identity,
+        })
+    };
+    make().map_err(|e| crate::engine::plain_io_message(&e))
+}
+
 /// A template is copied, never executed and never followed: bounded so a
 /// huge or endless file (a FIFO planted in Templates) cannot hang Gust.
 pub const TEMPLATE_MAX_BYTES: u64 = 16 * 1024 * 1024;

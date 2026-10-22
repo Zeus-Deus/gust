@@ -1545,3 +1545,14 @@ jobs are not silently imported. Parent directory mtime changes from validated
 tracked inverses may refresh older ancestor receipts only after exact inventory,
 all inode identities and every non-directory identity still match. Untracked
 new work prevents this refresh and blocks the older inverse.
+
+
+### Owned new-folder and link receipts
+
+`create::new_folder_recorded(dir,name)` returns FolderCreated with the created
+root's held identity while it is empty, after syncing the directory and parent.
+`History::record_folders(label, receipts)` admits only those exact still-empty
+objects; later children are new work, never adopted as created descendants.
+Forward link creation resolves its parent without following symlinks and
+returns the existing LinkMade identity/target receipt. Bulk path-pair outcomes
+remain an explicit history barrier until pre-mutation receipts are available.
