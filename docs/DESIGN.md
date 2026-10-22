@@ -22,6 +22,19 @@ LocationKey  = provider_id + ":" + opaque_location_bytes
 location bytes. Metadata and thumbnail results carry `EntryId` + `generation`
 and are dropped if either no longer matches.
 
+### 1.1 Byte tokens at the UI boundary
+
+`location::PathToken` validates the existing `local:<hex OS bytes>` encoding
+as an absolute, NUL-free local path. `ChildNameToken` encodes one nonempty
+child component as `name:<hex OS bytes>` and rejects `/`, NUL, `.` and `..`.
+Both expose fallible parsing, byte-preserving resolution and an ASCII token.
+They perform no filesystem I/O. They identify a path, not authority to operate
+on an unchanged inode; operation admission still checks identity separately.
+The bridge publishes tokens alongside escaped labels and activates by token.
+Labels can collide (newline versus literal `<U+000A>`, or invalid UTF-8 versus
+replacement characters), so reverse lookup by display text is forbidden.
+Existing `LocationKey` serialization remains compatible.
+
 ## 2. Capabilities
 
 ```rust
