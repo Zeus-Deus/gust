@@ -1008,6 +1008,17 @@ phases leaves recoverable temporary names rather than a lost file.
 Mockup B puts `o open with…` next to `enter open`. Enter uses the default
 handler; this is for the other times.
 
+### Content is not a program because a mount supplies executable bits
+
+Phone and non-Unix mounts can report ordinary files as executable (AFC
+reports iPhone photographs as `0700`). Recognized media, documents and
+archives open with the desktop handler regardless of those permission bits.
+They are not offered as programs by Run. Known script/launcher/program
+extensions still require deliberate Run, even without executable bits;
+unknown files with executable bits do too. Activation, recent files,
+multi-file opening and Run share this classification, using only the name
+and already available mode, without reading file contents on the UI thread.
+
 ### The list comes from the desktop database, not from a command's output
 
 `gio mime` prints "Default application for ..." in the system language, and

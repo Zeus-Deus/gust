@@ -27,7 +27,7 @@ pub fn category_for_name(name: &OsStr) -> Category {
     };
     match ext.as_str() {
         "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "svg" | "avif" | "heic" | "tiff"
-        | "ico" => Category::Image,
+        | "heif" | "tif" | "ico" => Category::Image,
         "mp4" | "mkv" | "webm" | "mov" | "avi" | "m4v" | "wmv" | "flv" => Category::Video,
         "mp3" | "flac" | "ogg" | "wav" | "m4a" | "opus" | "aac" => Category::Audio,
         "pdf" => Category::Pdf,
@@ -48,15 +48,25 @@ pub fn is_executable_mode(mode: u32) -> bool {
 
 /// Should activating this entry require a deliberate trusted action?
 ///
-/// Executable-by-mode regular files are never launched by a plain double
-/// click during browsing (AGENTS.md / plan §4).
+/// Phone and non-Unix mounts can supply executable bits for ordinary content.
+/// Known content types therefore beat mode bits, but script/program extensions
+/// and executable files of unknown type still require deliberate Run.
 pub fn needs_trusted_launch(name: &OsStr, mode: Option<u32>) -> bool {
-    if let Some(m) = mode {
-        if is_executable_mode(m) {
-            return true;
-        }
+    let ext = Path::new(name)
+        .extension()
+        .map(|e| e.as_bytes().to_ascii_lowercase())
+        .unwrap_or_default();
+    if matches!(
+        ext.as_slice(),
+        b"sh" | b"bash" | b"zsh" | b"fish" | b"py" | b"pl" | b"desktop"
+    ) {
+        return true;
     }
-    matches!(category_for_name(name), Category::Executable)
+    match category_for_name(name) {
+        Category::Executable => true,
+        Category::Other => mode.is_some_and(is_executable_mode),
+        _ => false,
+    }
 }
 
 /// A `.desktop` file is a script by another name.
@@ -94,6 +104,60 @@ mod tests {
     #[test]
     fn appimage_requires_trusted_launch_even_without_mode() {
         assert!(needs_trusted_launch(OsStr::new("Thing.AppImage"), None));
+    }
+
+    #[test]
+    fn phone_content_is_not_a_program_despite_executable_bits() {
+        for name in [
+            "IMG_0001.JPG",
+            "photo.HEIC",
+            "photo.HEIF",
+            "scan.TIF",
+            "clip.MOV",
+            "clip.MP4",
+            "memo.M4A",
+            "song.MP3",
+            "notes.txt",
+            "report.PDF",
+            "backup.zip",
+        ] {
+            for mode in [None, Some(0o700), Some(0o755), Some(0o777)] {
+                assert!(
+                    !needs_trusted_launch(OsStr::new(name), mode),
+                    "{name} {mode:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn scripts_and_programs_require_deliberate_run_with_any_mode() {
+        for name in [
+            "install.sh",
+            "setup.PY",
+            "run.bash",
+            "run.zsh",
+            "run.fish",
+            "run.pl",
+            "app.desktop",
+            "app.DESKTOP",
+            "Thing.AppImage",
+            "setup.run",
+            "app.exe",
+            "app.bin",
+        ] {
+            for mode in [None, Some(0o644), Some(0o700)] {
+                assert!(
+                    needs_trusted_launch(OsStr::new(name), mode),
+                    "{name} {mode:?}"
+                );
+            }
+        }
+        assert!(needs_trusted_launch(
+            OsStr::new("unknown.format"),
+            Some(0o700)
+        ));
+        assert!(needs_trusted_launch(OsStr::new("program"), Some(0o700)));
     }
 
     #[test]

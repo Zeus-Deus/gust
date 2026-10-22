@@ -46,29 +46,10 @@ const OPENERS: [&str; 3] = ["xdg-open", "gio", "handlr"];
 
 /// Does this look like a runnable program rather than a document?
 ///
-/// Executable bit OR a known script/binary extension. Both are treated the
-/// same: activation must never launch them.
+/// Shared with the UI's activation guard and the Run action, so synthetic
+/// executable bits on phone media cannot turn documents into programs.
 pub fn is_runnable(path: &Path, mode: Option<u32>) -> bool {
-    if let Some(m) = mode {
-        if m & 0o111 != 0 {
-            return true;
-        }
-    }
-    let name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().to_lowercase())
-        .unwrap_or_default();
-    const RUNNABLE_EXT: [&str; 8] = [
-        ".sh",
-        ".bash",
-        ".zsh",
-        ".fish",
-        ".py",
-        ".pl",
-        ".appimage",
-        ".run",
-    ];
-    RUNNABLE_EXT.iter().any(|e| name.ends_with(e))
+    crate::mime::needs_trusted_launch(path.file_name().unwrap_or_default(), mode)
 }
 
 /// Build the command for a given opener without running it.
@@ -157,8 +138,9 @@ pub fn which(program: &str) -> Option<PathBuf> {
 /// directory. Every part is a separate argv entry: no shell ever parses the
 /// path, and the path is absolute, so it can never be read as an option.
 ///
-/// Refused unless the file is a regular file with an executable bit: a
-/// script without +x is not "run" by guessing an interpreter.
+/// Refused unless the file is a runnable regular file with an executable bit:
+/// a script without +x is not "run" by guessing an interpreter, and content
+/// with synthetic +x permissions still belongs in its desktop application.
 pub fn run_argv(path: &Path, mode: u32, is_regular: bool) -> Result<Vec<String>, String> {
     if !path.is_absolute() {
         return Err("only a full path can be run".into());
@@ -170,6 +152,9 @@ pub fn run_argv(path: &Path, mode: u32, is_regular: bool) -> Result<Vec<String>,
         return Err(
             "this file is not executable — give it the x permission first (Permissions…)".into(),
         );
+    }
+    if !is_runnable(path, Some(mode)) {
+        return Err("this file opens in an application — use Open instead of Run".into());
     }
     let dir = path.parent().unwrap_or(Path::new("/"));
     Ok(vec![
@@ -329,6 +314,23 @@ mod tests {
         assert!(is_runnable(p, Some(0o755)));
         assert!(is_runnable(p, Some(0o700)));
         assert!(!is_runnable(p, Some(0o644)));
+    }
+
+    #[test]
+    fn executable_bits_on_content_do_not_require_run() {
+        for name in [
+            "IMG_0001.JPG",
+            "clip.MOV",
+            "memo.M4A",
+            "report.PDF",
+            "notes.txt",
+        ] {
+            let path = Path::new("/phone/DCIM").join(name);
+            assert!(!is_runnable(&path, Some(0o100700)), "{name}");
+            assert!(run_argv(&path, 0o100700, true)
+                .unwrap_err()
+                .contains("use Open instead of Run"));
+        }
     }
 
     #[test]
