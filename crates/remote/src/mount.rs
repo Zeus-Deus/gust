@@ -538,7 +538,7 @@ fn mount_prepared(
         mount_point,
         ctx.timeout.as_secs().clamp(1, u32::MAX as u64) as u32,
     ));
-    let out = helper::run(command, &[], ctx).map_err(helper_error)?;
+    let out = helper::run_daemon_startup(command, ctx).map_err(helper_error)?;
     if !out.status.success() {
         let first = classify(&String::from_utf8_lossy(&out.stderr));
         if matches!(first, MountError::Other(_)) {

@@ -1469,3 +1469,12 @@ backend receipts require a complete parsed response, never an empty failed parse
 
 Owned helpers remove inherited TLS keylog settings. Reaper-start failure retains
 bounded ownership, and subsequent admissions also reap completed children.
+
+Successful SSHFS daemon startup explicitly hands off the accepted filesystem and
+its SSH transport; normal helper retirement must not signal those descendants.
+Only a successful starter exit with drained pipes permits this handoff. Failed,
+cancelled or timed-out startup retains bounded process-group cleanup. Ordinary
+one-shot helpers still terminate leftover descendants even after a successful exit.
+Host-key scans offer keys for trust only when every key has a fingerprint. Any
+fingerprint helper failure, cancellation or shared-budget exhaustion rejects the
+whole scan; no undisplayed key may remain in a successful trust offer.
