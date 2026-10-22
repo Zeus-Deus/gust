@@ -382,6 +382,14 @@ uses a fresh token and at most one second of the remaining overall budget;
 it preserves the original cancellation and delivery uncertainty and never retries
 file data. This is synthetic protocol coverage, not physical receiver qualification.
 
+Send admission uses CORE's shared byte-preserving mount-table classification.
+Kernel-escaped mount names (backslash, tab, newline and space) must select the
+actual longest component-prefix mount before the source is opened; classification
+must not canonicalize or query the source path. Synthetic mount-table-to-admission
+regressions cover FUSE subtypes, NFS and CIFS under escaped mount names. Exercise
+the shared parser and the pre-open policy together; a filesystem-name policy
+alone does not establish correct admission.
+
 ## 6.5 Permanent delete
 
 The one operation with no undo. Reached only where Trash is genuinely

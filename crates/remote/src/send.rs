@@ -676,6 +676,47 @@ mod tests {
         }
     }
     #[test]
+    fn escaped_mount_tables_reach_send_admission_before_source_io() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+        let names: &[(&[u8], &[u8])] = &[
+            (br"/synthetic/share\040space", b"/synthetic/share space"),
+            (br"/synthetic/share\134slash", b"/synthetic/share\\slash"),
+            (br"/synthetic/share\011tab", b"/synthetic/share\ttab"),
+            (
+                br"/synthetic/share\012newline",
+                b"/synthetic/share\nnewline",
+            ),
+            (
+                br"/synthetic/share\134040literal",
+                br"/synthetic/share\040literal",
+            ),
+            (b"/synthetic/share-\xff", b"/synthetic/share-\xff"),
+        ];
+        for fstype in ["fuse.synthetic-peer", "nfs4", "cifs"] {
+            for (encoded, decoded) in names {
+                let mut mounts = b"root / ext4 rw 0 0\npeer ".to_vec();
+                mounts.extend_from_slice(encoded);
+                mounts.extend_from_slice(format!(" {fstype} rw 0 0\n").as_bytes());
+                let mut bytes = decoded.to_vec();
+                bytes.extend_from_slice(b"/payload.txt");
+                let path = PathBuf::from(OsString::from_vec(bytes));
+                let actual = gust_core::stall::fstype_from_mounts(&path, &mounts).unwrap();
+                assert_eq!(actual, fstype);
+                assert!(!source_filesystem_safe(&actual));
+
+                // A textual-prefix sibling belongs to the local root. These
+                // paths never need to exist or be queried to decide admission.
+                let mut sibling = decoded.to_vec();
+                sibling.extend_from_slice(b"-sibling/payload.txt");
+                let sibling = PathBuf::from(OsString::from_vec(sibling));
+                let actual = gust_core::stall::fstype_from_mounts(&sibling, &mounts).unwrap();
+                assert_eq!(actual, "ext4");
+                assert!(source_filesystem_safe(&actual));
+            }
+        }
+    }
+    #[test]
     fn prepare_cancellation_cleanup_keeps_original_failure_and_remaining_budget() {
         let root = fixture("prepare-cleanup");
         let source = root.join("sample");
