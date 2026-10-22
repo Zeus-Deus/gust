@@ -742,6 +742,15 @@ from `/proc/self/mounts`, which the kernel answers from its own tables and
 which therefore cannot itself hang. A path on ext4/btrfs/xfs/tmpfs spawns no
 child and pays nothing.
 
+`stall::fstype_for` reads the mount table as bytes and delegates to the pure
+`stall::fstype_from_mounts(path, table_bytes)` fixture/parser API. Mount points
+are decoded before longest-component-prefix matching, with no candidate open,
+stat or canonicalization. Shared `mount_table::decode_field(&[u8]) -> OsString`
+handles the kernel's space, tab, newline and backslash octal escapes exactly
+once, retaining raw non-UTF-8 bytes and literal escape-looking name segments.
+Core drop handling uses the same decoder and byte field separators. Filesystem
+admission policy remains with each caller; lookup does not probe a candidate.
+
 ### What the user sees
 
 The window stays on the folder it could reach. Moving somebody somewhere else
