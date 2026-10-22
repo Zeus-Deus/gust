@@ -3,10 +3,23 @@ use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
-fn table(mount: &[u8], fstype: &str) -> Vec<u8> {
+fn flat_table(mount: &[u8], fstype: &str) -> Vec<u8> {
     let mut table = b"/dev/root / ext4 rw 0 0\npeer ".to_vec();
     table.extend_from_slice(mount);
     table.extend_from_slice(format!(" {fstype} rw 0 0\n").as_bytes());
+    table
+}
+
+fn row(id: u64, parent: u64, mount: &[u8], fstype: &str) -> Vec<u8> {
+    let mut row = format!("{id} {parent} 0:1 / ").into_bytes();
+    row.extend_from_slice(mount);
+    row.extend_from_slice(format!(" rw - {fstype} source rw\n").as_bytes());
+    row
+}
+
+fn table(mount: &[u8], fstype: &str) -> Vec<u8> {
+    let mut table = row(1, 0, b"/", "ext4");
+    table.extend_from_slice(&row(2, 1, mount, fstype));
     table
 }
 
@@ -23,11 +36,12 @@ fn escaped_remote_mounts_win_over_the_local_root() {
             (b"/mnt/name\\012peer", b"/mnt/name\npeer"),
         ] {
             let source = Path::new(OsStr::from_bytes(raw)).join("source.txt");
-            let found = stall::fstype_from_mounts(&source, &table(encoded, fstype)).unwrap();
+            let found = stall::fstype_from_mountinfo(&source, &table(encoded, fstype)).unwrap();
             assert_eq!(found, fstype, "{encoded:?}");
             // Preserve the exact subtype for callers with an all-FUSE policy.
             assert!(found.starts_with("fuse") || stall::can_stall(&found));
-            let mounts = drop::mount_points(std::str::from_utf8(&table(encoded, fstype)).unwrap());
+            let mounts =
+                drop::mount_points(std::str::from_utf8(&flat_table(encoded, fstype)).unwrap());
             assert_eq!(drop::mount_of(&mounts, &source), source.parent());
         }
     }
@@ -62,17 +76,15 @@ fn literal_escape_sequences_do_not_alias_decoded_space_or_control_names() {
         ),
     ] {
         let mut mounts = table(encoded_literal, "fuse.custom-peer");
-        mounts.extend_from_slice(b"other ");
-        mounts.extend_from_slice(encoded_decoded);
-        mounts.extend_from_slice(b" btrfs rw 0 0\n");
+        mounts.extend_from_slice(&row(3, 1, encoded_decoded, "btrfs"));
         let literal = Path::new(OsStr::from_bytes(literal)).join("source.txt");
         let decoded = Path::new(OsStr::from_bytes(decoded)).join("source.txt");
         assert_eq!(
-            stall::fstype_from_mounts(&literal, &mounts).as_deref(),
+            stall::fstype_from_mountinfo(&literal, &mounts).as_deref(),
             Some("fuse.custom-peer")
         );
         assert_eq!(
-            stall::fstype_from_mounts(&decoded, &mounts).as_deref(),
+            stall::fstype_from_mountinfo(&decoded, &mounts).as_deref(),
             Some("btrfs")
         );
     }
@@ -90,7 +102,7 @@ fn non_utf8_and_non_separator_whitespace_remain_mount_path_bytes() {
         let mounts = table(raw, "nfs4");
         let source = Path::new(OsStr::from_bytes(raw)).join("source.txt");
         assert_eq!(
-            stall::fstype_from_mounts(&source, &mounts).as_deref(),
+            stall::fstype_from_mountinfo(&source, &mounts).as_deref(),
             Some("nfs4"),
             "{raw:?}"
         );
@@ -99,7 +111,8 @@ fn non_utf8_and_non_separator_whitespace_remain_mount_path_bytes() {
 
 #[test]
 fn matching_uses_the_longest_component_prefix_and_never_opens_candidates() {
-    let mounts = b"/dev/root / ext4 rw 0 0\npeer /mnt/shared nfs4 rw 0 0\nlocal /mnt/shared/local btrfs rw 0 0\n";
+    let mut mounts = table(b"/mnt/shared", "nfs4");
+    mounts.extend_from_slice(&row(3, 2, b"/mnt/shared/local", "btrfs"));
     for (path, fstype) in [
         ("/mnt/shared/source.txt", "nfs4"),
         ("/mnt/shared/local/source.txt", "btrfs"),
@@ -108,7 +121,7 @@ fn matching_uses_the_longest_component_prefix_and_never_opens_candidates() {
         ("/mnt/shared/local-sibling/source.txt", "nfs4"),
     ] {
         assert_eq!(
-            stall::fstype_from_mounts(Path::new(path), mounts).as_deref(),
+            stall::fstype_from_mountinfo(Path::new(path), &mounts).as_deref(),
             Some(fstype)
         );
     }
