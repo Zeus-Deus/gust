@@ -656,7 +656,7 @@ explicitly scoped and cancellable, and neither ever starts on its own.
 2. **Binary files are skipped.** A file is treated as binary if its first
    8 KiB contain a NUL. Grepping a disk image finds nothing useful and costs
    everything.
-3. **Bounded per file and overall.** At most 8 MiB read per file, and the
+3. **Bounded per file and overall.** At most 8 MiB searched per file, and the
    search stops at 500 matching files; the result says so rather than
    pretending it finished.
 4. **Cancellable at any moment**, with the same token the name search uses,
@@ -666,6 +666,42 @@ explicitly scoped and cancellable, and neither ever starts on its own.
    operations on the results.
 6. **Matches are counted, not concatenated.** The result list shows the file
    and how many lines matched; Gust does not build a giant text buffer.
+
+### 6.10.1 Bounded content details (core)
+
+`grep::grep_with_report(scope, needle, cancel, on_hit)` streams captured
+`DetailedContentHit { hit: ContentHit, snippet: ContentSnippet }` and returns
+`ContentSearchReport { hits, state, stats }`. Existing ContentHit path/count/
+first_line fields and legacy entry points remain compatibility APIs. The new
+report is required for truthful coverage. APP projects count, 1-based first
+line and snippet directly from the captured hit, without reopening its path.
+
+`ContentSnippet { text, truncated }` comes from the first matching line in the
+same bounded read. Its text uses existing display sanitization and never
+exceeds 256 rendered UTF-8 bytes, including expanded tabs/replacement chars.
+Context near the first match is preferred for long lines; omitted context is
+explicit. Raw paths remain typed byte identities, never snippet/display labels.
+
+Valid UTF-8 in the searched prefix uses per-character simple lowercasing for
+substring matching. Invalid UTF-8 retains ASCII-insensitive byte matching.
+There is no normalization or full Unicode case folding: for example, sharp-s
+is not expanded to `ss`. Query input is at most 4096 bytes; empty and excessive
+queries return invalid_query with detail empty or too_long. Compiled matching
+state is reused across lines/files and checks cancellation cooperatively.
+
+Ceilings are 8 MiB searched per file, 64 MiB total source bytes, 100,000 visited
+entries and 500 hit-files (or the smaller requested result limit). One extra
+byte detects per-file truncation and counts toward the total source budget.
+Bounds and omissions never imply a complete search. Serialized search state is partial,
+limited (detail hits/entries/bytes), cancelled, or invalid_query (detail
+empty/too_long). Stats retain entries/read_bytes/read_errors/entry_errors,
+depth_pruned/device_pruned/hidden_pruned/symlink_pruned, binary_files,
+ascii_fallback_files and file_byte_limits; scope_unverified is always true.
+The original iterative absolute-path traversal is still unanchored: it always
+reports partial unless a more specific terminal state applies. This work does
+not establish safe recursive scope, filesystem admission or syscall deadlines.
+Remote callers still need explicit admission and isolation. The pure bounded
+buffer matcher can be used without traversal; its result discloses byte limits.
 
 ## 6.11 Accessibility
 
