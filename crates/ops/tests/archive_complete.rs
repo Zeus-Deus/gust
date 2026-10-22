@@ -303,3 +303,37 @@ fn a_publication_failure_reports_the_partial_receipt() {
         b"new work"
     );
 }
+
+#[test]
+fn publication_receipts_do_not_adopt_a_later_edit() {
+    let f = Fixture::new();
+    put(f.0.join("source/file"), b"payload");
+    let mut changed = false;
+    let done = extract_with(
+        &f.archive(),
+        &f.destination(),
+        &ExtractPolicy::default(),
+        None,
+        &CancelToken::new(),
+        &mut |phase, _, _| {
+            if phase == ArchivePhase::Publishing
+                && !changed
+                && f.destination().join("file").exists()
+            {
+                put(f.destination().join("file"), b"later user work");
+                changed = true;
+            }
+        },
+    )
+    .unwrap();
+    assert!(changed);
+    let expected = &done
+        .published
+        .iter()
+        .find(|(p, _)| p.ends_with("file"))
+        .unwrap()
+        .1;
+    assert!(
+        !expected.matches(&gust_ops::FileIdentity::of_path(&f.destination().join("file")).unwrap())
+    );
+}

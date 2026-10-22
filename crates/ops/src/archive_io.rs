@@ -492,160 +492,6 @@ pub fn extract(
     )
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn an_ordinary_line_is_parsed() {
-        let e = parse_listing_line("-rw-r--r--  0 user   user        2 Sep 13 19:48 a.txt")
-            .expect("should parse");
-        assert_eq!(e.name, "a.txt");
-        assert_eq!(e.size, 2);
-        assert_eq!(e.kind, ArchiveEntryKind::Regular);
-    }
-
-    #[test]
-    fn a_directory_is_recognised_and_its_slash_dropped() {
-        let e = parse_listing_line("drwxr-xr-x  0 user   user        0 Sep 13 19:48 sub/").unwrap();
-        assert_eq!(e.kind, ArchiveEntryKind::Directory);
-        assert_eq!(e.name, "sub");
-    }
-
-    #[test]
-    fn a_symlink_keeps_its_target() {
-        let e = parse_listing_line(
-            "lrwxrwxrwx  0 user   user        0 Sep 13 19:48 link -> ../outside",
-        )
-        .unwrap();
-        assert_eq!(e.kind, ArchiveEntryKind::Symlink);
-        assert_eq!(e.name, "link");
-        assert_eq!(e.link_target.as_deref(), Some("../outside"));
-    }
-
-    #[test]
-    fn a_fifo_is_recognised_as_special() {
-        let e = parse_listing_line("prw-r--r--  0 user   user        0 Sep 13 19:48 pipe").unwrap();
-        assert_eq!(e.kind, ArchiveEntryKind::Special);
-    }
-
-    #[test]
-    fn a_setuid_entry_carries_its_privileged_bit() {
-        let e = parse_listing_line("-rwsr-xr-x  0 root   root     1234 Sep 13 19:48 evil").unwrap();
-        assert_ne!(e.mode & 0o4000, 0, "setuid must survive parsing");
-    }
-
-    #[test]
-    fn a_name_with_spaces_survives() {
-        let e = parse_listing_line(
-            "-rw-r--r--  0 user   user       10 Sep 13 19:48 my holiday photos.txt",
-        )
-        .unwrap();
-        assert_eq!(e.name, "my holiday photos.txt");
-    }
-
-    #[test]
-    fn a_year_dated_entry_parses_too() {
-        let e =
-            parse_listing_line("-rw-r--r--  0 user   user       10 Jan  1  2020 old.txt").unwrap();
-        assert_eq!(e.name, "old.txt");
-    }
-
-    #[test]
-    fn junk_is_skipped_not_guessed_at() {
-        assert!(parse_listing_line("").is_none());
-        assert!(parse_listing_line("   ").is_none());
-        assert!(parse_listing_line("not a listing line").is_none());
-    }
-
-    #[test]
-    fn archive_names_are_recognised_by_ending_only() {
-        assert!(looks_like_archive("backup.tar.zst"));
-        assert!(looks_like_archive("photos.ZIP"));
-        assert!(!looks_like_archive("notes.txt"));
-        // A name is a hint, never proof — nothing is run to find out.
-        assert!(!looks_like_archive("tar"));
-    }
-
-    #[test]
-    fn no_name_can_become_an_option() {
-        let args = compress_args(
-            Path::new("/tmp"),
-            Path::new("/tmp/out.tar.zst"),
-            &["--checkpoint-action=exec=sh".to_string()],
-        );
-        let dashdash = args.iter().position(|a| a == "--").expect("-- present");
-        let name_at = args
-            .iter()
-            .position(|a| a == "--checkpoint-action=exec=sh")
-            .unwrap();
-        assert!(
-            name_at > dashdash,
-            "every name must come after --, or it is an option"
-        );
-    }
-
-    #[test]
-    fn extraction_does_not_preserve_owner_or_permissions() {
-        let args = extract_args(Path::new("/tmp/a.tar"), Path::new("/tmp/stage"));
-        assert!(args.iter().any(|a| a == "--no-same-owner"));
-        assert!(args.iter().any(|a| a == "--no-same-permissions"));
-        // -P would let absolute paths through; it must never be passed.
-        assert!(!args.iter().any(|a| a == "-P"));
-    }
-
-    #[test]
-    fn a_summary_says_what_was_refused() {
-        let e = Extracted {
-            files: 3,
-            dirs: 1,
-            refused: vec!["evil (asks for extra privilege)".into()],
-            ..Default::default()
-        };
-        let s = e.summary();
-        assert!(s.contains("3 files"));
-        assert!(s.contains("1 folder"));
-        assert!(s.contains("refused 1 unsafe entry"));
-    }
-
-    #[test]
-    fn an_empty_extraction_says_so() {
-        assert_eq!(Extracted::default().summary(), "Nothing was extracted");
-    }
-
-    #[test]
-    fn a_second_archive_does_not_replace_the_first() {
-        let d = std::env::temp_dir().join("gust-arch-unique");
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-
-        // Nothing there yet: the wanted name is free.
-        assert_eq!(unique_name(&d, "photos.tar.zst"), d.join("photos.tar.zst"));
-
-        std::fs::write(d.join("photos.tar.zst"), "x").unwrap();
-        // The compound extension must survive intact.
-        assert_eq!(
-            unique_name(&d, "photos.tar.zst"),
-            d.join("photos-2.tar.zst")
-        );
-
-        std::fs::write(d.join("photos-2.tar.zst"), "x").unwrap();
-        assert_eq!(
-            unique_name(&d, "photos.tar.zst"),
-            d.join("photos-3.tar.zst")
-        );
-        std::fs::remove_dir_all(&d).ok();
-    }
-
-    #[test]
-    fn errors_are_actionable() {
-        assert!(ArchiveError::NoTool.message().contains("bsdtar"));
-        assert!(ArchiveError::Unsupported("x.bin".into())
-            .message()
-            .contains("x.bin"));
-    }
-}
-
 fn protocol_error() -> ArchiveError {
     ArchiveError::Failed("Archive helper returned an incomplete or invalid member stream.".into())
 }
@@ -687,9 +533,12 @@ impl Reader {
             ));
         }
         let identity = crate::anchor::FileIdentity::from_stat(&rustix::fs::fstat(&file)?);
-        // A held descriptor, not a re-resolved input pathname, is mounted.
-        let held = format!("/proc/{}/fd/{}", std::process::id(), file.as_raw_fd());
-        let mut child = Command::new("/usr/bin/bwrap")
+        // Pass an owned FD directly: user namespaces can refuse reopening a
+        // parent process's /proc/<pid>/fd path even for the same user.
+        let inherited = file.try_clone()?;
+        let held = inherited.as_raw_fd().to_string();
+        let mut command = Command::new("/usr/bin/bwrap");
+        command
             .args([
                 "--unshare-all",
                 "--die-with-parent",
@@ -714,7 +563,7 @@ impl Reader {
                 "/proc",
                 "--dev",
                 "/dev",
-                "--ro-bind",
+                "--ro-bind-fd",
             ])
             .arg(held)
             .arg("/input")
@@ -735,7 +584,17 @@ impl Reader {
             ])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::null());
+        use std::os::unix::process::CommandExt;
+        // SAFETY: after fork this closure only performs async-signal-safe
+        // fcntl on its owned descriptor. Parent FD flags remain untouched.
+        unsafe {
+            command.pre_exec(move || {
+                rustix::io::fcntl_setfd(&inherited, rustix::io::FdFlags::empty())
+                    .map_err(std::io::Error::from)
+            });
+        }
+        let mut child = command
             .spawn()
             .map_err(|_| ArchiveError::SandboxUnavailable)?;
         let input = child.stdin.take().ok_or_else(protocol_error)?;
@@ -1201,9 +1060,10 @@ pub fn extract_with(
         ));
     }
     progress(ArchivePhase::Publishing, seen, actual);
-    let mut published = BTreeSet::new();
+    let mut published = BTreeMap::new();
+    let mut published_dirs = BTreeSet::new();
     let mut placed_names = BTreeMap::new();
-    let publication = (|| -> Result<(), ArchiveError> {
+    let mut publication = (|| -> Result<(), ArchiveError> {
         // Explicit and implicit folders are created through the same anchored
         // walk. Existing folders may be shared; existing symlinks are refused.
         for (relative, member) in &manifest {
@@ -1215,8 +1075,9 @@ pub fn extract_with(
             } else {
                 relative.parent().unwrap_or(Path::new(""))
             };
-            stage::parents_with(&staging.parent, path, true, &mut |path| {
-                published.insert(path.to_path_buf());
+            stage::parents_with(&staging.parent, path, true, &mut |path, identity| {
+                published.insert(path.to_path_buf(), identity);
+                published_dirs.insert(path.to_path_buf());
                 done.dirs += 1;
             })?;
         }
@@ -1262,7 +1123,7 @@ pub fn extract_with(
                     Ok(()) => {
                         let placed = path.join(&chosen);
                         placed_names.insert(relative.clone(), placed.clone());
-                        published.insert(placed);
+                        published.insert(placed, expected);
                         done.files += 1;
                         if chosen != name {
                             done.renamed.push((
@@ -1277,6 +1138,7 @@ pub fn extract_with(
                         }
                         rustix::fs::fsync(target.as_fd())?;
                         moved = true;
+                        progress(ArchivePhase::Publishing, seen, actual);
                         break;
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -1291,15 +1153,35 @@ pub fn extract_with(
         }
         Ok(())
     })();
-    for relative in published {
-        let (parent, _) = stage::parents(
-            &staging.parent,
-            relative.parent().unwrap_or(Path::new("")),
-            false,
-        )?;
-        let identity = crate::anchor::FileIdentity::from_stat(
-            &parent.stat_child(relative.file_name().ok_or_else(protocol_error)?)?,
-        );
+    for (relative, mut identity) in published {
+        if published_dirs.contains(&relative) {
+            // Child publication changes a directory's mtime. Refresh that
+            // metadata only for the very directory we exclusively created;
+            // file receipts always retain their pre-publication identity.
+            let current = stage::parents(
+                &staging.parent,
+                relative.parent().unwrap_or(Path::new("")),
+                false,
+            )
+            .and_then(|(parent, _)| {
+                parent.stat_child(
+                    relative
+                        .file_name()
+                        .ok_or_else(|| std::io::Error::other("invalid published path"))?,
+                )
+            });
+            match current {
+                Ok(stat) if stat.st_dev == identity.dev && stat.st_ino == identity.ino => {
+                    identity = crate::anchor::FileIdentity::from_stat(&stat);
+                }
+                _ => {
+                    publication = Err(ArchiveError::Failed(
+                        "A published archive folder changed; receipt retained for inspection."
+                            .into(),
+                    ));
+                }
+            }
+        }
         done.published.push((dest.join(relative), identity.into()));
     }
     if let Err(cause) = publication {
@@ -1319,4 +1201,158 @@ pub fn extract_with(
         });
     }
     Ok(done)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_ordinary_line_is_parsed() {
+        let e = parse_listing_line("-rw-r--r--  0 user   user        2 Sep 13 19:48 a.txt")
+            .expect("should parse");
+        assert_eq!(e.name, "a.txt");
+        assert_eq!(e.size, 2);
+        assert_eq!(e.kind, ArchiveEntryKind::Regular);
+    }
+
+    #[test]
+    fn a_directory_is_recognised_and_its_slash_dropped() {
+        let e = parse_listing_line("drwxr-xr-x  0 user   user        0 Sep 13 19:48 sub/").unwrap();
+        assert_eq!(e.kind, ArchiveEntryKind::Directory);
+        assert_eq!(e.name, "sub");
+    }
+
+    #[test]
+    fn a_symlink_keeps_its_target() {
+        let e = parse_listing_line(
+            "lrwxrwxrwx  0 user   user        0 Sep 13 19:48 link -> ../outside",
+        )
+        .unwrap();
+        assert_eq!(e.kind, ArchiveEntryKind::Symlink);
+        assert_eq!(e.name, "link");
+        assert_eq!(e.link_target.as_deref(), Some("../outside"));
+    }
+
+    #[test]
+    fn a_fifo_is_recognised_as_special() {
+        let e = parse_listing_line("prw-r--r--  0 user   user        0 Sep 13 19:48 pipe").unwrap();
+        assert_eq!(e.kind, ArchiveEntryKind::Special);
+    }
+
+    #[test]
+    fn a_setuid_entry_carries_its_privileged_bit() {
+        let e = parse_listing_line("-rwsr-xr-x  0 root   root     1234 Sep 13 19:48 evil").unwrap();
+        assert_ne!(e.mode & 0o4000, 0, "setuid must survive parsing");
+    }
+
+    #[test]
+    fn a_name_with_spaces_survives() {
+        let e = parse_listing_line(
+            "-rw-r--r--  0 user   user       10 Sep 13 19:48 my holiday photos.txt",
+        )
+        .unwrap();
+        assert_eq!(e.name, "my holiday photos.txt");
+    }
+
+    #[test]
+    fn a_year_dated_entry_parses_too() {
+        let e =
+            parse_listing_line("-rw-r--r--  0 user   user       10 Jan  1  2020 old.txt").unwrap();
+        assert_eq!(e.name, "old.txt");
+    }
+
+    #[test]
+    fn junk_is_skipped_not_guessed_at() {
+        assert!(parse_listing_line("").is_none());
+        assert!(parse_listing_line("   ").is_none());
+        assert!(parse_listing_line("not a listing line").is_none());
+    }
+
+    #[test]
+    fn archive_names_are_recognised_by_ending_only() {
+        assert!(looks_like_archive("backup.tar.zst"));
+        assert!(looks_like_archive("photos.ZIP"));
+        assert!(!looks_like_archive("notes.txt"));
+        // A name is a hint, never proof — nothing is run to find out.
+        assert!(!looks_like_archive("tar"));
+    }
+
+    #[test]
+    fn no_name_can_become_an_option() {
+        let args = compress_args(
+            Path::new("/tmp"),
+            Path::new("/tmp/out.tar.zst"),
+            &["--checkpoint-action=exec=sh".to_string()],
+        );
+        let dashdash = args.iter().position(|a| a == "--").expect("-- present");
+        let name_at = args
+            .iter()
+            .position(|a| a == "--checkpoint-action=exec=sh")
+            .unwrap();
+        assert!(
+            name_at > dashdash,
+            "every name must come after --, or it is an option"
+        );
+    }
+
+    #[test]
+    fn extraction_does_not_preserve_owner_or_permissions() {
+        let args = extract_args(Path::new("/tmp/a.tar"), Path::new("/tmp/stage"));
+        assert!(args.iter().any(|a| a == "--no-same-owner"));
+        assert!(args.iter().any(|a| a == "--no-same-permissions"));
+        // -P would let absolute paths through; it must never be passed.
+        assert!(!args.iter().any(|a| a == "-P"));
+    }
+
+    #[test]
+    fn a_summary_says_what_was_refused() {
+        let e = Extracted {
+            files: 3,
+            dirs: 1,
+            refused: vec!["evil (asks for extra privilege)".into()],
+            ..Default::default()
+        };
+        let s = e.summary();
+        assert!(s.contains("3 files"));
+        assert!(s.contains("1 folder"));
+        assert!(s.contains("refused 1 unsafe entry"));
+    }
+
+    #[test]
+    fn an_empty_extraction_says_so() {
+        assert_eq!(Extracted::default().summary(), "Nothing was extracted");
+    }
+
+    #[test]
+    fn a_second_archive_does_not_replace_the_first() {
+        let d = std::env::temp_dir().join("gust-arch-unique");
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+
+        // Nothing there yet: the wanted name is free.
+        assert_eq!(unique_name(&d, "photos.tar.zst"), d.join("photos.tar.zst"));
+
+        std::fs::write(d.join("photos.tar.zst"), "x").unwrap();
+        // The compound extension must survive intact.
+        assert_eq!(
+            unique_name(&d, "photos.tar.zst"),
+            d.join("photos-2.tar.zst")
+        );
+
+        std::fs::write(d.join("photos-2.tar.zst"), "x").unwrap();
+        assert_eq!(
+            unique_name(&d, "photos.tar.zst"),
+            d.join("photos-3.tar.zst")
+        );
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn errors_are_actionable() {
+        assert!(ArchiveError::NoTool.message().contains("bsdtar"));
+        assert!(ArchiveError::Unsupported("x.bin".into())
+            .message()
+            .contains("x.bin"));
+    }
 }

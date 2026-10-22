@@ -109,14 +109,14 @@ pub(super) fn parents(
     path: &Path,
     create: bool,
 ) -> io::Result<(DirHandle, Vec<PathBuf>)> {
-    parents_with(root, path, create, &mut |_| {})
+    parents_with(root, path, create, &mut |_, _| {})
 }
 
 pub(super) fn parents_with(
     root: &DirHandle,
     path: &Path,
     create: bool,
-    on_created: &mut dyn FnMut(&Path),
+    on_created: &mut dyn FnMut(&Path, FileIdentity),
 ) -> io::Result<(DirHandle, Vec<PathBuf>)> {
     let mut dir = root.open_child_dir(OsStr::new("."))?;
     let mut rel = PathBuf::new();
@@ -133,7 +133,7 @@ pub(super) fn parents_with(
             match rustix::fs::mkdirat(dir.as_fd(), name, Mode::from_bits_truncate(0o700)) {
                 Ok(()) => {
                     made.push(rel.clone());
-                    on_created(&rel);
+                    on_created(&rel, FileIdentity::from_stat(&dir.stat_child(name)?));
                     rustix::fs::fsync(dir.as_fd())?;
                 }
                 Err(rustix::io::Errno::EXIST) => {}

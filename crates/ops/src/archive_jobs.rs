@@ -178,11 +178,16 @@ fn extraction_record(id: String, archive: &Path, destination: &Path, extracted: 
     record.subtree_identities = extracted.published.clone();
     // Only roots of disjoint created trees become entries; overlapping entries
     // would make an inverse attempt the same subtree twice.
+    let created: std::collections::BTreeSet<_> = extracted
+        .published
+        .iter()
+        .map(|(path, _)| path.clone())
+        .collect();
     for (path, identity) in &extracted.published {
-        if extracted
-            .published
-            .iter()
-            .any(|(other, _)| other != path && path.starts_with(other))
+        if path
+            .ancestors()
+            .skip(1)
+            .any(|ancestor| created.contains(ancestor))
         {
             continue;
         }
