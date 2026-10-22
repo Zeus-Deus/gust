@@ -691,8 +691,13 @@ Only active audio playback supplies the video clock. Ended/failed audio releases
 the video to monotonic timing, so unequal stream lengths still reach video end.
 A successful empty decode after a seek near/beyond the end triggers bounded
 look-behind retries (at most eight, with a shared 15-second deadline), retaining
-the last recovered frame. Paused seeks keep their requested position; seeks at
-or beyond duration reach Ended, and a later seek can restart playback.
+the last recovered frame. Recovery uses the first video stream's endpoint,
+relative to the input start, rather than a possibly much longer audio/container
+duration. The final retry starts at zero if that stream hint is absent or
+inaccurate; the same time/cancellation bounds still apply. The public duration
+and requested position remain on the full media timeline. Paused seeks into an
+audio-only tail retain the final video PNG and their requested position; seeks
+at or beyond duration reach Ended, and a later seek can restart playback.
 An empty decode at the start or malformed/incomplete PNG output remains an error.
 
 ## 6.10 Scoped content search (`:grep`)

@@ -301,14 +301,21 @@ fn run(path: &Path, px: u32, s: &Shared, sink: Option<Vec<String>>) -> Result<()
                     match child.child().try_wait().map_err(|_| PreviewError::Helper)? {
                         Some(status) if status.success() => {
                             if next_frame == 0 {
-                                // Accurate seeks can discard the final source
-                                // frame. Recover a bounded tail, consuming it
-                                // even while paused, and retain its last PNG.
+                                // Accurate seeks can discard the final frame,
+                                // including throughout a long audio-only tail.
+                                // Recover from the video endpoint, not the full
+                                // media duration. The final bounded attempt at
+                                // zero covers missing/inaccurate stream hints.
                                 if start == 0.0 || decode_start == 0.0 || tail_attempts == 8 {
                                     return Err(PreviewError::Output);
                                 }
                                 let look_behind = 0.25 * 2f64.powi(tail_attempts as i32);
-                                decode_start = (start - look_behind).max(0.0);
+                                let video_end = doc.video_end().unwrap_or(start).min(start);
+                                decode_start = if tail_attempts == 7 {
+                                    0.0
+                                } else {
+                                    (video_end - look_behind).max(0.0)
+                                };
                                 tail_attempts += 1;
                                 tail_retry = true;
                                 tail_deadline.get_or_insert_with(|| {
@@ -504,6 +511,97 @@ mod tests {
         });
         player.set_paused(false);
         wait_until(&player, |s| s.state == PlayState::Ended);
+    }
+
+    #[test]
+    fn long_audio_tail_seeks_keep_the_timeline_and_final_video_frame() {
+        if !require_video() {
+            return;
+        }
+        let d = Scratch::new().unwrap();
+        let mp4 = fixture(&d.0, 2.0, Some(40.0));
+        let mkv = d.0.join("clip.mkv");
+        assert!(Command::new("ffmpeg")
+            .args(["-nostdin", "-v", "error", "-i"])
+            .arg(&mp4)
+            .args(["-c", "copy"])
+            .arg(&mkv)
+            .status()
+            .unwrap()
+            .success());
+        for (path, has_stream_duration) in [(&mp4, true), (&mkv, false)] {
+            let doc = preview::inspect(path, PreviewKind::Video, &CancelToken::new()).unwrap();
+            let duration = doc.info().duration.unwrap();
+            assert!((duration - 40.0).abs() < 0.05);
+            assert_eq!(doc.video_end().is_some(), has_stream_duration);
+            if let Some(end) = doc.video_end() {
+                assert!((end - 2.0).abs() < 0.05);
+            }
+            drop(doc);
+            let sink = || {
+                Some(vec![
+                    "dd".into(),
+                    "of=/dev/null".into(),
+                    "status=none".into(),
+                ])
+            };
+            // Obtain the actual final PNG through ordinary playback, without
+            // waiting for the much longer audio timeline to finish.
+            let reference = Player::start_with_audio_sink(path, 64, sink());
+            let final_frame = wait_until(&reference, |s| s.frame_id >= 24);
+            assert!(final_frame.why.is_empty(), "{final_frame:?}");
+            let last_png = final_frame.frame.unwrap().png.clone();
+            drop(reference);
+
+            let player = Player::start_with_audio_sink(path, 64, sink());
+            player.set_paused(true);
+            let first = wait_until(&player, |s| s.state == PlayState::Paused);
+            assert_ne!(first.frame.unwrap().png, last_png);
+            // This player has never seen the final frame: retaining its old
+            // PNG on an empty seek would also fail these assertions.
+            for seconds in [duration, duration * 10.0, duration - 0.05, 1.95] {
+                let before = player.status().frame_id;
+                player.seek(seconds);
+                let state = if seconds >= duration {
+                    PlayState::Ended
+                } else {
+                    PlayState::Paused
+                };
+                let status = wait_until(&player, |s| s.state == state && s.frame_id > before);
+                assert!(status.why.is_empty(), "{status:?}");
+                assert_eq!(status.duration.unwrap(), duration);
+                assert!(
+                    (status.pos - seconds.min(duration)).abs() < 0.01,
+                    "{status:?}"
+                );
+                assert_eq!(status.frame.unwrap().png, last_png);
+            }
+            // Recovery must leave the worker usable for ordinary seeks,
+            // running endpoint seeks and resuming the audio-only tail.
+            let before = player.status().frame_id;
+            player.seek(1.0);
+            let ordinary = wait_until(&player, |s| {
+                s.state == PlayState::Paused && s.frame_id > before
+            });
+            assert!((ordinary.pos - 1.0).abs() < 0.01);
+            assert_ne!(ordinary.frame.unwrap().png, last_png);
+            player.set_paused(false);
+            let before = player.status().frame_id;
+            player.seek(duration * 10.0);
+            let ended = wait_until(&player, |s| {
+                s.state == PlayState::Ended && s.frame_id > before
+            });
+            assert_eq!(ended.frame.unwrap().png, last_png);
+            assert_eq!(ended.pos, duration);
+            player.set_paused(true);
+            let before = player.status().frame_id;
+            player.seek(duration - 0.05);
+            wait_until(&player, |s| {
+                s.state == PlayState::Paused && s.frame_id > before
+            });
+            player.set_paused(false);
+            wait_until(&player, |s| s.state == PlayState::Ended);
+        }
     }
 
     #[test]

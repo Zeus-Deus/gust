@@ -138,6 +138,8 @@ pub struct PreviewDocument {
     // Keep the conversion alive until after its held descriptor is closed.
     _scratch: Scratch,
     info: DocumentInfo,
+    // A private seek-recovery hint, independent of the public media duration.
+    video_end: Option<f64>,
 }
 
 fn run(
@@ -243,6 +245,7 @@ pub fn inspect(
         _ => None,
     };
     let render_input = converted.as_ref().unwrap_or(&input);
+    let mut video_end = None;
     match kind {
         PreviewKind::Pdf | PreviewKind::Office | PreviewKind::Html => {
             let bytes = run(
@@ -334,7 +337,7 @@ pub fn inspect(
                     "-print_format",
                     "json",
                     "-show_entries",
-                    "format=duration:format_tags=title,artist,album:stream=codec_type",
+                    "format=duration,start_time:format_tags=title,artist,album:stream=codec_type,start_time,duration",
                     "/in/input",
                 ],
                 cancel,
@@ -348,12 +351,22 @@ pub fn inspect(
             info.has_audio = probe["streams"]
                 .as_array()
                 .is_some_and(|streams| streams.iter().any(|s| s["codec_type"] == "audio"));
-            if !probe["streams"]
+            let video = probe["streams"]
                 .as_array()
-                .is_some_and(|streams| streams.iter().any(|s| s["codec_type"] == "video"))
-            {
-                return Err(PreviewError::Output);
-            }
+                .and_then(|streams| streams.iter().find(|s| s["codec_type"] == "video"))
+                .ok_or(PreviewError::Output)?;
+            let seconds = |value: &serde_json::Value| {
+                value
+                    .as_str()
+                    .and_then(|v| v.parse::<f64>().ok())
+                    .filter(|v| v.is_finite())
+            };
+            let input_start = seconds(&probe["format"]["start_time"]).unwrap_or(0.0);
+            let video_start = seconds(&video["start_time"]).unwrap_or(input_start);
+            video_end = seconds(&video["duration"])
+                .filter(|duration| *duration > 0.0)
+                .map(|duration| video_start + duration - input_start)
+                .filter(|end| end.is_finite() && *end > 0.0);
             for (name, value) in [("Title", title), ("Artist", artist), ("Album", album)] {
                 if !value.is_empty() {
                     info.metadata.push(MetadataField {
@@ -376,10 +389,14 @@ pub fn inspect(
         converted,
         _scratch: scratch,
         info,
+        video_end,
     })
 }
 
 impl PreviewDocument {
+    pub(crate) fn video_end(&self) -> Option<f64> {
+        self.video_end
+    }
     pub(crate) fn ensure_unchanged(&self) -> Result<(), PreviewError> {
         if self.input.unchanged() {
             Ok(())
