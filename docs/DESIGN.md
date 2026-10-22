@@ -282,6 +282,8 @@ turned off; a key that later changes is refused as for any SSH host.
 Connected places of every kind appear under Remote in the sidebar: click
 to browse, drop files on them (§6.1, a copy across drives), right-click to
 open in a new tab or disconnect.
+Grouping never hides an additional mounted-but-lost route: it remains a
+separate sidebar recovery/disconnect target even after another route connects.
 
 #### Computers and connection routes
 
@@ -321,6 +323,10 @@ Connection prerequisites and errors live in a prominent, wrapping notice inside
 Connect, not only in the status line. Missing sshfs explains how to install it
 and offers **Check again**; Gust never installs packages or runs privileged
 commands automatically. Checking again refreshes discovery, never connects.
+Each attempt retains its capability key so a newly discovered missing helper
+can still expose Install support. A worker panic completes feedback with an
+explicit unknown-outcome failure, never an app-wide permanent busy state;
+it neither retries nor claims to have undone external effects.
 An explicit attempt keeps the panel open with the named operation in progress,
 blocks duplicate attempts, and retains failures until the next action. Only a
 matching completion from the initiating model clears its progress. Successful
@@ -788,6 +794,10 @@ on `/dev/bus/usb/<bus>/` says when something was plugged in or pulled.
   in the row what the person has to do ("Unlock your iPhone and tap
   Trust"). A second click stops waiting and answers Cancel. "Don't Trust"
   is told plainly, with how to be asked again.
+- Opening is published only by an admitted worker after the requested device
+  interface is validated. Busy refusals, unsupported app-files requests and
+  worker-start failures leave the previous phone state intact; a worker panic
+  becomes an explicit failed/unknown state rather than an orphaned Opening.
 - The supported Arch package installs the SSH, cloud, SMB/NFS and USB-device
   helpers as dependencies, including `gvfs-afc`/`usbmuxd` for Apple devices,
   `gvfs-mtp` for Android and `gvfs-gphoto2` for cameras. These are part of

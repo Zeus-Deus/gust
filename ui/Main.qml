@@ -679,6 +679,11 @@ Window {
             if (mounted.length === 0) continue
             const r = mounted.find(r => !r.lost) || mounted[0]
             sidebarPlaces.push({kind: r.kind, name: r.name, label: c.name, path: r.path, lost: r.lost})
+            for (const other of mounted) {
+                if (other === r || !other.lost) continue
+                sidebarPlaces.push({kind: other.kind, name: other.name,
+                    label: qsTr("%1 · %2").arg(c.name).arg(other.name), path: other.path, lost: true})
+            }
         }
         for (const p of (info.cloud || []))
             if (p.connected) sidebarPlaces.push({kind: "cloud", name: p.name, path: p.path, lost: p.lost})
@@ -769,6 +774,7 @@ Window {
         if (kind === "ssh" || kind === "cloud") {
             const op = kind === "ssh" ? "remote-connect" : "cloud-connect"
             if (!win.beginPlaceFeedback(op, name, qsTr("Connecting to %1…").arg(name))) return
+            connectPanel.supportKey = kind === "cloud" ? "cloud" : "ssh"
             const model = win.connectionOwner
             const error = kind === "ssh" ? model.remote_connect(name) : model.cloud_connect(name)
             if (error !== "") { win.alertText = error; win.finishPlaceFeedback(op, name, error, model) }
@@ -796,6 +802,7 @@ Window {
             return
         }
         if (!win.beginPlaceFeedback("tailnet-connect", t.name, qsTr("Connecting to %1…").arg(t.name), t.model)) return
+        connectPanel.supportKey = "ssh"
         const error = t.model.tailnet_connect(t.name, t.target, user, trust)
         if (error !== "") { win.alertText = error; win.finishPlaceFeedback("tailnet-connect", t.name, error, t.model) }
     }
@@ -1699,7 +1706,9 @@ Window {
             if (cerr2 !== "") win.alertText = cerr2
         }
         else if (a === "cloud-setup") {
+            if (connectPanel.busy) { connectPanel.showFeedback("", "", false); return }
             if (!win.requireSupport("cloud")) return
+            connectPanel.supportKey = "cloud"
             // rclone's own config tool, in a terminal. Gust never asks
             // for a cloud password and never sees one.
             const serr = dirModel.cloud_setup()

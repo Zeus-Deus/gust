@@ -1127,6 +1127,14 @@ enum PlaceOutcome {
     Then(Box<dyn FnOnce(Pin<&mut qobject::DirModel>) + Send>),
 }
 
+/// A worker panic is an unknown outcome, not permission to retry its effects.
+fn run_place_work<F>(work: F) -> std::thread::Result<PlaceOutcome>
+where
+    F: FnOnce() -> PlaceOutcome,
+{
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(work))
+}
+
 /// Is this the administrator window (root, started through pkexec)? Set
 /// only by main.rs after it checked it is really running as root.
 pub fn admin_session() -> bool {
@@ -1530,7 +1538,19 @@ impl qobject::DirModel {
         let spawned = std::thread::Builder::new()
             .name(format!("gust-{op}"))
             .spawn(move || {
-                let outcome = work();
+                let outcome = match run_place_work(work) {
+                    Ok(outcome) => outcome,
+                    Err(_) => {
+                        let message = "The connection worker stopped unexpectedly. Its outcome is unknown. Choose Check again before retrying.".to_string();
+                        if op == "phone-open" {
+                            Self::set_phone_state(
+                                &name,
+                                gust_remote::phones::PhoneState::Failed(message.clone()),
+                            );
+                        }
+                        PlaceOutcome::Failed(message)
+                    }
+                };
                 let _ = thread.queue(move |mut model| {
                     model.as_mut().set_place_busy(false);
                     let (opq, nameq) = (QString::from(op), QString::from(&name));
@@ -3497,6 +3517,9 @@ impl qobject::DirModel {
 
     fn phone_open(self: Pin<&mut Self>, id: QString, apps: bool) -> QString {
         use gust_remote::phones::{mount, scan, PhoneState};
+        if self.as_ref().place_busy {
+            return QString::from("Another connection is still in progress.");
+        }
         let id = id.to_string();
         let Some(thread) = self.as_ref().qt_thread_handle() else {
             return QString::default();
@@ -3504,9 +3527,7 @@ impl qobject::DirModel {
         if let Ok(mut c) = phone_cancels().lock() {
             c.remove(&id);
         }
-        Self::set_phone_state(&id, PhoneState::Opening);
         let refresh = thread.clone();
-        let _ = refresh.queue(|model| model.request_devices());
         self.place_op(
             "phone-open",
             id.clone(),
@@ -3526,6 +3547,8 @@ impl qobject::DirModel {
                         }
                     }
                 }
+                Self::set_phone_state(&id, PhoneState::Opening);
+                let _ = refresh.queue(|model| model.request_devices());
                 let cancel_id = id.clone();
                 let cancelled = move || {
                     phone_cancels()

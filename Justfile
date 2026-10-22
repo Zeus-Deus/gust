@@ -39,6 +39,7 @@ qa-tab-insertion:
 # Actual ConnectPanel route/keyboard tests; model I/O and theme are fixtures.
 qa-connections:
     python3 crates/app/tests/connection_regressions.py --source . --output "${GUST_CONNECTION_QA_OUT:?Set a fresh evidence directory}"
+    python3 crates/app/tests/phone_state_regressions.py --source . --output "${GUST_CONNECTION_QA_OUT}/workers"
 
 lint:
     cargo fmt --all -- --check

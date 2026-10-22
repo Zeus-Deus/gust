@@ -109,6 +109,47 @@ Item {
         win.dirModel = {location: tail.path, places_json: JSON.stringify({
             computers: [{name: "Studio", routes: [ssh, tail]}], ssh: [ssh], tailnet: [tail], cloud: []})}
     }
+    function test_lost_mounts_remain_sidebar_disconnect_targets_data() {
+        return [{tag: "recovered", healthy: true}, {tag: "all-lost", healthy: false}]
+    }
+    function test_lost_mounts_remain_sidebar_disconnect_targets(row) {
+        const routes = [route("ssh", "studio-old", true), route("tailnet", "studio", !row.healthy),
+                        route("ssh", "studio-second", true)]
+        fakeModel.places_json = JSON.stringify({computers: [{name: "Studio", routes: routes}],
+            ssh: [routes[0], routes[2]], tailnet: [routes[1]], cloud: []})
+        win.placesArrived()
+        compare(win.connectedPlaces.length, 3, "A healthy alternative must not hide other still-mounted lost routes")
+        compare(win.connectedPlaces.map(p => p.kind + ":" + p.name).sort().join(","),
+                routes.map(p => p.kind + ":" + p.name).sort().join(","))
+        compare(win.connectedPlaces.filter(p => p.lost).length, row.healthy ? 2 : 3)
+        compare(fakeModel.connectCalls, 0, "Projecting mounts never retries a connection")
+    }
+    function test_worker_discovered_missing_support_retains_install_context_data() {
+        return [{tag: "ssh", kind: "ssh", key: "ssh", op: "remote-connect", packageName: "openssh"},
+                {tag: "cloud", kind: "cloud", key: "cloud", op: "cloud-connect", packageName: "rclone"},
+                {tag: "tailnet", kind: "tailnet", key: "ssh", op: "tailnet-connect", packageName: "fuse3"}]
+    }
+    function test_worker_discovered_missing_support_retains_install_context(row) {
+        win.placesInfo = {sshfs: true, setup: [{key: row.key, packages: [], installable: true}]}
+        win.connectPlace(row.kind, "fixture", "192.0.2.10", "fixture-user")
+        if (row.kind === "tailnet") win.tailnetUserEntered("fixture-user")
+        compare(fakeModel.connectCalls, 1)
+        fakeModel.place_busy = false
+        win.finishPlaceFeedback(row.op, "fixture", "A required helper is missing", fakeModel)
+        win.placesInfo = {setup: [{key: row.key, packages: [row.packageName], installable: true}]}
+        verify(connectPanel.missingSupport, "A worker failure must keep an actionable setup context")
+        compare(connectPanel.requirement.key, row.key)
+    }
+    function test_cloud_setup_failure_is_prominent_and_keeps_setup_context() {
+        win.placesInfo = {setup: [{key: "cloud", packages: [], installable: true}]}
+        fakeModel.returnError = "rclone is no longer available"
+        win.cloudSetupAction()
+        verify(connectPanel.open, "A failed setup launch must not disappear into a status line")
+        compare(connectPanel.feedbackBody, fakeModel.returnError)
+        win.placesInfo = {setup: [{key: "cloud", packages: ["rclone"], installable: true}]}
+        verify(connectPanel.missingSupport)
+        compare(connectPanel.requirement.key, "cloud")
+    }
     function test_add_cloud_offers_helper_setup_before_starting_a_terminal() {
         fakeModel.cloudSetupCalls = 0
         win.placesInfo = {setup: [{key: "cloud", packages: ["rclone"], installable: true}]}
@@ -302,13 +343,15 @@ Item {
         compare(connectionRecovery.routeKey, "tailnet:studio")
     }
     function cleanup() { recovery.close() }
-    function test_healthy_alternative_is_one_sidebar_computer() {
+    function test_healthy_alternative_keeps_a_lost_mount_accessible() {
         const ssh = route("ssh", "studio-lan", false)
         const tail = route("tailnet", "studio", true)
         win.dirModel = {location: "/local", places_json: JSON.stringify({
             computers: [{name: "Studio", routes: [ssh, tail]}], ssh: [ssh], tailnet: [tail], cloud: []})}
         win.placesArrived()
-        compare(win.connectedPlaces.length, 1, "A lost and a healthy route are still one computer")
+        compare(win.connectedPlaces.length, 2, "One computer summary plus its still-mounted lost route")
+        compare(win.connectedPlaces[1].name, "studio")
+        compare(win.connectedPlaces[1].lost, true)
         compare(win.connectedPlaces[0].kind, "ssh")
         compare(win.connectedPlaces[0].name, "studio-lan", "Actions retain route alias")
         compare(win.connectedPlaces[0].label, "Studio", "Display retains computer name")

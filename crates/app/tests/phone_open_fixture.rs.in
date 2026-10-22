@@ -1,0 +1,100 @@
+#![allow(dead_code)]
+use std::{collections::HashSet, path::PathBuf, pin::Pin, sync::{Mutex, OnceLock}};
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct QString(String);
+impl QString { fn to_string(&self) -> String { self.0.clone() } }
+impl From<&str> for QString { fn from(s: &str) -> Self { Self(s.into()) } }
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PhoneState { Ready, Opening, Open(PathBuf), Failed(String) }
+impl PhoneState { fn words(&self, _: ()) -> String { "fixture failure".into() } }
+static STATE: Mutex<PhoneState> = Mutex::new(PhoneState::Ready);
+static CANCELS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+static LABELS: Mutex<Vec<(PathBuf, String)>> = Mutex::new(Vec::new());
+static OPTIONS: Mutex<(bool, bool)> = Mutex::new((false, false));
+static PANIC_MOUNT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+fn phone_cancels() -> &'static Mutex<HashSet<String>> { CANCELS.get_or_init(|| Mutex::new(HashSet::new())) }
+fn place_labels() -> &'static Mutex<Vec<(PathBuf, String)>> { &LABELS }
+mod gust_remote { pub mod phones {
+    pub use crate::PhoneState;
+    pub struct Phone { pub uri: String, pub apps_uri: Option<String>, pub kind: () }
+    impl Phone { pub fn id(&self)->String { "fixture".into() } }
+    pub fn scan()->Vec<Phone> { vec![Phone {uri:"media".into(), apps_uri: if crate::OPTIONS.lock().unwrap().0 {Some("apps".into())} else {None}, kind:()}] }
+    pub fn friendly_names()->Vec<String> { vec![] }
+    pub fn display_name(_: &Phone, _: &[String])->String { "Fixture phone".into() }
+    pub fn mount(_: &Phone, _: std::time::Duration, _: &mut impl FnMut(PhoneState), cancelled: &impl Fn()->bool)->Result<std::path::PathBuf,PhoneState> {
+        if crate::PANIC_MOUNT.load(std::sync::atomic::Ordering::SeqCst) { panic!("inert fixture worker panic"); }
+        if cancelled() { Err(PhoneState::Ready) } else { Ok("/fixture/mount".into()) }
+    }
+} }
+#[derive(Clone)]
+struct Thread;
+impl Thread { fn queue(&self, _: impl FnOnce(Pin<&mut Model>))->Result<(),()> { Ok(()) } }
+enum PlaceOutcome { Failed(String), Done(String), Open {path:PathBuf,status:String} }
+@WORK_GUARD@
+struct Model { place_busy: bool, fail_start: bool, calls: usize, outcome: Option<PlaceOutcome> }
+impl Model {
+    fn qt_thread_handle(&self)->Option<Thread> { Some(Thread) }
+    fn request_devices(self: Pin<&mut Self>) {}
+    fn set_phone_state(_: &str, s: PhoneState) { *STATE.lock().unwrap()=s; }
+    // External worker-admission seam: a busy or failed spawn must not run work.
+    fn place_op(self: Pin<&mut Self>, op: &'static str, name:String, _:String, work:impl FnOnce()->PlaceOutcome+Send+'static) {
+        let m=self.get_mut(); m.calls+=1;
+        if !m.place_busy && !m.fail_start {
+            if OPTIONS.lock().unwrap().1 { phone_cancels().lock().unwrap().insert("fixture".into()); }
+            @WORK_OUTCOME@
+            m.outcome=Some(outcome);
+        }
+    }
+@PHONE_OPEN@
+}
+fn run(busy:bool, fail_start:bool, apps:bool, has_apps:bool, early_cancel:bool)->(PhoneState,Model,QString) {
+    *STATE.lock().unwrap()=PhoneState::Ready;
+    phone_cancels().lock().unwrap().clear(); LABELS.lock().unwrap().clear(); *OPTIONS.lock().unwrap()=(has_apps,early_cancel);
+    PANIC_MOUNT.store(false,std::sync::atomic::Ordering::SeqCst);
+    let mut m=Model {place_busy:busy,fail_start,calls:0,outcome:None};
+    let e=Pin::new(&mut m).phone_open(QString::from("fixture"),apps);
+    let state=STATE.lock().unwrap().clone(); (state,m,e)
+}
+#[test] fn refused_busy_request_does_not_publish_opening_or_clear_the_active_cancel() {
+    *STATE.lock().unwrap()=PhoneState::Open("/existing/media".into());
+    phone_cancels().lock().unwrap().insert("fixture".into());
+    let mut m=Model {place_busy:true,fail_start:false,calls:0,outcome:None};
+    let error=Pin::new(&mut m).phone_open(QString::from("fixture"),false);
+    let state=STATE.lock().unwrap().clone();
+    let cancelled=phone_cancels().lock().unwrap().contains("fixture");
+    assert_eq!(state,PhoneState::Open("/existing/media".into()));
+    assert!(cancelled);
+    assert!(!error.0.is_empty());
+}
+#[test] fn spawn_failure_does_not_publish_opening() {
+    let (state,_,_)=run(false,true,false,true,false); assert_eq!(state,PhoneState::Ready);
+}
+#[test] fn unsupported_app_files_do_not_leave_opening() {
+    let (state,m,_)=run(false,false,true,false,false); assert_eq!(state,PhoneState::Ready);
+    assert!(matches!(m.outcome,Some(PlaceOutcome::Failed(_))));
+}
+#[test] fn accepted_media_and_app_files_both_settle_open() {
+    for apps in [false,true] { let (s,m,e)=run(false,false,apps,true,false); assert_eq!(s,PhoneState::Open("/fixture/mount".into())); assert!(e.0.is_empty()); assert!(matches!(m.outcome,Some(PlaceOutcome::Open{..}))); }
+}
+#[test] fn cancellation_after_admission_before_worker_execution_is_preserved() {
+    let (s,m,_)=run(false,false,false,true,true); assert_eq!(s,PhoneState::Ready); assert!(matches!(m.outcome,Some(PlaceOutcome::Done(_))));
+}
+#[test] fn a_phone_worker_panic_reports_unknown_outcome_instead_of_sticking_opening() {
+    let (_,mut m,_)=run(false,true,false,true,false);m.fail_start=false;
+    PANIC_MOUNT.store(true,std::sync::atomic::Ordering::SeqCst);
+    let result=std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Pin::new(&mut m).phone_open(QString::from("fixture"),false)));
+    PANIC_MOUNT.store(false,std::sync::atomic::Ordering::SeqCst);
+    assert!(result.is_ok(),"A worker panic must become a normal completion");
+    let state=STATE.lock().unwrap().clone();
+    assert!(matches!(state,PhoneState::Failed(ref s) if s.contains("unknown")));
+    assert!(matches!(m.outcome,Some(PlaceOutcome::Failed(ref s)) if s.contains("unknown")));
+}
+#[test] fn other_worker_panics_report_failure_without_changing_the_phone() {
+    let (_,mut m,_)=run(false,true,false,true,false);m.fail_start=false;
+    *STATE.lock().unwrap()=PhoneState::Open("/existing/media".into());
+    let result=std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Pin::new(&mut m).place_op("remote-connect","fixture".into(),String::new(),|| panic!("inert fixture worker panic"))));
+    assert!(result.is_ok());
+    let state=STATE.lock().unwrap().clone();
+    assert_eq!(state,PhoneState::Open("/existing/media".into()));
+    assert!(matches!(m.outcome,Some(PlaceOutcome::Failed(ref s)) if s.contains("unknown")));
+}
