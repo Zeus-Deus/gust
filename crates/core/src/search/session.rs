@@ -1,7 +1,12 @@
 //! Resumable, bounded, worker-owned filename/tag retrieval.
 use super::{match_score, SearchHit, SearchScope};
-use crate::{lister::CancelToken, tags};
+use crate::{
+    entry::{EntryKind, Metadata},
+    lister::CancelToken,
+    tags,
+};
 use std::fs::{self, ReadDir};
+use std::os::fd::AsRawFd;
 use std::os::unix::{ffi::OsStrExt, fs::MetadataExt};
 use std::path::{Path, PathBuf};
 
@@ -139,15 +144,74 @@ pub struct SearchReport {
     pub stats: SearchStats,
     pub issues: Vec<SearchIssue>,
 }
+/// Identity and revision of the held object used to produce a search row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SearchSourceStamp {
+    pub generation: u64,
+    pub dev: u64,
+    pub ino: u64,
+    pub size: u64,
+    pub mtime: i64,
+    pub mtime_ns: i64,
+    pub ctime: i64,
+    pub ctime_ns: i64,
+}
+impl SearchSourceStamp {
+    fn of(meta: &fs::Metadata, generation: u64) -> Self {
+        Self {
+            generation,
+            dev: meta.dev(),
+            ino: meta.ino(),
+            size: meta.size(),
+            mtime: meta.mtime(),
+            mtime_ns: meta.mtime_nsec(),
+            ctime: meta.ctime(),
+            ctime_ns: meta.ctime_nsec(),
+        }
+    }
+}
+/// Plain row data captured from a held object. It is not operation authority.
+#[derive(Debug, Clone)]
+pub struct SearchEntry {
+    pub path: PathBuf,
+    pub relative_path: PathBuf,
+    pub kind: EntryKind,
+    pub metadata: Metadata,
+    pub source: SearchSourceStamp,
+    /// A zero tag mask is unknown when an error is present here.
+    pub tag_error: Option<std::io::ErrorKind>,
+}
+#[derive(Debug, Clone)]
+pub struct SearchProjection {
+    pub report: SearchReport,
+    pub entries: Vec<SearchEntry>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct DirectoryId {
+    dev: u64,
+    ino: u64,
+}
+impl DirectoryId {
+    fn of(file: &fs::File) -> std::io::Result<Self> {
+        let meta = file.metadata()?;
+        Ok(Self {
+            dev: meta.dev(),
+            ino: meta.ino(),
+        })
+    }
+}
 struct Candidate {
     path: PathBuf,
     depth: usize,
+    parent_id: DirectoryId,
 }
 struct Directory {
     path: PathBuf,
     depth: usize,
     entries: ReadDir,
     handle: fs::File,
+    id: DirectoryId,
 }
 
 impl Directory {
@@ -157,21 +221,25 @@ impl Directory {
         parent: Option<&fs::File>,
         device: Option<u64>,
     ) -> std::io::Result<Self> {
-        use rustix::fs::{open, openat, Mode, OFlags};
-        use std::os::fd::AsRawFd;
+        use rustix::fs::{openat2, Mode, OFlags, ResolveFlags};
         let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-        let fd = match parent {
-            Some(parent) => openat(
+        let handle = match parent {
+            Some(parent) => open_beneath(
                 parent,
-                path.file_name().unwrap_or_default(),
+                Path::new(path.file_name().unwrap_or_default()),
+                flags,
+                device.is_some(),
+            )?,
+            None => fs::File::from(openat2(
+                rustix::fs::CWD,
+                &path,
                 flags,
                 Mode::empty(),
-            ),
-            None => open(&path, flags, Mode::empty()),
-        }?;
-        let handle = fs::File::from(fd);
-        let actual_device = handle.metadata()?.dev();
-        if device.is_some_and(|dev| dev != actual_device) {
+                ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
+            )?),
+        };
+        let id = DirectoryId::of(&handle)?;
+        if device.is_some_and(|dev| dev != id.dev) {
             return Err(std::io::Error::from(std::io::ErrorKind::CrossesDevices));
         }
         // Enumerate the held object, so replacing a child with a symlink
@@ -182,7 +250,54 @@ impl Directory {
             depth,
             entries,
             handle,
+            id,
         })
+    }
+}
+
+/// Every user-controlled component is resolved beneath a held directory.
+fn open_beneath(
+    parent: &fs::File,
+    relative: &Path,
+    flags: rustix::fs::OFlags,
+    stay_on_device: bool,
+) -> std::io::Result<fs::File> {
+    use rustix::fs::{openat2, Mode, ResolveFlags};
+    let mut resolve =
+        ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS;
+    if stay_on_device {
+        resolve |= ResolveFlags::NO_XDEV;
+    }
+    Ok(fs::File::from(openat2(
+        parent,
+        relative,
+        flags,
+        Mode::empty(),
+        resolve,
+    )?))
+}
+
+fn read_held_tags(object: &fs::File) -> std::io::Result<Option<Vec<u8>>> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let meta = object.metadata()?;
+    // Linux user attributes cannot be attached to symlinks or special files.
+    if !meta.is_file() && !meta.is_dir() {
+        return Ok(None);
+    }
+    // O_PATH supports safe identity reads but not fgetxattr. Reopen the held
+    // regular file/directory via procfs, never via its mutable user pathname.
+    let reader = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags((rustix::fs::OFlags::NONBLOCK | rustix::fs::OFlags::CLOEXEC).bits() as i32)
+        .open(format!("/proc/self/fd/{}", object.as_raw_fd()))?;
+    let mut raw = vec![0u8; tags::MAX_VALUE];
+    match rustix::fs::fgetxattr(&reader, tags::ATTR, &mut raw) {
+        Ok(size) => {
+            raw.truncate(size);
+            Ok(Some(raw))
+        }
+        Err(e) if e == rustix::io::Errno::NODATA || e == rustix::io::Errno::NOTSUP => Ok(None),
+        Err(e) => Err(e.into()),
     }
 }
 
@@ -196,11 +311,12 @@ pub struct SearchSession {
     replay: usize,
     stack: Vec<Directory>,
     root_dev: Option<u64>,
+    root_handle: Option<fs::File>,
     walk_state: SearchState,
     started: bool,
     result_limited: bool,
     cancelled: bool,
-    hits: Vec<(SearchHit, usize)>,
+    hits: Vec<(SearchHit, usize, SearchEntry)>,
     stats: SearchStats,
     issues: Vec<(SearchIssue, bool)>,
     walk_issue_count: usize,
@@ -216,6 +332,7 @@ impl SearchSession {
             replay: 0,
             stack: Vec::new(),
             root_dev: None,
+            root_handle: None,
             walk_state: SearchState::Running,
             started: false,
             result_limited: false,
@@ -293,22 +410,17 @@ impl SearchSession {
             self.walk_state = SearchState::Complete;
             return;
         }
-        match fs::symlink_metadata(&root) {
-            Ok(meta) if meta.is_dir() => self.root_dev = Some(meta.dev()),
-            Ok(_) => {
-                self.walk_state =
-                    SearchState::Failed("Search root must be a real directory".into());
-                return;
-            }
-            Err(e) => {
-                self.issue(root, "metadata", e);
-                self.walk_state = SearchState::Failed("Cannot inspect search root".into());
-                return;
-            }
-        }
         match Directory::open(root.clone(), 0, None, None) {
             Ok(dir) => {
-                self.root_dev = dir.handle.metadata().ok().map(|m| m.dev());
+                self.root_dev = Some(dir.id.dev);
+                match dir.handle.try_clone() {
+                    Ok(handle) => self.root_handle = Some(handle),
+                    Err(e) => {
+                        self.issue(root, "retain_root", e);
+                        self.walk_state = SearchState::Failed("Cannot retain search root".into());
+                        return;
+                    }
+                }
                 self.stack.push(dir);
             }
             Err(e) => {
@@ -316,6 +428,54 @@ impl SearchSession {
                 self.walk_state = SearchState::Failed("Cannot read search root".into());
             }
         }
+    }
+    fn restrict_device(&self) -> bool {
+        self.scope.stay_on_device || !self.options.allow_remote
+    }
+    fn validated_parent(&self, path: &Path, expected: DirectoryId) -> std::io::Result<fs::File> {
+        use rustix::fs::{openat2, Mode, OFlags, ResolveFlags};
+        let invalid = || std::io::Error::other("Search directory changed; invalidate the session");
+        let root = self.root_handle.as_ref().ok_or_else(invalid)?;
+        let root_path = self.scope.root.as_path().ok_or_else(invalid)?;
+        let flags = OFlags::PATH | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        let current_root = fs::File::from(openat2(
+            rustix::fs::CWD,
+            root_path,
+            flags,
+            Mode::empty(),
+            ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
+        )?);
+        if DirectoryId::of(&current_root)? != DirectoryId::of(root)? {
+            return Err(invalid());
+        }
+        let relative = path
+            .parent()
+            .and_then(|p| p.strip_prefix(root_path).ok())
+            .ok_or_else(invalid)?;
+        let relative = if relative.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            relative
+        };
+        let parent = open_beneath(
+            root,
+            relative,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            self.restrict_device(),
+        )?;
+        if DirectoryId::of(&parent)? != expected {
+            return Err(invalid());
+        }
+        Ok(parent)
+    }
+    fn resolve_candidate(&self, path: &Path, parent_id: DirectoryId) -> std::io::Result<fs::File> {
+        let parent = self.validated_parent(path, parent_id)?;
+        open_beneath(
+            &parent,
+            Path::new(path.file_name().unwrap_or_default()),
+            rustix::fs::OFlags::PATH | rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC,
+            self.restrict_device(),
+        )
     }
     fn evaluate(&mut self, index: usize, on_hit: &mut impl FnMut(&SearchHit)) {
         let c = &self.candidates[index];
@@ -325,45 +485,158 @@ impl SearchSession {
         };
         let path = c.path.clone();
         let depth = c.depth;
-        if let Err(e) = fs::symlink_metadata(&path) {
-            self.query_issue(path, "metadata", e);
-            return;
-        }
-        if !self.query.tags.is_empty() {
-            match tags::read_raw(&path) {
-                Ok(raw) => {
-                    let raw = raw.as_deref().unwrap_or_default();
-                    if std::str::from_utf8(raw).is_err() {
-                        self.query_issue(
-                            path,
-                            "tags",
-                            std::io::Error::from(std::io::ErrorKind::InvalidData),
-                        );
-                        return;
-                    }
-                    let names = tags::parse(raw);
-                    if !self
-                        .query
-                        .tags
-                        .iter()
-                        .all(|tag| tags::contains_tag(&names, tag))
-                    {
-                        return;
-                    }
-                }
-                Err(e) => {
-                    self.query_issue(path, "tags", e);
+        let parent_id = c.parent_id;
+        let object = match self.resolve_candidate(&path, parent_id) {
+            Ok(object) => object,
+            Err(e) => {
+                self.query_issue(path, "resolve_candidate", e);
+                return;
+            }
+        };
+        let meta = match object.metadata() {
+            Ok(meta) => meta,
+            Err(e) => {
+                self.query_issue(path, "metadata", e);
+                return;
+            }
+        };
+        let source = SearchSourceStamp::of(&meta, self.generation);
+        let mut tag_error = None;
+        let raw = match read_held_tags(&object) {
+            Ok(raw) => raw.unwrap_or_default(),
+            Err(e) => {
+                tag_error = Some(e.kind());
+                if !self.query.tags.is_empty() {
+                    self.query_issue(path.clone(), "tags", e);
                     return;
                 }
+                Vec::new()
+            }
+        };
+        if std::str::from_utf8(&raw).is_err() {
+            tag_error = Some(std::io::ErrorKind::InvalidData);
+            if !self.query.tags.is_empty() {
+                self.query_issue(
+                    path.clone(),
+                    "tags",
+                    std::io::Error::from(std::io::ErrorKind::InvalidData),
+                );
+                return;
+            }
+        }
+        let names = tags::parse(&raw);
+        if !self
+            .query
+            .tags
+            .iter()
+            .all(|tag| tags::contains_tag(&names, tag))
+        {
+            return;
+        }
+        let current = self.resolve_candidate(&path, parent_id);
+        match current
+            .and_then(|current| Ok(DirectoryId::of(&current)? == DirectoryId::of(&object)?))
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                self.query_issue(
+                    path,
+                    "changed_candidate",
+                    std::io::Error::other("Search candidate changed"),
+                );
+                return;
+            }
+            Err(e) => {
+                self.query_issue(path, "resolve_candidate", e);
+                return;
+            }
+        }
+        match object.metadata() {
+            Ok(current) if SearchSourceStamp::of(&current, self.generation) == source => {}
+            Ok(_) => {
+                self.query_issue(
+                    path,
+                    "changed_candidate",
+                    std::io::Error::other("Search candidate changed"),
+                );
+                return;
+            }
+            Err(e) => {
+                self.query_issue(path, "metadata", e);
+                return;
             }
         }
         if self.hits.len() >= self.scope.max_results {
             self.result_limited = true;
             return;
         }
+        let kind = if meta.is_dir() {
+            EntryKind::Dir
+        } else if meta.is_file() {
+            EntryKind::File
+        } else if meta.is_symlink() {
+            EntryKind::Symlink
+        } else {
+            EntryKind::Special
+        };
+        let mount_root = if kind == EntryKind::Dir {
+            use rustix::fs::{statx, AtFlags, StatxAttributes, StatxFlags};
+            statx(
+                &object,
+                "",
+                AtFlags::EMPTY_PATH | AtFlags::NO_AUTOMOUNT,
+                StatxFlags::empty(),
+            )
+            .is_ok_and(|stat| {
+                stat.stx_attributes_mask
+                    .contains(StatxAttributes::MOUNT_ROOT)
+                    && stat.stx_attributes.contains(StatxAttributes::MOUNT_ROOT)
+            })
+        } else {
+            false
+        };
+        let metadata = Metadata {
+            size: meta.size(),
+            mtime: meta.mtime(),
+            mode: meta.mode(),
+            uid: meta.uid(),
+            gid: meta.gid(),
+            dev: meta.dev(),
+            ino: meta.ino(),
+            link_ok: None,
+            link_dir: false,
+            mount_root,
+            tags: if tag_error.is_none() {
+                tags::mask_of(&names)
+            } else {
+                0
+            },
+        };
+        let Some(relative_path) = self
+            .scope
+            .root
+            .as_path()
+            .and_then(|root| path.strip_prefix(root).ok())
+            .map(Path::to_path_buf)
+        else {
+            self.query_issue(
+                path,
+                "relative_path",
+                std::io::Error::from(std::io::ErrorKind::InvalidInput),
+            );
+            return;
+        };
+        let entry = SearchEntry {
+            path: path.clone(),
+            relative_path,
+            kind,
+            metadata,
+            source,
+            tag_error,
+        };
         let hit = SearchHit { path, score };
         on_hit(&hit);
-        self.hits.push((hit, depth));
+        self.hits.push((hit, depth, entry));
     }
     /// At most `entry_budget` directory entries or cached candidates are examined.
     /// A callback is a provisional hit for this generation, not sorted output.
@@ -401,6 +674,7 @@ impl SearchSession {
                     break;
                 };
                 let depth = dir.depth;
+                let parent_id = dir.id;
                 let parent = dir.path.clone();
                 let next = dir.entries.next();
                 let Some(next) = next else {
@@ -446,6 +720,7 @@ impl SearchSession {
                 self.candidates.push(Candidate {
                     path: path.clone(),
                     depth,
+                    parent_id,
                 });
                 self.stats.cached = self.candidates.len();
                 self.replay += 1;
@@ -454,16 +729,23 @@ impl SearchSession {
                     Ok(ft) if ft.is_dir() && self.scope.recursive => {
                         if depth + 1 >= self.scope.max_depth {
                             self.stats.depth_pruned += 1;
-                        } else if self.options.skip_generated && generated_tree(&path, &name) {
-                            self.stats.generated_pruned += 1;
                         } else {
-                            let parent = self.stack.last().map(|dir| &dir.handle);
-                            let device = if self.scope.stay_on_device {
+                            let device = if self.restrict_device() {
                                 self.root_dev
                             } else {
                                 None
                             };
-                            match Directory::open(path.clone(), depth + 1, parent, device) {
+                            let child =
+                                self.validated_parent(&path, parent_id).and_then(|parent| {
+                                    Directory::open(path.clone(), depth + 1, Some(&parent), device)
+                                });
+                            match child {
+                                Ok(dir)
+                                    if self.options.skip_generated
+                                        && generated_tree(&dir.handle, &name) =>
+                                {
+                                    self.stats.generated_pruned += 1;
+                                }
                                 Ok(dir) => self.stack.push(dir),
                                 Err(e) if e.kind() == std::io::ErrorKind::CrossesDevices => {
                                     self.stats.device_pruned += 1
@@ -482,14 +764,57 @@ impl SearchSession {
         }
         self.snapshot()
     }
-    pub fn snapshot(&self) -> SearchReport {
-        let mut hits = self.hits.clone();
-        hits.sort_by(|(a, da), (b, db)| {
+    fn ranked_hits(&self) -> Vec<&(SearchHit, usize, SearchEntry)> {
+        let mut hits: Vec<_> = self.hits.iter().collect();
+        hits.sort_by(|(a, da, _), (b, db, _)| {
             a.score
                 .cmp(&b.score)
                 .then(da.cmp(db))
                 .then(a.path.cmp(&b.path))
         });
+        hits
+    }
+    /// Pure projection of data captured during safe evaluation: never reopens paths.
+    /// Consumers build rows from relative_path/kind/metadata, without fill_metadata.
+    pub fn project_hits(&self, cancel: &CancelToken) -> SearchProjection {
+        let mut report = self.snapshot();
+        if cancel.is_cancelled() || self.cancelled {
+            report.state = SearchState::Cancelled;
+            report.hits.clear();
+            return SearchProjection {
+                report,
+                entries: Vec::new(),
+            };
+        }
+        let mut entries = Vec::new();
+        for (_, _, entry) in self.ranked_hits() {
+            if cancel.is_cancelled() {
+                report.state = SearchState::Cancelled;
+                report.hits.clear();
+                return SearchProjection {
+                    report,
+                    entries: Vec::new(),
+                };
+            }
+            if let Some(kind) = entry.tag_error {
+                report.stats.issue_count = report.stats.issue_count.saturating_add(1);
+                if report.issues.len() < self.options.max_issues {
+                    report.issues.push(SearchIssue {
+                        path: entry.path.clone(),
+                        operation: "tags",
+                        kind,
+                    });
+                }
+                if report.state == SearchState::Complete {
+                    report.state = SearchState::Partial;
+                }
+            }
+            entries.push(entry.clone());
+        }
+        SearchProjection { report, entries }
+    }
+    pub fn snapshot(&self) -> SearchReport {
+        let hits = self.ranked_hits();
         let state = if self.cancelled {
             SearchState::Cancelled
         } else if self.result_limited {
@@ -505,7 +830,7 @@ impl SearchSession {
         };
         SearchReport {
             generation: self.generation,
-            hits: hits.into_iter().map(|(h, _)| h).collect(),
+            hits: hits.into_iter().map(|(h, _, _)| h.clone()).collect(),
             state,
             stats: self.stats.clone(),
             issues: self.issues.iter().map(|(issue, _)| issue.clone()).collect(),
@@ -513,19 +838,16 @@ impl SearchSession {
     }
 }
 
-fn generated_tree(path: &Path, name: &std::ffi::OsStr) -> bool {
+fn generated_tree(dir: &fs::File, name: &std::ffi::OsStr) -> bool {
     if name == "node_modules" || name == "__pycache__" {
         return true;
     }
-    // A mere file with this name must not hide ordinary user data.
     use std::io::Read;
-    use std::os::unix::fs::OpenOptionsExt;
-    let flags = rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK;
-    let Ok(mut file) = fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(flags.bits() as i32)
-        .open(path.join("CACHEDIR.TAG"))
-    else {
+    let flags = rustix::fs::OFlags::RDONLY
+        | rustix::fs::OFlags::NOFOLLOW
+        | rustix::fs::OFlags::NONBLOCK
+        | rustix::fs::OFlags::CLOEXEC;
+    let Ok(mut file) = open_beneath(dir, Path::new("CACHEDIR.TAG"), flags, true) else {
         return false;
     };
     if !file.metadata().is_ok_and(|m| m.is_file()) {

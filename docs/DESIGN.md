@@ -251,6 +251,31 @@ global index or implicit Home crawl is created. Each replay uses fresh no-follow
 metadata/xattrs, so removed/replaced paths and external tag edits are not
 treated as durable cached authority.
 
+Enumeration, candidate metadata, tag reads and cache markers share descriptor
+anchoring. A session retains its root descriptor and caches each candidate's
+parent device/inode. Replay resolves parents beneath that root with kernel
+no-symlink resolution, verifies the parent identity and rejects a changed root
+or parent as an explicit issue. Candidate metadata and tags come from a held
+object; cache markers are opened relative to the admitted child directory.
+No candidate/cache-marker read follows a reconstructed user pathname. Device
+restriction is enforced during resolution, before touching a crossed mount;
+cross-device descent requires both scope widening and explicit remote admission.
+Unsupported secure resolution fails explicitly. Stamps fence a read, not later
+operation authority; filesystem changes after verification remain possible.
+
+`SearchSession::project_hits(cancel)` returns `SearchProjection { report,
+entries }` from row data captured during descriptor-anchored evaluation. It
+performs no new filesystem calls. `SearchEntry` contains byte `path` and
+`relative_path`, `EntryKind`, existing `entry::Metadata`, a `SearchSourceStamp`
+(generation/device/inode/size/nanosecond mtime+ctime), and optional `tag_error`.
+Consumers create rows from relative_path/kind/metadata; they never call
+`symlink_metadata` or `fill_metadata` on search-hit paths. Symlink target state
+remains unknown; retrieval does not probe a target. A zero tag mask with
+`tag_error` means unavailable, and the projection report includes that issue.
+Filename matching itself does not require successful tag decoration. Existing
+`SearchHit { path, score }` and report APIs remain compatible. Captured stamps
+are snapshots, not authorization for a later filesystem operation.
+
 `SearchQuery::parse` accepts filename terms and conjunctive `tag:Red` or
 `tag:"word tag"` terms; invalid/empty tag syntax is an error. Colour names
 match ASCII case-insensitively; unknown word tags match exactly after trimming.
