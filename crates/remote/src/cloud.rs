@@ -9,6 +9,8 @@
 //! password or client secret, and nothing puts one on a command line.
 //! Configuring a remote is `rclone config`'s job.
 
+use crate::helper::{self, CallContext, ErrorCode, RemoteError};
+use gust_core::lister::CancelToken;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -38,6 +40,7 @@ pub enum CloudError {
     /// rclone is not installed. Cloud remotes are an optional dependency and
     /// their absence degrades gracefully (plan §8).
     NotInstalled,
+    Service(RemoteError),
     /// rclone's config is encrypted and locked. Gust never handles the
     /// passphrase; rclone's own prompt does.
     ConfigLocked,
@@ -52,6 +55,7 @@ pub enum CloudError {
 impl CloudError {
     pub fn message(&self) -> String {
         match self {
+            CloudError::Service(error) => error.message.clone(),
             CloudError::NotInstalled => {
                 "rclone is not installed, so cloud storage is unavailable. \
                  Install rclone to add cloud places."
@@ -71,13 +75,28 @@ impl CloudError {
     }
 }
 
+fn helper_error(error: RemoteError) -> CloudError {
+    if error.code == ErrorCode::MissingHelper {
+        CloudError::NotInstalled
+    } else {
+        CloudError::Service(error)
+    }
+}
+
 /// Is rclone available at all?
 pub fn rclone_available() -> bool {
-    Command::new("rclone")
-        .arg("version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    let mut command = Command::new("rclone");
+    command.arg("version");
+    helper::run(
+        command,
+        &[],
+        &CallContext {
+            cancel: &CancelToken::new(),
+            timeout: Duration::from_secs(3),
+        },
+    )
+    .map(|o| o.status.success())
+    .unwrap_or(false)
 }
 
 /// The remotes the installed rclone has configured.
@@ -87,6 +106,18 @@ pub fn rclone_available() -> bool {
 /// The result is a list of suggestions; connecting is a separate, deliberate
 /// act by the user.
 pub fn list_remotes(config: Option<&Path>) -> Result<Vec<CloudRemote>, CloudError> {
+    list_remotes_with_context(
+        config,
+        &CallContext {
+            cancel: &CancelToken::new(),
+            timeout: Duration::from_secs(5),
+        },
+    )
+}
+pub fn list_remotes_with_context(
+    config: Option<&Path>,
+    ctx: &CallContext<'_>,
+) -> Result<Vec<CloudRemote>, CloudError> {
     let mut cmd = Command::new("rclone");
     cmd.arg("listremotes").arg("--long");
     if let Some(c) = config {
@@ -96,11 +127,7 @@ pub fn list_remotes(config: Option<&Path>) -> Result<Vec<CloudRemote>, CloudErro
     // passphrase on a terminal that is not there.
     cmd.env("RCLONE_ASK_PASSWORD", "false");
 
-    let out = match cmd.output() {
-        Ok(o) => o,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(CloudError::NotInstalled),
-        Err(e) => return Err(CloudError::Refused(e.to_string())),
-    };
+    let out = helper::run(cmd, &[], ctx).map_err(helper_error)?;
 
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
@@ -228,31 +255,52 @@ pub fn rc_client_args(rc_addr: &str) -> Vec<String> {
 /// Gust started, listens on a user-only Unix socket (see [`rc_socket_path`]),
 /// and is never exposed to previews or page content.
 pub fn vfs_pending(rc_addr: &str, timeout: Duration) -> Result<VfsPending, CloudError> {
-    let out = Command::new("rclone")
+    vfs_pending_with_context(
+        rc_addr,
+        &CallContext {
+            cancel: &CancelToken::new(),
+            timeout,
+        },
+    )
+}
+pub fn vfs_pending_with_context(
+    rc_addr: &str,
+    ctx: &CallContext<'_>,
+) -> Result<VfsPending, CloudError> {
+    let mut command = Command::new("rclone");
+    command
         .arg("rc")
         .args(rc_client_args(rc_addr))
         .arg("vfs/stats")
         .arg("--timeout")
-        .arg(format!("{}s", timeout.as_secs().max(1)))
-        .output()
-        .map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                CloudError::NotInstalled
-            } else {
-                CloudError::Refused(e.to_string())
-            }
-        })?;
+        .arg(format!("{}s", ctx.timeout.as_secs().max(1)));
+    let out = helper::run(command, &[], ctx).map_err(helper_error)?;
 
     if !out.status.success() {
         return Err(CloudError::Refused(first_useful_line(
             &String::from_utf8_lossy(&out.stderr),
         )));
     }
-    Ok(parse_vfs_stats(&String::from_utf8_lossy(&out.stdout)))
+    parse_vfs_stats_checked(&out.stdout)
 }
 
-/// Pull the three numbers out of `vfs/stats` JSON without a JSON dependency
-/// in this crate: the shape is fixed and the values are plain integers.
+pub fn parse_vfs_stats_checked(bytes: &[u8]) -> Result<VfsPending, CloudError> {
+    let value: serde_json::Value = serde_json::from_slice(bytes)
+        .map_err(|_| CloudError::Service(RemoteError::new(ErrorCode::Protocol)))?;
+    let number = |key: &str| {
+        value[key]
+            .as_u64()
+            .ok_or_else(|| CloudError::Service(RemoteError::new(ErrorCode::Protocol)))
+    };
+    Ok(VfsPending {
+        queued: number("uploadsQueued")?,
+        in_progress: number("uploadsInProgress")?,
+        errored: number("erroredFiles")?,
+    })
+}
+
+/// Legacy display parser. Safety decisions use `parse_vfs_stats_checked`: absent
+/// or malformed counters are unknown, never a proof that disconnect is safe.
 pub fn parse_vfs_stats(json: &str) -> VfsPending {
     VfsPending {
         queued: json_u64(json, "uploadsQueued"),
@@ -295,6 +343,32 @@ pub fn backend_listing(
     subdir: &str,
     config: Option<&Path>,
 ) -> Result<Vec<BackendEntry>, CloudError> {
+    backend_listing_with_context(
+        remote,
+        subdir,
+        config,
+        &CallContext {
+            cancel: &CancelToken::new(),
+            timeout: Duration::from_secs(15),
+        },
+    )
+}
+pub fn backend_listing_with_context(
+    remote: &str,
+    subdir: &str,
+    config: Option<&Path>,
+    ctx: &CallContext<'_>,
+) -> Result<Vec<BackendEntry>, CloudError> {
+    if remote.is_empty()
+        || remote.starts_with('-')
+        || remote.contains([':', '/', '\\'])
+        || remote.chars().any(char::is_control)
+        || subdir.split('/').any(|s| s == "..")
+    {
+        return Err(CloudError::Service(RemoteError::new(
+            ErrorCode::InvalidInput,
+        )));
+    }
     let target = if subdir.is_empty() {
         format!("{remote}:")
     } else {
@@ -307,13 +381,7 @@ pub fn backend_listing(
     }
     cmd.env("RCLONE_ASK_PASSWORD", "false");
 
-    let out = cmd.output().map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            CloudError::NotInstalled
-        } else {
-            CloudError::Refused(e.to_string())
-        }
-    })?;
+    let out = helper::run(cmd, &[], ctx).map_err(helper_error)?;
 
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
@@ -322,7 +390,27 @@ pub fn backend_listing(
         }
         return Err(CloudError::Refused(first_useful_line(&err)));
     }
-    Ok(parse_lsjson(&String::from_utf8_lossy(&out.stdout)))
+    let entries: serde_json::Value = serde_json::from_slice(&out.stdout)
+        .map_err(|_| CloudError::Service(RemoteError::new(ErrorCode::Protocol)))?;
+    let entries = entries
+        .as_array()
+        .ok_or_else(|| CloudError::Service(RemoteError::new(ErrorCode::Protocol)))?;
+    entries
+        .iter()
+        .filter(|entry| entry["IsDir"].as_bool() != Some(true))
+        .map(|entry| {
+            let name = entry["Name"]
+                .as_str()
+                .ok_or_else(|| CloudError::Service(RemoteError::new(ErrorCode::Protocol)))?;
+            let size = entry["Size"]
+                .as_u64()
+                .ok_or_else(|| CloudError::Service(RemoteError::new(ErrorCode::Protocol)))?;
+            Ok(BackendEntry {
+                name: name.into(),
+                size,
+            })
+        })
+        .collect()
 }
 
 /// Names and sizes from `rclone lsjson`. Only the two fields that decide
@@ -402,6 +490,24 @@ pub fn config_command() -> (&'static str, Vec<&'static str>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn incomplete_or_malformed_upload_stats_cannot_clear_disconnect_guard() {
+        for bytes in [
+            b"{}".as_slice(),
+            b"not json",
+            br#"{"uploadsQueued":0,"uploadsInProgress":0}"#,
+            br#"{"uploadsQueued":0,"uploadsInProgress":0,"erroredFiles":null}"#,
+        ] {
+            assert!(parse_vfs_stats_checked(bytes).is_err());
+        }
+        assert_eq!(
+            parse_vfs_stats_checked(
+                br#"{"uploadsQueued":0,"uploadsInProgress":0,"erroredFiles":0}"#
+            )
+            .unwrap(),
+            VfsPending::default()
+        );
+    }
 
     #[test]
     fn the_rc_is_a_user_only_socket_not_a_port() {

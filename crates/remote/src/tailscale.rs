@@ -12,10 +12,11 @@
 //! check of the SSH key that device serves, written to known_hosts only
 //! when the user says yes.
 
-use std::io::Read;
+use crate::helper::{self, CallContext};
+use gust_core::lister::CancelToken;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::process::Command;
+use std::time::Duration;
 
 /// One device on the tailnet, other than this computer.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -107,46 +108,45 @@ impl PeerCache {
 /// Read the tailnet from the local daemon. Bounded: a wedged daemon gives
 /// an error after `timeout`, never a hung caller.
 pub fn peers(timeout: Duration) -> Result<Vec<TailnetPeer>, TailnetError> {
-    let mut child = match Command::new("tailscale")
-        .args(["status", "--json"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-    {
-        Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Err(TailnetError::NotInstalled)
-        }
-        Err(e) => return Err(TailnetError::Other(e.to_string())),
-    };
-    // Drain stdout on a thread so a large tailnet cannot fill the pipe and
-    // look like a hang.
-    let mut out = child.stdout.take();
-    let reader = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(o) = out.as_mut() {
-            let _ = o.take(8 * 1024 * 1024).read_to_end(&mut buf);
-        }
-        buf
-    });
-    let deadline = Instant::now() + timeout;
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) if Instant::now() >= deadline => {
-                let _ = child.kill();
-                gust_core::stall::reap_in_background(child);
-                return Err(TailnetError::Other(
-                    "Tailscale did not answer in time".into(),
-                ));
+    peers_command(
+        Command::new("tailscale").args(["status", "--json"]),
+        timeout,
+        None,
+    )
+}
+
+/// Cancellable local discovery. Quiet commands observe cancellation within
+/// 20ms plus scheduler latency; no tailnet device is contacted.
+pub fn peers_with_cancel(
+    timeout: Duration,
+    cancel: &gust_core::lister::CancelToken,
+) -> Result<Vec<TailnetPeer>, TailnetError> {
+    peers_command(
+        Command::new("tailscale").args(["status", "--json"]),
+        timeout,
+        Some(cancel),
+    )
+}
+
+fn peers_command(
+    command: &mut Command,
+    timeout: Duration,
+    cancel: Option<&gust_core::lister::CancelToken>,
+) -> Result<Vec<TailnetPeer>, TailnetError> {
+    let output = crate::command::capture_stdout(command, timeout, 8 * 1024 * 1024, cancel)
+        .map_err(|error| match error.kind() {
+            std::io::ErrorKind::NotFound => TailnetError::NotInstalled,
+            std::io::ErrorKind::TimedOut => {
+                TailnetError::Other("Tailscale did not answer in time".into())
             }
-            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
-            Err(e) => return Err(TailnetError::Other(e.to_string())),
-        }
-    }
-    let stdout = reader.join().unwrap_or_default();
-    parse_status(&String::from_utf8_lossy(&stdout))
+            std::io::ErrorKind::Interrupted => {
+                TailnetError::Other("Tailscale discovery was cancelled".into())
+            }
+            _ => TailnetError::Other(error.to_string()),
+        })?;
+    // Still parse BackendState on failure: tailscale reports NeedsLogin in
+    // valid JSON even when status exits unsuccessfully.
+    parse_status(&String::from_utf8_lossy(&output.stdout))
 }
 
 /// Parse `tailscale status --json`. Pure, so it is tested without a tailnet.
@@ -275,17 +275,18 @@ pub fn host_known(known_hosts: &Path, host: &str) -> bool {
     if !known_hosts.is_file() {
         return false;
     }
-    Command::new("ssh-keygen")
-        .arg("-F")
-        .arg(host)
-        .arg("-f")
-        .arg(known_hosts)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    let mut command = Command::new("ssh-keygen");
+    command.arg("-F").arg(host).arg("-f").arg(known_hosts);
+    helper::run(
+        command,
+        &[],
+        &CallContext {
+            cancel: &CancelToken::new(),
+            timeout: Duration::from_secs(3),
+        },
+    )
+    .map(|out| out.status.success())
+    .unwrap_or(false)
 }
 
 /// The SSH host keys a device presents, for the user to decide on.
@@ -300,21 +301,36 @@ pub struct ScannedKeys {
 /// Ask the device for its host keys (the first network traffic, and only
 /// on an explicit Connect). Bounded by ssh-keyscan's own timeout.
 pub fn scan_host_keys(host: &str) -> Result<ScannedKeys, String> {
+    scan_host_keys_with_context(
+        host,
+        &CallContext {
+            cancel: &CancelToken::new(),
+            timeout: Duration::from_secs(10),
+        },
+    )
+}
+pub fn scan_host_keys_with_context(
+    host: &str,
+    ctx: &CallContext<'_>,
+) -> Result<ScannedKeys, String> {
+    let started = std::time::Instant::now();
     if !safe_target(host) {
         return Err("That is not a usable address".into());
     }
-    let out = Command::new("ssh-keyscan")
-        .args(["-T", "6", "-t", "ed25519,ecdsa,rsa", "--", host])
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|e| e.to_string())?;
+    let mut command = Command::new("ssh-keyscan");
+    command.args(["-T", "6", "-t", "ed25519,ecdsa,rsa", "--", host]);
+    let out = helper::run(command, &[], ctx).map_err(|e| e.message)?;
     let lines = keyscan_lines(&String::from_utf8_lossy(&out.stdout), host);
     if lines.is_empty() {
         return Err("That device did not answer on SSH. Is SSH turned on there?".into());
     }
     let mut fingerprints = Vec::new();
     for l in &lines {
-        if let Some(fp) = fingerprint(l) {
+        let remaining = CallContext {
+            cancel: ctx.cancel,
+            timeout: ctx.timeout.saturating_sub(started.elapsed()),
+        };
+        if let Some(fp) = fingerprint(l, &remaining) {
             fingerprints.push(fp);
         }
     }
@@ -343,17 +359,10 @@ pub fn keyscan_lines(text: &str, host: &str) -> Vec<String> {
         .collect()
 }
 
-fn fingerprint(line: &str) -> Option<String> {
-    use std::io::Write;
-    let mut child = Command::new("ssh-keygen")
-        .args(["-l", "-f", "-"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-    child.stdin.take()?.write_all(line.as_bytes()).ok()?;
-    let out = child.wait_with_output().ok()?;
+fn fingerprint(line: &str, ctx: &CallContext<'_>) -> Option<String> {
+    let mut command = Command::new("ssh-keygen");
+    command.args(["-l", "-f", "-"]);
+    let out = helper::run(command, line.as_bytes(), ctx).ok()?;
     // "256 SHA256:abc… host (ED25519)"
     let s = String::from_utf8_lossy(&out.stdout);
     let mut f = s.split_whitespace();
@@ -490,6 +499,51 @@ mod tests {
         assert_eq!(p[0].target, "nas-box.tail1.ts.net");
         assert_eq!(p[0].os, "linux");
         assert!(p[0].online && !p[2].online);
+    }
+
+    #[test]
+    fn local_discovery_drains_stdout_without_waiting_for_stderr() {
+        let mut command = Command::new("sh");
+        command
+            .args([
+                "-c",
+                "head -c 131072 /dev/zero >&2; printf '%s' \"$1\"",
+                "fixture",
+            ])
+            .arg(STATUS);
+        assert_eq!(
+            peers_command(&mut command, Duration::from_secs(1), None).unwrap(),
+            parse_status(STATUS).unwrap()
+        );
+    }
+
+    #[test]
+    fn local_discovery_keeps_stopped_state_on_unsuccessful_exit() {
+        let mut command = Command::new("sh");
+        command.args([
+            "-c",
+            "printf '%s' '{\"BackendState\":\"NeedsLogin\"}'; exit 1",
+        ]);
+        assert_eq!(
+            peers_command(&mut command, Duration::from_secs(1), None),
+            Err(TailnetError::NotRunning("NeedsLogin".into()))
+        );
+    }
+
+    #[test]
+    fn local_discovery_refuses_oversized_answers_and_pre_cancel() {
+        let mut flood = Command::new("head");
+        flood.args(["-c", "8388609", "/dev/zero"]);
+        let error = peers_command(&mut flood, Duration::from_secs(2), None).unwrap_err();
+        assert!(error.message().contains("output exceeded limit"));
+        let cancel = gust_core::lister::CancelToken::new();
+        cancel.cancel();
+        assert_eq!(
+            peers_with_cancel(Duration::from_secs(1), &cancel),
+            Err(TailnetError::Other(
+                "Tailscale discovery was cancelled".into()
+            ))
+        );
     }
 
     #[test]

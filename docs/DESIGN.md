@@ -1451,3 +1451,21 @@ Untrusted bytes (thumbnail decoding, archive listing) run under
 and a private output directory — or the feature is unavailable. Parent
 validates helper output through a held descriptor: regular file, size bound,
 expected format, no symlink/FIFO.
+
+
+### 6.4.2 Owned remote helper calls
+
+Remote service calls run on workers. `helper::CallContext { cancel: &CancelToken,
+timeout: Duration }` gives each call one overall budget. `RemoteError` carries a
+typed code and an actionable message; cancellation never claims rollback or
+authorizes replay. Existing connection APIs remain bounded compatibility adapters.
+Owned subprocesses share eight admission slots, nonblocking capped stdin/stdout/
+stderr, readiness-based waits and process-group cleanup. A single reaper retains
+a slot until even a kernel-stuck child is reaped; no reader join can outlive the
+call deadline. Only owned children are signalled and mounts are never lazily
+detached on cancellation. SSH aliases remain verbatim during diagnostic probes.
+Malformed or missing rclone upload counters are unknown and block disconnect;
+backend receipts require a complete parsed response, never an empty failed parse.
+
+Owned helpers remove inherited TLS keylog settings. Reaper-start failure retains
+bounded ownership, and subsequent admissions also reap completed children.
