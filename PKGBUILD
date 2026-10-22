@@ -10,8 +10,8 @@
 #   one is removed later (plan §8).
 
 pkgname=gust
-_commit=1526156a060fe1cf0a32b15ca54d8fa86e205027
-pkgver=0.1.0
+_commit=51949a44d468a36ecd9a13f5f4e156a2c982b4df
+pkgver=0.1.0.r98.g51949a44d468
 pkgrel=1
 pkgdesc="A fast, calm file manager for Omarchy"
 arch=('x86_64' 'aarch64')
@@ -35,7 +35,7 @@ depends=(
   'pipewire-audio' 'poppler' 'mpv'
   # Archives, USB drives and discs, Open/Save dialogs for other apps.
   'libarchive' 'tar' 'zstd' 'udisks2' 'xdg-desktop-portal'
-  'shared-mime-info' 'curl' 'coreutils'
+  'shared-mime-info' 'curl' 'openssl' 'coreutils'
 )
 makedepends=('rust' 'cargo' 'python' 'pkgconf')
 # Tailscale is a network service with its own account: Gust lists its devices
@@ -47,7 +47,7 @@ optdepends=(
   'libreoffice-fresh: sandboxed Office/HTML conversion (capability-gated)'
 )
 source=("$pkgname-$_commit.tar.gz::https://codeload.github.com/Zeus-Deus/gust/tar.gz/$_commit")
-sha256sums=('9bf5f6f85ca7607fdb5766f51f558fb815e2470aff9cec5fe74ea41d7c4bcfcd')
+sha256sums=('2a539105f2b190982b4e6df25e2d1d76ab41b498107af5cd26cd4251418ca590')
 
 build() {
   cd "$pkgname-$_commit"

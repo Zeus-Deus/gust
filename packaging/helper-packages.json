@@ -1,6 +1,6 @@
 {
   "required": {
-    "bsdtar": "libarchive", "bwrap": "bubblewrap", "curl": "curl",
+    "bsdtar": "libarchive", "bwrap": "bubblewrap", "curl": "curl", "openssl": "openssl",
     "ffmpeg": "ffmpeg", "ffprobe": "ffmpeg", "ffmpegthumbnailer": "ffmpegthumbnailer",
     "fusermount3": "fuse3", "gio": "glib2", "ls": "coreutils", "true": "coreutils", "timeout": "coreutils",
     "lsblk": "util-linux", "prlimit": "util-linux", "magick": "imagemagick",
