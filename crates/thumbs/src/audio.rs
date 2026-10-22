@@ -18,8 +18,10 @@
 
 use crate::sandbox::{sandbox_available, SandboxSpec};
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::path::Path;
+#[cfg(test)]
+use std::process::Command;
+use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -92,9 +94,10 @@ struct Shared {
     seek_to: Mutex<Option<f64>>,
     paused: AtomicBool,
     stop: AtomicBool,
-    /// PIDs to kill on stop, so a thread blocked in a read or write wakes.
-    decoder_pid: AtomicU32,
-    sink_pid: AtomicU32,
+    cancel: gust_core::CancelToken,
+    /// Linear gain encoded as f32 bits; zero means silent until initialized.
+    volume: AtomicU32,
+    muted: AtomicBool,
 }
 
 /// One file playing. Dropping it stops the sound and both processes.
@@ -231,20 +234,32 @@ impl Player {
 
     /// As [`start`](Self::start), with a chosen sink (tests write to a file).
     pub fn start_with_sink(path: &Path, sink: Option<Vec<String>>) -> Player {
+        Self::start_worker(path, sink, None)
+    }
+
+    pub(crate) fn start_held(input: crate::helper::Input) -> Player {
+        Self::start_worker(Path::new(""), sink_argv(), Some(input))
+    }
+
+    fn start_worker(
+        path: &Path,
+        sink: Option<Vec<String>>,
+        input: Option<crate::helper::Input>,
+    ) -> Player {
         let shared = Arc::new(Shared::default());
+        shared.volume.store(1.0f32.to_bits(), Ordering::Relaxed);
         let s = shared.clone();
         let path = path.to_path_buf();
         let spawned = std::thread::Builder::new()
             .name("gust-audio".into())
             .spawn(move || {
-                if let Err(why) = run(&path, sink, &s) {
+                if let Err(why) = run(&path, sink, &s, input) {
                     if !s.stop.load(Ordering::Relaxed) {
                         let mut st = s.status.lock().unwrap_or_else(|e| e.into_inner());
                         st.state = PlayState::Failed;
                         st.why = why;
                     }
                 }
-                kill_all(&s);
             });
         if spawned.is_err() {
             let mut st = shared.status.lock().unwrap_or_else(|e| e.into_inner());
@@ -279,6 +294,9 @@ impl Player {
 
     /// Jump to `secs` from the start (clamped to the file).
     pub fn seek(&self, secs: f64) {
+        if !secs.is_finite() {
+            return;
+        }
         let dur = self.status().duration;
         let t = match dur {
             Some(d) => secs.clamp(0.0, (d - 0.05).max(0.0)),
@@ -293,7 +311,28 @@ impl Player {
 
     pub fn stop(&self) {
         self.shared.stop.store(true, Ordering::Relaxed);
-        kill_all(&self.shared);
+        self.shared.cancel.cancel();
+    }
+
+    /// Linear PCM gain, clamped to 0..=1. Nonfinite requests are ignored.
+    pub fn set_volume(&self, volume: f32) {
+        if volume.is_finite() {
+            self.shared
+                .volume
+                .store(volume.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+        }
+    }
+    pub fn volume(&self) -> f32 {
+        f32::from_bits(self.shared.volume.load(Ordering::Relaxed))
+    }
+    pub fn set_muted(&self, muted: bool) {
+        self.shared.muted.store(muted, Ordering::Relaxed);
+    }
+    pub fn muted(&self) -> bool {
+        self.shared.muted.load(Ordering::Relaxed)
+    }
+    pub fn is_stopped(&self) -> bool {
+        self.shared.stop.load(Ordering::Relaxed)
     }
 }
 
@@ -303,75 +342,46 @@ impl Drop for Player {
     }
 }
 
-fn kill_all(s: &Shared) {
-    for pid in [&s.decoder_pid, &s.sink_pid] {
-        let p = pid.swap(0, Ordering::Relaxed);
-        if let Some(p) = rustix::process::Pid::from_raw(p as i32) {
-            let _ = rustix::process::kill_process(p, rustix::process::Signal::KILL);
-        }
-    }
-}
-
-/// A child process, killed and reaped when dropped.
-struct Proc(Child);
-impl Drop for Proc {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
-
-fn spawn(argv: &[String], stdin: Stdio, stdout: Stdio) -> Result<Proc, String> {
-    spawn_err(argv, stdin, stdout, Stdio::null())
-}
-
-fn spawn_err(argv: &[String], stdin: Stdio, stdout: Stdio, stderr: Stdio) -> Result<Proc, String> {
-    Command::new(&argv[0])
-        .args(&argv[1..])
-        .stdin(stdin)
-        .stdout(stdout)
-        .stderr(stderr)
-        .spawn()
-        .map(Proc)
-        .map_err(|e| format!("{}: {e}", argv[0]))
-}
-
 fn set(s: &Shared, f: impl FnOnce(&mut Status)) {
     f(&mut s.status.lock().unwrap_or_else(|e| e.into_inner()));
 }
 
-/// The scratch folder the sandbox wants for `/out` (unused by the decoder).
-fn scratch_dir() -> Result<PathBuf, String> {
-    let base = std::env::var_os("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-    let d = base.join(format!(
-        "gust-audio-{}-{:?}",
-        std::process::id(),
-        std::thread::current().id()
-    ));
-    let _ = std::fs::remove_dir_all(&d);
-    std::fs::create_dir_all(&d).map_err(|e| e.to_string())?;
-    Ok(d)
-}
-
-fn run(path: &Path, sink: Option<Vec<String>>, s: &Shared) -> Result<(), String> {
-    available()?;
-    let sink = sink.ok_or("Playing audio needs pw-play (PipeWire) or paplay")?;
-    let meta = std::fs::metadata(path).map_err(|e| e.to_string())?;
-    if !meta.is_file() {
-        return Err("not a regular file".into());
+fn run(
+    path: &Path,
+    sink: Option<Vec<String>>,
+    s: &Shared,
+    input: Option<crate::helper::Input>,
+) -> Result<(), String> {
+    use crate::helper::{self, OwnedChild};
+    let fail = |_| "the sandboxed media helper stopped or exceeded its limit".to_string();
+    helper::check(&s.cancel).map_err(fail)?;
+    if !sandbox_available() {
+        return Err("Playing audio needs bubblewrap and prlimit".into());
     }
-    let scratch = scratch_dir()?;
-    let _cleanup = Cleanup(scratch.clone());
+    if !crate::sandbox::which("ffmpeg") {
+        return Err("Playing audio needs ffmpeg".into());
+    }
+    let sink = sink.ok_or("Playing audio needs pw-play (PipeWire) or paplay")?;
+    let input = input
+        .map(Ok)
+        .unwrap_or_else(|| helper::Input::open(path, crate::preview::MAX_MEDIA_BYTES))
+        .map_err(|_| "Audio needs a regular file within the preview size limit")?;
+    let scratch = helper::Scratch::new().map_err(fail)?;
+    let argv = |a: Vec<String>| {
+        a.into_iter()
+            .map(std::ffi::OsString::from)
+            .collect::<Vec<_>>()
+    };
 
     // Duration and tags (sandboxed; at most 64 KiB of its output is read).
-    if let Ok(mut probe) = spawn(&probe_argv(path, &scratch), Stdio::null(), Stdio::piped()) {
-        let mut text = Vec::new();
-        if let Some(out) = probe.0.stdout.take() {
-            let _ = out.take(64 * 1024).read_to_end(&mut text);
-        }
-        drop(probe);
+    if let Ok(text) = helper::capture_in(
+        &helper::pinned_argv(probe_argv(Path::new("/in/input"), &scratch.0), &scratch.0),
+        &s.cancel,
+        Duration::from_secs(5),
+        64 * 1024,
+        Some(&input),
+        Some(&scratch.0),
+    ) {
         let (dur, title, artist, album) = parse_probe(&String::from_utf8_lossy(&text));
         set(s, |st| {
             st.duration = dur;
@@ -384,25 +394,37 @@ fn run(path: &Path, sink: Option<Vec<String>>, s: &Shared) -> Result<(), String>
         return Ok(());
     }
 
-    let mut sink_proc = spawn(&sink, Stdio::piped(), Stdio::null())?;
-    s.sink_pid.store(sink_proc.0.id(), Ordering::Relaxed);
-    let mut sink_in: ChildStdin = sink_proc.0.stdin.take().ok_or("no sink input")?;
+    let mut sink_proc =
+        OwnedChild::spawn(&argv(sink), Stdio::piped(), Stdio::null()).map_err(fail)?;
+    let mut sink_in = sink_proc.child().stdin.take().ok_or("no sink input")?;
+    helper::nonblocking(&sink_in).map_err(fail)?;
 
     let mut start_at = 0.0f64;
     let mut buf = vec![0u8; CHUNK];
     'decoders: loop {
-        let mut dec = spawn_err(
-            &decoder_argv(path, &scratch, start_at),
-            Stdio::null(),
+        helper::check(&s.cancel).map_err(fail)?;
+        if !input.unchanged() {
+            return Err("The media file changed; reopen the preview".into());
+        }
+        let mut dec = OwnedChild::spawn_input(
+            &helper::pinned_argv(
+                decoder_argv(Path::new("/in/input"), &scratch.0, start_at),
+                &scratch.0,
+            ),
+            &input,
             Stdio::piped(),
-            Stdio::piped(),
-        )?;
-        s.decoder_pid.store(dec.0.id(), Ordering::Relaxed);
-        let mut out = dec.0.stdout.take().ok_or("no decoder output")?;
+        )
+        .map_err(fail)?;
+        let mut out = dec.child().stdout.take().ok_or("no decoder output")?;
+        helper::nonblocking(&out).map_err(fail)?;
+        let mut pending = Vec::new();
+        let mut sent = 0usize;
+        let mut tail = Vec::new();
         let mut written = 0.0f64; // seconds handed to the sink
         let mut played = 0.0f64; // seconds the listener has heard
         let mut last = Instant::now();
         let mut eof = false;
+        let mut progress = Instant::now();
         set(s, |st| {
             st.state = PlayState::Playing;
             st.pos = start_at;
@@ -418,9 +440,9 @@ fn run(path: &Path, sink: Option<Vec<String>>, s: &Shared) -> Result<(), String>
             if !paused {
                 played = (played + dt).min(written);
             }
-            if let Some(t) = s.seek_to.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            let requested_seek = s.seek_to.lock().unwrap_or_else(|e| e.into_inner()).take();
+            if let Some(t) = requested_seek {
                 start_at = t;
-                s.decoder_pid.store(0, Ordering::Relaxed);
                 drop(dec);
                 continue 'decoders;
             }
@@ -436,56 +458,105 @@ fn run(path: &Path, sink: Option<Vec<String>>, s: &Shared) -> Result<(), String>
                 };
             });
             if paused || ended || eof || written - played > AHEAD_SECS {
+                progress = Instant::now();
                 std::thread::sleep(Duration::from_millis(20));
                 continue;
             }
+            if progress.elapsed() > Duration::from_secs(15) {
+                return Err("the media decoder or audio sink stopped responding".into());
+            }
+            // A blocked decoder or desktop sink cannot block Stop or Seek.
+            if sent < pending.len() {
+                match sink_in.write(&pending[sent..]) {
+                    Ok(0) => return Err("the desktop's audio player stopped".into()),
+                    Ok(n) => {
+                        progress = Instant::now();
+                        sent += n;
+                        written += n as f64 / BYTES_PER_SEC;
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(10))
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(_) => return Err("the desktop's audio player stopped".into()),
+                }
+                continue;
+            }
             match out.read(&mut buf) {
-                Ok(0) => {
-                    eof = true;
-                    if written == 0.0 && start_at == 0.0 {
-                        // Say what the decoder said (its last line, bounded).
-                        let mut err = Vec::new();
-                        if let Some(e) = dec.0.stderr.take() {
-                            let _ = e.take(4096).read_to_end(&mut err);
-                        }
-                        let last = String::from_utf8_lossy(&err)
-                            .lines()
-                            .rev()
-                            .find(|l| !l.trim().is_empty())
-                            .map(|l| gust_core::peek::sanitise_line(l.as_bytes()))
-                            .unwrap_or_default();
-                        let status = dec.0.wait().map(|s| s.to_string()).unwrap_or_default();
-                        return Err(if last.is_empty() {
-                            format!("the file could not be decoded as audio ({status})")
-                        } else {
-                            format!("the file could not be decoded as audio: {last}")
-                        });
+                Ok(0) => match dec.child().try_wait() {
+                    Ok(Some(status))
+                        if status.success()
+                            && tail.is_empty()
+                            && (written > 0.0 || start_at > 0.0) =>
+                    {
+                        eof = true
                     }
-                }
+                    Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+                    _ => return Err("the file could not be decoded as audio".into()),
+                },
                 Ok(n) => {
-                    // Whole frames only (4 bytes), so channels never swap.
-                    let n = n - n % 4;
-                    if sink_in.write_all(&buf[..n]).is_err() {
-                        return Err("the desktop's audio player stopped".into());
-                    }
-                    written += n as f64 / BYTES_PER_SEC;
+                    progress = Instant::now();
+                    pending.clear();
+                    pending.extend_from_slice(&tail);
+                    pending.extend_from_slice(&buf[..n]);
+                    let whole = pending.len() - pending.len() % 4;
+                    tail = pending.split_off(whole);
+                    let volume = if s.muted.load(Ordering::Relaxed) {
+                        0.0
+                    } else {
+                        f32::from_bits(s.volume.load(Ordering::Relaxed))
+                    };
+                    scale_pcm(&mut pending, volume);
+                    sent = 0;
                 }
-                Err(e) => return Err(e.to_string()),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(10))
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => return Err("the media decoder stopped".into()),
             }
         }
     }
 }
 
-struct Cleanup(PathBuf);
-impl Drop for Cleanup {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
+fn scale_pcm(bytes: &mut [u8], volume: f32) {
+    for sample in bytes.as_chunks_mut::<2>().0 {
+        let value = i16::from_le_bytes([sample[0], sample[1]]);
+        let scaled = (value as f32 * volume).round() as i16;
+        sample.copy_from_slice(&scaled.to_le_bytes());
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pcm_gain_and_controls_are_finite_and_do_not_overflow() {
+        let mut bytes = [
+            i16::MIN.to_le_bytes(),
+            i16::MAX.to_le_bytes(),
+            (-1234i16).to_le_bytes(),
+        ]
+        .concat();
+        scale_pcm(&mut bytes, 0.5);
+        assert_eq!(i16::from_le_bytes(bytes[0..2].try_into().unwrap()), -16384);
+        assert_eq!(i16::from_le_bytes(bytes[2..4].try_into().unwrap()), 16384);
+        scale_pcm(&mut bytes, 0.0);
+        assert_eq!(bytes, vec![0; 6]);
+        let p = Player {
+            shared: Arc::new(Shared::default()),
+        };
+        p.set_volume(2.0);
+        assert_eq!(p.volume(), 1.0);
+        p.set_volume(f32::NAN);
+        assert_eq!(p.volume(), 1.0);
+        p.seek(f64::NAN);
+        p.seek(f64::INFINITY);
+        assert!(p.shared.seek_to.lock().unwrap().is_none());
+        p.set_muted(true);
+        assert!(p.muted());
+    }
 
     #[test]
     fn the_decoder_runs_sandboxed_with_no_audio_or_network() {
