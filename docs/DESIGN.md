@@ -1684,3 +1684,14 @@ accounting. The charge includes all owned path/slot capacities, info capacity
 and a conservative per-tree-node allowance; it is not an allocator/RSS reading.
 APP bounds the aggregate cache and reports limits instead of retaining an
 unbounded set of individually bounded receipts.
+
+
+Trash path admission and discovery consume CORE MountInfo::resolve and
+visible_mounts from one bounded kernel mountinfo snapshot. The shared parent-ID
+projection handles stacked mounts and covered descendants; no flat/first/last
+fallback or independent Trash topology parser remains. A malformed, limited
+or ambiguous inventory refuses explicitly. Unrelated path resolution may
+remain available outside an ambiguous subtree. Discovery establishes visible
+local roots before any candidate access and separately checks the shared,
+private, files and info paths before opening them. Snapshot checks do not
+promise atomic exclusion of concurrent mount changes or syscall deadlines.

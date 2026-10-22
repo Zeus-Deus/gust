@@ -4,7 +4,10 @@ use crate::{
     anchor::{self, DirHandle, FileIdentity},
     history_tree,
 };
-use gust_core::lister::CancelToken;
+use gust_core::{
+    lister::CancelToken,
+    mount_table::{MountInfo, MountTableError, MAX_MOUNTINFO_BYTES},
+};
 use rustix::fs::{Mode, OFlags};
 use std::{
     collections::BTreeMap,
@@ -257,9 +260,7 @@ fn parse_info(
 impl TrashLocation {
     fn handles(&self, create: bool) -> io::Result<(DirHandle, DirHandle)> {
         let mounts = mounts()?;
-        for path in [self.trash.root(), &self.trash.files, &self.trash.info] {
-            local_path(path, &mounts)?;
-        }
+        local_location(self, &mounts)?;
         if self.trash.files != self.trash.root().join("files")
             || self.trash.info != self.trash.root().join("info")
         {
@@ -645,61 +646,46 @@ impl TrashLocation {
         Ok(out)
     }
 }
-#[derive(Debug)]
-struct Mount {
-    path: PathBuf,
-    local: bool,
+fn mount_error(error: MountTableError) -> io::Error {
+    let kind = match error {
+        MountTableError::Ambiguous | MountTableError::NoMount => io::ErrorKind::Unsupported,
+        _ => io::ErrorKind::InvalidData,
+    };
+    io::Error::new(kind, format!("Trash mount topology refused: {error:?}"))
 }
-fn mounts() -> io::Result<Vec<Mount>> {
+fn mounts() -> io::Result<MountInfo> {
     let file = File::open("/proc/self/mountinfo")?;
     let mut bytes = Vec::new();
-    file.take(4 * 1024 * 1024 + 1).read_to_end(&mut bytes)?;
-    if bytes.len() > 4 * 1024 * 1024 {
-        return Err(invalid("Mount inventory exceeds limit"));
-    }
-    Ok(parse_mounts(&bytes))
+    file.take(MAX_MOUNTINFO_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    parse_mounts(&bytes)
 }
-fn parse_mounts(bytes: &[u8]) -> Vec<Mount> {
-    bytes
-        .split(|b| *b == b'\n')
-        .filter_map(|line| {
-            let fields: Vec<_> = line
-                .split(|b| matches!(b, b' ' | b'\t'))
-                .filter(|s| !s.is_empty())
-                .collect();
-            let separator = fields.iter().position(|s| *s == b"-")?;
-            let kind = std::str::from_utf8(fields.get(separator + 1)?).ok()?;
-            Some(Mount {
-                path: gust_core::mount_table::decode_field(fields.get(4)?).into(),
-                local: matches!(
-                    kind,
-                    "ext2"
-                        | "ext3"
-                        | "ext4"
-                        | "btrfs"
-                        | "xfs"
-                        | "tmpfs"
-                        | "ramfs"
-                        | "overlay"
-                        | "zfs"
-                        | "bcachefs"
-                        | "f2fs"
-                        | "exfat"
-                        | "vfat"
-                        | "msdos"
-                        | "ntfs3"
-                ),
-            })
-        })
-        .collect()
+fn parse_mounts(bytes: &[u8]) -> io::Result<MountInfo> {
+    MountInfo::parse(bytes).map_err(mount_error)
 }
-fn local_path(path: &Path, mounts: &[Mount]) -> io::Result<()> {
-    if mounts
-        .iter()
-        .filter(|m| path.starts_with(&m.path))
-        .max_by_key(|m| m.path.components().count())
-        .is_some_and(|m| m.local)
-    {
+fn local_fstype(kind: &str) -> bool {
+    matches!(
+        kind,
+        "ext2"
+            | "ext3"
+            | "ext4"
+            | "btrfs"
+            | "xfs"
+            | "tmpfs"
+            | "ramfs"
+            | "overlay"
+            | "zfs"
+            | "bcachefs"
+            | "f2fs"
+            | "exfat"
+            | "vfat"
+            | "msdos"
+            | "ntfs3"
+    )
+}
+fn local_path(path: &Path, mounts: &MountInfo) -> io::Result<()> {
+    let mount = mounts.resolve(path).map_err(mount_error)?;
+    if local_fstype(&mount.fs_type) {
         Ok(())
     } else {
         Err(io::Error::new(
@@ -707,6 +693,19 @@ fn local_path(path: &Path, mounts: &[Mount]) -> io::Result<()> {
             "Automatic Trash is available only on known local filesystems",
         ))
     }
+}
+fn local_location(location: &TrashLocation, mounts: &MountInfo) -> io::Result<()> {
+    if let Some(top) = &location.topdir {
+        local_path(top, mounts)?;
+    }
+    for path in [
+        location.trash.root(),
+        &location.trash.files,
+        &location.trash.info,
+    ] {
+        local_path(path, mounts)?;
+    }
+    Ok(())
 }
 fn nearest_dev(path: &Path) -> io::Result<u64> {
     for path in path.ancestors() {
@@ -718,12 +717,32 @@ fn nearest_dev(path: &Path) -> io::Result<u64> {
     }
     Err(invalid("No existing location ancestor"))
 }
-fn candidates(top: &Path) -> Vec<TrashLocation> {
+#[cfg(test)]
+thread_local! {
+    static SHARED_OPEN_PROBE:std::cell::Cell<Option<bool>>=const {std::cell::Cell::new(None)};
+}
+fn open_shared(path: &Path) -> io::Result<DirHandle> {
+    #[cfg(test)]
+    if SHARED_OPEN_PROBE.with(|probe| match probe.get() {
+        Some(_) => {
+            probe.set(Some(true));
+            true
+        }
+        None => false,
+    }) {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "test probe; no candidate I/O",
+        ));
+    }
+    history_tree::open_dir(path)
+}
+fn candidates(top: &Path, mounts: &MountInfo) -> Vec<TrashLocation> {
     let uid = rustix::process::geteuid().as_raw();
     let shared = top.join(".Trash");
     let mut out = Vec::new();
-    if history_tree::open_dir(&shared)
-        .is_ok_and(|d| d.stat_self().is_ok_and(|s| s.st_mode & 0o1000 != 0))
+    if local_path(&shared, mounts).is_ok()
+        && open_shared(&shared).is_ok_and(|d| d.stat_self().is_ok_and(|s| s.st_mode & 0o1000 != 0))
     {
         out.push(TrashLocation {
             trash: TrashDir::at(shared.join(uid.to_string())),
@@ -768,17 +787,17 @@ pub fn select_location(path: &Path, home: &TrashDir) -> io::Result<TrashLocation
         topdir: None,
     };
     if nearest_dev(home.root())? == dev {
+        local_location(&home_location, &mounts)?;
         usable(&home_location, dev)?;
         return Ok(home_location);
     }
     let top = mounts
-        .iter()
-        .filter(|m| m.local && path.starts_with(&m.path))
-        .max_by_key(|m| m.path.components().count())
-        .map(|m| m.path.clone())
-        .ok_or_else(|| invalid("Source volume is unknown"))?;
-    for location in candidates(&top) {
-        if local_path(location.trash.root(), &mounts).is_ok() && usable(&location, dev).is_ok() {
+        .resolve(path)
+        .map_err(mount_error)?
+        .mount_point
+        .clone();
+    for location in candidates(&top, &mounts) {
+        if local_location(&location, &mounts).is_ok() && usable(&location, dev).is_ok() {
             return Ok(location);
         }
     }
@@ -786,6 +805,15 @@ pub fn select_location(path: &Path, home: &TrashDir) -> io::Result<TrashLocation
         io::ErrorKind::Unsupported,
         "No safe same-volume Trash location is available",
     ))
+}
+fn inventory_roots(mounts: &MountInfo) -> io::Result<Vec<PathBuf>> {
+    Ok(mounts
+        .visible_mounts()
+        .map_err(mount_error)?
+        .into_iter()
+        .filter(|m| local_fstype(&m.fs_type))
+        .map(|m| m.mount_point.clone())
+        .collect())
 }
 /// Existing locations only; listing never creates directories on mounted media.
 pub fn locations(home: &TrashDir) -> io::Result<Vec<TrashLocation>> {
@@ -795,12 +823,14 @@ pub fn locations(home: &TrashDir) -> io::Result<Vec<TrashLocation>> {
         topdir: None,
     };
     let mounts = mounts()?;
-    if local_path(home.root(), &mounts).is_ok() && home_location.handles(false).is_ok() {
+    // Refuse an incomplete inventory before touching any candidate directory.
+    let roots = inventory_roots(&mounts)?;
+    if local_location(&home_location, &mounts).is_ok() && home_location.handles(false).is_ok() {
         out.push(home_location);
     }
-    for mount in mounts.iter().filter(|m| m.local) {
-        for location in candidates(&mount.path) {
-            if local_path(location.trash.root(), &mounts).is_ok()
+    for top in roots {
+        for location in candidates(&top, &mounts) {
+            if local_location(&location, &mounts).is_ok()
                 && location.handles(false).is_ok()
                 && !out.contains(&location)
             {
@@ -1185,14 +1215,109 @@ mod tests {
     }
     #[test]
     fn mount_decode_is_shared_single_pass_and_network_is_skipped() {
-        let mounts=parse_mounts(b"1 0 0:1 / /a\\040b\\134040c\\011d\\012e\xff rw - ext4 disk rw\n2 0 0:2 / /a\\040b\\134040c\\011d\\012e\xff/remote rw - fuse.sshfs ssh rw\n");
+        let mounts=parse_mounts(b"1 0 0:1 / / rw - ext4 disk rw\n2 1 0:2 / /a\\040b\\134040c\\011d\\012e\xff rw - ext4 disk rw\n3 2 0:3 / /a\\040b\\134040c\\011d\\012e\xff/remote rw - fuse.sshfs ssh rw\n").unwrap();
+        let raw = Path::new(OsStr::from_bytes(b"/a b\\040c\td\ne\xff"));
+        assert_eq!(mounts.resolve(raw).unwrap().mount_point, raw);
+        assert!(local_path(raw, &mounts).is_ok());
+        assert!(local_path(&raw.join("remote/file"), &mounts).is_err());
+    }
+    fn table(rows: &[(u64, u64, &str, &str)], reverse: bool) -> Vec<u8> {
+        let mut rows: Vec<_> = rows
+            .iter()
+            .map(|(id, parent, path, kind)| {
+                format!("{id} {parent} 0:1 / {path} rw - {kind} source rw\n")
+            })
+            .collect();
+        if reverse {
+            rows.reverse();
+        }
+        rows.concat().into_bytes()
+    }
+    #[test]
+    fn visible_overmount_and_hidden_descendants_are_refused_before_trash_discovery() {
+        for kind in ["fuse.custom-peer", "nfs4", "cifs", "unknownfs"] {
+            for reverse in [false, true] {
+                for equal in [false, true] {
+                    let mut rows = vec![
+                        (1, 0, "/", "ext4"),
+                        (2, 1, "/synthetic/share/deep", "ext4"),
+                        (3, 1, "/synthetic/share", "ext4"),
+                        (4, 1, "/synthetic/local", "btrfs"),
+                    ];
+                    if equal {
+                        rows.push((5, 3, "/synthetic/share", kind));
+                    } else {
+                        rows.retain(|r| r.0 != 3);
+                        rows.push((5, 1, "/synthetic/share", kind));
+                    }
+                    let mounts = parse_mounts(&table(&rows, reverse)).unwrap();
+                    assert!(
+                        local_path(Path::new("/synthetic/share/deep/file"), &mounts).is_err(),
+                        "{kind} reverse={reverse} equal={equal}"
+                    );
+                    assert!(local_path(Path::new("/synthetic/local/file"), &mounts).is_ok());
+                    let roots = inventory_roots(&mounts).unwrap();
+                    assert!(
+                        !roots.iter().any(|p| p.starts_with("/synthetic/share")),
+                        "{roots:?}"
+                    );
+                    assert!(roots.contains(&PathBuf::from("/synthetic/local")));
+                }
+            }
+        }
+    }
+    #[test]
+    fn ambiguous_topology_refuses_inventory_but_keeps_unrelated_paths_available() {
+        for reverse in [false, true] {
+            let mounts = parse_mounts(&table(
+                &[
+                    (1, 0, "/", "ext4"),
+                    (2, 1, "/synthetic/share", "ext4"),
+                    (3, 1, "/synthetic/share", "fuse.custom-peer"),
+                    (4, 1, "/synthetic/local", "btrfs"),
+                ],
+                reverse,
+            ))
+            .unwrap();
+            assert!(local_path(Path::new("/synthetic/share/file"), &mounts).is_err());
+            assert!(local_path(Path::new("/synthetic/local/file"), &mounts).is_ok());
+            assert!(inventory_roots(&mounts).is_err());
+        }
+    }
+    #[test]
+    fn shared_trash_is_classified_before_any_candidate_open() {
+        let mounts = parse_mounts(&table(
+            &[
+                (1, 0, "/", "ext4"),
+                (2, 1, "/synthetic/volume/.Trash", "fuse.custom-peer"),
+            ],
+            false,
+        ))
+        .unwrap();
+        SHARED_OPEN_PROBE.with(|probe| probe.set(Some(false)));
+        let _ = candidates(Path::new("/synthetic/volume"), &mounts);
         assert_eq!(
-            mounts[0].path.as_os_str().as_bytes(),
-            b"/a b\\040c\td\ne\xff"
+            SHARED_OPEN_PROBE.with(|probe| probe.replace(None)),
+            Some(false)
         );
-        assert!(mounts[0].local);
-        assert!(!mounts[1].local);
-        assert!(local_path(&mounts[1].path, &mounts).is_err());
+    }
+    #[test]
+    fn local_over_autofs_stays_available_without_record_order_assumptions() {
+        for reverse in [false, true] {
+            let mounts = parse_mounts(&table(
+                &[
+                    (1, 0, "/", "ext4"),
+                    (2, 1, "/synthetic/home", "autofs"),
+                    (3, 2, "/synthetic/home", "btrfs"),
+                ],
+                reverse,
+            ))
+            .unwrap();
+            assert!(local_path(Path::new("/synthetic/home/file"), &mounts).is_ok());
+            assert!(inventory_roots(&mounts)
+                .unwrap()
+                .contains(&PathBuf::from("/synthetic/home")));
+        }
     }
     #[test]
     fn late_slot_collision_preserves_source_new_work_and_intent() {
