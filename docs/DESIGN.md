@@ -1596,3 +1596,17 @@ completion. On validation failure, restore the prior mode only while root
 identity/revision and the just-written mode still match; report Partial and
 retain the pending fence. Other traversal errors remain refusals. No permission
 change is performed solely to admit a forward history receipt.
+
+
+### Job worker startup failure
+
+Existing jobs::start/start_with/start_resolved/start_journalled signatures stay
+compatible. If the inner OS thread cannot be created, the returned handle and
+its observers are immediately terminal Failed, with a matching Failed memory
+record and typed `start_error()->Option<JobStartError>`. This case proves the
+worker closure never ran; no mutation or journal publication is fabricated.
+There is no producer to wait for, so wait returns that failure immediately.
+A successfully created worker retains its real join/cleanup ownership and no
+start error; cancellation/timeouts never stand in for its terminal completion.
+APP may use the typed failure as no-effect evidence while holding/reconciling
+its own forward marker. No filesystem I/O is added to GUI observer polling.

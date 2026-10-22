@@ -98,10 +98,23 @@ impl Request {
     }
 }
 
+/// No worker was created, so its closure could not perform any effects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JobStartError {
+    ThreadUnavailable(std::io::ErrorKind),
+}
+impl std::fmt::Display for JobStartError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Could not start the file operation; nothing was changed.")
+    }
+}
+impl std::error::Error for JobStartError {}
+
 /// Owns one running job. Dropping it does NOT kill the worker; call `cancel`.
 pub struct JobHandle {
     progress: Arc<Mutex<JobProgress>>,
     cancel: CancelToken,
+    start_error: Option<JobStartError>,
     join: Option<std::thread::JoinHandle<()>>,
     /// The journal record, filled in as the job runs. Read after completion
     /// to plan an undo.
@@ -113,9 +126,13 @@ pub struct JobHandle {
 pub struct JobObserver {
     progress: Arc<Mutex<JobProgress>>,
     cancel: CancelToken,
+    start_error: Option<JobStartError>,
     record: Arc<Mutex<crate::journal::Job>>,
 }
 impl JobObserver {
+    pub fn start_error(&self) -> Option<JobStartError> {
+        self.start_error
+    }
     pub fn snapshot(&self) -> JobProgress {
         self.progress
             .lock()
@@ -151,10 +168,14 @@ impl JobObserver {
 }
 
 impl JobHandle {
+    pub fn start_error(&self) -> Option<JobStartError> {
+        self.start_error
+    }
     pub fn observer(&self) -> JobObserver {
         JobObserver {
             progress: self.progress.clone(),
             cancel: self.cancel.clone(),
+            start_error: self.start_error,
             record: self.record.clone(),
         }
     }
@@ -345,28 +366,55 @@ fn start_full(
     let worker_cancel = cancel.clone();
     let worker_record = Arc::clone(&record);
 
-    let join = std::thread::Builder::new()
-        .name(format!("gust-job-{id}"))
-        .spawn(move || {
-            run(
-                req,
-                policy,
-                answers,
-                worker_progress,
-                worker_cancel,
-                worker_record,
-                journal,
-                trash,
-            )
-        })
-        .ok();
+    let spawned = spawn_worker(format!("gust-job-{id}"), move || {
+        run(
+            req,
+            policy,
+            answers,
+            worker_progress,
+            worker_cancel,
+            worker_record,
+            journal,
+            trash,
+        )
+    });
+    let (join, start_error) = match spawned {
+        Ok(join) => (Some(join), None),
+        Err(error) => {
+            let failure = JobStartError::ThreadUnavailable(error.kind());
+            // spawn Err guarantees the closure never ran. Publish the failed
+            // record before terminal progress, so observers cannot see a
+            // terminal offer paired with a Planned record.
+            record.lock().unwrap_or_else(|e| e.into_inner()).state = JobState::Failed;
+            let mut state = progress.lock().unwrap_or_else(|e| e.into_inner());
+            state.state = JobState::Failed;
+            state.message = failure.to_string();
+            (None, Some(failure))
+        }
+    };
 
     JobHandle {
         progress,
         cancel,
         join,
         record,
+        start_error,
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    static SPAWN_ERROR:std::cell::Cell<Option<std::io::ErrorKind>>=const { std::cell::Cell::new(None) };
+}
+fn spawn_worker(
+    name: String,
+    worker: impl FnOnce() + Send + 'static,
+) -> std::io::Result<std::thread::JoinHandle<()>> {
+    #[cfg(test)]
+    if let Some(kind) = SPAWN_ERROR.with(|error| error.take()) {
+        return Err(std::io::Error::from(kind));
+    }
+    std::thread::Builder::new().name(name).spawn(worker)
 }
 
 fn set<F: FnOnce(&mut JobProgress)>(p: &Arc<Mutex<JobProgress>>, f: F) {
@@ -1733,5 +1781,104 @@ mod cancel_timing_tests {
             "files went missing: src={in_src} dest={in_dst}"
         );
         fs::remove_dir_all(&d).ok();
+    }
+}
+
+#[cfg(test)]
+mod startup_tests {
+    use super::*;
+    use crate::history::History;
+    use std::{fs, io};
+    #[test]
+    fn injected_spawn_failure_is_terminal_for_all_entrypoints_without_effects() {
+        let root = std::env::temp_dir().join(format!(
+            "gust-startup-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("dest")).unwrap();
+        let source = root.join("source");
+        fs::write(&source, b"keep source").unwrap();
+        let history_path = root.join("state/history.json");
+        let history = History::open(&history_path).unwrap();
+        for entrypoint in 0..4 {
+            let journal = crate::journal::Journal::new(root.join(format!("journal-{entrypoint}")));
+            let request = Request::Move {
+                sources: vec![source.clone()],
+                dest_dir: root.join("dest"),
+            };
+            SPAWN_ERROR.with(|e| e.set(Some(io::ErrorKind::WouldBlock)));
+            let mut job = match entrypoint {
+                0 => start("failed", request, ConflictPolicy::Ask),
+                1 => start_with(
+                    "failed",
+                    request,
+                    ConflictPolicy::Ask,
+                    Some(crate::journal::Journal::new(journal.path())),
+                    None,
+                ),
+                2 => start_resolved(
+                    "failed",
+                    request,
+                    std::collections::HashMap::new(),
+                    Some(crate::journal::Journal::new(journal.path())),
+                    None,
+                ),
+                _ => start_journalled(
+                    "failed",
+                    request,
+                    ConflictPolicy::Ask,
+                    Some(crate::journal::Journal::new(journal.path())),
+                ),
+            };
+            assert!(
+                job.is_finished(),
+                "there is no producer for {:?}",
+                job.snapshot()
+            );
+            assert_eq!(
+                job.start_error(),
+                Some(JobStartError::ThreadUnavailable(io::ErrorKind::WouldBlock))
+            );
+            let observer = job.observer();
+            assert!(observer.is_finished());
+            assert_eq!(observer.start_error(), job.start_error());
+            observer.pause();
+            assert!(!observer.is_paused());
+            observer.cancel();
+            assert_eq!(job.wait().state, JobState::Failed);
+            assert_eq!(observer.record().state, JobState::Failed);
+            assert!(observer.record().entries.is_empty());
+            assert!(observer.record().subtree_identities.is_empty());
+            assert!(
+                !journal.path().exists(),
+                "no worker journal publication is fabricated"
+            );
+            assert_eq!(
+                History::open(&history_path).err().unwrap().kind(),
+                io::ErrorKind::WouldBlock
+            );
+            assert_eq!(fs::read(&source).unwrap(), b"keep source");
+            assert_eq!(fs::read_dir(root.join("dest")).unwrap().count(), 0);
+        }
+        drop(history);
+        drop(History::open(history_path).unwrap());
+        // The one-shot seam did not disable real workers or their join ownership.
+        let mut job = start(
+            "actual",
+            Request::Copy {
+                sources: vec![source.clone()],
+                dest_dir: root.join("dest"),
+            },
+            ConflictPolicy::Ask,
+        );
+        assert!(job.start_error().is_none());
+        assert_eq!(job.wait().state, JobState::Confirmed);
+        assert_eq!(fs::read(root.join("dest/source")).unwrap(), b"keep source");
+        assert_eq!(fs::read(source).unwrap(), b"keep source");
+        fs::remove_dir_all(root).unwrap();
     }
 }
