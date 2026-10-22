@@ -317,3 +317,58 @@ fn cancellation_clears_both_the_preview_and_all_roles() {
     assert_eq!(result.syntax.state, SyntaxState::Cancelled);
     assert!(result.syntax.lines.is_empty());
 }
+
+const CPP_SEPARATED_NUMBERS: [&str; 6] = [
+    "1'000",
+    "0xCA'FE",
+    "0b1010'0101",
+    "1.23'45",
+    "1e1'0",
+    "0x1.A'Bp1'0",
+];
+
+#[test]
+fn cpp_digit_separators_preserve_following_keywords_and_character_literals() {
+    for literal in CPP_SEPARATED_NUMBERS {
+        let input = format!("auto n = {literal};\nreturn n;\nauto c = 'x';\n");
+        let result = render(input.as_bytes(), "x.cpp");
+        assert_ranges(&result);
+        assert!(
+            result.syntax.lines[1]
+                .iter()
+                .any(|s| s.role == SyntaxRole::Keyword && piece(&text(&result)[1], s) == "return"),
+            "following keyword after {literal}"
+        );
+        assert!(
+            result.syntax.lines[0]
+                .iter()
+                .any(|s| s.role == SyntaxRole::Number && piece(&text(&result)[0], s) == literal),
+            "one numeric token for {literal}"
+        );
+        assert!(result.syntax.lines[2]
+            .iter()
+            .any(|s| s.role == SyntaxRole::String && piece(&text(&result)[2], s) == "'x'"));
+    }
+}
+
+#[test]
+fn cpp_digit_separators_do_not_poison_a_window_after_the_number() {
+    for literal in CPP_SEPARATED_NUMBERS {
+        let input = format!("auto n = {literal};\nreturn n;\n");
+        let result = preview_source(
+            &source(input.as_bytes()),
+            OsStr::new("x.cpp"),
+            PreviewWindow { start: 1, count: 1 },
+            &PreviewLimits::default(),
+            &CancelToken::new(),
+        );
+        assert_ranges(&result);
+        assert_eq!(result.syntax.state, SyntaxState::Complete);
+        assert!(
+            result.syntax.lines[0]
+                .iter()
+                .any(|s| s.role == SyntaxRole::Keyword && piece(&text(&result)[0], s) == "return"),
+            "paged keyword after {literal}"
+        );
+    }
+}

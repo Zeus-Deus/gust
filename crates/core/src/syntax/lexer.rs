@@ -79,12 +79,22 @@ impl Lexer {
                         self.quoted(bytes, &mut at, cancel);
                         Some(SyntaxRole::String)
                     } else if c.is_ascii_digit() {
+                        let cpp_hex = self.language == Language::Cpp
+                            && (rest.starts_with("0x") || rest.starts_with("0X"));
                         at += 1;
                         while at < bytes.len() && !cancel.is_cancelled() {
                             let b = bytes[at];
                             if b.is_ascii_alphanumeric()
                                 || b == b'_'
-                                || b == b'.' && bytes.get(at + 1).is_some_and(u8::is_ascii_digit)
+                                // C++ separators belong to the number, not quote state.
+                                || self.language == Language::Cpp
+                                    && b == b'\''
+                                    && bytes[at - 1].is_ascii_hexdigit()
+                                    && bytes.get(at + 1).is_some_and(u8::is_ascii_hexdigit)
+                                || b == b'.'
+                                    && bytes.get(at + 1).is_some_and(|b| {
+                                        b.is_ascii_digit() || cpp_hex && b.is_ascii_hexdigit()
+                                    })
                                 || matches!(b, b'+' | b'-')
                                     && matches!(bytes[at - 1], b'e' | b'E' | b'p' | b'P')
                             {
