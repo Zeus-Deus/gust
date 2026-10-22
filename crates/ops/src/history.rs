@@ -803,16 +803,16 @@ impl History {
             .collect();
         reconcile_mode_lineages(&mut record.steps, &modes);
 
-        if record.entry.kind == HistoryKind::Trash && record.native_trash.is_empty() {
-            record.native_trash = legacy_native_bindings(&record)?;
-            self.store.records[index].native_trash = record.native_trash.clone();
-            self.save()?;
-        }
         let indices: Vec<_> = if undo {
             (0..record.steps.len()).rev().collect()
         } else {
             (0..record.steps.len()).collect()
         };
+        if record.entry.kind == HistoryKind::Trash && record.native_trash.is_empty() {
+            record.native_trash = legacy_native_bindings(&record)?;
+            self.store.records[index].native_trash = record.native_trash.clone();
+            self.save()?;
+        }
         // Check all identities and occupancy before any inverse effect. Names
         // overlapping another step are refused, retaining the whole receipt.
         let mut occupied = std::collections::BTreeSet::new();
