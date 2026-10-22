@@ -184,6 +184,18 @@ pub(crate) fn create_recorded(
     }
     let sources = inventory(&root, input.names, cancel, started)?;
     for (path, source) in &sources {
+        if input.format == ArchiveFormat::SevenZip
+            && (std::str::from_utf8(path.as_os_str().as_bytes()).is_err()
+                || source
+                    .link
+                    .as_ref()
+                    .is_some_and(|target| std::str::from_utf8(target).is_err()))
+        {
+            return Err(ArchiveError::UnsupportedEncoding {
+                format: input.format,
+                member: path.clone(),
+            });
+        }
         let seconds = source.identity.mtime;
         let nanoseconds = u32::try_from(source.identity.mtime_nsec).unwrap_or(u32::MAX);
         if !input

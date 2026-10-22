@@ -443,3 +443,156 @@ fn negative_7z_date_is_typed_before_payload_streaming() {
 fn wide_zip_date_is_typed_before_payload_streaming() {
     unsupported_date_refuses_before_any_payload(ArchiveFormat::Zip, 4_294_967_296);
 }
+
+fn name_round_trip(format: ArchiveFormat, bytes: &[u8]) {
+    use std::os::unix::ffi::OsStringExt;
+    let f = Fixture::new();
+    let source = f.0.join("source");
+    let name = OsString::from_vec(bytes.to_vec());
+    std::fs::write(source.join(&name), b"exact bytes").unwrap();
+    std::os::unix::fs::symlink(std::path::Path::new(&name), source.join("link")).unwrap();
+    let destination = f.0.join("names.archive");
+    io::create_with(
+        &source,
+        &[name.clone(), "link".into()],
+        &destination,
+        format,
+        None,
+        &CancelToken::new(),
+        &mut |_, _, _| {},
+    )
+    .unwrap();
+    let out = f.0.join("out");
+    std::fs::create_dir(&out).unwrap();
+    io::extract(&destination, &out, &Default::default()).unwrap();
+    assert_eq!(std::fs::read(out.join(&name)).unwrap(), b"exact bytes");
+    assert_eq!(
+        std::fs::read_link(out.join("link")).unwrap().as_os_str(),
+        &name
+    );
+}
+#[test]
+fn tar_unicode_name_and_link_target_round_trip() {
+    name_round_trip(ArchiveFormat::TarZstd, "é.txt".as_bytes());
+}
+#[test]
+fn zip_unicode_name_and_link_target_round_trip() {
+    name_round_trip(ArchiveFormat::Zip, "é.txt".as_bytes());
+}
+#[test]
+fn sevenzip_unicode_name_and_link_target_round_trip() {
+    name_round_trip(ArchiveFormat::SevenZip, "é.txt".as_bytes());
+}
+#[test]
+fn tar_raw_name_and_link_target_round_trip() {
+    name_round_trip(ArchiveFormat::TarZstd, b"raw-\xff");
+}
+#[test]
+fn zip_raw_name_and_link_target_round_trip() {
+    name_round_trip(ArchiveFormat::Zip, b"raw-\xff");
+}
+#[test]
+fn sevenzip_raw_name_refuses_before_payload() {
+    use std::os::unix::ffi::OsStringExt;
+    let f = Fixture::new();
+    let source = f.0.join("source");
+    let name = OsString::from_vec(b"raw-\xff".to_vec());
+    std::fs::write(source.join(&name), b"preserve").unwrap();
+    let destination = f.0.join("raw.7z");
+    let mut callbacks = 0;
+    let result = io::create_with(
+        &source,
+        std::slice::from_ref(&name),
+        &destination,
+        ArchiveFormat::SevenZip,
+        None,
+        &CancelToken::new(),
+        &mut |_, _, _| callbacks += 1,
+    );
+    assert_eq!(
+        result,
+        Err(ArchiveError::UnsupportedEncoding {
+            format: ArchiveFormat::SevenZip,
+            member: name.clone().into()
+        })
+    );
+    assert_eq!(callbacks, 0);
+    assert!(!destination.exists());
+    assert_eq!(std::fs::read(source.join(name)).unwrap(), b"preserve");
+}
+
+#[test]
+fn sevenzip_raw_link_target_refuses_before_payload() {
+    use std::os::unix::ffi::OsStringExt;
+    let f = Fixture::new();
+    let source = f.0.join("source");
+    let target = OsString::from_vec(b"raw-\xff".to_vec());
+    std::os::unix::fs::symlink(&target, source.join("z-link")).unwrap();
+    let destination = f.0.join("raw-target.7z");
+    let mut callbacks = 0;
+    let result = io::create_with(
+        &source,
+        &["-dash".into(), "z-link".into()],
+        &destination,
+        ArchiveFormat::SevenZip,
+        None,
+        &CancelToken::new(),
+        &mut |_, _, _| callbacks += 1,
+    );
+    assert_eq!(
+        result,
+        Err(ArchiveError::UnsupportedEncoding {
+            format: ArchiveFormat::SevenZip,
+            member: "z-link".into()
+        })
+    );
+    assert_eq!(callbacks, 0);
+    assert!(!destination.exists());
+    assert_eq!(
+        std::fs::read_link(source.join("z-link"))
+            .unwrap()
+            .as_os_str(),
+        &target
+    );
+}
+#[test]
+fn zip_mixed_unicode_and_opaque_members_keep_exact_names_and_link_targets() {
+    use std::os::unix::ffi::OsStringExt;
+    let f = Fixture::new();
+    let source = f.0.join("source");
+    let names = [
+        OsString::from_vec(b"a-raw-\xff".to_vec()),
+        OsString::from("é.txt"),
+    ];
+    let mut selection = Vec::new();
+    for (index, name) in names.iter().enumerate() {
+        std::fs::write(source.join(name), b"exact").unwrap();
+        let link = format!("link-{index}");
+        std::os::unix::fs::symlink(name, source.join(&link)).unwrap();
+        selection.push(name.clone());
+        selection.push(link.into());
+    }
+    let destination = f.0.join("mixed.zip");
+    io::create_with(
+        &source,
+        &selection,
+        &destination,
+        ArchiveFormat::Zip,
+        None,
+        &CancelToken::new(),
+        &mut |_, _, _| {},
+    )
+    .unwrap();
+    let out = f.0.join("out");
+    std::fs::create_dir(&out).unwrap();
+    io::extract(&destination, &out, &Default::default()).unwrap();
+    for (index, name) in names.iter().enumerate() {
+        assert_eq!(std::fs::read(out.join(name)).unwrap(), b"exact");
+        assert_eq!(
+            std::fs::read_link(out.join(format!("link-{index}")))
+                .unwrap()
+                .as_os_str(),
+            name
+        );
+    }
+}

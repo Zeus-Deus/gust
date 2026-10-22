@@ -37,6 +37,10 @@ pub enum ArchiveError {
         seconds: i64,
         nanoseconds: u32,
     },
+    UnsupportedEncoding {
+        format: ArchiveFormat,
+        member: PathBuf,
+    },
     Unsupported(String),
     Failed(String),
     Cancelled,
@@ -63,6 +67,7 @@ impl ArchiveError {
                 };
                 format!("{} has a date outside the supported {name} creation range; choose another archive format.", member.display())
             }
+            Self::UnsupportedEncoding { member, .. } => format!("{} has a name or link target this archive format cannot represent; choose TAR+Zstd.", member.display()),
             Self::PasswordRequired => "This archive needs a password.".into(),
             Self::IncorrectPassword => "The archive password was not accepted.".into(),
             Self::Unsupported(name) => format!("Gust cannot read {name} as an archive."),
