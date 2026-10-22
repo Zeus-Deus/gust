@@ -120,7 +120,7 @@ pub fn available() -> Result<(), &'static str> {
 }
 
 /// The desktop's raw-PCM player: PipeWire's, else PulseAudio's.
-fn sink_argv() -> Option<Vec<String>> {
+pub(crate) fn sink_argv() -> Option<Vec<String>> {
     let fmt = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
     if crate::sandbox::which("pw-play") {
         return Some(fmt(&[
@@ -237,8 +237,8 @@ impl Player {
         Self::start_worker(path, sink, None)
     }
 
-    pub(crate) fn start_held(input: crate::helper::Input) -> Player {
-        Self::start_worker(Path::new(""), sink_argv(), Some(input))
+    pub(crate) fn start_held(input: crate::helper::Input, sink: Vec<String>) -> Player {
+        Self::start_worker(Path::new(""), Some(sink), Some(input))
     }
 
     fn start_worker(
@@ -406,13 +406,12 @@ fn run(
         if !input.unchanged() {
             return Err("The media file changed; reopen the preview".into());
         }
-        let mut dec = OwnedChild::spawn_input(
+        let mut dec = OwnedChild::spawn_stream_input(
             &helper::pinned_argv(
                 decoder_argv(Path::new("/in/input"), &scratch.0, start_at),
                 &scratch.0,
             ),
             &input,
-            Stdio::piped(),
         )
         .map_err(fail)?;
         let mut out = dec.child().stdout.take().ok_or("no decoder output")?;
@@ -425,6 +424,7 @@ fn run(
         let mut last = Instant::now();
         let mut eof = false;
         let mut progress = Instant::now();
+        let mut revision_check = Instant::now();
         set(s, |st| {
             st.state = PlayState::Playing;
             st.pos = start_at;
@@ -432,6 +432,12 @@ fn run(
         loop {
             if s.stop.load(Ordering::Relaxed) {
                 return Ok(());
+            }
+            if revision_check.elapsed() >= Duration::from_millis(100) {
+                if !input.unchanged() {
+                    return Err("The media file changed; reopen the preview".into());
+                }
+                revision_check = Instant::now();
             }
             let now = Instant::now();
             let dt = now.duration_since(last).as_secs_f64();
@@ -467,6 +473,9 @@ fn run(
             }
             // A blocked decoder or desktop sink cannot block Stop or Seek.
             if sent < pending.len() {
+                if !input.unchanged() {
+                    return Err("The media file changed; reopen the preview".into());
+                }
                 match sink_in.write(&pending[sent..]) {
                     Ok(0) => return Err("the desktop's audio player stopped".into()),
                     Ok(n) => {
@@ -556,6 +565,78 @@ mod tests {
         assert!(p.shared.seek_to.lock().unwrap().is_none());
         p.set_muted(true);
         assert!(p.muted());
+    }
+
+    #[test]
+    fn paused_audio_source_change_refuses_resume_without_relaying_more_pcm() {
+        gust_testkit::skip_unless!(
+            sandbox_available() && gust_testkit::have("ffmpeg"),
+            "AUDIO",
+            "audio helpers missing"
+        );
+        let d = crate::helper::Scratch::new().unwrap();
+        let song = d.0.join("tone.flac");
+        assert!(Command::new("ffmpeg")
+            .args([
+                "-nostdin",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=4"
+            ])
+            .arg(&song)
+            .status()
+            .unwrap()
+            .success());
+        let pcm = d.0.join("heard.raw");
+        let player = Player::start_with_sink(
+            &song,
+            Some(vec![
+                "dd".into(),
+                format!("of={}", pcm.display()),
+                "status=none".into(),
+            ]),
+        );
+        let wait = |wanted: PlayState| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let status = player.status();
+                if status.state == wanted {
+                    return status;
+                }
+                assert_ne!(status.state, PlayState::Failed, "{status:?}");
+                assert!(Instant::now() < deadline, "{status:?}");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+        wait(PlayState::Playing);
+        std::thread::sleep(Duration::from_millis(150));
+        player.set_paused(true);
+        wait(PlayState::Paused);
+        std::thread::sleep(Duration::from_millis(100));
+        let heard = std::fs::metadata(&pcm).unwrap().len();
+        assert!(heard > 0);
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&song)
+            .unwrap()
+            .write_all(b"source changed")
+            .unwrap();
+        player.set_paused(false);
+        let failed = wait(PlayState::Failed);
+        assert!(failed.why.contains("changed"), "{failed:?}");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Arc::strong_count(&player.shared) > 1 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            Arc::strong_count(&player.shared),
+            1,
+            "relay must release decoder and sink"
+        );
+        assert_eq!(std::fs::metadata(pcm).unwrap().len(), heard);
     }
 
     #[test]

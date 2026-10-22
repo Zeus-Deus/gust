@@ -380,6 +380,13 @@ pub fn inspect(
 }
 
 impl PreviewDocument {
+    pub(crate) fn ensure_unchanged(&self) -> Result<(), PreviewError> {
+        if self.input.unchanged() {
+            Ok(())
+        } else {
+            Err(PreviewError::Changed)
+        }
+    }
     pub(crate) fn media_input(&self) -> Result<Input, PreviewError> {
         self.input.try_clone().map_err(Into::into)
     }

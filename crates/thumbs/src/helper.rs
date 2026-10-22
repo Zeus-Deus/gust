@@ -193,6 +193,28 @@ impl OwnedChild {
         args[index + 1] = file.as_raw_fd().to_string().into();
         Self::spawn_inner(&args, Stdio::null(), stdout, Some(file))
     }
+    /// A stdout relay does not monitor host output trees. Remove that write
+    /// surface entirely, rather than treating a per-file limit as a quota.
+    pub fn spawn_stream_input(argv: &[OsString], input: &Input) -> Result<Self, Error> {
+        let mut args = argv.to_owned();
+        let output = args
+            .windows(3)
+            .position(|a| a[0] == "--bind" && a[2] == "/out")
+            .ok_or(Error::Failed)?;
+        args.splice(
+            output..output + 3,
+            [
+                "--size",
+                "1048576",
+                "--tmpfs",
+                "/out",
+                "--remount-ro",
+                "/out",
+            ]
+            .map(OsString::from),
+        );
+        Self::spawn_input(&args, input, Stdio::piped())
+    }
     fn spawn_inner(
         argv: &[OsString],
         stdin: Stdio,
@@ -421,6 +443,40 @@ mod tests {
     use super::*;
     fn shell(script: &str) -> Vec<OsString> {
         vec!["sh".into(), "-c".into(), script.into()]
+    }
+    #[test]
+    fn streaming_spawn_has_no_host_output_write_surface() {
+        gust_testkit::skip_unless!(
+            crate::sandbox::sandbox_available(),
+            "PREVIEWS",
+            "sandbox unavailable"
+        );
+        let d = Scratch::new().unwrap();
+        let path = d.0.join("input");
+        std::fs::write(&path, b"synthetic").unwrap();
+        let input = Input::open(&path, 100).unwrap();
+        let mut spec = crate::sandbox::SandboxSpec::new("/in/input", &d.0);
+        spec.wall_timeout_seconds = 5;
+        let args = argv(&spec, "sh", &["-c", "truncate -s 1 /tmp/canary || exit 1; i=0; written=0; while [ \"$i\" -lt 18 ]; do if truncate -s 8388608 \"/out/f$i\" 2>/dev/null; then written=$((written+1)); fi; i=$((i+1)); done; printf '%s' \"$written\""]);
+        // Exercise the exact constructor used by both direct decoder relays,
+        // outside capture_in and its output-tree monitor.
+        let mut child = OwnedChild::spawn_stream_input(&args, &input).unwrap();
+        let mut output = Vec::new();
+        child
+            .child()
+            .stdout
+            .take()
+            .unwrap()
+            .take(16)
+            .read_to_end(&mut output)
+            .unwrap();
+        assert!(child.child().wait().unwrap().success());
+        assert_eq!(output, b"0", "none of the 18 sparse writes may succeed");
+        assert_eq!(
+            std::fs::read_dir(&d.0).unwrap().count(),
+            1,
+            "only the source fixture is on the host"
+        );
     }
     #[test]
     fn held_input_binding_survives_namespaces_and_placeholder_paths() {

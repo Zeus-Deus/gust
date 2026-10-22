@@ -682,6 +682,19 @@ frames. Optional sound uses the existing PCM player and the same held input
 identity. Missing sound support leaves video available with a reason. Paused
 seeks render one new frame; stopping cancels probing, decoder reads and audio.
 
+Streaming audio/video helpers have no writable host output bind: their `/out`
+is an empty read-only private tmpfs. Their owned streaming spawn path enforces
+this independently of capture/output-tree monitoring. Both relays recheck the
+held source revision periodically, while paused, and before each PCM write or
+frame publication; a changed source stops playback and invalidates video output.
+Only active audio playback supplies the video clock. Ended/failed audio releases
+the video to monotonic timing, so unequal stream lengths still reach video end.
+A successful empty decode after a seek near/beyond the end triggers bounded
+look-behind retries (at most eight, with a shared 15-second deadline), retaining
+the last recovered frame. Paused seeks keep their requested position; seeks at
+or beyond duration reach Ended, and a later seek can restart playback.
+An empty decode at the start or malformed/incomplete PNG output remains an error.
+
 ## 6.10 Scoped content search (`:grep`)
 
 `:find` matches names; `:grep` matches *contents* (plan §2, §4). Both are

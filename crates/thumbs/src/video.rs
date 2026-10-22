@@ -10,7 +10,6 @@ use gust_core::CancelToken;
 use std::{
     io::Read,
     path::Path,
-    process::Stdio,
     sync::{
         atomic::{AtomicBool, AtomicU32, Ordering},
         Arc, Mutex,
@@ -60,6 +59,19 @@ impl Player {
     /// Returns immediately. Poll status on the UI thread; frame data is shared
     /// by Arc, so an unchanged poll never copies a PNG. Only one frame is kept.
     pub fn start(path: &Path, px: u32) -> Self {
+        Self::start_worker(path, px, audio::sink_argv)
+    }
+
+    #[cfg(test)]
+    fn start_with_audio_sink(path: &Path, px: u32, sink: Option<Vec<String>>) -> Self {
+        Self::start_worker(path, px, move || sink)
+    }
+
+    fn start_worker(
+        path: &Path,
+        px: u32,
+        sink: impl FnOnce() -> Option<Vec<String>> + Send + 'static,
+    ) -> Self {
         let shared = Arc::new(Shared {
             status: Mutex::new(Status::default()),
             seek: Mutex::new(None),
@@ -73,11 +85,17 @@ impl Player {
         let result = std::thread::Builder::new()
             .name("gust-video".into())
             .spawn(move || {
-                if let Err(error) = run(&path, px, &s) {
+                // Tool discovery, including the desktop PCM sink, stays on
+                // this worker; tests supply an inert sink through the factory.
+                if let Err(error) = run(&path, px, &s, sink()) {
                     if !s.cancel.is_cancelled() {
                         let mut st = s.status.lock().unwrap_or_else(|e| e.into_inner());
                         st.state = PlayState::Failed;
                         st.why = error.to_string();
+                        if error == PreviewError::Changed {
+                            st.frame = None;
+                            st.frame_id = st.frame_id.wrapping_add(1);
+                        }
                     }
                 }
             });
@@ -110,11 +128,7 @@ impl Player {
         if !seconds.is_finite() {
             return;
         }
-        let max = self
-            .status()
-            .duration
-            .map(|d| (d - 0.05).max(0.0))
-            .unwrap_or(f64::MAX);
+        let max = self.status().duration.unwrap_or(f64::MAX);
         *self.shared.seek.lock().unwrap_or_else(|e| e.into_inner()) = Some(seconds.clamp(0.0, max));
     }
     pub fn set_volume(&self, volume: f32) {
@@ -143,14 +157,17 @@ impl Drop for Player {
     }
 }
 
-fn run(path: &Path, px: u32, s: &Shared) -> Result<(), PreviewError> {
+fn run(path: &Path, px: u32, s: &Shared, sink: Option<Vec<String>>) -> Result<(), PreviewError> {
     if px == 0 || px > preview::MAX_PIXELS {
         return Err(PreviewError::InvalidRequest);
     }
     let doc = preview::inspect(path, PreviewKind::Video, &s.cancel)?;
     let scratch = Scratch::new()?;
-    let audio = if doc.info().has_audio && audio::available().is_ok() {
-        Some(audio::Player::start_held(doc.media_input()?))
+    let audio = if doc.info().has_audio {
+        match sink {
+            Some(sink) => Some(audio::Player::start_held(doc.media_input()?, sink)),
+            None => None,
+        }
     } else {
         None
     };
@@ -165,12 +182,15 @@ fn run(path: &Path, px: u32, s: &Shared) -> Result<(), PreviewError> {
         }
     }
     let mut start = 0.0;
+    let mut decode_start = 0.0;
+    let mut tail_retry = false;
+    let mut tail_attempts = 0u32;
+    let mut tail_deadline = None;
     'decoders: loop {
         helper::check(&s.cancel)?;
-        let mut child = OwnedChild::spawn_input(
-            &doc.stream_argv(&scratch, start, px)?,
+        let mut child = OwnedChild::spawn_stream_input(
+            &doc.stream_argv(&scratch, decode_start, px)?,
             &doc.media_input()?,
-            Stdio::piped(),
         )?;
         let mut pipe = child.child().stdout.take().ok_or(PreviewError::Helper)?;
         helper::nonblocking(&pipe)?;
@@ -180,11 +200,23 @@ fn run(path: &Path, px: u32, s: &Shared) -> Result<(), PreviewError> {
         let mut last = Instant::now();
         let mut last_bytes = Instant::now();
         let mut eof = false;
+        let mut revision_check = Instant::now();
         loop {
             helper::check(&s.cancel)?;
+            if revision_check.elapsed() >= Duration::from_millis(100) {
+                doc.ensure_unchanged()?;
+                revision_check = Instant::now();
+            }
+            if tail_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                return Err(PreviewError::Limit);
+            }
             let requested_seek = s.seek.lock().unwrap_or_else(|e| e.into_inner()).take();
             if let Some(seconds) = requested_seek {
                 start = seconds;
+                decode_start = seconds;
+                tail_retry = false;
+                tail_attempts = 0;
+                tail_deadline = None;
                 if let Some(audio) = &audio {
                     audio.seek(seconds);
                 }
@@ -203,10 +235,10 @@ fn run(path: &Path, px: u32, s: &Shared) -> Result<(), PreviewError> {
                 audio.set_volume(volume);
                 audio.set_muted(muted);
                 let status = audio.status();
-                if matches!(
-                    status.state,
-                    PlayState::Playing | PlayState::Paused | PlayState::Ended
-                ) {
+                if !eof
+                    && !tail_retry
+                    && matches!(status.state, PlayState::Playing | PlayState::Paused)
+                {
                     clock = status.pos.max(start);
                 }
                 if status.state == PlayState::Failed {
@@ -223,7 +255,7 @@ fn run(path: &Path, px: u32, s: &Shared) -> Result<(), PreviewError> {
                 st.pos = clock.min(end);
                 st.volume = volume;
                 st.muted = muted;
-                st.state = if next_frame == 0 {
+                st.state = if next_frame == 0 || (tail_retry && !eof) {
                     PlayState::Loading
                 } else if ended {
                     PlayState::Ended
@@ -233,10 +265,10 @@ fn run(path: &Path, px: u32, s: &Shared) -> Result<(), PreviewError> {
                     PlayState::Playing
                 };
             }
-            if (paused && next_frame > 0)
+            if ((paused && next_frame > 0) && !tail_retry)
                 || ended
                 || eof
-                || start + next_frame as f64 / 12.0 > clock + 0.05
+                || (!tail_retry && start + next_frame as f64 / 12.0 > clock + 0.05)
             {
                 last_bytes = Instant::now();
                 std::thread::sleep(Duration::from_millis(10));
@@ -245,6 +277,7 @@ fn run(path: &Path, px: u32, s: &Shared) -> Result<(), PreviewError> {
             if let Some(len) = frame_length(&buffer)? {
                 let png: Vec<u8> = buffer.drain(..len).collect();
                 let (width, height) = preview::png_dimensions(&png, px)?;
+                doc.ensure_unchanged()?;
                 let mut st = s.status.lock().unwrap_or_else(|e| e.into_inner());
                 st.frame = Some(Arc::new(RasterPage {
                     png,
@@ -262,11 +295,32 @@ fn run(path: &Path, px: u32, s: &Shared) -> Result<(), PreviewError> {
             let mut buf = [0u8; 8192];
             match pipe.read(&mut buf) {
                 Ok(0) => {
-                    if next_frame == 0 || !buffer.is_empty() {
+                    if !buffer.is_empty() {
                         return Err(PreviewError::Output);
                     }
                     match child.child().try_wait().map_err(|_| PreviewError::Helper)? {
-                        Some(status) if status.success() => eof = true,
+                        Some(status) if status.success() => {
+                            if next_frame == 0 {
+                                // Accurate seeks can discard the final source
+                                // frame. Recover a bounded tail, consuming it
+                                // even while paused, and retain its last PNG.
+                                if start == 0.0 || decode_start == 0.0 || tail_attempts == 8 {
+                                    return Err(PreviewError::Output);
+                                }
+                                let look_behind = 0.25 * 2f64.powi(tail_attempts as i32);
+                                decode_start = (start - look_behind).max(0.0);
+                                tail_attempts += 1;
+                                tail_retry = true;
+                                tail_deadline.get_or_insert_with(|| {
+                                    Instant::now() + Duration::from_secs(15)
+                                });
+                                continue 'decoders;
+                            }
+                            eof = true;
+                            if tail_retry {
+                                tail_deadline = None;
+                            }
+                        }
                         Some(_) => return Err(PreviewError::Helper),
                         None => std::thread::sleep(Duration::from_millis(10)),
                     }
@@ -324,6 +378,162 @@ fn frame_length(bytes: &[u8]) -> Result<Option<usize>, PreviewError> {
 mod tests {
     use super::*;
     use std::process::Command;
+
+    fn fixture(
+        directory: &Path,
+        video_seconds: f64,
+        audio_seconds: Option<f64>,
+    ) -> std::path::PathBuf {
+        let path = directory.join("clip.mp4");
+        let mut command = Command::new("ffmpeg");
+        command
+            .args(["-nostdin", "-loglevel", "error", "-f", "lavfi", "-i"])
+            .arg(format!(
+                "testsrc2=size=64x36:rate=12:duration={video_seconds}"
+            ));
+        if let Some(seconds) = audio_seconds {
+            command.args(["-f", "lavfi", "-i"]).arg(format!(
+                "sine=frequency=440:sample_rate=48000:duration={seconds}"
+            ));
+        }
+        command.args(["-c:v", "libx264", "-threads", "1", "-preset", "ultrafast"]);
+        if audio_seconds.is_some() {
+            command.args(["-c:a", "aac"]);
+        }
+        assert!(command.arg(&path).status().unwrap().success());
+        path
+    }
+
+    fn wait_until(player: &Player, predicate: impl Fn(&Status) -> bool) -> Status {
+        let deadline = Instant::now() + Duration::from_secs(8);
+        loop {
+            let status = player.status();
+            if predicate(&status) {
+                return status;
+            }
+            assert_ne!(status.state, PlayState::Failed, "{status:?}");
+            assert!(Instant::now() < deadline, "video timeout: {status:?}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn require_video() -> bool {
+        let cap = preview::capability(PreviewKind::Video);
+        if cap.available() {
+            true
+        } else {
+            gust_testkit::record_skip(
+                "PREVIEWS",
+                &gust_testkit::current_test(),
+                &format!("video tools missing: {:?}", cap.missing),
+            );
+            false
+        }
+    }
+
+    #[test]
+    fn unequal_audio_video_lengths_reach_the_video_end() {
+        if !require_video() {
+            return;
+        }
+        for (video_seconds, audio_seconds) in [(2.0, 0.5), (1.0, 2.0)] {
+            let d = Scratch::new().unwrap();
+            let path = fixture(&d.0, video_seconds, Some(audio_seconds));
+            let pcm = d.0.join("heard.raw");
+            let sink = vec![
+                "dd".into(),
+                format!("of={}", pcm.display()),
+                "status=none".into(),
+            ];
+            let player = Player::start_with_audio_sink(&path, 64, Some(sink));
+            let status = wait_until(&player, |s| s.state == PlayState::Ended);
+            assert!(
+                status.why.is_empty(),
+                "audio must actually play: {status:?}"
+            );
+            assert!(
+                status.pos >= video_seconds.max(audio_seconds) - 0.05,
+                "{status:?}"
+            );
+            assert!(
+                status.frame_id >= (video_seconds * 12.0) as u64 - 1,
+                "{status:?}"
+            );
+            let heard = std::fs::metadata(pcm).unwrap().len() as f64 / audio::BYTES_PER_SEC;
+            assert!(
+                (heard - audio_seconds).abs() < 0.15,
+                "PCM sink received {heard} seconds"
+            );
+        }
+    }
+
+    #[test]
+    fn paused_end_and_beyond_duration_seeks_recover_the_last_frame() {
+        if !require_video() {
+            return;
+        }
+        let d = Scratch::new().unwrap();
+        let path = fixture(&d.0, 2.0, None);
+        let player = Player::start_with_audio_sink(&path, 64, None);
+        let ended = wait_until(&player, |s| s.state == PlayState::Ended);
+        let last_png = &ended.frame.as_ref().unwrap().png;
+        player.set_paused(true);
+        for seconds in [2.0, 200.0] {
+            let before = player.status().frame_id;
+            player.seek(seconds);
+            let status = wait_until(&player, |s| {
+                s.state == PlayState::Ended && s.frame_id > before
+            });
+            assert_eq!(&status.frame.as_ref().unwrap().png, last_png);
+            assert!((status.pos - 2.0).abs() < 0.01, "{status:?}");
+        }
+        let before = player.status().frame_id;
+        player.seek(1.95);
+        let near_end = wait_until(&player, |s| {
+            s.state == PlayState::Paused && s.frame_id > before
+        });
+        assert_eq!(&near_end.frame.as_ref().unwrap().png, last_png);
+        assert!((near_end.pos - 1.95).abs() < 0.01, "{near_end:?}");
+        player.set_paused(false);
+        wait_until(&player, |s| s.state == PlayState::Ended);
+        player.set_paused(true);
+        let before = player.status().frame_id;
+        player.seek(1.0);
+        wait_until(&player, |s| {
+            s.state == PlayState::Paused && s.frame_id > before
+        });
+        player.set_paused(false);
+        wait_until(&player, |s| s.state == PlayState::Ended);
+    }
+
+    #[test]
+    fn paused_video_source_change_refuses_resume_and_invalidates_frame() {
+        use std::io::Write;
+        if !require_video() {
+            return;
+        }
+        let d = Scratch::new().unwrap();
+        let path = fixture(&d.0, 4.0, None);
+        let player = Player::start_with_audio_sink(&path, 64, None);
+        wait_until(&player, |s| s.frame_id >= 2);
+        player.set_paused(true);
+        let paused = wait_until(&player, |s| s.state == PlayState::Paused);
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(path)
+            .unwrap()
+            .write_all(b"source changed")
+            .unwrap();
+        player.set_paused(false);
+        let failed = wait_until(&player, |s| s.state == PlayState::Failed);
+        assert!(failed.why.contains("changed"), "{failed:?}");
+        assert!(failed.frame.is_none());
+        assert_eq!(
+            failed.frame_id,
+            paused.frame_id + 1,
+            "only invalidation, no changed-source frame"
+        );
+    }
 
     #[test]
     fn stream_parser_refuses_hostile_lengths_and_non_png() {
