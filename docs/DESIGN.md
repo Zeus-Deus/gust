@@ -1478,3 +1478,24 @@ one-shot helpers still terminate leftover descendants even after a successful ex
 Host-key scans offer keys for trust only when every key has a fingerprint. Any
 fingerprint helper failure, cancellation or shared-budget exhaustion rejects the
 whole scan; no undisplayed key may remain in a successful trust offer.
+
+### Owned block-device helpers
+
+`remote::block::{mount,unlock,unmount,lock}` run only on a worker, using the
+existing bounded, cancellable owned helper runtime and `helper::CallContext`.
+They retain CORE's device argument builders and unlock parser. Mount returns a
+byte-preserving `PathBuf`; unlock returns the cleartext device string. Neither
+checks candidate metadata, creates a mount directory, probes a device, or performs
+automatic compensation. APP retains kernel-discovery/selection checks and passes
+one cancellation token plus the remaining overall budget across unlock and mount.
+
+`BlockFailure { error: RemoteError, effect: BlockEffect }` distinguishes proven
+`NotStarted`, post-launch `Unknown`, and `Accepted` when the helper reports success
+but its location cannot be decoded safely. Cancellation or timeout after launch
+does not roll back a request already accepted by the device service. Callers must
+check current device state before retrying an uncertain operation. Raw helper
+diagnostics are not returned or logged. Secret bytes are borrowed only for stdin;
+the caller retains and wipes its buffer. Existing input/output and helper-admission
+bounds apply. CLI output is read in the C locale; malformed replies never trigger
+path guesses or filesystem checks. Tests use private executable stand-ins, never
+the real device service, mounts or credentials.

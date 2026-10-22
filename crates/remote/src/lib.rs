@@ -6,6 +6,7 @@
 //! - host-key verification is never disabled
 //! - no secret in argv, env, logs or config files
 
+pub mod block;
 pub mod capabilities;
 pub mod cloud;
 mod command;
