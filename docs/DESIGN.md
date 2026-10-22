@@ -340,6 +340,48 @@ Browsing and downloading can still work; the local source is retained after
 this refusal. Connecting successfully does not imply upload support. Gust
 never substitutes an overwrite-capable rename or replays the refused operation.
 
+### 6.4.3 File-send services
+
+`send::taildrop(target, paths, context)` and
+`send::localsend(peer, paths, context)` return `Result<SendReceipt, SendFailure>`.
+`SendReceipt { accepted_files }` counts receiver protocol acceptance.
+`SendFailure { error, accepted_files, delivery_uncertain }` retains known partial
+completion without claiming rollback. `LocalSendPeer { address: SocketAddr,
+public_key_pin: String }` requires an explicitly trusted SHA-256 SPKI pin
+(`sha256//BASE64`), distinct from LocalSend's certificate fingerprint. The pin
+authenticates self-signed TLS; redirects and proxies are disabled.
+They are explicit sends, never discovery side effects, moves, or source deletion.
+Taildrop uses the installed local Tailscale CLI and reports policy/offline refusal.
+LocalSend uses its v2 prepare/upload/cancel protocol over explicitly pinned TLS;
+receiver approval is required. Session tokens travel in private helper stdin,
+never argv/environment/logs/files. Inputs are bounded regular local files; source
+identity changes refuse transfer. Cancellation best-effort cancels the receiver
+session and reports possible partial delivery. A receipt means protocol acceptance,
+not proof of receiver persistence or physical-device/provider qualification.
+
+`send::inspect_localsend(address, context)` explicitly fetches an untrusted peer
+certificate and returns `LocalSendIdentity { peer, certificate_fingerprint }`.
+The app presents that fingerprint for comparison with the receiver; only an
+explicit trust choice permits `localsend(identity.peer, ...)`. Inspection itself
+never persists trust, sends file metadata, or accepts the inspected identity.
+OpenSSL is used through bounded pipes for certificate/public-key parsing; an
+ephemeral client certificate/key is generated for mutual TLS, retained only in a
+sealed owner-only memfd and reused for every request in that send session. It is
+never written to a disk/config file or passed as secret bytes in argv/env. Inherited TLS-keylog/debug
+settings are removed from owned helpers so they cannot persist session secrets.
+`send::localsend_with_pin(peer, paths, Option<String>, context)` supports a
+receiver PIN through the same private request pipe; the default `localsend`
+adapter supplies no PIN. A rejected PIN is an actionable authentication result,
+never a request to change receiver settings or weaken TLS.
+
+Send source admission refuses every FUSE subtype, including types absent from
+the general remote-stall classifier, before opening or querying source metadata.
+Cancelling LocalSend during prepare/receiver approval best-effort posts `cancel`
+without a session ID using the same trusted peer and client identity. Cleanup
+uses a fresh token and at most one second of the remaining overall budget;
+it preserves the original cancellation and delivery uncertainty and never retries
+file data. This is synthetic protocol coverage, not physical receiver qualification.
+
 ## 6.5 Permanent delete
 
 The one operation with no undo. Reached only where Trash is genuinely
@@ -1470,40 +1512,6 @@ backend receipts require a complete parsed response, never an empty failed parse
 Owned helpers remove inherited TLS keylog settings. Reaper-start failure retains
 bounded ownership, and subsequent admissions also reap completed children.
 
-### 6.4.3 File-send services
-
-`send::taildrop(target, paths, context)` and
-`send::localsend(peer, paths, context)` return `Result<SendReceipt, SendFailure>`.
-`SendReceipt { accepted_files }` counts receiver protocol acceptance.
-`SendFailure { error, accepted_files, delivery_uncertain }` retains known partial
-completion without claiming rollback. `LocalSendPeer { address: SocketAddr,
-public_key_pin: String }` requires an explicitly trusted SHA-256 SPKI pin
-(`sha256//BASE64`), distinct from LocalSend's certificate fingerprint. The pin
-authenticates self-signed TLS; redirects and proxies are disabled.
-They are explicit sends, never discovery side effects, moves, or source deletion.
-Taildrop uses the installed local Tailscale CLI and reports policy/offline refusal.
-LocalSend uses its v2 prepare/upload/cancel protocol over explicitly pinned TLS;
-receiver approval is required. Session tokens travel in private helper stdin,
-never argv/environment/logs/files. Inputs are bounded regular local files; source
-identity changes refuse transfer. Cancellation best-effort cancels the receiver
-session and reports possible partial delivery. A receipt means protocol acceptance,
-not proof of receiver persistence or physical-device/provider qualification.
-
-`send::inspect_localsend(address, context)` explicitly fetches an untrusted peer
-certificate and returns `LocalSendIdentity { peer, certificate_fingerprint }`.
-The app presents that fingerprint for comparison with the receiver; only an
-explicit trust choice permits `localsend(identity.peer, ...)`. Inspection itself
-never persists trust, sends file metadata, or accepts the inspected identity.
-OpenSSL is used through bounded pipes for certificate/public-key parsing; an
-ephemeral client certificate/key is generated for mutual TLS, retained only in a
-sealed owner-only memfd and reused for every request in that send session. It is
-never written to a disk/config file or passed as secret bytes in argv/env. Inherited TLS-keylog/debug
-settings are removed from owned helpers so they cannot persist session secrets.
-`send::localsend_with_pin(peer, paths, Option<String>, context)` supports a
-receiver PIN through the same private request pipe; the default `localsend`
-adapter supplies no PIN. A rejected PIN is an actionable authentication result,
-never a request to change receiver settings or weaken TLS.
-
 Successful SSHFS daemon startup explicitly hands off the accepted filesystem and
 its SSH transport; normal helper retirement must not signal those descendants.
 Only a successful starter exit with drained pipes permits this handoff. Failed,
@@ -1512,11 +1520,3 @@ one-shot helpers still terminate leftover descendants even after a successful ex
 Host-key scans offer keys for trust only when every key has a fingerprint. Any
 fingerprint helper failure, cancellation or shared-budget exhaustion rejects the
 whole scan; no undisplayed key may remain in a successful trust offer.
-
-Send source admission refuses every FUSE subtype, including types absent from
-the general remote-stall classifier, before opening or querying source metadata.
-Cancelling LocalSend during prepare/receiver approval best-effort posts `cancel`
-without a session ID using the same trusted peer and client identity. Cleanup
-uses a fresh token and at most one second of the remaining overall budget;
-it preserves the original cancellation and delivery uncertainty and never retries
-file data. This is synthetic protocol coverage, not physical receiver qualification.
