@@ -287,8 +287,11 @@ pub fn vfs_pending_with_context(
 pub fn parse_vfs_stats_checked(bytes: &[u8]) -> Result<VfsPending, CloudError> {
     let value: serde_json::Value = serde_json::from_slice(bytes)
         .map_err(|_| CloudError::Service(RemoteError::new(ErrorCode::Protocol)))?;
+    // Current rclone nests upload counters in diskCache. Older adapters and
+    // fixtures used the flat shape; malformed nested data must not fall back.
+    let counters = value.get("diskCache").unwrap_or(&value);
     let number = |key: &str| {
-        value[key]
+        counters[key]
             .as_u64()
             .ok_or_else(|| CloudError::Service(RemoteError::new(ErrorCode::Protocol)))
     };
@@ -507,6 +510,17 @@ mod tests {
             .unwrap(),
             VfsPending::default()
         );
+        let nested=parse_vfs_stats_checked(br#"{"uploadsQueued":0,"uploadsInProgress":0,"erroredFiles":0,"diskCache":{"uploadsQueued":2,"uploadsInProgress":1,"erroredFiles":0}}"#).unwrap();
+        assert_eq!(nested.queued, 2);
+        assert!(nested.has_pending());
+        assert!(parse_vfs_stats_checked(
+            br#"{"diskCache":{"uploadsQueued":0,"uploadsInProgress":0}}"#
+        )
+        .is_err());
+        assert!(parse_vfs_stats_checked(
+            br#"{"uploadsQueued":0,"uploadsInProgress":0,"erroredFiles":0,"diskCache":null}"#
+        )
+        .is_err());
     }
 
     #[test]
