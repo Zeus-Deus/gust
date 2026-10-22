@@ -7,7 +7,7 @@ build:
     cargo build --workspace
 
 release:
-    cargo build --workspace --release
+    python3 packaging/build-artifact.py
 
 # Library tests. These need no display and are the fast inner loop.
 # Fixture tests that cannot run are reported as SKIP, never counted as passed.
@@ -15,14 +15,28 @@ test:
     ./tests/run-tests.sh
 
 # Release gate: every fixture must be present. A skip is a failure here.
-# Start the fixtures first (tests/remote-fixture.sh, smb-, nfs-, rclone-,
-# docker-peers.sh) and run inside the desktop session for the clipboard.
+# Provision fixtures explicitly in a disposable environment first.
 test-required:
-    GUST_ALL_REQUIRED=1 GUST_LIVE_CLIPBOARD=1 ./tests/run-tests.sh
+    ./tests/run-tests.sh --required
 
 # Every test including the app crate (needs Qt).
 test-all:
-    cargo test --workspace
+    ./tests/run-tests.sh --workspace
+
+# Qt app Rust tests, with the same skip/ignored/no-tests accounting.
+test-app:
+    ./tests/run-tests.sh --app
+
+# Source-only checks and orchestration regression tests, no desktop/build.
+check-release:
+    python3 tests/test-release-runners.py
+    python3 tests/test-package-artifacts.py
+    python3 tests/check-setup-packaging.py
+    python3 packaging/check-dependencies.py
+
+# Missing prerequisites are explicit SKIP. Required mode rejects every skip.
+release-gates *args:
+    python3 tests/release-gates.py {{args}}
 
 # VM-only Qt model/signal regressions. Use a fresh owned evidence directory:
 # GUST_MODEL_QA_OUT="$PWD/target/model-qa-run" just qa-model-routing
@@ -60,19 +74,19 @@ lint:
 a11y: release
     GUST_BIN=target/release/gust ./tests/a11y.sh
 
-# Desktop QA: drives the REAL window with REAL key events and asserts on the
-# app's own state. Requires a Wayland session (see tests/vmsession).
-qa: build
-    ./tests/qa.sh
+# Native acceptance requires a fresh external output, installed root and the
+# UI-owned safe runner. Missing prerequisites fail the required gate.
+qa *args:
+    python3 tests/release-gates.py --gate native --required {{args}}
 
 # Desktop QA against the RELEASE artifact, which is what users install.
 # The plan requires testing the artifact, not just development source.
-qa-release: release
-    GUST_BIN="$PWD/target/release/gust" ./tests/qa.sh /tmp/gust-qa-release
+qa-release *args:
+    python3 tests/release-gates.py --gate installed --gate native --required {{args}}
 
-# Screenshot every installed Omarchy theme.
-theme-matrix: build
-    ./tests/theme-matrix.sh
+# Private installed-theme matrix through the safe input-free launch journey.
+theme-matrix *args:
+    python3 tests/release-gates.py --gate themes --required {{args}}
 
 bench: release
     ./tests/bench.sh
@@ -87,4 +101,3 @@ fixture:
 
 clean:
     cargo clean
-    rm -rf /tmp/gust-fixture /tmp/gust-qa*
