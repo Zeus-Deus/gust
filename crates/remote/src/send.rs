@@ -200,13 +200,17 @@ struct Source {
     identity: Metadata,
     name: String,
 }
+fn source_filesystem_safe(fstype: &str) -> bool {
+    // NONBLOCK does not bound FUSE lookup/metadata, regardless of subtype.
+    !fstype.starts_with("fuse") && !gust_core::stall::can_stall(fstype)
+}
 impl Source {
     fn open(path: &Path) -> Result<Self, RemoteError> {
         if !path.is_absolute()
             || path
                 .components()
                 .any(|c| c == std::path::Component::ParentDir)
-            || gust_core::stall::fstype_for(path).is_none_or(|fs| gust_core::stall::can_stall(&fs))
+            || gust_core::stall::fstype_for(path).is_none_or(|fs| !source_filesystem_safe(&fs))
         {
             return Err(RemoteError::new(ErrorCode::InvalidInput));
         }
@@ -531,12 +535,22 @@ fn localsend_with_fingerprint(
         let id=i.to_string(); (id.clone(),json!({"id":id,"fileName":s.name,"size":s.identity.len(),"fileType":"application/octet-stream"}))
     }).collect();
     let prepare=json!({"info":{"alias":"Gust","version":"2.2","deviceType":"desktop","fingerprint":fingerprint,"port":0,"protocol":"https","download":false},"files":files}).to_string();
-    let (status, body) = transport(
+    let prepared = transport(
         "prepare-upload",
         Body::Json(&prepare),
         &remaining(ctx, started),
-    )
-    .map_err(|e| failure(e, 0, true))?;
+    );
+    let (status, body) = match prepared {
+        Ok(response) => response,
+        Err(error) => {
+            if error.code == ErrorCode::Cancelled {
+                // The receiver can still be waiting for approval without having
+                // returned a session ID. Closing curl alone does not cancel it.
+                cancel_offer(None, ctx, started, &mut transport);
+            }
+            return Err(failure(error, 0, true));
+        }
+    };
     if status == 204 {
         return Ok(SendReceipt { accepted_files: 0 });
     }
@@ -586,25 +600,36 @@ fn localsend_with_fingerprint(
         })
     })();
     if result.is_err() {
-        // A cancelled token cannot also cancel the cleanup. Charge cleanup to
-        // the remaining call budget and cap it at one second; never retry data.
-        let cleanup = CancelToken::new();
-        let budget = ctx
-            .timeout
-            .saturating_sub(started.elapsed())
-            .min(Duration::from_secs(1));
-        if !budget.is_zero() {
-            let _ = transport(
-                &format!("cancel?sessionId={}", encode(session)),
-                Body::Empty,
-                &CallContext {
-                    cancel: &cleanup,
-                    timeout: budget,
-                },
-            );
-        }
+        cancel_offer(Some(session), ctx, started, &mut transport);
     }
     result.map_err(|e| failure(e, accepted, true))
+}
+fn cancel_offer(
+    session: Option<&str>,
+    ctx: &CallContext<'_>,
+    started: Instant,
+    transport: &mut impl FnMut(&str, Body<'_>, &CallContext<'_>) -> Result<(u16, Vec<u8>), RemoteError>,
+) {
+    // Reuse the transport's trusted peer and client certificate. A cancelled
+    // token cannot cancel cleanup, which remains within the caller's deadline.
+    let cleanup = CancelToken::new();
+    let budget = ctx
+        .timeout
+        .saturating_sub(started.elapsed())
+        .min(Duration::from_secs(1));
+    if !budget.is_zero() {
+        let route = session
+            .map(|s| format!("cancel?sessionId={}", encode(s)))
+            .unwrap_or_else(|| "cancel".into());
+        let _ = transport(
+            &route,
+            Body::Empty,
+            &CallContext {
+                cancel: &cleanup,
+                timeout: budget,
+            },
+        );
+    }
 }
 fn http_error(status: u16) -> RemoteError {
     RemoteError::new(match status {
@@ -631,6 +656,175 @@ mod tests {
             address: "127.0.0.1:1".parse().unwrap(),
             public_key_pin: format!("sha256//{}=", "A".repeat(43)),
         }
+    }
+    #[test]
+    fn all_fuse_source_types_are_refused_before_source_open() {
+        for fs in [
+            "fuse",
+            "fuseblk",
+            "fuse.sshfs",
+            "fuse.rclone",
+            "fuse.custom-peer",
+            "fuseblk.custom",
+            "nfs4",
+            "cifs",
+        ] {
+            assert!(!source_filesystem_safe(fs), "admitted {fs}");
+        }
+        for fs in ["ext4", "btrfs", "xfs", "tmpfs", "overlay"] {
+            assert!(source_filesystem_safe(fs), "refused {fs}");
+        }
+    }
+    #[test]
+    fn prepare_cancellation_cleanup_keeps_original_failure_and_remaining_budget() {
+        let root = fixture("prepare-cleanup");
+        let source = root.join("sample");
+        std::fs::write(&source, b"synthetic payload").unwrap();
+        let token = CancelToken::new();
+        let ctx = CallContext {
+            cancel: &token,
+            timeout: Duration::from_secs(3),
+        };
+        let mut cancelled = false;
+        let error = localsend_with(
+            &peer(),
+            std::slice::from_ref(&source),
+            &ctx,
+            |route, body, context| {
+                if route == "prepare-upload" {
+                    token.cancel();
+                    return Err(RemoteError::new(ErrorCode::Cancelled));
+                }
+                assert_eq!(route, "cancel");
+                assert!(matches!(body, Body::Empty));
+                assert!(!context.cancel.is_cancelled());
+                assert!(context.timeout <= Duration::from_secs(1));
+                cancelled = true;
+                Err(RemoteError::new(ErrorCode::Failed))
+            },
+        )
+        .unwrap_err();
+        assert!(cancelled);
+        assert_eq!(error.error.code, ErrorCode::Cancelled);
+        assert_eq!(error.accepted_files, 0);
+        assert!(error.delivery_uncertain);
+        assert_eq!(std::fs::read(&source).unwrap(), b"synthetic payload");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn cancellation_during_receiver_approval_allows_a_subsequent_offer() {
+        fn request_head(listener: &TcpListener) -> (std::net::TcpStream, String) {
+            let started = Instant::now();
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(e)
+                        if e.kind() == std::io::ErrorKind::WouldBlock
+                            && started.elapsed() < Duration::from_secs(3) =>
+                    {
+                        std::thread::sleep(Duration::from_millis(5))
+                    }
+                    Err(e) => panic!("fixture request: {e}"),
+                }
+            };
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let mut head = Vec::new();
+            let mut byte = [0];
+            while !head.ends_with(b"\r\n\r\n") {
+                stream.read_exact(&mut byte).unwrap();
+                head.push(byte[0]);
+            }
+            let head = String::from_utf8(head).unwrap();
+            let length = head
+                .lines()
+                .find_map(|s| {
+                    s.to_ascii_lowercase()
+                        .strip_prefix("content-length: ")
+                        .and_then(|s| s.parse::<usize>().ok())
+                })
+                .unwrap();
+            if head.to_ascii_lowercase().contains("expect: 100-continue") {
+                stream.write_all(b"HTTP/1.1 100 Continue\r\n\r\n").unwrap();
+            }
+            stream.read_exact(&mut vec![0; length]).unwrap();
+            (stream, head)
+        }
+        fn respond(stream: &mut std::net::TcpStream, code: u16, body: &str) {
+            write!(
+                stream,
+                "HTTP/1.1 {code} Fixture\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+        }
+        let root = fixture("approval");
+        let source = root.join("sample.txt");
+        std::fs::write(&source, b"synthetic approval payload").unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let mut peer = peer();
+        peer.address = listener.local_addr().unwrap();
+        let (ready, waiting) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (pending, head) = request_head(&listener);
+            assert!(head.starts_with("POST /api/localsend/v2/prepare-upload "));
+            // Keep this request pending, as a receiver awaiting approval does.
+            ready.send(()).unwrap();
+            let (mut next, head) = request_head(&listener);
+            if !head.starts_with("POST /api/localsend/v2/cancel ") {
+                // Reproduce the receiver's busy response if curl was merely
+                // disconnected and the original offer remained active.
+                respond(&mut next, 409, "");
+                return false;
+            }
+            respond(&mut next, 200, "");
+            drop(pending);
+            let (mut next, head) = request_head(&listener);
+            assert!(head.starts_with("POST /api/localsend/v2/prepare-upload "));
+            respond(
+                &mut next,
+                200,
+                r#"{"sessionId":"fixture","files":{"0":"fixture-token"}}"#,
+            );
+            let (mut upload, head) = request_head(&listener);
+            assert!(head.starts_with("POST /api/localsend/v2/upload?"));
+            respond(&mut upload, 200, "");
+            true
+        });
+        let token = CancelToken::new();
+        let cancel = token.clone();
+        let canceller = std::thread::spawn(move || {
+            waiting.recv_timeout(Duration::from_secs(3)).unwrap();
+            cancel.cancel();
+        });
+        let first = localsend_with(
+            &peer,
+            std::slice::from_ref(&source),
+            &CallContext {
+                cancel: &token,
+                timeout: Duration::from_secs(5),
+            },
+            |route, body, ctx| request_at(&peer, route, body, ctx, true, None),
+        );
+        canceller.join().unwrap();
+        let second = localsend_with(
+            &peer,
+            std::slice::from_ref(&source),
+            &CallContext {
+                cancel: &CancelToken::new(),
+                timeout: Duration::from_secs(5),
+            },
+            |route, body, ctx| request_at(&peer, route, body, ctx, true, None),
+        );
+        let cancelled = server.join().unwrap();
+        let content = std::fs::read(&source).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+        assert_eq!(first.unwrap_err().error.code, ErrorCode::Cancelled);
+        assert!(cancelled, "waiting receiver offer was not cancelled");
+        assert_eq!(second.unwrap().accepted_files, 1);
+        assert_eq!(content, b"synthetic approval payload");
     }
     #[test]
     fn taildrop_uses_held_source_and_keeps_it_after_success_or_cancel() {

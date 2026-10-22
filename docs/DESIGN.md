@@ -1512,3 +1512,11 @@ one-shot helpers still terminate leftover descendants even after a successful ex
 Host-key scans offer keys for trust only when every key has a fingerprint. Any
 fingerprint helper failure, cancellation or shared-budget exhaustion rejects the
 whole scan; no undisplayed key may remain in a successful trust offer.
+
+Send source admission refuses every FUSE subtype, including types absent from
+the general remote-stall classifier, before opening or querying source metadata.
+Cancelling LocalSend during prepare/receiver approval best-effort posts `cancel`
+without a session ID using the same trusted peer and client identity. Cleanup
+uses a fresh token and at most one second of the remaining overall budget;
+it preserves the original cancellation and delivery uncertainty and never retries
+file data. This is synthetic protocol coverage, not physical receiver qualification.
