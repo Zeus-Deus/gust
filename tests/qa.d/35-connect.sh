@@ -85,6 +85,11 @@ shot 35b-host-key
 wclick left "$(state "' '.join(map(str, d['confirmButtons']['cancel']))")"; sleep 1
 mounted "$NAS" && bad "Cancel still connected" || ok "Cancel connected nothing"
 [[ ! -s "$FIXTURE/.ssh/known_hosts" ]] && ok "and recorded no key" || bad "Cancel wrote a key: $(cat "$FIXTURE/.ssh/known_hosts")"
+wait_for "d['connectOpen']" "True" 10 >/dev/null
+expect "Cancel keeps the connection feedback in context" "d['connectFeedbackTitle']" "Not connected"
+expect_contains "Cancel explains that no key was trusted" "d['connectFeedbackBody']" "No SSH key was trusted"
+key Escape
+wait_for "d['connectOpen']" "False" 10 >/dev/null
 
 say "35c · Trust and connect: the device opens like a folder"
 wclick left "$(pt_of placePoints connect)"

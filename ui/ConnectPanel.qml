@@ -16,6 +16,16 @@ Item {
     property bool open: false
     /// The parsed places_json from the model.
     property var places: ({})
+    property var operation: null
+    readonly property bool busy: root.operation !== null
+    property string feedbackTitle: ""
+    property string feedbackBody: ""
+    property bool feedbackFailed: false
+    readonly property bool needsSshfs: root.places.sshfs === false && (root.places.computers || []).length > 0
+    readonly property string statusTitle: root.feedbackTitle || (root.needsSshfs ? qsTr("Install sshfs to connect computers") : "")
+    readonly property string statusBody: root.feedbackTitle ? root.feedbackBody : root.needsSshfs
+        ? qsTr("Install sshfs with your package manager, then choose Check again. On Omarchy: sudo pacman -S sshfs") : ""
+    signal refreshRequested()
     property int current: 0
     property string selectionKey: ""
     /// One member's stable route key identifies the selected computer even
@@ -62,6 +72,43 @@ Item {
             Qt.callLater(() => root.step(1))
         } else root.hide()
     }
+    function beginFeedback(op, name, title) {
+        if (root.busy) return false
+        root.operation = {op: op, name: name}
+        root.feedbackTitle = title
+        root.feedbackBody = qsTr("Waiting for the result. Closing this panel does not cancel the attempt.")
+        root.feedbackFailed = false
+        root.open = true
+        Qt.callLater(() => { if (root.open) keys.forceActiveFocus() })
+        return true
+    }
+    function completeFeedback(op, name, message) {
+        const pending = root.operation
+        // Share labels are canonicalised by the worker; an empty pending
+        // name matches that one operation. Empty failure names are worker-start failures.
+        if (!pending || pending.op !== op || (pending.name !== "" && name !== "" && pending.name !== name)) return false
+        root.operation = null
+        root.feedbackFailed = message !== ""
+        root.feedbackTitle = message !== "" ? qsTr("Connection problem") : ""
+        root.feedbackBody = message
+        if (message === "" && root.open && (op.endsWith("-connect") || op === "share")) root.hide()
+        return true
+    }
+    function showFeedback(title, body, failed) {
+        if (!root.busy) {
+            root.feedbackTitle = title
+            root.feedbackBody = body
+            root.feedbackFailed = failed
+        }
+        root.open = true
+        Qt.callLater(() => { if (root.open) keys.forceActiveFocus() })
+    }
+    function checkAgain() {
+        if (root.busy) return
+        root.feedbackTitle = ""; root.feedbackBody = ""; root.feedbackFailed = false
+        root.refreshRequested()
+    }
+    onStatusTitleChanged: noticeView.contentY = 0
     function hide() { root.open = false; root.closed() }
     /// Take the keyboard back (after a prompt on top of the panel closed).
     function refocus() { if (root.open) keys.forceActiveFocus() }
@@ -94,9 +141,6 @@ Item {
         const p = root.places || {}
         const out = []
         const note = (t) => out.push({ type: "note", text: t })
-        if (p.sshfs === false)
-            note(qsTr("Computers need sshfs to connect — install it to enable them"))
-
         if (root.selectedComputer) {
             out.push({ type: "action", action: "back", text: qsTr("Back to computers") })
             note(qsTr("Each connection keeps its own account and folder. Interrupted file operations are not retried."))
@@ -176,6 +220,7 @@ Item {
     }
 
     function activate(i) {
+        if (root.busy) return
         const r = rows[i]
         if (!r) return
         if (r.type === "action") {
@@ -190,7 +235,9 @@ Item {
             return
         }
         if (r.lost || (r.kind !== "ssh" && r.available === false)) return
-        root.connectRequested(r.kind, r.name, r.detail, r.user || root.places.localUser || "")
+        const connection = r.computer ? r.computer.routes[0] : r
+        root.connectRequested(connection.kind, connection.name, connection.target || connection.detail,
+                              connection.user || root.places.localUser || "")
     }
 
     /// Window points of each row's buttons, "kind:name" for the main one and
@@ -232,6 +279,7 @@ Item {
                 if (r && r.computer && r.computer.routes.length > 1) root.showRoutes(r.kind + ":" + r.name)
                 event.accepted = true
             }
+            else if (event.key === Qt.Key_R) { root.checkAgain(); event.accepted = true }
             else if (event.key === Qt.Key_Down) { root.step(1); event.accepted = true }
             else if (event.key === Qt.Key_Up) { root.step(-1); event.accepted = true }
             else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
@@ -248,7 +296,7 @@ Item {
         // Sized from what it lists: the title block, every row at its own
         // height, and the footer, so a short list is a short card (it was a
         // fixed 24 rows tall, mostly empty). A long list scrolls.
-        height: Math.min(parent.height - Tokens.spaceXl * 4,
+        height: Math.min(parent.height - Tokens.spaceLg * 2,
                          Math.round(head.implicitHeight + Tokens.spaceXl + Tokens.spaceLg
                                     + root.rowsHeight + Tokens.spaceSm * 2
                                     + foot.implicitHeight + Tokens.spaceXl * 2))
@@ -279,6 +327,76 @@ Item {
                 font.family: Tokens.fontFamily
                 font.pixelSize: Tokens.fontSmall
                 wrapMode: Text.Wrap
+            }
+            Rectangle {
+                id: notice
+                objectName: "connectionNotice"
+                visible: root.statusTitle !== ""
+                width: parent.width
+                height: visible ? Math.min(noticeContents.implicitHeight + Tokens.spaceMd * 2,
+                                           Math.max(Tokens.controlHeight * 2, root.height * 0.30)) : 0
+                color: Tokens.withAlpha(root.feedbackFailed ? Tokens.danger : Tokens.accent, 0.08)
+                border.color: root.feedbackFailed ? Tokens.danger : Tokens.accent
+                border.width: Tokens.borderWidth
+                Flickable {
+                    id: noticeView
+                    anchors.fill: parent
+                    anchors.margins: Tokens.spaceMd
+                    contentHeight: noticeContents.implicitHeight
+                    clip: true
+                    boundsBehavior: Flickable.StopAtBounds
+                    WheelScroll { view: noticeView }
+                    Column {
+                        id: noticeContents
+                        width: parent.width
+                        spacing: Tokens.spaceSm
+                        Text {
+                            objectName: "connectionNoticeTitle"
+                            width: parent.width
+                            text: root.statusTitle
+                            textFormat: Text.PlainText
+                            color: root.feedbackFailed ? Tokens.danger : Tokens.foregroundBright
+                            font.family: Tokens.fontFamily
+                            font.pixelSize: Tokens.fontBody
+                            font.bold: true
+                            wrapMode: Text.Wrap
+                        }
+                        Text {
+                            width: parent.width
+                            text: root.statusBody
+                            textFormat: Text.PlainText
+                            color: Tokens.foreground
+                            font.family: Tokens.fontFamily
+                            font.pixelSize: Tokens.fontSmall
+                            wrapMode: Text.Wrap
+                        }
+                        Rectangle {
+                            objectName: "connectionCheckAgain"
+                            visible: !root.busy
+                            width: checkLabel.implicitWidth + Tokens.spaceLg
+                            height: Tokens.controlHeight
+                            color: "transparent"
+                            border.color: Tokens.accent
+                            border.width: Tokens.borderWidth
+                            Text {
+                                id: checkLabel
+                                anchors.centerIn: parent
+                                text: qsTr("Check again")
+                                textFormat: Text.PlainText
+                                color: Tokens.foreground
+                                font.family: Tokens.fontFamily
+                                font.pixelSize: Tokens.fontSmall
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.checkAgain()
+                            }
+                            Accessible.role: Accessible.Button
+                            Accessible.name: qsTr("Check connection requirements again")
+                        }
+                    }
+                }
             }
         }
 
@@ -441,6 +559,7 @@ Item {
                         }
                         MouseArea {
                             id: offMouse
+                            enabled: !root.busy
                             anchors.fill: parent
                             hoverEnabled: true
                             cursorShape: Qt.PointingHandCursor
@@ -464,7 +583,8 @@ Item {
                             textFormat: Text.PlainText
                             id: mainLabel
                             anchors.centerIn: parent
-                            text: row.isAction ? (row.modelData.action === "back" ? qsTr("Back") : qsTr("Set up"))
+                            text: root.busy ? qsTr("Please wait")
+                                  : row.isAction ? (row.modelData.action === "back" ? qsTr("Back") : qsTr("Set up"))
                                   : row.modelData.connected && !row.modelData.lost ? qsTr("Open")
                                   : row.modelData.computer && row.modelData.computer.routes.length > 1 ? qsTr("Connections…")
                                   : row.modelData.lost ? qsTr("Disconnect first")
@@ -493,7 +613,9 @@ Item {
             anchors.right: parent.right
             anchors.bottom: parent.bottom
             anchors.margins: Tokens.spaceXl
-            text: root.routeKey !== "" ? qsTr("Enter chooses · Escape goes back") : qsTr("Enter connects or opens · Escape closes")
+            text: root.busy ? qsTr("Escape closes · attempt keeps running")
+                  : root.routeKey !== "" ? qsTr("Enter chooses · R checks again · Escape goes back")
+                  : qsTr("Enter connects or opens · R checks again · Escape closes")
             color: Tokens.foregroundDim
             font.family: Tokens.fontFamily
             font.pixelSize: Tokens.fontCaption

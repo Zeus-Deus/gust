@@ -6,12 +6,14 @@ TestCase {
     name: "ComputerConnections"
     width: 1180
     height: 720
+    visible: true
     when: windowShown
 
     ConnectPanel { id: panel }
     SignalSpy { id: connectSpy; target: panel; signalName: "connectRequested" }
     SignalSpy { id: openSpy; target: panel; signalName: "openRequested" }
     SignalSpy { id: offSpy; target: panel; signalName: "disconnectRequested" }
+    SignalSpy { id: refreshSpy; target: panel; signalName: "refreshRequested" }
 
     function route(kind, name, target) {
         return { kind: kind, name: name, detail: target, user: "media", path: "/fixture/" + kind,
@@ -25,13 +27,88 @@ TestCase {
     }
     function actionableRows() { return panel.rows.filter(r => r.type === "place") }
     function init() {
+        test.width = 1180; test.height = 720
         panel.hide()
+        refreshSpy.clear()
+        panel.operation = null
+        panel.feedbackTitle = ""; panel.feedbackBody = ""; panel.feedbackFailed = false
         panel.places = fixture()
         connectSpy.clear(); openSpy.clear(); offSpy.clear()
         panel.show()
         wait(0)
     }
     function cleanup() { panel.hide() }
+    function test_missing_sshfs_has_a_prominent_actionable_notice() {
+        const p = fixture()
+        p.sshfs = false
+        panel.places = p
+        compare(panel.statusTitle, "Install sshfs to connect computers")
+        verify(panel.statusBody.indexOf("sudo pacman -S sshfs") >= 0)
+        waitForRendering(panel)
+        const notice = findChild(panel, "connectionNotice")
+        verify(notice !== null, "Notice object must exist")
+        compare(notice.visible, true, "Notice must be visible; panel=" + panel.visible + ", test=" + test.visible)
+        verify(notice.height > 0, "Notice height=" + notice.height + ", panel=" + panel.height)
+        const check = findChild(panel, "connectionCheckAgain")
+        verify(check && check.visible)
+    }
+    function test_attempt_stays_visible_and_retains_failure() {
+        compare(panel.busy, false)
+        verify(panel.beginFeedback("remote-connect", "studio-lan", "Connecting to studio-lan…"))
+        compare(panel.busy, true)
+        compare(panel.statusTitle, "Connecting to studio-lan…")
+        panel.activate(panel.rows.findIndex(r => r.type === "place"))
+        compare(connectSpy.count, 0, "A second attempt must not start")
+        verify(panel.completeFeedback("remote-connect", "studio-lan", "Connection refused. Check SSH on that computer."))
+        compare(panel.busy, false)
+        compare(panel.open, true)
+        compare(panel.feedbackFailed, true)
+        verify(panel.statusBody.indexOf("Connection refused") >= 0)
+    }
+    function test_check_again_is_a_discovery_action_not_a_connection() {
+        const p = fixture(); p.sshfs = false; panel.places = p
+        waitForRendering(panel)
+        const check = findChild(panel, "connectionCheckAgain")
+        mouseClick(check, check.width / 2, check.height / 2)
+        compare(refreshSpy.count, 1)
+        compare(connectSpy.count, 0)
+        p.sshfs = true; panel.places = JSON.parse(JSON.stringify(p))
+        compare(panel.statusTitle, "", "An installed dependency must not keep nagging")
+    }
+    function test_hidden_attempt_completion_does_not_reopen_or_forget_failure() {
+        panel.beginFeedback("remote-connect", "studio-lan", "Connecting…")
+        panel.hide()
+        compare(panel.busy, true, "Close is not cancellation")
+        verify(panel.completeFeedback("remote-connect", "studio-lan", "Timed out"))
+        compare(panel.open, false, "A late error must not steal focus")
+        panel.show()
+        compare(panel.statusBody, "Timed out")
+    }
+    function test_minimum_window_keeps_notice_and_list_inside_the_card() {
+        test.width = 520; test.height = 320
+        const p = fixture(); p.sshfs = false; panel.places = p
+        waitForRendering(panel)
+        const list = findChild(panel, "connectList")
+        verify(list.height > 0, "List height=" + list.height)
+        const notice = findChild(panel, "connectionNotice")
+        const point = notice.mapToItem(panel, 0, notice.height)
+        verify(point.y <= panel.height, "Notice must fit at the app's minimum size")
+    }
+    function test_success_does_not_leave_an_empty_notice_on_reopen() {
+        panel.beginFeedback("remote-connect", "studio-lan", "Connecting…")
+        verify(panel.completeFeedback("remote-connect", "studio-lan", ""))
+        compare(panel.open, false)
+        panel.show()
+        compare(panel.statusTitle, "")
+    }
+    function test_single_tailnet_computer_connects_to_its_address_not_its_display_summary() {
+        const p = fixture()
+        p.computers[0].routes = [route("tailnet", "studio", "studio.tail.test")]
+        panel.places = p
+        panel.activate(panel.rows.findIndex(r => r.type === "place"))
+        compare(connectSpy.count, 1)
+        compare(connectSpy.signalArguments[0][2], "studio.tail.test", "Tailscale is a display summary, not the SSH destination")
+    }
     function test_one_computer_not_two_sources() {
         compare(actionableRows().length, 1, "One computer must not appear twice")
         compare(actionableRows()[0].name, "studio")

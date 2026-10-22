@@ -315,6 +315,25 @@ Tailscale stops, marked unavailable, so disabling it does not erase the
 connection choices. This is not a claim that a peer is reachable, nor a
 persistent device inventory. No new device is contacted just by looking.
 
+#### Connection feedback
+
+Connection prerequisites and errors live in a prominent, wrapping notice inside
+Connect, not only in the status line. Missing sshfs explains how to install it
+and offers **Check again**; Gust never installs packages or runs privileged
+commands automatically. Checking again refreshes discovery, never connects.
+An explicit attempt keeps the panel open with the named operation in progress,
+blocks duplicate attempts, and retains failures until the next action. Only a
+matching completion from the initiating model clears its progress. Successful
+connections close the panel; closing it manually does not cancel an attempt or
+allow its later failure to steal focus. SSH, Tailscale, cloud setup and network
+shares use the same feedback surface without retaining credentials.
+
+**SSHFS upload limitation:** if a mount does not support atomic no-replace
+rename, Gust refuses publication rather than risk replacing another file.
+Browsing and downloading can still work; the local source is retained after
+this refusal. Connecting successfully does not imply upload support. Gust
+never substitutes an overwrite-capable rename or replays the refused operation.
+
 ## 6.5 Permanent delete
 
 The one operation with no undo. Reached only where Trash is genuinely

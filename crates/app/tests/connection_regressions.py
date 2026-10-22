@@ -68,7 +68,17 @@ QtObject {
         if name.endswith(".qml") and name != "ui/Main.qml":
             shutil.copyfile(source / name, output / Path(name).name)
     controller = (source / "ui/tests/tst_connection_controller.qml.in").read_text()
-    controller = controller.replace("@PLACES_ARRIVED@", block((source / "ui/Main.qml").read_text(), "function placesArrived("))
+    main_source = (source / "ui/Main.qml").read_text()
+    controller = controller.replace("@PLACES_ARRIVED@", block(main_source, "function placesArrived("))
+    functions = ["connectPlace", "tailnetUserEntered", "placeDone", "beginPlaceFeedback", "finishPlaceFeedback", "startTailnetAttempt", "shareAddressEntered", "sharePasswordEntered", "connectShare", "forgetConnectionOwner"]
+    controller = controller.replace("@CONNECTION_FUNCTIONS@", "\n".join(
+        block(main_source, "function " + name + "(") for name in functions if "function " + name + "(" in main_source))
+    controller = controller.replace("@CONNECT_HANDLER@", block(main_source, "onConnectRequested:"))
+    controller = controller.replace("@ACTION_HANDLER@", block(main_source, "onActionRequested: (a) => { connectPanel" ) if "onActionRequested: (a) => { connectPanel" in main_source
+                                    else block(main_source[main_source.index("    ConnectPanel {"):], "onActionRequested:"))
+    controller = controller.replace("@CLOUD_BRANCH@", block(main_source, 'else if (a === "cloud-setup")'))
+    removed = block(main_source, "onObjectRemoved:")
+    controller = controller.replace("@OBJECT_REMOVED@", removed[removed.index("{") + 1:-1])
     (output / "tst_connection_controller.qml").write_text(controller)
     for name in ["home", "runtime", "tmp"]:
         (output / name).mkdir(mode=0o700)

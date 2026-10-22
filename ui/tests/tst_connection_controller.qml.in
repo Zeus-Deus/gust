@@ -13,7 +13,7 @@ Item {
         property var seenLostRoutes: []
         property var dirModel: ({places_json: "{}", location: "/local"})
         property var confirm: ({visible: false})
-        property var prompt: ({visible: false, claimingFocus: false})
+        property var prompt: ({visible: false, claimingFocus: false, close: function() { this.visible = false }})
         QtObject { id: palette; property bool visible: false }
         property var quickLook: ({open: false})
         property var conflictDialog: ({visible: false})
@@ -31,10 +31,42 @@ Item {
             property string routeKey: ""
             function open(title, body, button, danger) { win.recoveryOpened += 1 }
         }
+        property string alertText: ""
+        property var connectionOwner: null
+        property string shareAddress: ""
+        property string shareUser: ""
+        property var pendingTailnet: null
+        property string pendingTailnetUser: ""
+        property var hints: ({message: ""})
+        QtObject {
+            id: fakeModel
+            property bool place_busy: false
+            property string places_json: "{}"
+            property string location: "/local"
+            property string returnError: ""
+            property int connectCalls: 0
+            function remote_connect(name) { connectCalls += 1; place_busy = returnError === ""; return returnError }
+            function cloud_connect(name) { return remote_connect(name) }
+            function tailnet_connect(name, target, user, trust) { return remote_connect(name) }
+            function cloud_setup() { return returnError }
+            function share_check(address) { return "" }
+            function share_mount(address, user, domain, password) { return remote_connect(address) }
+            function request_places() {}
+        }
+        function cloudSetupAction() { const a = "cloud-setup"; if (false) {} @CLOUD_BRANCH@ }
+        function runAction(action) {
+            if (action.startsWith("remote-on:")) dirModel.remote_connect(action.substring(10))
+            else if (action === "cloud-setup") cloudSetupAction()
+        }
+        function forgetConflictOwner(model) {}
+        function refreshActiveModel() {}
+        function removeModel(index, object) { @OBJECT_REMOVED@ }
+        function refreshPlaces() {}
+        @CONNECTION_FUNCTIONS@
         function qaDump(tag) {}
         function runningJobModels() { return [] }
         @PLACES_ARRIVED@
-        ConnectPanel { id: connectPanel; places: win.placesInfo }
+        ConnectPanel { id: connectPanel; places: win.placesInfo; @CONNECT_HANDLER@ @ACTION_HANDLER@ }
     }
     ConfirmDialog { id: recovery; preferCancel: true }
     SignalSpy { id: accepted; target: recovery; signalName: "accepted" }
@@ -51,12 +83,91 @@ Item {
         win.seenLostRoutes = []; win.recoveryOpened = 0
         win.filterInput = {activeFocus: false}; win.searchInput = {activeFocus: false}
         accepted.clear(); rejected.clear()
+        connectPanel.operation = null; connectPanel.feedbackTitle = ""; connectPanel.feedbackBody = ""; connectPanel.feedbackFailed = false
+        connectPanel.hide(); win.connectionOwner = null; win.dirModel = fakeModel
+        fakeModel.place_busy = false; fakeModel.returnError = ""; fakeModel.connectCalls = 0
+        win.placesInfo = {sshfs: true, computers: [{name: "studio", routes: [
+            {kind: "ssh", name: "studio-lan", detail: "192.0.2.10", online: true, connected: false}]}]}
+
     }
     function recoveryFixture() {
         const ssh = route("ssh", "studio-lan", false)
         const tail = route("tailnet", "studio", true)
         win.dirModel = {location: tail.path, places_json: JSON.stringify({
             computers: [{name: "Studio", routes: [ssh, tail]}], ssh: [ssh], tailnet: [tail], cloud: []})}
+    }
+    function test_missing_tool_does_not_close_panel_or_start_a_connection() {
+        win.placesInfo = Object.assign({}, win.placesInfo, {sshfs: false})
+        connectPanel.show(); wait(0)
+        connectPanel.activate(connectPanel.rows.findIndex(r => r.type === "place"))
+        compare(connectPanel.open, true, "A prerequisite refusal stays where Connect was clicked")
+        compare(fakeModel.connectCalls, 0, "Missing tool must be caught before network work")
+        verify(connectPanel.statusBody.indexOf("sudo pacman -S sshfs") >= 0)
+    }
+    function test_actual_connect_handler_tracks_the_matching_worker_result() {
+        connectPanel.show(); wait(0)
+        connectPanel.activate(connectPanel.rows.findIndex(r => r.type === "place"))
+        compare(fakeModel.connectCalls, 1)
+        compare(connectPanel.busy, true, "The real Connect handler must show progress")
+        compare(connectPanel.open, true)
+        const unrelated = {place_busy: false}
+        win.placeDone("remote-connect", "studio-lan", "Other tab failed", unrelated)
+        compare(connectPanel.busy, true, "Other tabs cannot complete this attempt")
+        win.placeDone("remote-connect", "studio-lan", "Connection refused", fakeModel)
+        compare(connectPanel.busy, false)
+        compare(connectPanel.open, true)
+        compare(connectPanel.statusBody, "Connection refused")
+    }
+    function test_tailnet_login_keeps_progress_and_inline_validation_failure() {
+        win.pendingTailnet = {name: "studio", target: "192.0.2.10", model: fakeModel}
+        fakeModel.returnError = "That is not a usable login name."
+        connectPanel.show(); wait(0)
+        win.tailnetUserEntered("invalid login")
+        compare(connectPanel.open, true, "Validation failure must not disappear into the status bar")
+        compare(connectPanel.busy, false)
+        compare(connectPanel.statusBody, fakeModel.returnError)
+        verify(connectPanel.feedbackFailed)
+    }
+    function test_cloud_setup_failure_is_visible_in_the_connect_panel() {
+        fakeModel.returnError = "Cloud storage needs rclone. Install it and check again."
+        connectPanel.show(); wait(0)
+        connectPanel.activate(connectPanel.rows.findIndex(r => r.action === "cloud-setup"))
+        compare(connectPanel.open, true)
+        compare(connectPanel.statusBody, fakeModel.returnError)
+        compare(connectPanel.feedbackFailed, true)
+    }
+    function test_nfs_share_validation_and_worker_errors_stay_in_context() {
+        fakeModel.returnError = "Sharing support is not installed."
+        connectPanel.show(); wait(0)
+        win.shareAddressEntered("nfs://192.0.2.10/export")
+        compare(fakeModel.connectCalls, 1)
+        compare(connectPanel.statusBody, fakeModel.returnError)
+        compare(connectPanel.open, true)
+    }
+    function test_closing_the_initiating_tab_releases_progress_without_claiming_cancellation() {
+        connectPanel.show(); wait(0)
+        win.connectPlace("ssh", "studio-lan", "", "")
+        compare(connectPanel.busy, true)
+        win.removeModel(0, fakeModel)
+        compare(connectPanel.busy, false)
+        verify(connectPanel.statusBody.indexOf("unknown") >= 0, "Closing a tab is not proof that the worker cancelled")
+    }
+    function test_a_duplicate_from_the_palette_reopens_the_existing_progress() {
+        win.connectPlace("ssh", "studio-lan", "", "")
+        compare(connectPanel.busy, true)
+        const title = connectPanel.statusTitle
+        connectPanel.hide()
+        win.connectPlace("cloud", "different-storage", "", "")
+        compare(connectPanel.open, true, "A refused attempt must show the one already running")
+        compare(connectPanel.statusTitle, title)
+        compare(fakeModel.connectCalls, 1)
+    }
+    function test_trust_for_a_closed_owner_explains_why_it_did_not_start() {
+        connectPanel.hide()
+        win.startTailnetAttempt(null, "media", true)
+        compare(connectPanel.open, true)
+        verify(connectPanel.statusBody.indexOf("Choose the computer again") >= 0)
+        compare(fakeModel.connectCalls, 0)
     }
     function test_filter_typing_does_not_lose_focus_to_recovery() {
         recoveryFixture(); win.filterInput = {activeFocus: true}
