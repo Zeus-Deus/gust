@@ -297,3 +297,39 @@ fn late_stage_relocation_at_last_unlink_never_reports_finished() {
     assert!(kept.join("intent.json").exists());
     assert_eq!(fs::read(old.unwrap().join("later")).unwrap(), b"new work");
 }
+
+#[test]
+fn relocated_nested_directory_preserves_remaining_children_after_first_unlink() {
+    let f = Fixture::new();
+    let root = f.0.join("tree");
+    fs::create_dir_all(root.join("nested")).unwrap();
+    for name in ["a", "b"] {
+        fs::write(root.join("nested").join(name), b"admitted child").unwrap();
+    }
+    let kept = f.0.join("relocated-nested");
+    let mut moved = false;
+    let mut finished = false;
+    let error =
+        permanent::delete_permanently_with_progress(&f.0, &root, None, &CancelToken::new(), |p| {
+            finished |= p.phase == DeletePhase::Finished;
+            if p.removed.files == 1 && !moved {
+                let nested = f.stage().join("item/nested");
+                fs::rename(&nested, &kept).unwrap();
+                fs::create_dir(&nested).unwrap();
+                fs::write(nested.join("later"), b"replacement subtree").unwrap();
+                moved = true;
+            }
+        })
+        .unwrap_err();
+    assert_eq!(error.reason, DeleteFailure::Changed);
+    assert_eq!(error.removed, Removed { files: 1, dirs: 0 });
+    assert_eq!(fs::read_dir(&kept).unwrap().count(), 1);
+    assert_eq!(fs::read(kept.join("b")).unwrap(), b"admitted child");
+    assert_eq!(
+        fs::read(f.stage().join("item/nested/later")).unwrap(),
+        b"replacement subtree"
+    );
+    assert!(f.stage().join("intent.json").is_file());
+    assert!(error.locations_uncertain);
+    assert!(!finished);
+}
