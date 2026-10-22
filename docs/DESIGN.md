@@ -1477,11 +1477,16 @@ desktop evidence is not qualification of a new binary, architecture or provider.
   records that exclusion; it never enables ignored tests or counts a benchmark
   as passed. Other ignored/skipped cases still fail required mode. Cancellation
   stops the owned child process group before releasing its build lease.
+  Public failure details are bounded Rust error codes, locked crate identifiers,
+  counts and fixed categories; diagnostic prose/paths remain private.
 - Native and theme gates require an explicitly dedicated disposable desktop,
   their actual tools and the installed binary. They must not start on an
   ordinary shared desktop. The desktop runner owns `/tmp/gust-qa.lock`; callers
   must not wrap it in a second acquisition. A missing prerequisite is SKIP,
   never PASS, and makes a required qualification fail.
+  The current UI runner creates a private headless labwc session; the wrapper
+  must not require or drive the host Hyprland session. A missing/nonempty QML
+  warning ledger fails acceptance. Labwc does not qualify Hyprland visual rules.
 - Package validation checks the staged/installed files, executable formats,
   dynamic library resolution and dependency metadata. A source recipe or a
   successful development-tree launch does not qualify an installed artifact.

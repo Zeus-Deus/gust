@@ -28,6 +28,12 @@ accounting and a command that exits zero without observed tests. A compilation
 failure is a failure even if no test summary was printed. Filters still select
 only their stated tests; filtered-out tests are not evidence of coverage.
 
+Failure summaries additionally expose at most 16 Rust error codes and 16 crate
+names already present in Cargo.lock, plus build-script/native-compiler/test-process
+failure categories. Diagnostic prose, paths, source excerpts and panic payloads
+remain in the private log. Gate output preserves these bounded fields so a
+hosted failure can be investigated without publishing raw evidence.
+
 `--package-unit` explicitly selects `--lib` and filters the one manual disk
 benchmark `recursive::tests::copy_1000_small_files`. Its exclusion is recorded in
 the summary, rather than counted as a pass. Every other ignored test still fails
@@ -80,8 +86,11 @@ legacy desktop/remote fixture script has the same containment.
 The native gate consumes the UI-owned `ui-flea-journeys.sh` contract. Until that
 local script is available, the gate is SKIP. It may be selected from an unpushed
 UI integration checkout using `--native-runner`; that does not authorize
-publishing the UI code. The runner owns `/tmp/gust-qa.lock`, closes the descriptor
-for children, starts/kills only its own Gust PID and verifies focus before input.
+publishing the UI code. The runner owns `/tmp/gust-qa.lock` and closes the
+descriptor for children. The current local UI contract creates a private
+headless labwc compositor and uses its absolute Wayland socket, with synthetic
+HOME/XDG roots. It stops only its own Gust/compositor PIDs; input cannot reach
+the host desktop.
 Callers must not acquire the QA lease again.
 
 ```sh
@@ -91,12 +100,17 @@ GUST_DEDICATED_QA=1 python3 tests/release-gates.py --gate native --required \
   --output /tmp/gust-native-fresh
 ```
 
-Select a synthetic Wayland/Hyprland session only after coordinating with its
-owner. Every HOME/XDG base and fixture belongs inside the runner's output; the
+The private lab needs labwc, grim, wtype, wl-paste, python3 and wlr-randr; the
+UI-owned runner admits these prerequisites. It does not require a host Wayland
+or Hyprland session. Pointer journeys additionally need `GUST_UI_VPTR`; missing
+pointer support leaves those journeys SKIP. Every HOME/XDG base and fixture
+belongs inside the runner's output; the
 Omarchy token source is read-only. The binary must match the current source build
 receipt before input starts. Native runner exits 75 (busy) and 77 (unavailable)
 are SKIP. Its `results.tsv` must account for journeys; mixed PASS/SKIP is still
-SKIP even if the script exits zero. Raw paths, logs and images never reach public
+SKIP even if the script exits zero. The QML warning ledger must be a regular,
+empty `qml-warnings.txt`; a missing ledger or collected runtime error fails
+acceptance. Raw paths, logs and images never reach public
 CI summaries.
 
 The `themes` gate additionally needs `--themes-dir`, ImageMagick and the same
@@ -106,6 +120,8 @@ receipt and requires that theme's background in the window-region capture.
 Missing color files count as skips. A successful subset is not the complete
 installed matrix. It never switches the global theme. The matrix wrapper does
 not hold a lease while the UI runner acquires it.
+Labwc acceptance does not qualify Hyprland blur, transparency or window rules;
+those require separate coordinated acceptance on the intended compositor.
 
 Legacy `tests/qa.sh`, `tests/qa-one.sh`, `tests/theme-matrix.sh`, accessibility and
 benchmark drivers have wider desktop/process/fixture side effects, including

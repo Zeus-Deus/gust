@@ -2,7 +2,10 @@
 """Exercise the shared runner's process boundary with synthetic Cargo output."""
 
 import concurrent.futures
+import contextlib
 import fcntl
+import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -12,6 +15,8 @@ import sys
 import tempfile
 import time
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNNER = ROOT / "tests/run-tests.sh"
@@ -32,7 +37,13 @@ if os.environ.get('CASE') == 'skip':
     Path(os.environ['GUST_SKIP_LEDGER']).write_text('SKIP\\tFIXTURE\\tcase\\tprivate fixture missing\\n')
 if os.environ.get('CASE') != 'empty':
     print('test result: ok. 2 passed; 0 failed; ' + ('1' if os.environ.get('CASE') == 'ignored' else '0') + ' ignored; 0 measured; 0 filtered out;')
-sys.exit(23 if os.environ.get('CASE') == 'failure' else 0)
+if os.environ.get('CASE') == 'diagnostic':
+    print('error[E0425]: private-marker at /synthetic-private/location')
+    print('error: could not compile `gust-app` (test) due to private-marker')
+    print('error: could not compile `private-marker`')
+    print('error: failed to run custom build command: private-marker')
+    print('fatal error: private-marker')
+sys.exit(23 if os.environ.get('CASE') in ('failure', 'diagnostic') else 0)
 """)
         cargo.chmod(0o755)
 
@@ -102,6 +113,16 @@ sys.exit(23 if os.environ.get('CASE') == 'failure' else 0)
         self.assertEqual(result.returncode, 1)
         self.assertEqual(summary["ignored"], 1)
 
+    def test_failure_diagnostics_emit_only_allowlisted_identifiers_and_categories(self):
+        result, summary = self.run_case("diagnostic", "--app", "--required")
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(summary["diagnostics"]["rust_error_codes"], ["E0425"])
+        self.assertEqual(summary["diagnostics"]["failed_crates"], ["gust-app"])
+        self.assertTrue(summary["diagnostics"]["build_script_failure"])
+        self.assertTrue(summary["diagnostics"]["native_compiler_failure"])
+        self.assertNotIn("private-marker", result.stdout + result.stderr)
+        self.assertNotIn("/synthetic-private/", result.stdout + result.stderr)
+
 
 class FixtureContainmentTests(unittest.TestCase):
     def test_fresh_fixture_is_built_and_sibling_data_is_untouched(self):
@@ -139,6 +160,46 @@ class FixtureContainmentTests(unittest.TestCase):
 
 
 class GateAdmissionTests(unittest.TestCase):
+    def test_private_compositor_contract_accounts_for_mixed_skips_and_qml_errors(self):
+        spec = importlib.util.spec_from_file_location("release_gates", ROOT / "tests/release-gates.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        for case, status, exit_code in (("pass", "PASS", 0), ("partial", "SKIP", 1),
+                                       ("warnings", "FAIL", 1), ("missing-ledger", "FAIL", 1)):
+            with self.subTest(case=case), tempfile.TemporaryDirectory(prefix="gust-native-contract-") as temporary:
+                root = Path(temporary)
+                binary = root / "installed/usr/bin/gust"
+                binary.parent.mkdir(parents=True)
+                binary.write_bytes(b"inert fixture; never executed")
+                runner = root / "runner"
+                runner.write_text("""#!/usr/bin/env python3
+import os, sys
+from pathlib import Path
+out = Path(sys.argv[1]); out.mkdir()
+rows = 'journey\\tstatus\\tseconds\\treason\\tartifact\\nlaunch\\tPASS\\t0\\t\\t\\n'
+if os.environ['NATIVE_CASE'] == 'partial':
+    rows += 'layout\\tSKIP\\t0\\tmissing pointer\\t\\n'
+if os.environ['NATIVE_CASE'] != 'missing-ledger':
+    (out / 'qml-warnings.txt').touch()
+if os.environ['NATIVE_CASE'] == 'warnings':
+    (out / 'qml-warnings.txt').write_text('private-runtime-marker')
+(out / 'results.tsv').write_text(rows)
+(out / 'invoked').touch()
+""")
+                runner.chmod(0o755)
+                gate = module.Gates(SimpleNamespace(output=root / "evidence", gate=["native"],
+                    required=True, installed_root=root / "installed", native_runner=runner))
+                # Isolate runner accounting from artifact qualification, which
+                # has its own real-file/provenance suite. No desktop is used.
+                gate.installed_verified = True
+                public = io.StringIO()
+                with patch.dict(os.environ, GUST_DEDICATED_QA="1", WAYLAND_DISPLAY="",
+                                HYPRLAND_INSTANCE_SIGNATURE="", NATIVE_CASE=case), contextlib.redirect_stdout(public):
+                    self.assertEqual(gate.run(), exit_code)
+                self.assertTrue((gate.output / "native/invoked").is_file())
+                self.assertEqual(gate.results[-1]["status"], status)
+                self.assertNotIn("private-runtime-marker", public.getvalue())
+
     def test_cancel_stops_owned_descendants_before_releasing_lease(self):
         # No Gust, compiler or shared lease is involved: exercise the real
         # process boundary with a synthetic child/grandchild and a temp lock.

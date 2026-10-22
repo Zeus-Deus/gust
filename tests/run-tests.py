@@ -21,6 +21,8 @@ RESULT = re.compile(
     r"^test result: (?:ok|FAILED)\. (\d+) passed; (\d+) failed; (\d+) ignored;",
     re.MULTILINE,
 )
+KNOWN_CRATES = frozenset(re.findall(r'^name = "([a-zA-Z0-9_-]+)"$',
+                                  (ROOT / "Cargo.lock").read_text(), re.MULTILINE))
 
 
 def enabled(value):
@@ -52,6 +54,16 @@ def summarize(log, ledger, cargo_exit, required):
         "passed": max(0, passed - skipped), "failed": failed,
         "skipped": skipped, "ignored": ignored, "required": required,
         "accounting_valid": not invalid,
+        # Emit only bounded compiler identifiers/categories, never diagnostic
+        # prose, source excerpts, paths, test names or panic payloads.
+        "diagnostics": {
+            "rust_error_codes": sorted(set(re.findall(r"(?m)^error\[(E\d{4})\]:", log)))[:16],
+            "failed_crates": sorted(set(re.findall(
+                r"(?m)^error: could not compile `([a-zA-Z0-9_-]{1,80})`", log)) & KNOWN_CRATES)[:16],
+            "build_script_failure": "failed to run custom build command" in log,
+            "native_compiler_failure": "fatal error:" in log or ("linking with" in log and "failed" in log),
+            "test_process_failure": "test failed, to rerun pass" in log,
+        },
     }
 
 

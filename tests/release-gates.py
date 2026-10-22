@@ -121,6 +121,7 @@ class Gates:
         if code in {75, 77}:
             self.result(gate, "SKIP", "build prerequisite or lease unavailable")
             return
+        summary = {}
         try:
             summary = json.loads((self.output / (gate + ".log")).read_text())
             status = "FAIL" if code or summary["status"] != "pass" else (
@@ -128,6 +129,10 @@ class Gates:
         except (OSError, ValueError, KeyError):
             status = "FAIL"
         self.result(gate, status, "" if status == "PASS" else "see private test accounting")
+        if status != "PASS":
+            self.results[-1]["test_summary"] = {key: summary[key] for key in (
+                "cargo_exit", "passed", "failed", "skipped", "ignored", "tests_observed", "diagnostics")
+                if key in summary}
 
     def models(self, portable=False):
         scripts = (("model-connections", "connection_regressions.py", False, []),
@@ -164,9 +169,9 @@ class Gates:
         if root is None or not (root / "usr/bin/gust").is_file() or not runner.is_file():
             self.result(name, "SKIP", "installed artifact or UI-owned runner unavailable")
             return
-        if not os.environ.get("WAYLAND_DISPLAY") or any(not shutil.which(p) for p in ("hyprctl", "grim")):
-            self.result(name, "SKIP", "Wayland acceptance tools unavailable")
-            return
+        # The UI-owned runner creates a private headless labwc session and
+        # admits its own tools. Requiring the host's Wayland/Hyprland session
+        # would reject the isolated path and encourage unsafe host coupling.
         if self.installed_verified is None:
             self.installed_verified = self.command("native-artifact-preflight", [sys.executable,
                 str(ROOT / "packaging/check-package.py"), "--root", str(root),
@@ -190,6 +195,9 @@ class Gates:
             if journeys and set(journeys) != {row["journey"] for row in rows}:
                 raise ValueError("requested journey not accounted for")
             status = "FAIL" if code or "FAIL" in statuses else "SKIP" if "SKIP" in statuses else "PASS"
+            warnings = output / "qml-warnings.txt"
+            if warnings.is_symlink() or not warnings.is_file() or warnings.stat().st_size:
+                status = "FAIL"
         except (OSError, KeyError, ValueError):
             status = "FAIL"
         self.result(name, status, "" if status == "PASS" else "native journey incomplete")
