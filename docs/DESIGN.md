@@ -384,7 +384,7 @@ file data. This is synthetic protocol coverage, not physical receiver qualificat
 
 Send admission uses CORE's shared byte-preserving mount-table classification.
 Kernel-escaped mount names (backslash, tab, newline and space) must select the
-actual longest component-prefix mount before the source is opened; classification
+visible mount by mount-ID/parent topology before the source is opened; classification
 must not canonicalize or query the source path. Synthetic mount-table-to-admission
 regressions cover FUSE subtypes, NFS and CIFS under escaped mount names. Exercise
 the shared parser and the pre-open policy together; a filesystem-name policy
@@ -397,6 +397,17 @@ The APP worker calls it before shelf `OwnedPath`/`Target` or shown-selection
 identity validation, then uses the existing send handlers. Source opening repeats this
 same guard; identity checks remain required afterward. The check does not make
 subsequent filesystem calls atomic with changes to the kernel mount table.
+
+Send admission must refuse mount visibility that the shared classification cannot
+establish. A stacked local/FUSE or network mount must not become eligible because
+of table order, equal mount-path lengths, or a longer descendant entry hidden by
+an ambiguous ancestor. Synthetic stacked-table tests exercise the same admission
+guard without candidate I/O; callers must not substitute a first/last-row rule.
+Production fixtures use `stall::fstype_from_mountinfo(path, bytes)`, matching
+`fstype_for` without opening candidates. The conservative flat-table compatibility
+seam remains covered separately. A uniquely resolved local mount over autofs stays
+eligible; remote mounts and descendants hidden below them cannot borrow the type
+of a covered local mount. An ambiguous subtree does not reject unrelated siblings.
 
 ## 6.5 Permanent delete
 

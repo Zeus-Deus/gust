@@ -709,7 +709,7 @@ mod tests {
         );
     }
     #[test]
-    fn escaped_mount_tables_reach_send_admission_before_source_io() {
+    fn escaped_mountinfo_reaches_send_admission_before_source_io() {
         use std::ffi::OsString;
         use std::os::unix::ffi::OsStringExt;
         let names: &[(&[u8], &[u8])] = &[
@@ -728,16 +728,16 @@ mod tests {
         ];
         for fstype in ["fuse.synthetic-peer", "nfs4", "cifs"] {
             for (encoded, decoded) in names {
-                let mut mounts = b"root / ext4 rw 0 0\npeer ".to_vec();
+                let mut mounts = b"1 0 0:1 / / rw - ext4 root rw\n2 1 0:2 / ".to_vec();
                 mounts.extend_from_slice(encoded);
-                mounts.extend_from_slice(format!(" {fstype} rw 0 0\n").as_bytes());
+                mounts.extend_from_slice(format!(" rw - {fstype} peer rw\n").as_bytes());
                 let mut bytes = decoded.to_vec();
                 bytes.extend_from_slice(b"/payload.txt");
                 let path = PathBuf::from(OsString::from_vec(bytes));
-                let actual = gust_core::stall::fstype_from_mounts(&path, &mounts).unwrap();
+                let actual = gust_core::stall::fstype_from_mountinfo(&path, &mounts).unwrap();
                 assert_eq!(actual, fstype);
                 assert_eq!(
-                    check_source_location_with(&path, |p| gust_core::stall::fstype_from_mounts(
+                    check_source_location_with(&path, |p| gust_core::stall::fstype_from_mountinfo(
                         p, &mounts
                     ))
                     .unwrap_err()
@@ -750,12 +750,119 @@ mod tests {
                 let mut sibling = decoded.to_vec();
                 sibling.extend_from_slice(b"-sibling/payload.txt");
                 let sibling = PathBuf::from(OsString::from_vec(sibling));
-                let actual = gust_core::stall::fstype_from_mounts(&sibling, &mounts).unwrap();
+                let actual = gust_core::stall::fstype_from_mountinfo(&sibling, &mounts).unwrap();
                 assert_eq!(actual, "ext4");
                 assert!(check_source_location_with(&sibling, |p| {
-                    gust_core::stall::fstype_from_mounts(p, &mounts)
+                    gust_core::stall::fstype_from_mountinfo(p, &mounts)
                 })
                 .is_ok());
+            }
+        }
+    }
+    #[test]
+    fn stacked_mount_tables_never_admit_sources_by_record_order() {
+        let path = Path::new("/synthetic/share/leaf/payload.txt");
+        let sibling = Path::new("/synthetic/share-sibling/payload.txt");
+        for fstype in ["fuse.custom-peer", "nfs4", "cifs"] {
+            for remote_first in [false, true] {
+                for hidden_descendant in [false, true] {
+                    let local = "local /synthetic/share ext4 rw 0 0\n";
+                    let remote = format!("peer /synthetic/share {fstype} rw 0 0\n");
+                    let mut mounts = b"root / ext4 rw 0 0\n".to_vec();
+                    for entry in if remote_first {
+                        [remote.as_str(), local]
+                    } else {
+                        [local, remote.as_str()]
+                    } {
+                        mounts.extend_from_slice(entry.as_bytes());
+                    }
+                    if hidden_descendant {
+                        mounts.extend_from_slice(b"local /synthetic/share/leaf ext4 rw 0 0\n");
+                    }
+                    assert!(
+                        check_source_location_with(path, |p| {
+                            gust_core::stall::fstype_from_mounts(p, &mounts)
+                        })
+                        .is_err(),
+                        "admitted ambiguous {fstype}: remote_first={remote_first}, hidden_descendant={hidden_descendant}"
+                    );
+                    assert!(check_source_location_with(sibling, |p| {
+                        gust_core::stall::fstype_from_mounts(p, &mounts)
+                    })
+                    .is_ok());
+                }
+            }
+        }
+    }
+    #[test]
+    fn visible_mount_topology_controls_send_admission_without_candidate_io() {
+        let path = Path::new("/synthetic/share/leaf/payload.txt");
+        let sibling = Path::new("/synthetic/share-sibling/payload.txt");
+        for fstype in ["fuse.custom-peer", "nfs4", "cifs"] {
+            let cases = [
+                (
+                    "remote over local, including hidden local descendant",
+                    format!(
+                        "2 1 0:2 / /synthetic/share rw - ext4 local rw\n\
+                         3 2 0:3 / /synthetic/share rw - {fstype} peer rw\n\
+                         4 2 0:4 / /synthetic/share/leaf rw - ext4 hidden rw\n"
+                    ),
+                    false,
+                ),
+                (
+                    "local over autofs, including hidden remote descendant",
+                    format!(
+                        "2 1 0:2 / /synthetic/share rw - autofs trigger rw\n\
+                         3 2 0:3 / /synthetic/share rw - btrfs local rw\n\
+                         4 2 0:4 / /synthetic/share/leaf rw - {fstype} hidden rw\n"
+                    ),
+                    true,
+                ),
+                (
+                    "hidden local descendant without duplicate ancestor path",
+                    format!(
+                        "2 1 0:2 / /synthetic/share/leaf rw - ext4 hidden rw\n\
+                         3 1 0:3 / /synthetic/share rw - {fstype} peer rw\n"
+                    ),
+                    false,
+                ),
+                (
+                    "ambiguous siblings, including a longer local descendant",
+                    format!(
+                        "2 1 0:2 / /synthetic/share rw - ext4 local rw\n\
+                         3 1 0:3 / /synthetic/share rw - {fstype} peer rw\n\
+                         4 2 0:4 / /synthetic/share/leaf rw - ext4 local rw\n"
+                    ),
+                    false,
+                ),
+                (
+                    "visible local descendant attached to the remote mount",
+                    format!(
+                        "2 1 0:2 / /synthetic/share rw - {fstype} peer rw\n\
+                         3 2 0:3 / /synthetic/share/leaf rw - ext4 local rw\n"
+                    ),
+                    true,
+                ),
+            ];
+            for (label, rows, expected) in cases {
+                let table = format!("1 0 0:1 / / rw - ext4 root rw\n{rows}");
+                for reverse in [false, true] {
+                    let mut rows: Vec<_> = table.lines().collect();
+                    if reverse {
+                        rows.reverse();
+                    }
+                    let table = rows.join("\n");
+                    for (path, allowed) in [(path, expected), (sibling, true)] {
+                        assert_eq!(
+                            check_source_location_with(path, |p| {
+                                gust_core::stall::fstype_from_mountinfo(p, table.as_bytes())
+                            })
+                            .is_ok(),
+                            allowed,
+                            "{label}: {fstype}, reverse={reverse}, path={path:?}"
+                        );
+                    }
+                }
             }
         }
     }
