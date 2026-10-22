@@ -642,6 +642,35 @@ and stale-preview fences, not operation/Undo authority. Remote callers still
 need explicit opt-in and stall isolation; cancellation cannot interrupt a
 blocked kernel syscall. Existing Quick Look APIs remain compatibility paths.
 
+### 6.9.3 Bounded code roles (core)
+
+`syntax::preview_source(&PreviewSource, &OsStr, PreviewWindow, &PreviewLimits,
+&CancelToken)` returns additive `CodePreview { preview: Preview, syntax:
+SyntaxAnnotations }`. The existing text payload and all display budgets remain
+unchanged. Language selection uses only the supplied filename extension; no
+path access, code execution, parser process or browser is involved.
+
+`SyntaxAnnotations` serializes `language` as null or `rust`, `python`,
+`javascript`, `typescript`, `qml`, `c`, `cpp`, `shell`, `go`, `java`; `state` as
+`complete`, `unsupported`, `unavailable`, `limited`, `cancelled`; and `lines` as
+arrays of spans. A span contains `start_utf16`, `len_utf16`, and `role`, where
+role is `keyword`, `string`, `comment` or `number`. Offsets are zero-based UTF-16
+code units into the exact sanitized display line returned in the same preview
+and window. Neither boundary splits a surrogate pair. Spans are ordered and do
+not overlap; uncovered text remains plain. No source strings, markup or colors
+are included in annotations. APP adds `syntax` alongside its existing text
+projection; UI maps roles to theme tokens without interpreting source as HTML.
+
+Complete/limited annotation arrays align with `PreviewPayload::Text.lines`.
+Unknown languages use unsupported/plain fallback; invalid/binary/unavailable
+text has no annotations. A hard 16,384-span cap reports limited and leaves the
+remaining text plain; it never discards plain preview text. Lexical state is
+carried through skipped lines in the bounded source prefix, so paged comments
+and strings retain their roles. Existing byte/row/cell truncation remains in
+`preview.state`, separately from annotation completion. Cancellation clears
+both the preview payload and all spans. These are lexical hints for common
+code families, not grammar validation or executable/source identity.
+
 ## 6.10 Scoped content search (`:grep`)
 
 `:find` matches names; `:grep` matches *contents* (plan §2, §4). Both are
