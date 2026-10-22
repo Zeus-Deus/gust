@@ -1451,3 +1451,8 @@ Untrusted bytes (thumbnail decoding, archive listing) run under
 and a private output directory — or the feature is unavailable. Parent
 validates helper output through a held descriptor: regular file, size bound,
 expected format, no symlink/FIFO.
+
+Video frame helpers have a 1 GiB address-space budget: FFmpeg's decoder and
+scaler threads reserve stacks that can exceed the default 512 MiB even for
+ordinary 1080p clips. This limits virtual address space, not resident memory.
+The CPU, wall-clock, process-count and output-size limits still apply.

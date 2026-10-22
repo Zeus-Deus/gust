@@ -398,7 +398,13 @@ fn pdf_page_in(base: &Path, path: &Path, page: u32, px: u32) -> Result<PathBuf, 
 fn run_helpers(path: &Path, helpers: &[Helper], scratch: &Path) -> Result<Vec<u8>, ThumbError> {
     let mut last = ThumbError::NoHelper;
     for h in helpers {
-        let spec = SandboxSpec::new(path, scratch);
+        let mut spec = SandboxSpec::new(path, scratch);
+        if h.binary == "ffmpegthumbnailer" {
+            // Decoder/scaler thread stacks can exhaust 512 MiB of virtual
+            // address space even for 1080p video, leaving every tile blank.
+            // Match the audio decoder's budget; keep all other limits.
+            spec.address_space_bytes = 1024 * 1024 * 1024;
+        }
         let hargs: Vec<&str> = h.args.iter().map(String::as_str).collect();
         let argv = spec.bwrap_argv(h.binary, &hargs);
         let out_file = scratch.join("thumb.png");
@@ -643,6 +649,52 @@ mod tests {
         // An image is only ever shrunk, never blown up past its own size.
         let img = &helpers_for("image/png", 1024)[0];
         assert!(img.args.iter().any(|a| a == "1024x1024>"));
+    }
+
+    #[test]
+    fn hd_video_frames_render_in_the_sandbox_at_grid_and_quick_look_sizes() {
+        gust_testkit::skip_unless!(
+            sandbox_available()
+                && gust_testkit::have("ffmpeg")
+                && gust_testkit::have("ffmpegthumbnailer"),
+            "thumbnails",
+            "bwrap, ffmpeg or ffmpegthumbnailer is not installed"
+        );
+        let d = tmp("hd-video");
+        let video = d.join("clip.mp4");
+        assert!(Command::new("ffmpeg")
+            .args([
+                "-nostdin",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=1920x1080:rate=25:duration=1",
+                "-c:v",
+                "libx264",
+                "-threads",
+                "1",
+                "-preset",
+                "ultrafast",
+                "-pix_fmt",
+                "yuv420p",
+            ])
+            .arg(&video)
+            .status()
+            .unwrap()
+            .success());
+        let scratch = d.join("output");
+        fs::create_dir(&scratch).unwrap();
+        for size in [ThumbSize::Normal, ThumbSize::XxLarge] {
+            let png = run_helpers(&video, &helpers_for("video/mp4", size.pixels()), &scratch)
+                .unwrap_or_else(|e| panic!("{size:?}: {e}"));
+            let width = u32::from_be_bytes(png[16..20].try_into().unwrap());
+            let height = u32::from_be_bytes(png[20..24].try_into().unwrap());
+            assert_eq!(width, size.pixels());
+            assert_eq!(height, size.pixels() * 9 / 16);
+        }
+        fs::remove_dir_all(d).unwrap();
     }
 
     #[test]
