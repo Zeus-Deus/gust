@@ -15,10 +15,10 @@ ROOT = Path(__file__).resolve().parents[1]
 MANIFESTS = (ROOT / "PKGBUILD", ROOT / "docs/release/PKGBUILD")
 REQUIRED = {
     "openssh", "sshfs", "fuse3", "rclone", "gvfs", "gvfs-afc",
-    "gvfs-smb", "gvfs-nfs", "gvfs-mtp", "gvfs-gphoto2", "usbmuxd", "polkit",
+    "gvfs-smb", "gvfs-nfs", "gvfs-mtp", "gvfs-gphoto2", "gvfs-dnssd", "usbmuxd", "polkit",
 }
-# Every other program Gust calls ships with it, so a fresh install has
-# clipboard, thumbnails, previews, archives, drives and Open with working.
+# Baseline feature helpers are required; optional richer codecs/converters
+# remain explicit capability prerequisites rather than implied qualification.
 FEATURES = {
     "wl-clipboard", "xdg-terminal-exec", "xdg-utils", "zoxide", "bubblewrap",
     "util-linux", "imagemagick", "ffmpegthumbnailer", "ffmpeg",
@@ -115,7 +115,7 @@ class SetupPackagingTests(unittest.TestCase):
                 self.assertFalse(FEATURES - required,
                                  f"missing feature helpers: {sorted(FEATURES - required)}")
 
-    def test_only_user_chosen_services_stay_optional(self):
+    def test_optional_tools_are_explicit_capabilities(self):
         for manifest in MANIFESTS:
             with self.subTest(manifest=str(manifest.relative_to(ROOT))):
                 optional = package_names(shell_array(manifest.read_text(), "optdepends"))

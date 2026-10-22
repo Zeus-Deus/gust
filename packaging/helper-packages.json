@@ -9,7 +9,7 @@
     "sshfs": "sshfs", "tar": "tar", "zstd": "zstd", "udisksctl": "udisks2",
     "wl-copy": "wl-clipboard", "wl-paste": "wl-clipboard", "xdg-mime": "xdg-utils",
     "xdg-open": "xdg-utils", "xdg-terminal-exec": "xdg-terminal-exec", "zoxide": "zoxide",
-    "pkexec": "polkit"
+    "pkexec": "polkit", "/usr/lib/gvfsd-dav": "gvfs-dnssd"
   },
   "optional": {"tailscale": "tailscale", "dcraw_emu": "libraw", "exiftool": "perl-image-exiftool", "libreoffice": "libreoffice-fresh"},
   "session": {"hyprctl": "Hyprland desktop integration", "systemctl": "user session activation"}
