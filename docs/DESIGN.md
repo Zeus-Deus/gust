@@ -608,7 +608,8 @@ never decodes an untrusted byte in Gust's own process.
   sandboxed `ffprobe`, sanitised. Closing Quick Look kills both processes.
 - **Video** shows a frame and says "Enter plays it in your video player".
   Enter in Quick Look closes the preview and opens the file with its
-  default application, as Enter does in the list.
+  media viewer, with neighbouring media available (§6.18.1), as Enter does
+  in the list.
 - A file named like audio that is not audio says "Cannot play: …" and
   shows no controls.
 
@@ -1006,7 +1007,8 @@ phases leaves recoverable temporary names rather than a lost file.
 ## 6.17 Open with…
 
 Mockup B puts `o open with…` next to `enter open`. Enter uses the default
-handler; this is for the other times.
+handler (or the neighbouring-media viewer, §6.18.1); this is for the other
+times.
 
 ### The list comes from the desktop database, not from a command's output
 
@@ -1082,6 +1084,24 @@ Enter on a mixed selection opens only the cursor row, as it always did.
 
 Executables are refused exactly as they are for a single file (§4). Nothing
 about selecting several files makes running one of them safer.
+
+### 6.18.1 Browsing neighbouring media
+
+Activating a regular image, audio or video file opens one `mpv` window with
+the visible media rows in their current display order, starting at the
+activated row. The playlist is a snapshot: filtering and hidden-file settings
+apply, and folders, programs and other documents are skipped. Left / Right
+select the previous / next file and stop at either end; Shift+Left / Right
+seek five seconds, Space pauses, Escape closes. Images stay up until the
+user navigates; completed audio/video stays open too.
+
+The model builds this snapshot from names and cached entry kinds only.
+On a worker, Gust streams a file-URI M3U playlist to mpv's stdin, avoiding
+argv size limits and preserving raw names, including newlines. Keyboard
+bindings apply to this player process only. Non-media, explicit Open with…,
+and multi-selection retain their desktop handlers. If mpv is absent, the
+activated file opens with its desktop handler. Launch errors return to the
+owning model; no system file associations are changed.
 
 ## 6.19 The clipboard other applications can see
 
