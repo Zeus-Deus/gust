@@ -204,16 +204,31 @@ fn source_filesystem_safe(fstype: &str) -> bool {
     // NONBLOCK does not bound FUSE lookup/metadata, regardless of subtype.
     !fstype.starts_with("fuse") && !gust_core::stall::can_stall(fstype)
 }
+
+/// Worker-side check before identity validation or other candidate access.
+/// Reads only the kernel mount table, never the candidate. Opening repeats this
+/// guard; it does not replace identity checks or prevent later mount changes.
+pub fn check_source_location(path: &Path) -> Result<(), RemoteError> {
+    check_source_location_with(path, gust_core::stall::fstype_for)
+}
+fn check_source_location_with(
+    path: &Path,
+    fstype_for: impl FnOnce(&Path) -> Option<String>,
+) -> Result<(), RemoteError> {
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|c| c == std::path::Component::ParentDir)
+        || fstype_for(path).is_none_or(|fs| !source_filesystem_safe(&fs))
+    {
+        Err(RemoteError::new(ErrorCode::InvalidInput))
+    } else {
+        Ok(())
+    }
+}
 impl Source {
     fn open(path: &Path) -> Result<Self, RemoteError> {
-        if !path.is_absolute()
-            || path
-                .components()
-                .any(|c| c == std::path::Component::ParentDir)
-            || gust_core::stall::fstype_for(path).is_none_or(|fs| !source_filesystem_safe(&fs))
-        {
-            return Err(RemoteError::new(ErrorCode::InvalidInput));
-        }
+        check_source_location(path)?;
         let name = path
             .file_name()
             .and_then(|s| s.to_str())
@@ -676,6 +691,24 @@ mod tests {
         }
     }
     #[test]
+    fn location_guard_rejects_bad_shapes_and_unknown_mounts_without_candidate_io() {
+        for path in ["relative/payload.txt", "/synthetic/../payload.txt"] {
+            let path = Path::new(path);
+            let error =
+                check_source_location_with(path, |_| panic!("invalid path queried mount table"))
+                    .unwrap_err();
+            assert_eq!(error.code, ErrorCode::InvalidInput);
+            assert_eq!(check_source_location(path).unwrap_err().code, error.code);
+        }
+        // The pure admission path needs no existing directory or source object.
+        let path = Path::new("/synthetic/not-created/payload.txt");
+        assert!(check_source_location_with(path, |_| Some("ext4".into())).is_ok());
+        assert_eq!(
+            check_source_location_with(path, |_| None).unwrap_err().code,
+            ErrorCode::InvalidInput
+        );
+    }
+    #[test]
     fn escaped_mount_tables_reach_send_admission_before_source_io() {
         use std::ffi::OsString;
         use std::os::unix::ffi::OsStringExt;
@@ -703,7 +736,14 @@ mod tests {
                 let path = PathBuf::from(OsString::from_vec(bytes));
                 let actual = gust_core::stall::fstype_from_mounts(&path, &mounts).unwrap();
                 assert_eq!(actual, fstype);
-                assert!(!source_filesystem_safe(&actual));
+                assert_eq!(
+                    check_source_location_with(&path, |p| gust_core::stall::fstype_from_mounts(
+                        p, &mounts
+                    ))
+                    .unwrap_err()
+                    .code,
+                    ErrorCode::InvalidInput
+                );
 
                 // A textual-prefix sibling belongs to the local root. These
                 // paths never need to exist or be queried to decide admission.
@@ -712,7 +752,10 @@ mod tests {
                 let sibling = PathBuf::from(OsString::from_vec(sibling));
                 let actual = gust_core::stall::fstype_from_mounts(&sibling, &mounts).unwrap();
                 assert_eq!(actual, "ext4");
-                assert!(source_filesystem_safe(&actual));
+                assert!(check_source_location_with(&sibling, |p| {
+                    gust_core::stall::fstype_from_mounts(p, &mounts)
+                })
+                .is_ok());
             }
         }
     }

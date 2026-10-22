@@ -390,6 +390,14 @@ regressions cover FUSE subtypes, NFS and CIFS under escaped mount names. Exercis
 the shared parser and the pre-open policy together; a filesystem-name policy
 alone does not establish correct admission.
 
+`send::check_source_location(path) -> Result<(), RemoteError>` exposes the exact
+absolute/path/filesystem predicate used first by `Source::open`. It reads only
+the kernel mount table, with no candidate open, lstat, stat or canonicalization.
+The APP worker calls it before shelf `OwnedPath`/`Target` or shown-selection
+identity validation, then uses the existing send handlers. Source opening repeats this
+same guard; identity checks remain required afterward. The check does not make
+subsequent filesystem calls atomic with changes to the kernel mount table.
+
 ## 6.5 Permanent delete
 
 The one operation with no undo. Reached only where Trash is genuinely
