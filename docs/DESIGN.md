@@ -1572,3 +1572,13 @@ objects; later children are new work, never adopted as created descendants.
 Forward link creation resolves its parent without following symlinks and
 returns the existing LinkMade identity/target receipt. Bulk path-pair outcomes
 remain an explicit history barrier until pre-mutation receipts are available.
+
+Creation receipts originate before public-name readback. Regular files retain
+the descriptor returned by exclusive creation through write/sync and receipt
+capture. Folder/link creation captures identity in an exclusive mode-0700
+private namespace, then publishes with no-replace and checks the public entry
+against that original identity. A replacement or new child at readback refuses
+the receipt and preserves later work. Cleanup never recursively removes a
+folder produced by this path. This bounds the demonstrated public-name race;
+it does not promise exclusion of all concurrent same-user writers inside the
+private namespace or after final verification.

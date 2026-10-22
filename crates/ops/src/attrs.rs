@@ -221,7 +221,7 @@ pub fn link_name_for(dir: &Path, target: &Path) -> std::ffi::OsString {
 }
 
 /// Make a symbolic link `dir/name` pointing at `target` (absolute). Never
-/// replaces anything: `symlink(2)` fails on an existing name.
+/// replaces anything: publish the privately identified link with no-replace.
 pub fn create_link(target: &Path, dir: &Path, name: &OsStr) -> Result<LinkMade, String> {
     crate::recursive::validate_name(name).map_err(|e| format!("{e}"))?;
     if !target.is_absolute() {
@@ -230,27 +230,20 @@ pub fn create_link(target: &Path, dir: &Path, name: &OsStr) -> Result<LinkMade, 
     let link = dir.join(name);
     let (parent, name) =
         crate::anchor::resolve_parent(&link).map_err(|e| crate::engine::plain_io_message(&e))?;
-    match rustix::fs::symlinkat(target, parent.as_fd(), &name).map_err(std::io::Error::from) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            return Err("something with that name already exists".into())
-        }
-        Err(e) => return Err(crate::engine::plain_io_message(&e)),
-    }
-    let stat = parent
-        .stat_child(&name)
-        .map_err(|e| crate::engine::plain_io_message(&e))?;
-    let held_target = rustix::fs::readlinkat(parent.as_fd(), &name, Vec::new())
-        .map_err(|e| crate::engine::plain_io_message(&e.into()))?;
-    use std::os::unix::ffi::OsStrExt;
-    if held_target.to_bytes() != target.as_os_str().as_bytes() {
-        return Err("the created link changed; it was preserved".into());
-    }
+    let identity =
+        crate::creation_stage::publish(&parent, &name, crate::creation_stage::Kind::Link(target))
+            .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::AlreadyExists {
+                "something with that name already exists".into()
+            } else {
+                crate::engine::plain_io_message(&e)
+            }
+        })?;
     let ident = Ident {
-        dev: stat.st_dev,
-        ino: stat.st_ino,
-        mtime: stat.st_mtime,
-        mtime_nsec: stat.st_mtime_nsec as i64,
+        dev: identity.dev,
+        ino: identity.ino,
+        mtime: identity.mtime,
+        mtime_nsec: identity.mtime_nsec,
     };
     Ok(LinkMade {
         link,
