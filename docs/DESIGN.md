@@ -1605,3 +1605,61 @@ completion. On validation failure, restore the prior mode only while root
 identity/revision and the just-written mode still match; report Partial and
 retain the pending fence. Other traversal errors remain refusals. No permission
 change is performed solely to admit a forward history receipt.
+
+## 7.4 Same-volume Trash and restoration receipts
+
+Read-only `trash::locations(home)` discovers existing validated home and volume
+Trash directories, including both safe shared-sticky `.Trash/uid` and private
+`.Trash-uid` locations. `select_location(path,home)` chooses without creating
+anything. Only admitted `TrashLocation::trash_path(path,cancel)` creates owned
+private storage. Home Trash remains preferred on its filesystem; cross-volume
+copy/delete and permanent-delete fallbacks are never substituted. Layout and
+relative volume restore paths follow the freedesktop Trash specification.
+
+`TrashLocation { trash, topdir }` provides list, trash_path, receipt_named and
+restore. TrashReceipt retains the byte slot, location, exact data/info
+identities and full subtree; APP holds it behind an opaque ID. QML does not
+supply a restore destination. The exclusive private .trashinfo record is
+synced before the no-replace move; data and parent directories are synced
+before success. Info records bind original bytes to the admitted root identity.
+Restoration verifies both records and data, uses no-follow parents and atomic
+no-replace, then moves the exact info record into an exclusive private recovery vault
+after data is durable. No public-name info unlink is performed.
+Changed records, replaced slots, unreadable descendants, new work and occupied
+restore paths refuse with both data and receipt preserved. A crash or late I/O
+error retains enough durable information for inspection; no guessed deletion
+or automatic replay occurs. Legacy free APIs remain compatible.
+
+The backend lists existing locations without mkdir and bounds mount/list/info
+metadata. Unsupported atomic no-replace support stays a refusal. Discovery and
+all Trash I/O run on workers; stalled filesystem syscalls have no asserted
+cancellation deadline. Permanent deletion retains its separate confirmation.
+
+
+Trash receipts expose display projections but privately bind the canonical
+location, byte slot, original path, data/info identities, parent directory
+identities and complete inventory. Mutated projections refuse. Volume paths
+are relative to their bound mount root; home paths are absolute. Bounded proc
+mount parsing uses CORE's shared byte decoder; automatic discovery skips
+network/FUSE/unknown types before touching candidates. Explicit selection also
+refuses these types, with no remote probe or permanent-delete fallback.
+
+`TrashLocation::restore` retains the original information inode in a private
+recovery vault. Worker-only `TrashReceipt::restore_history_supported(cancel)`
+preflights known missing parents without effects. Its RestoredReceipt exposes
+`history_supported()`; recreation
+of missing original parents remains compatible but requires a caller barrier,
+as those parent creations have no inverse receipt. A durable private intent
+precedes parent creation/data movement and remains for inspection. I/O errors
+once intent or metadata has been published carry downcastable `TrashPartial`
+locations; callers never infer no effect from generic Err. Pending artifacts
+are never automatically replayed or recursively removed.
+
+`History::record_trash(label, receipts)` and `record_restored(label, receipts)`
+admit only exact receipt inventories, information bytes and private bindings.
+Trash Undo restores data before retaining info; Redo restores info before data.
+Restoration Undo restores info before data; Redo restores data before retaining
+info. Every internal step uses existing durable pending intent and no-replace
+identity checks. Info inodes survive Undo/Redo, and new descendants, replaced
+parents, records or occupied names refuse. APP still owns forward markers and
+capacity/barrier reservation before effects and holds History through admission.

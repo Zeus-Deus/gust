@@ -483,6 +483,89 @@ impl History {
         }
         self.admit(label, HistoryKind::Create, steps)
     }
+    /// Admit a completed typed Trash move. The original information inode
+    /// participates in both directions, rather than deleting/recreating it.
+    pub fn record_trash(
+        &mut self,
+        label: &str,
+        receipts: &[crate::trash::TrashReceipt],
+    ) -> Result<HistoryEntry, HistoryError> {
+        let mut steps = Vec::new();
+        let mut names = std::collections::BTreeSet::new();
+        for receipt in receipts {
+            receipt.verify(&CancelToken::new())?;
+            receipt.verify_original_parent()?;
+            let data = receipt.data_path();
+            let info = receipt.info_path();
+            for path in [&data, &info, receipt.original_path()] {
+                if !names.insert(path.to_path_buf()) {
+                    return Err(HistoryError::Unsupported(
+                        "Overlapping Trash receipts need a barrier".into(),
+                    ));
+                }
+            }
+            steps.push(move_step(
+                &info,
+                None,
+                vec![TreeNode {
+                    relative: SavedPath::new(Path::new("")),
+                    identity: receipt.info.into(),
+                    mode: receipt.info.mode,
+                }],
+            )?);
+            steps.push(move_step(
+                &data,
+                Some(receipt.original_path()),
+                receipt_tree(&data, &receipt.tree)?,
+            )?);
+            receipt.verify(&CancelToken::new())?;
+            receipt.verify_original_parent()?;
+        }
+        self.admit(label, HistoryKind::Trash, steps)
+    }
+    pub fn record_restored(
+        &mut self,
+        label: &str,
+        receipts: &[crate::trash::RestoredReceipt],
+    ) -> Result<HistoryEntry, HistoryError> {
+        let mut steps = Vec::new();
+        let mut names = std::collections::BTreeSet::new();
+        for receipt in receipts {
+            if !receipt.history_supported() {
+                return Err(HistoryError::Unsupported(
+                    "Restoration created missing parents; preserve a history barrier".into(),
+                ));
+            }
+            receipt.verify(&CancelToken::new())?;
+            let data = receipt.trash.data_path();
+            let info = receipt.trash.info_path();
+            for path in [&data, &info, &receipt.original, receipt.info_path()] {
+                if !names.insert(path.to_path_buf()) {
+                    return Err(HistoryError::Unsupported(
+                        "Overlapping restoration receipts need a barrier".into(),
+                    ));
+                }
+            }
+            steps.push(move_step(
+                &receipt.original,
+                Some(&data),
+                receipt_tree(&data, &receipt.trash.tree)?,
+            )?);
+            steps.push(move_step(
+                receipt.info_path(),
+                Some(&info),
+                vec![TreeNode {
+                    relative: SavedPath::new(Path::new("")),
+                    identity: receipt.trash.info.into(),
+                    mode: receipt.trash.info.mode,
+                }],
+            )?);
+        }
+        for receipt in receipts {
+            receipt.verify(&CancelToken::new())?;
+        }
+        self.admit(label, HistoryKind::Trash, steps)
+    }
     pub fn record_renames(
         &mut self,
         label: &str,
@@ -1122,6 +1205,20 @@ fn compare_tree(root: &Path, expected: &Tree, current: Tree) -> Result<(), Histo
         return Err(HistoryError::Changed(root.to_path_buf()));
     }
     Ok(())
+}
+fn receipt_tree(root: &Path, tree: &BTreeMap<PathBuf, FileIdentity>) -> Result<Tree, HistoryError> {
+    tree.iter()
+        .map(|(path, id)| {
+            Ok(TreeNode {
+                relative: SavedPath::new(
+                    path.strip_prefix(root)
+                        .map_err(|_| HistoryError::IdentityUnknown(path.clone()))?,
+                ),
+                identity: (*id).into(),
+                mode: id.mode,
+            })
+        })
+        .collect()
 }
 fn move_step(present: &Path, restore: Option<&Path>, mut tree: Tree) -> Result<Step, HistoryError> {
     tree.sort_by(|a, b| a.relative.0.cmp(&b.relative.0));

@@ -1,0 +1,1221 @@
+//! Descriptor-bound per-volume Trash and identity receipts.
+use super::{TrashDir, TrashEntry, TrashedItem};
+use crate::{
+    anchor::{self, DirHandle, FileIdentity},
+    history_tree,
+};
+use gust_core::lister::CancelToken;
+use rustix::fs::{Mode, OFlags};
+use std::{
+    collections::BTreeMap,
+    ffi::{OsStr, OsString},
+    fs::File,
+    io::{self, Read, Write},
+    os::unix::ffi::{OsStrExt, OsStringExt},
+    path::{Component, Path, PathBuf},
+};
+#[derive(Debug, Clone, PartialEq)]
+pub struct TrashLocation {
+    pub trash: TrashDir,
+    pub topdir: Option<PathBuf>,
+}
+/// Display projections are not mutation authority; private bindings are checked.
+#[derive(Debug, Clone)]
+pub struct TrashReceipt {
+    pub item: TrashedItem,
+    pub location: TrashLocation,
+    canonical: TrashLocation,
+    original: PathBuf,
+    name: OsString,
+    root_dir: FileIdentity,
+    top_dir: Option<FileIdentity>,
+    original_parent: Option<FileIdentity>,
+    files_dir: FileIdentity,
+    info_dir: FileIdentity,
+    pub(crate) data: FileIdentity,
+    pub(crate) info: FileIdentity,
+    pub(crate) tree: BTreeMap<PathBuf, FileIdentity>,
+    pub(crate) info_bytes: Vec<u8>,
+}
+#[derive(Debug, Clone)]
+pub struct RestoredReceipt {
+    pub original: PathBuf,
+    pub(crate) trash: TrashReceipt,
+    retained_info: PathBuf,
+    retained_dir: FileIdentity,
+    restored_parent: FileIdentity,
+    created_parents: bool,
+}
+impl RestoredReceipt {
+    /// Missing-parent restoration is supported, but those new parents have no inverse.
+    pub fn history_supported(&self) -> bool {
+        !self.created_parents
+    }
+}
+/// An admitted operation may have metadata, intent or data at these locations.
+/// Retain all of them for inspection; an error is not proof of no effects.
+#[derive(Debug)]
+pub struct TrashPartial {
+    pub locations: Vec<PathBuf>,
+    pub cause: String,
+}
+impl std::fmt::Display for TrashPartial {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Trash recovery needs inspection at {:?}: {}",
+            self.locations, self.cause
+        )
+    }
+}
+impl std::error::Error for TrashPartial {}
+fn partial(error: io::Error, locations: Vec<PathBuf>) -> io::Error {
+    let mut locations = locations;
+    if let Some(prior) = error
+        .get_ref()
+        .and_then(|e| e.downcast_ref::<TrashPartial>())
+    {
+        locations.extend(prior.locations.iter().cloned());
+    }
+    locations.sort();
+    locations.dedup();
+    io::Error::new(
+        error.kind(),
+        TrashPartial {
+            locations,
+            cause: error.to_string(),
+        },
+    )
+}
+fn same_dir(dir: &DirHandle, expected: FileIdentity) -> io::Result<()> {
+    let stat = dir.stat_self()?;
+    if (stat.st_dev, stat.st_ino) != (expected.dev, expected.ino) {
+        return Err(invalid("Trash directory was replaced"));
+    }
+    private(dir)
+}
+fn invalid(message: &str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, message)
+}
+fn check(cancel: &CancelToken) -> io::Result<()> {
+    if cancel.is_cancelled() {
+        Err(io::Error::new(
+            io::ErrorKind::Interrupted,
+            "Trash operation cancelled",
+        ))
+    } else {
+        Ok(())
+    }
+}
+fn private(dir: &DirHandle) -> io::Result<()> {
+    let s = dir.stat_self()?;
+    if s.st_uid != rustix::process::geteuid().as_raw() || s.st_mode & 0o077 != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "Trash must be an owned private directory",
+        ));
+    }
+    Ok(())
+}
+fn existing_private(path: &Path) -> io::Result<Option<DirHandle>> {
+    match history_tree::open_dir(path) {
+        Ok(d) => {
+            private(&d)?;
+            Ok(Some(d))
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+fn info_name(name: &OsStr) -> io::Result<OsString> {
+    crate::recursive::validate_name(name).map_err(|e| invalid(&e.to_string()))?;
+    let mut n = name.to_os_string();
+    n.push(".trashinfo");
+    Ok(n)
+}
+fn remap(
+    tree: &BTreeMap<PathBuf, FileIdentity>,
+    from: &Path,
+    to: &Path,
+) -> io::Result<BTreeMap<PathBuf, FileIdentity>> {
+    tree.iter()
+        .map(|(p, id)| {
+            Ok((
+                to.join(
+                    p.strip_prefix(from)
+                        .map_err(|_| invalid("Invalid Trash inventory"))?,
+                ),
+                *id,
+            ))
+        })
+        .collect()
+}
+fn open_info(dir: &DirHandle, name: &OsStr) -> io::Result<(File, FileIdentity, Vec<u8>)> {
+    let mut file = File::from(rustix::fs::openat(
+        dir.as_fd(),
+        name,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?);
+    let st = rustix::fs::fstat(&file)?;
+    if st.st_mode & 0o170000 != 0o100000
+        || st.st_uid != rustix::process::geteuid().as_raw()
+        || st.st_mode & 0o022 != 0
+    {
+        return Err(invalid("Trash information is not an owned regular record"));
+    }
+    let mut bytes = Vec::new();
+    Read::by_ref(&mut file)
+        .take(65537)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > 65536 {
+        return Err(invalid("Trash information exceeds its size bound"));
+    }
+    let id = FileIdentity::from_stat(&st);
+    if !id.matches(&FileIdentity::from_stat(&rustix::fs::fstat(&file)?)) {
+        return Err(invalid("Trash record changed while reading"));
+    }
+    Ok((file, id, bytes))
+}
+fn decode(value: &[u8]) -> io::Result<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < value.len() {
+        if value[i] == b'%' {
+            let pair = value
+                .get(i + 1..i + 3)
+                .ok_or_else(|| invalid("Invalid escaped Trash path"))?;
+            let text =
+                std::str::from_utf8(pair).map_err(|_| invalid("Invalid escaped Trash path"))?;
+            out.push(
+                u8::from_str_radix(text, 16).map_err(|_| invalid("Invalid escaped Trash path"))?,
+            );
+            i += 3;
+        } else {
+            out.push(value[i]);
+            i += 1;
+        }
+    }
+    if out.contains(&0) {
+        return Err(invalid("NUL in Trash path"));
+    }
+    Ok(out)
+}
+fn parse_info(
+    bytes: &[u8],
+    location: &TrashLocation,
+) -> io::Result<(PathBuf, String, Option<crate::journal::RecordedIdentity>)> {
+    let mut lines = bytes.split(|b| *b == b'\n');
+    if lines.next() != Some(b"[Trash Info]".as_slice()) {
+        return Err(invalid("Invalid Trash record header"));
+    }
+    let (mut path, mut date, mut identity) = (None, None, None);
+    for line in lines {
+        if path.is_none() {
+            if let Some(v) = line.strip_prefix(b"Path=") {
+                path = Some(PathBuf::from(OsString::from_vec(decode(v)?)));
+            }
+        }
+        if date.is_none() {
+            if let Some(v) = line.strip_prefix(b"DeletionDate=") {
+                date = Some(
+                    String::from_utf8(v.to_vec()).map_err(|_| invalid("Invalid deletion date"))?,
+                );
+            }
+        }
+        if identity.is_none() {
+            if let Some(v) = line.strip_prefix(b"X-Gust-Identity=") {
+                identity =
+                    Some(serde_json::from_slice(v).map_err(|_| invalid("Invalid Trash identity"))?);
+            }
+        }
+    }
+    let path = path.ok_or_else(|| invalid("Missing Trash path"))?;
+    if path.as_os_str().is_empty()
+        || path
+            .components()
+            .any(|c| !matches!(c, Component::RootDir | Component::Normal(_)))
+    {
+        return Err(invalid("Unsafe Trash path"));
+    }
+    let original = if let Some(top) = &location.topdir {
+        if path.is_absolute() {
+            return Err(invalid("Volume Trash requires a relative restore path"));
+        }
+        top.join(path)
+    } else if path.is_absolute() {
+        path
+    } else {
+        return Err(invalid("Home Trash requires an absolute restore path"));
+    };
+    Ok((
+        original,
+        date.ok_or_else(|| invalid("Missing deletion date"))?,
+        identity,
+    ))
+}
+impl TrashLocation {
+    fn handles(&self, create: bool) -> io::Result<(DirHandle, DirHandle)> {
+        let mounts = mounts()?;
+        for path in [self.trash.root(), &self.trash.files, &self.trash.info] {
+            local_path(path, &mounts)?;
+        }
+        if self.trash.files != self.trash.root().join("files")
+            || self.trash.info != self.trash.root().join("info")
+        {
+            return Err(invalid("Invalid Trash directory layout"));
+        }
+        if let Some(top) = &self.topdir {
+            let uid = rustix::process::geteuid().as_raw();
+            let shared = top.join(".Trash");
+            if self.trash.root() == shared.join(uid.to_string()) {
+                let dir = history_tree::open_dir(&shared)?;
+                if dir.stat_self()?.st_mode & 0o1000 == 0 {
+                    return Err(invalid("Shared Trash has no sticky bit"));
+                }
+            } else if self.trash.root() != top.join(format!(".Trash-{uid}")) {
+                return Err(invalid("Invalid volume Trash root"));
+            }
+        }
+        let root = if create {
+            history_tree::ensure_dir(self.trash.root())?
+        } else {
+            history_tree::open_dir(self.trash.root())?
+        };
+        private(&root)?;
+        for name in ["files", "info"] {
+            if create {
+                match rustix::fs::mkdirat(root.as_fd(), name, Mode::from_bits_truncate(0o700)) {
+                    Ok(()) => rustix::fs::fsync(root.as_fd())?,
+                    Err(rustix::io::Errno::EXIST) => {}
+                    Err(e) => return Err(e.into()),
+                }
+            }
+            private(&root.open_child_dir(OsStr::new(name))?)?;
+        }
+        let files = root.open_child_dir(OsStr::new("files"))?;
+        let info = root.open_child_dir(OsStr::new("info"))?;
+        let dev = root.stat_self()?.st_dev;
+        if files.stat_self()?.st_dev != dev || info.stat_self()?.st_dev != dev {
+            return Err(invalid("Trash directories must share a filesystem"));
+        }
+        if let Some(top) = &self.topdir {
+            if history_tree::open_dir(top)?.stat_self()?.st_dev != dev {
+                return Err(invalid("Trash is outside its bound volume"));
+            }
+        }
+        Ok((files, info))
+    }
+    pub fn trash_path(&self, path: &Path, cancel: &CancelToken) -> io::Result<TrashReceipt> {
+        check(cancel)?;
+        let mount_table = mounts()?;
+        local_path(path, &mount_table)?;
+        local_path(self.trash.root(), &mount_table)?;
+        if path.starts_with(self.trash.root()) || self.trash.root().starts_with(path) {
+            return Err(invalid(
+                "A Trash directory or its ancestor cannot be trashed",
+            ));
+        }
+        let (source, source_name) = anchor::resolve_parent(path)?;
+        let tree = history_tree::snapshot_at(&source, &source_name, path, cancel)?;
+        let data = *tree
+            .get(path)
+            .ok_or_else(|| invalid("Missing Trash identity"))?;
+        let original = if let Some(top) = &self.topdir {
+            let relative = path
+                .strip_prefix(top)
+                .map_err(|_| invalid("Source is outside selected volume"))?;
+            if relative.as_os_str().is_empty() {
+                return Err(invalid("A volume root cannot be trashed"));
+            }
+            relative
+        } else {
+            path
+        };
+        if nearest_dev(self.trash.root())? != data.dev {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "Trash is unavailable on this source volume",
+            ));
+        }
+        let (files, info) = self.handles(true)?;
+        let root_dir =
+            FileIdentity::from_stat(&history_tree::open_dir(self.trash.root())?.stat_self()?);
+        let top_dir = self
+            .topdir
+            .as_ref()
+            .map(|p| {
+                history_tree::open_dir(p)
+                    .and_then(|d| d.stat_self())
+                    .map(|s| FileIdentity::from_stat(&s))
+            })
+            .transpose()?;
+        if data.dev != files.stat_self()?.st_dev {
+            return Err(invalid("Source and Trash are on different volumes"));
+        }
+        let base = source_name.as_bytes();
+        let base = OsStr::from_bytes(&base[..base.len().min(220)]);
+        for n in 0..10000 {
+            check(cancel)?;
+            let mut name = base.to_os_string();
+            if n != 0 {
+                name.push(format!(".{}-{n}", std::process::id()));
+            }
+            match files.stat_child(&name) {
+                Ok(_) => continue,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e),
+            }
+            let iname = info_name(&name)?;
+            let mut record = match rustix::fs::openat(
+                info.as_fd(),
+                &iname,
+                OFlags::RDWR | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::from_bits_truncate(0o600),
+            ) {
+                Ok(fd) => File::from(fd),
+                Err(rustix::io::Errno::EXIST) => continue,
+                Err(e) => return Err(e.into()),
+            };
+            let info_path = self.trash.info.join(&iname);
+            let target = self.trash.files.join(&name);
+            let locations = vec![path.into(), target.clone(), info_path.clone()];
+            // The fsynced exclusive record is the forward restore intent. Never
+            // unlink its publicly mutable name on an uncertain error.
+            let admitted = (|| -> io::Result<TrashReceipt> {
+                let bytes = format!(
+                    "[Trash Info]\nPath={}\nDeletionDate={}\nX-Gust-Identity={}\n",
+                    super::percent_encode(original.as_os_str().as_bytes()),
+                    super::iso_now(),
+                    serde_json::to_string(&crate::journal::RecordedIdentity::from(data))?
+                )
+                .into_bytes();
+                record.write_all(&bytes)?;
+                record.sync_all()?;
+                rustix::fs::fsync(info.as_fd())?;
+                let info_id = FileIdentity::from_stat(&rustix::fs::fstat(&record)?);
+                let (_, now, read) = open_info(&info, &iname)?;
+                if now != info_id || read != bytes {
+                    return Err(invalid("Trash intent changed before data move"));
+                }
+                move_checked(
+                    &source,
+                    &source_name,
+                    path,
+                    &files,
+                    &name,
+                    &target,
+                    &tree,
+                    cancel,
+                )?;
+                let receipt = TrashReceipt {
+                    item: TrashedItem {
+                        original: path.into(),
+                        trashed_name: name.clone(),
+                        info_file: info_path.clone(),
+                    },
+                    location: self.clone(),
+                    canonical: self.clone(),
+                    original: path.into(),
+                    name: name.clone(),
+                    root_dir,
+                    top_dir,
+                    original_parent: Some(FileIdentity::from_stat(&source.stat_self()?)),
+                    files_dir: FileIdentity::from_stat(&files.stat_self()?),
+                    info_dir: FileIdentity::from_stat(&info.stat_self()?),
+                    data,
+                    info: info_id,
+                    tree: remap(&tree, path, &target)?,
+                    info_bytes: bytes,
+                };
+                receipt.verify(cancel)?;
+                Ok(receipt)
+            })();
+            return admitted.map_err(|e| partial(e, locations));
+        }
+        Err(io::Error::other("No free Trash slot is available"))
+    }
+    pub fn receipt_named(&self, name: &OsStr, cancel: &CancelToken) -> io::Result<TrashReceipt> {
+        check(cancel)?;
+        let iname = info_name(name)?;
+        let (files, info) = self.handles(false)?;
+        let (_, info_id, bytes) = open_info(&info, &iname)?;
+        let (original, _, recorded) = parse_info(&bytes, self)?;
+        if original.starts_with(self.trash.root()) || self.trash.root().starts_with(&original) {
+            return Err(invalid("Unsafe Trash restore destination"));
+        }
+        let path = self.trash.files.join(name);
+        let tree = history_tree::snapshot_at(&files, name, &path, cancel)?;
+        let data = *tree
+            .get(&path)
+            .ok_or_else(|| invalid("Missing Trash data"))?;
+        if recorded.is_some_and(|id| !id.matches(&data)) {
+            return Err(invalid("Trash slot was replaced or changed"));
+        }
+        let receipt = TrashReceipt {
+            item: TrashedItem {
+                original: original.clone(),
+                trashed_name: name.into(),
+                info_file: self.trash.info.join(iname),
+            },
+            location: self.clone(),
+            canonical: self.clone(),
+            original_parent: optional_dir(
+                original
+                    .parent()
+                    .ok_or_else(|| invalid("Missing restore parent"))?,
+            )?,
+            original,
+            name: name.into(),
+            root_dir: FileIdentity::from_stat(
+                &history_tree::open_dir(self.trash.root())?.stat_self()?,
+            ),
+            top_dir: self
+                .topdir
+                .as_ref()
+                .map(|p| {
+                    history_tree::open_dir(p)
+                        .and_then(|d| d.stat_self())
+                        .map(|s| FileIdentity::from_stat(&s))
+                })
+                .transpose()?,
+            files_dir: FileIdentity::from_stat(&files.stat_self()?),
+            info_dir: FileIdentity::from_stat(&info.stat_self()?),
+            data,
+            info: info_id,
+            tree,
+            info_bytes: bytes,
+        };
+        receipt.verify(cancel)?;
+        Ok(receipt)
+    }
+    pub fn restore(
+        &self,
+        receipt: &TrashReceipt,
+        cancel: &CancelToken,
+    ) -> io::Result<RestoredReceipt> {
+        check(cancel)?;
+        if self != &receipt.canonical {
+            return Err(invalid("Receipt belongs to another Trash"));
+        }
+        receipt.verify(cancel)?;
+        let (files, info) = self.handles(false)?;
+        same_dir(&files, receipt.files_dir)?;
+        same_dir(&info, receipt.info_dir)?;
+        let original = &receipt.original;
+        let parent_path = original
+            .parent()
+            .ok_or_else(|| invalid("Missing restore parent"))?;
+        let target_name = original
+            .file_name()
+            .ok_or_else(|| invalid("Missing restore name"))?;
+        let created_parents = match history_tree::open_dir(parent_path) {
+            Ok(parent) => {
+                if let Some(expected) = receipt.original_parent {
+                    inode_dir(&parent, expected)?;
+                }
+                ensure_absent(&parent, target_name)?;
+                false
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => true,
+            Err(e) => return Err(e),
+        };
+        // Prepare intent before creating missing original parents or moving data.
+        let (vault, vault_path) = recovery_vault(&info, &self.trash.info)?;
+        let retained_info = vault_path.join("info");
+        let source_path = self.trash.files.join(&receipt.name);
+        let info_path = self.trash.info.join(info_name(&receipt.name)?);
+        let evidence = vec![
+            original.clone(),
+            source_path.clone(),
+            info_path.clone(),
+            vault_path.clone(),
+        ];
+        let result = (|| -> io::Result<RestoredReceipt> {
+            let intent = serde_json::to_vec(&serde_json::json!({"version":1,
+                "original":original.as_os_str().as_bytes(),"data":source_path.as_os_str().as_bytes(),
+                "info":info_path.as_os_str().as_bytes(),"data_identity":crate::journal::RecordedIdentity::from(receipt.data),
+                "info_identity":crate::journal::RecordedIdentity::from(receipt.info)}))?;
+            let mut file = File::from(rustix::fs::openat(
+                vault.as_fd(),
+                "intent.json",
+                OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::from_bits_truncate(0o600),
+            )?);
+            file.write_all(&intent)?;
+            file.sync_all()?;
+            rustix::fs::fsync(vault.as_fd())?;
+            rustix::fs::fsync(info.as_fd())?;
+            check(cancel)?;
+            let target = history_tree::ensure_dir(parent_path)?;
+            if !created_parents {
+                if let Some(expected) = receipt.original_parent {
+                    inode_dir(&target, expected)?;
+                }
+            }
+            if target.stat_self()?.st_dev != receipt.data.dev {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "Restore would cross volumes",
+                ));
+            }
+            receipt.verify(cancel)?;
+            move_checked(
+                &files,
+                &receipt.name,
+                &source_path,
+                &target,
+                target_name,
+                original,
+                &receipt.tree,
+                cancel,
+            )?;
+            let info_tree = BTreeMap::from([(info_path.clone(), receipt.info)]);
+            // After the data effect, complete record retention even if the
+            // caller cancels. No success is reported before both are durable.
+            move_checked(
+                &info,
+                &info_name(&receipt.name)?,
+                &info_path,
+                &vault,
+                OsStr::new("info"),
+                &retained_info,
+                &info_tree,
+                &CancelToken::new(),
+            )?;
+            let restored = RestoredReceipt {
+                original: original.clone(),
+                trash: receipt.clone(),
+                retained_info,
+                retained_dir: FileIdentity::from_stat(&vault.stat_self()?),
+                restored_parent: FileIdentity::from_stat(&target.stat_self()?),
+                created_parents,
+            };
+            restored.verify(&CancelToken::new())?;
+            Ok(restored)
+        })();
+        result.map_err(|e| partial(e, evidence))
+    }
+    pub fn list(&self) -> io::Result<Vec<TrashEntry>> {
+        let (files, info) = self.handles(false)?;
+        let mut out = Vec::new();
+        let mut seen = 0usize;
+        let mut metadata = 0usize;
+        for entry in rustix::fs::Dir::read_from(info.as_fd())? {
+            seen += 1;
+            if seen > 200_002 {
+                return Err(invalid("Trash listing exceeds entry limit"));
+            }
+            let entry = entry?;
+            let Some(raw) = entry.file_name().to_bytes().strip_suffix(b".trashinfo") else {
+                continue;
+            };
+            let name = OsStr::from_bytes(raw);
+            let iname = info_name(name)?;
+            let Ok((_, _, bytes)) = open_info(&info, &iname) else {
+                continue;
+            };
+            metadata = metadata.saturating_add(bytes.len());
+            if metadata > 32 * 1024 * 1024 {
+                return Err(invalid("Trash listing exceeds metadata limit"));
+            }
+            let Ok((original, deleted, recorded)) = parse_info(&bytes, self) else {
+                continue;
+            };
+            let Ok(stat) = files.stat_child(name) else {
+                continue;
+            };
+            if recorded.is_some_and(|id| !id.matches(&FileIdentity::from_stat(&stat))) {
+                continue;
+            }
+            out.push(TrashEntry {
+                trashed_name: name.to_os_string(),
+                original,
+                deleted,
+            });
+            if out.len() > 200_000 {
+                return Err(invalid("Trash listing exceeds entry limit"));
+            }
+        }
+        out.sort_by(|a, b| {
+            b.deleted
+                .cmp(&a.deleted)
+                .then_with(|| a.trashed_name.cmp(&b.trashed_name))
+        });
+        Ok(out)
+    }
+}
+#[derive(Debug)]
+struct Mount {
+    path: PathBuf,
+    local: bool,
+}
+fn mounts() -> io::Result<Vec<Mount>> {
+    let file = File::open("/proc/self/mountinfo")?;
+    let mut bytes = Vec::new();
+    file.take(4 * 1024 * 1024 + 1).read_to_end(&mut bytes)?;
+    if bytes.len() > 4 * 1024 * 1024 {
+        return Err(invalid("Mount inventory exceeds limit"));
+    }
+    Ok(parse_mounts(&bytes))
+}
+fn parse_mounts(bytes: &[u8]) -> Vec<Mount> {
+    bytes
+        .split(|b| *b == b'\n')
+        .filter_map(|line| {
+            let fields: Vec<_> = line
+                .split(|b| matches!(b, b' ' | b'\t'))
+                .filter(|s| !s.is_empty())
+                .collect();
+            let separator = fields.iter().position(|s| *s == b"-")?;
+            let kind = std::str::from_utf8(fields.get(separator + 1)?).ok()?;
+            Some(Mount {
+                path: gust_core::mount_table::decode_field(fields.get(4)?).into(),
+                local: matches!(
+                    kind,
+                    "ext2"
+                        | "ext3"
+                        | "ext4"
+                        | "btrfs"
+                        | "xfs"
+                        | "tmpfs"
+                        | "ramfs"
+                        | "overlay"
+                        | "zfs"
+                        | "bcachefs"
+                        | "f2fs"
+                        | "exfat"
+                        | "vfat"
+                        | "msdos"
+                        | "ntfs3"
+                ),
+            })
+        })
+        .collect()
+}
+fn local_path(path: &Path, mounts: &[Mount]) -> io::Result<()> {
+    if mounts
+        .iter()
+        .filter(|m| path.starts_with(&m.path))
+        .max_by_key(|m| m.path.components().count())
+        .is_some_and(|m| m.local)
+    {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Automatic Trash is available only on known local filesystems",
+        ))
+    }
+}
+fn nearest_dev(path: &Path) -> io::Result<u64> {
+    for path in path.ancestors() {
+        match history_tree::open_dir(path) {
+            Ok(d) => return Ok(d.stat_self()?.st_dev),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Err(invalid("No existing location ancestor"))
+}
+fn candidates(top: &Path) -> Vec<TrashLocation> {
+    let uid = rustix::process::geteuid().as_raw();
+    let shared = top.join(".Trash");
+    let mut out = Vec::new();
+    if history_tree::open_dir(&shared)
+        .is_ok_and(|d| d.stat_self().is_ok_and(|s| s.st_mode & 0o1000 != 0))
+    {
+        out.push(TrashLocation {
+            trash: TrashDir::at(shared.join(uid.to_string())),
+            topdir: Some(top.to_path_buf()),
+        });
+    }
+    out.push(TrashLocation {
+        trash: TrashDir::at(top.join(format!(".Trash-{uid}"))),
+        topdir: Some(top.to_path_buf()),
+    });
+    out
+}
+fn usable(location: &TrashLocation, dev: u64) -> io::Result<()> {
+    if let Some(root) = existing_private(location.trash.root())? {
+        if root.stat_self()?.st_dev != dev {
+            return Err(invalid("Trash root is on another filesystem"));
+        }
+        for name in ["files", "info"] {
+            match root.open_child_dir(OsStr::new(name)) {
+                Ok(dir) => {
+                    private(&dir)?;
+                    if dir.stat_self()?.st_dev != dev {
+                        return Err(invalid("Trash child is on another filesystem"));
+                    }
+                }
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e),
+            }
+        }
+    }
+    Ok(())
+}
+/// Read-only selection. Directory creation belongs to the admitted mutation.
+pub fn select_location(path: &Path, home: &TrashDir) -> io::Result<TrashLocation> {
+    let mounts = mounts()?;
+    local_path(path, &mounts)?;
+    local_path(home.root(), &mounts)?;
+    let (parent, name) = anchor::resolve_parent(path)?;
+    let dev = parent.stat_child(&name)?.st_dev;
+    let home_location = TrashLocation {
+        trash: home.clone(),
+        topdir: None,
+    };
+    if nearest_dev(home.root())? == dev {
+        usable(&home_location, dev)?;
+        return Ok(home_location);
+    }
+    let top = mounts
+        .iter()
+        .filter(|m| m.local && path.starts_with(&m.path))
+        .max_by_key(|m| m.path.components().count())
+        .map(|m| m.path.clone())
+        .ok_or_else(|| invalid("Source volume is unknown"))?;
+    for location in candidates(&top) {
+        if local_path(location.trash.root(), &mounts).is_ok() && usable(&location, dev).is_ok() {
+            return Ok(location);
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "No safe same-volume Trash location is available",
+    ))
+}
+/// Existing locations only; listing never creates directories on mounted media.
+pub fn locations(home: &TrashDir) -> io::Result<Vec<TrashLocation>> {
+    let mut out = Vec::new();
+    let home_location = TrashLocation {
+        trash: home.clone(),
+        topdir: None,
+    };
+    let mounts = mounts()?;
+    if local_path(home.root(), &mounts).is_ok() && home_location.handles(false).is_ok() {
+        out.push(home_location);
+    }
+    for mount in mounts.iter().filter(|m| m.local) {
+        for location in candidates(&mount.path) {
+            if local_path(location.trash.root(), &mounts).is_ok()
+                && location.handles(false).is_ok()
+                && !out.contains(&location)
+            {
+                out.push(location);
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn inode_dir(dir: &DirHandle, expected: FileIdentity) -> io::Result<()> {
+    let now = dir.stat_self()?;
+    if (now.st_dev, now.st_ino) != (expected.dev, expected.ino) {
+        return Err(invalid("Bound directory was replaced"));
+    }
+    Ok(())
+}
+fn optional_dir(path: &Path) -> io::Result<Option<FileIdentity>> {
+    match history_tree::open_dir(path) {
+        Ok(dir) => Ok(Some(FileIdentity::from_stat(&dir.stat_self()?))),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+fn ensure_absent(parent: &DirHandle, name: &OsStr) -> io::Result<()> {
+    match parent.stat_child(name) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Ok(_) => Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "Restore name is occupied; all work was preserved",
+        )),
+        Err(e) => Err(e),
+    }
+}
+fn verify_at(
+    parent: &DirHandle,
+    name: &OsStr,
+    path: &Path,
+    tree: &BTreeMap<PathBuf, FileIdentity>,
+    cancel: &CancelToken,
+) -> io::Result<()> {
+    let current = history_tree::snapshot_at(parent, name, path, cancel)?;
+    if &current != tree {
+        return Err(invalid("Trash subtree changed; current work was preserved"));
+    }
+    Ok(())
+}
+#[cfg(test)]
+type MoveHook = Box<dyn FnOnce()>;
+#[cfg(test)]
+thread_local! {
+    static AFTER_MOVE:std::cell::RefCell<Option<MoveHook>>=const { std::cell::RefCell::new(None) };
+    static BEFORE_MOVE:std::cell::RefCell<Option<MoveHook>>=const { std::cell::RefCell::new(None) };
+}
+/// NOREPLACE protects target occupancy. Held-parent pre/post inventories bind
+/// the source for the tested race; a mismatching move is restored only while
+/// the observed moved inode is unchanged and its old name remains free.
+#[allow(clippy::too_many_arguments)]
+fn move_checked(
+    source: &DirHandle,
+    name: &OsStr,
+    from: &Path,
+    target: &DirHandle,
+    to_name: &OsStr,
+    to: &Path,
+    tree: &BTreeMap<PathBuf, FileIdentity>,
+    cancel: &CancelToken,
+) -> io::Result<()> {
+    verify_at(source, name, from, tree, cancel)?;
+    ensure_absent(target, to_name)?;
+    check(cancel)?;
+    #[cfg(test)]
+    BEFORE_MOVE.with(|h| {
+        if let Some(f) = h.borrow_mut().take() {
+            f()
+        }
+    });
+    check(cancel)?;
+    anchor::rename_noreplace(source, name, target, to_name)?;
+    #[cfg(test)]
+    AFTER_MOVE.with(|h| {
+        let f = h.borrow_mut().take();
+        if let Some(f) = f {
+            f()
+        }
+    });
+    let evidence = vec![from.into(), to.into()];
+    let moved = target
+        .stat_child(to_name)
+        .map(|s| FileIdentity::from_stat(&s))
+        .map_err(|e| partial(e, evidence.clone()))?;
+    let mapped = remap(tree, from, to)?;
+    if let Err(error) = verify_at(target, to_name, to, &mapped, cancel) {
+        let recover = (|| -> io::Result<()> {
+            if FileIdentity::from_stat(&target.stat_child(to_name)?) != moved {
+                return Err(invalid("Moved item changed before recovery"));
+            }
+            anchor::rename_noreplace(target, to_name, source, name)?;
+            if FileIdentity::from_stat(&source.stat_child(name)?) != moved {
+                return Err(invalid("Restored name changed during recovery"));
+            }
+            rustix::fs::fsync(target.as_fd())?;
+            rustix::fs::fsync(source.as_fd())?;
+            Ok(())
+        })();
+        return Err(partial(
+            io::Error::new(
+                error.kind(),
+                match recover {
+                    Ok(()) => format!("{error}; observed item restored without replacement"),
+                    Err(e) => format!("{error}; recovery refused: {e}"),
+                },
+            ),
+            evidence,
+        ));
+    }
+    rustix::fs::fsync(source.as_fd()).map_err(|e| partial(e.into(), evidence.clone()))?;
+    rustix::fs::fsync(target.as_fd()).map_err(|e| partial(e.into(), evidence))?;
+    Ok(())
+}
+fn recovery_vault(info: &DirHandle, info_path: &Path) -> io::Result<(DirHandle, PathBuf)> {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    for _ in 0..64 {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(io::Error::other)?
+            .as_nanos();
+        let name = format!(
+            ".gust-restore-{}-{stamp}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        );
+        match rustix::fs::mkdirat(info.as_fd(), name.as_str(), Mode::from_bits_truncate(0o700)) {
+            Ok(()) => {
+                let path = info_path.join(&name);
+                let opened = (|| -> io::Result<DirHandle> {
+                    let dir = info.open_child_dir(OsStr::new(&name))?;
+                    private(&dir)?;
+                    rustix::fs::fsync(info.as_fd())?;
+                    Ok(dir)
+                })();
+                return opened
+                    .map(|dir| (dir, path.clone()))
+                    .map_err(|e| partial(e, vec![path]));
+            }
+            Err(rustix::io::Errno::EXIST) => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Err(io::Error::other(
+        "Cannot reserve private Trash recovery storage",
+    ))
+}
+impl TrashReceipt {
+    /// Worker-only read-only preflight. If false, reserve a durable history
+    /// barrier before restoring missing parents. Races still require the
+    /// caller's forward marker and the terminal receipt's history flag.
+    pub fn restore_history_supported(&self, cancel: &CancelToken) -> io::Result<bool> {
+        self.verify(cancel)?;
+        let path = self
+            .original
+            .parent()
+            .ok_or_else(|| invalid("Missing restore parent"))?;
+        match history_tree::open_dir(path) {
+            Ok(parent) => {
+                if let Some(expected) = self.original_parent {
+                    inode_dir(&parent, expected)?;
+                }
+                Ok(true)
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+    fn bindings(&self) -> io::Result<(DirHandle, DirHandle)> {
+        if self.location != self.canonical
+            || self.item.original != self.original
+            || self.item.trashed_name != self.name
+            || self.item.info_file != self.canonical.trash.info.join(info_name(&self.name)?)
+        {
+            return Err(invalid("Trash display receipt was modified"));
+        }
+        let (files, info) = self.canonical.handles(false)?;
+        same_dir(
+            &history_tree::open_dir(self.canonical.trash.root())?,
+            self.root_dir,
+        )?;
+        if let (Some(path), Some(expected)) = (&self.canonical.topdir, self.top_dir) {
+            inode_dir(&history_tree::open_dir(path)?, expected)?;
+        }
+        same_dir(&files, self.files_dir)?;
+        same_dir(&info, self.info_dir)?;
+        let (original, _, recorded) = parse_info(&self.info_bytes, &self.canonical)?;
+        if original != self.original || recorded.is_some_and(|id| !id.matches(&self.data)) {
+            return Err(invalid("Trash receipt has invalid original binding"));
+        }
+        Ok((files, info))
+    }
+    pub(crate) fn verify(&self, cancel: &CancelToken) -> io::Result<()> {
+        let (files, info) = self.bindings()?;
+        let (_, id, bytes) = open_info(&info, &info_name(&self.name)?)?;
+        if id != self.info || bytes != self.info_bytes {
+            return Err(invalid("Trash information changed"));
+        }
+        let path = self.canonical.trash.files.join(&self.name);
+        verify_at(&files, &self.name, &path, &self.tree, cancel)?;
+        if self.tree.get(&path) != Some(&self.data) {
+            return Err(invalid("Trash receipt root mismatch"));
+        }
+        Ok(())
+    }
+    pub(crate) fn data_path(&self) -> PathBuf {
+        self.canonical.trash.files.join(&self.name)
+    }
+    pub(crate) fn info_path(&self) -> PathBuf {
+        self.canonical
+            .trash
+            .info
+            .join(info_name(&self.name).expect("private admitted Trash name"))
+    }
+    pub(crate) fn verify_original_parent(&self) -> io::Result<()> {
+        let parent = history_tree::open_dir(
+            self.original
+                .parent()
+                .ok_or_else(|| invalid("Missing original parent"))?,
+        )?;
+        inode_dir(
+            &parent,
+            self.original_parent
+                .ok_or_else(|| invalid("Original parent has no identity receipt"))?,
+        )
+    }
+    pub(crate) fn original_path(&self) -> &Path {
+        &self.original
+    }
+}
+impl RestoredReceipt {
+    pub(crate) fn verify(&self, cancel: &CancelToken) -> io::Result<()> {
+        let (_, info) = self.trash.bindings()?;
+        if self.original != self.trash.original {
+            return Err(invalid("Restored display path was modified"));
+        }
+        let (parent, name) = anchor::resolve_parent(&self.retained_info)?;
+        same_dir(&parent, self.retained_dir)?;
+        let (_, id, bytes) = open_info(&parent, &name)?;
+        if id != self.trash.info || bytes != self.trash.info_bytes {
+            return Err(invalid("Retained Trash record changed"));
+        }
+        let (target, name) = anchor::resolve_parent(&self.original)?;
+        inode_dir(&target, self.restored_parent)?;
+        let mapped = remap(&self.trash.tree, &self.trash.data_path(), &self.original)?;
+        verify_at(&target, &name, &self.original, &mapped, cancel)?;
+        ensure_absent(&info, &info_name(&self.trash.name)?)?;
+        Ok(())
+    }
+    pub(crate) fn info_path(&self) -> &Path {
+        &self.retained_info
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{fs, os::unix::fs::PermissionsExt};
+    fn fixture() -> (PathBuf, TrashLocation, PathBuf) {
+        let root = std::env::temp_dir().join(format!(
+            "gust-trash-race-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("work")).unwrap();
+        let file = root.join("work/file");
+        fs::write(&file, b"original").unwrap();
+        let l = TrashLocation {
+            trash: TrashDir::at(root.join("Trash")),
+            topdir: None,
+        };
+        (root, l, file)
+    }
+    #[test]
+    fn mismatching_source_is_restored_without_adopting_a_receipt() {
+        let (root, l, file) = fixture();
+        let source = file.clone();
+        let kept = root.join("kept");
+        let keep = kept.clone();
+        BEFORE_MOVE.with(|h| {
+            *h.borrow_mut() = Some(Box::new(move || {
+                fs::rename(&source, &keep).unwrap();
+                fs::write(&source, b"replacement").unwrap();
+            }))
+        });
+        let e = l.trash_path(&file, &CancelToken::new()).unwrap_err();
+        assert!(e
+            .get_ref()
+            .unwrap()
+            .downcast_ref::<TrashPartial>()
+            .is_some());
+        assert_eq!(fs::read(&file).unwrap(), b"replacement");
+        assert_eq!(fs::read(&kept).unwrap(), b"original");
+        assert!(l.list().unwrap().is_empty());
+        assert!(l.trash.info.join("file.trashinfo").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn blocked_identity_bound_recovery_reports_all_locations() {
+        let (root, l, file) = fixture();
+        let source = file.clone();
+        let keep = root.join("kept");
+        let kept = keep.clone();
+        BEFORE_MOVE.with(|h| {
+            *h.borrow_mut() = Some(Box::new(move || {
+                fs::rename(&source, &keep).unwrap();
+                fs::write(&source, b"replacement").unwrap();
+            }))
+        });
+        AFTER_MOVE.with(|h| {
+            *h.borrow_mut() = Some(Box::new({
+                let file = file.clone();
+                move || fs::write(file, b"new work").unwrap()
+            }))
+        });
+        let e = l.trash_path(&file, &CancelToken::new()).unwrap_err();
+        let p = e.get_ref().unwrap().downcast_ref::<TrashPartial>().unwrap();
+        assert!(p.locations.contains(&file));
+        assert!(p.locations.contains(&l.trash.files.join("file")));
+        assert_eq!(fs::read(&file).unwrap(), b"new work");
+        assert_eq!(fs::read(kept).unwrap(), b"original");
+        assert_eq!(
+            fs::read(l.trash.files.join("file")).unwrap(),
+            b"replacement"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn cancellation_after_durable_info_retains_intent_and_source() {
+        let (root, l, file) = fixture();
+        let c = CancelToken::new();
+        let stop = c.clone();
+        BEFORE_MOVE.with(|h| *h.borrow_mut() = Some(Box::new(move || stop.cancel())));
+        let e = l.trash_path(&file, &c).unwrap_err();
+        assert!(e
+            .get_ref()
+            .unwrap()
+            .downcast_ref::<TrashPartial>()
+            .is_some());
+        assert_eq!(fs::read(file).unwrap(), b"original");
+        assert!(l.trash.info.join("file.trashinfo").exists());
+        assert!(l.list().unwrap().is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn mount_decode_is_shared_single_pass_and_network_is_skipped() {
+        let mounts=parse_mounts(b"1 0 0:1 / /a\\040b\\134040c\\011d\\012e\xff rw - ext4 disk rw\n2 0 0:2 / /a\\040b\\134040c\\011d\\012e\xff/remote rw - fuse.sshfs ssh rw\n");
+        assert_eq!(
+            mounts[0].path.as_os_str().as_bytes(),
+            b"/a b\\040c\td\ne\xff"
+        );
+        assert!(mounts[0].local);
+        assert!(!mounts[1].local);
+        assert!(local_path(&mounts[1].path, &mounts).is_err());
+    }
+    #[test]
+    fn late_slot_collision_preserves_source_new_work_and_intent() {
+        let (root, l, file) = fixture();
+        let occupied = l.trash.files.join("file");
+        let target = occupied.clone();
+        BEFORE_MOVE.with(|h| {
+            *h.borrow_mut() = Some(Box::new(move || fs::write(target, b"new work").unwrap()))
+        });
+        let e = l.trash_path(&file, &CancelToken::new()).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::AlreadyExists);
+        assert!(e
+            .get_ref()
+            .unwrap()
+            .downcast_ref::<TrashPartial>()
+            .is_some());
+        assert_eq!(fs::read(&file).unwrap(), b"original");
+        assert_eq!(fs::read(occupied).unwrap(), b"new work");
+        assert!(l.trash.info.join("file.trashinfo").exists());
+        assert!(l.list().unwrap().is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn unsupported_atomic_publish_never_substitutes_delete_or_overwrite() {
+        let (root, l, file) = fixture();
+        crate::anchor::UNSUPPORTED_ERRNO.with(|e| e.set(Some(rustix::io::Errno::OPNOTSUPP)));
+        let e = l.trash_path(&file, &CancelToken::new()).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::Unsupported);
+        assert_eq!(fs::read(&file).unwrap(), b"original");
+        assert!(!l.trash.files.join("file").exists());
+        assert!(l.trash.info.join("file.trashinfo").exists());
+        assert!(e
+            .get_ref()
+            .unwrap()
+            .downcast_ref::<TrashPartial>()
+            .is_some());
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn symlinked_shared_trash_is_never_traversed() {
+        let (root, l, file) = fixture();
+        let shared = root.join(".Trash");
+        fs::create_dir(root.join("elsewhere")).unwrap();
+        std::os::unix::fs::symlink(root.join("elsewhere"), &shared).unwrap();
+        let shared = TrashLocation {
+            trash: TrashDir::at(shared.join(rustix::process::geteuid().as_raw().to_string())),
+            topdir: Some(root.clone()),
+        };
+        assert!(shared.trash_path(&file, &CancelToken::new()).is_err());
+        assert!(!l.trash.root().exists());
+        assert_eq!(fs::read_dir(root.join("elsewhere")).unwrap().count(), 0);
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+}

@@ -9,10 +9,15 @@
 //! accidentally touch the user's real Trash) and makes parallel execution
 //! race-free.
 
+#[path = "trash_volume.rs"]
+mod volume;
+pub use volume::{
+    locations, select_location, RestoredReceipt, TrashLocation, TrashPartial, TrashReceipt,
+};
+
 use crate::anchor::resolve_parent;
 use gust_core::location::Cap;
 use std::io;
-use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 /// A freedesktop trash location: `files/` holds the data, `info/` the records.
@@ -73,8 +78,8 @@ pub fn trash_capability(path: &Path, trash: &TrashDir) -> Cap {
     match (dev_of(src), dev_of(&probe)) {
         (Some(a), Some(b)) if a == b => Cap::Yes,
         (Some(_), Some(_)) => {
-            // A volume trash (.Trash-$uid) may exist but is not implemented
-            // yet: Unknown, never a silent permanent delete.
+            // The explicit supplied location is on another volume. Selection
+            // is separate; never substitute a permanent delete here.
             Cap::Unknown
         }
         _ => Cap::Unknown,
@@ -138,81 +143,30 @@ pub fn trash_path(path: &Path, trash: &TrashDir) -> io::Result<TrashedItem> {
             "trash is not available for this location",
         ));
     }
-    std::fs::create_dir_all(&trash.files)?;
-    std::fs::create_dir_all(&trash.info)?;
-
-    let base = path
-        .file_name()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no file name"))?;
-
-    // Find a free slot. Both the data and info name must be free, so two files
-    // with the same name never collide.
-    let mut name = base.to_os_string();
-    let mut n = 1;
-    loop {
-        let info_candidate = trash
-            .info
-            .join(format!("{}.trashinfo", name.to_string_lossy()));
-        if !trash.files.join(&name).exists() && !info_candidate.exists() {
-            break;
-        }
-        let mut cand = base.to_os_string();
-        cand.push(format!(".{n}"));
-        name = cand;
-        n += 1;
-        if n > 10_000 {
-            return Err(io::Error::other("cannot find a free trash name"));
-        }
+    TrashLocation {
+        trash: trash.clone(),
+        topdir: None,
     }
-
-    // Info file BEFORE the move: a crash must not leave an unrestorable file.
-    let info_path = trash
-        .info
-        .join(format!("{}.trashinfo", name.to_string_lossy()));
-    let info = format!(
-        "[Trash Info]\nPath={}\nDeletionDate={}\n",
-        percent_encode(path.as_os_str().as_bytes()),
-        iso_now()
-    );
-    std::fs::write(&info_path, info)?;
-
-    // Anchored rename into the trash.
-    let (src_dir, src_name) = resolve_parent(path)?;
-    let (trash_dir, _) = resolve_parent(&trash.files.join("placeholder"))?;
-    match rustix::fs::renameat(src_dir.as_fd(), &src_name, trash_dir.as_fd(), &name) {
-        Ok(()) => Ok(TrashedItem {
-            original: path.to_path_buf(),
-            trashed_name: name,
-            info_file: info_path,
-        }),
-        Err(e) => {
-            // Roll back the info file so the trash stays consistent.
-            let _ = std::fs::remove_file(&info_path);
-            Err(e.into())
-        }
-    }
+    .trash_path(path, &gust_core::lister::CancelToken::new())
+    .map(|receipt| receipt.item)
 }
 
-/// Restore a trashed item to its original location.
-///
-/// Refuses if something now occupies the original path — restoring must never
-/// overwrite work created after the delete.
+/// Restore without replacing any current name. Typed callers retain the
+/// stronger original data/info identity receipt across this operation.
 pub fn restore(item: &TrashedItem, trash: &TrashDir) -> io::Result<()> {
-    let from = trash.files.join(&item.trashed_name);
-    if item.original.exists() {
+    let location = TrashLocation {
+        trash: trash.clone(),
+        topdir: None,
+    };
+    let cancel = gust_core::lister::CancelToken::new();
+    let receipt = location.receipt_named(&item.trashed_name, &cancel)?;
+    if receipt.item.original != item.original || receipt.item.info_file != item.info_file {
         return Err(io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            "original path is occupied; restore would overwrite",
+            io::ErrorKind::InvalidData,
+            "Trash receipt changed; data was preserved",
         ));
     }
-    if let Some(parent) = item.original.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let (fd_from, n_from) = resolve_parent(&from)?;
-    let (fd_to, n_to) = resolve_parent(&item.original)?;
-    rustix::fs::renameat(fd_from.as_fd(), &n_from, fd_to.as_fd(), &n_to)?;
-    let _ = std::fs::remove_file(&item.info_file);
-    Ok(())
+    location.restore(&receipt, &cancel).map(|_| ())
 }
 
 /// One item in the Trash, as the Trash view lists it.
@@ -226,102 +180,25 @@ pub struct TrashEntry {
     pub deleted: String,
 }
 
-fn percent_decode(s: &str) -> Vec<u8> {
-    let b = s.as_bytes();
-    let mut out = Vec::with_capacity(b.len());
-    let mut i = 0;
-    while i < b.len() {
-        if b[i] == b'%' && i + 2 < b.len() {
-            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
-                out.push(v);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(b[i]);
-        i += 1;
-    }
-    out
-}
-
-/// Read one `.trashinfo` record. None for anything malformed or relative:
-/// a record must name an absolute path, or restoring it could write
-/// somewhere relative to wherever Gust happens to run.
-fn read_info(path: &Path) -> Option<(PathBuf, String)> {
-    let text = std::fs::read_to_string(path).ok()?;
-    let mut orig = None;
-    let mut date = String::new();
-    for line in text.lines() {
-        if let Some(v) = line.strip_prefix("Path=") {
-            orig = Some(PathBuf::from(
-                <std::ffi::OsString as std::os::unix::ffi::OsStringExt>::from_vec(percent_decode(
-                    v.trim(),
-                )),
-            ));
-        } else if let Some(v) = line.strip_prefix("DeletionDate=") {
-            date = v.trim().to_string();
-        }
-    }
-    let orig = orig.filter(|p| p.is_absolute())?;
-    Some((orig, date))
-}
-
-/// Everything in the Trash that can be restored: a record with its data.
-/// Newest first. Entries other file managers wrote are included.
+/// Existing restorable records, newest first. Compatibility callers retain
+/// their Vec result; typed location callers can inspect enumeration errors.
 pub fn list(trash: &TrashDir) -> Vec<TrashEntry> {
-    let Ok(rd) = std::fs::read_dir(&trash.info) else {
-        return Vec::new();
-    };
-    let mut out: Vec<TrashEntry> = rd
-        .flatten()
-        .filter_map(|e| {
-            let fname = e.file_name();
-            let stem = fname.as_bytes().strip_suffix(b".trashinfo")?;
-            let name = std::ffi::OsStr::from_bytes(stem).to_os_string();
-            // The data must be there (lstat: a trashed symlink counts).
-            std::fs::symlink_metadata(trash.files.join(&name)).ok()?;
-            let (original, deleted) = read_info(&e.path())?;
-            Some(TrashEntry {
-                trashed_name: name,
-                original,
-                deleted,
-            })
-        })
-        .collect();
-    out.sort_by(|a, b| {
-        b.deleted
-            .cmp(&a.deleted)
-            .then_with(|| a.trashed_name.cmp(&b.trashed_name))
-    });
-    out
+    TrashLocation {
+        trash: trash.clone(),
+        topdir: None,
+    }
+    .list()
+    .unwrap_or_default()
 }
 
-/// Restore one Trash item by its name in the Trash. Refuses to overwrite
-/// anything now at the original path; recreates missing parent folders.
-pub fn restore_named(trash: &TrashDir, trashed_name: &std::ffi::OsStr) -> io::Result<()> {
-    // A name, never a path: nothing outside files/ can be addressed.
-    if Path::new(trashed_name).components().count() != 1 || trashed_name.as_bytes().contains(&b'/')
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "not a Trash item name",
-        ));
-    }
-    let mut info_name = trashed_name.to_os_string();
-    info_name.push(".trashinfo");
-    let info_file = trash.info.join(&info_name);
-    let (original, _) = read_info(&info_file).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            "the Trash record is missing or damaged",
-        )
-    })?;
-    let item = TrashedItem {
-        original,
-        trashed_name: trashed_name.to_os_string(),
-        info_file,
+pub fn restore_named(trash: &TrashDir, name: &std::ffi::OsStr) -> io::Result<()> {
+    let location = TrashLocation {
+        trash: trash.clone(),
+        topdir: None,
     };
-    restore(&item, trash)
+    let cancel = gust_core::lister::CancelToken::new();
+    let receipt = location.receipt_named(name, &cancel)?;
+    location.restore(&receipt, &cancel).map(|_| ())
 }
 
 /// Permanently delete. Deliberately separate from `trash_path`, and callers
