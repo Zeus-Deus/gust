@@ -802,7 +802,6 @@ impl History {
             })
             .collect();
         reconcile_mode_lineages(&mut record.steps, &modes);
-
         let indices: Vec<_> = if undo {
             (0..record.steps.len()).rev().collect()
         } else {
