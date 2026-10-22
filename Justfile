@@ -52,6 +52,7 @@ lint:
     ./tests/lint-qml.sh
     ./tests/lint-recipes.sh
     ./tests/lint-strings.sh
+    python3 tests/check-setup-packaging.py
 
 # Accessibility and scaling (plan §7): runs the window at three font sizes
 # and reads the live AT-SPI tree a screen reader would read.

@@ -259,6 +259,10 @@ pub mod qobject {
         /// credential itself and never sees one.
         #[qinvokable]
         fn cloud_setup(self: &DirModel) -> QString;
+        /// Install an allowlisted capability on a worker through polkit.
+        /// No device is connected, trusted or browsed by installation.
+        #[qinvokable]
+        fn install_support(self: Pin<&mut DirModel>, key: QString) -> QString;
 
         #[qinvokable]
         fn breadcrumbs(self: &DirModel) -> QStringList;
@@ -3541,9 +3545,7 @@ impl qobject::DirModel {
                     &cancelled,
                 ) {
                     Ok(path) => {
-                        if !apps {
-                            Self::set_phone_state(&id, PhoneState::Open(path.clone()));
-                        }
+                        Self::set_phone_state(&id, PhoneState::Open(path.clone()));
                         let name = gust_remote::phones::display_name(
                             &phone,
                             &gust_remote::phones::friendly_names(),
@@ -4442,7 +4444,8 @@ impl qobject::DirModel {
         }
         serde_json::json!({"computers": computers::group_computers(routes), "ssh": ssh, "tailnet": tail,
             "tailnetError": snapshot.error, "cloud": cloud, "cloudError": cloud_error,
-            "sshfs": mount::Backend::Sshfs.available(), "localUser": local_user}).to_string()
+            "sshfs": mount::Backend::Sshfs.available(), "setup": gust_remote::setup::snapshot(),
+            "localUser": local_user}).to_string()
     }
 
     /// Host keys shown to the user, by target: a "Trust and connect"
@@ -6022,6 +6025,23 @@ impl qobject::DirModel {
             Ok(_opener) => QString::from("file"),
             Err(e) => QString::from(&format!("blocked:{e}")),
         }
+    }
+
+    fn install_support(self: Pin<&mut Self>, key: QString) -> QString {
+        if self.as_ref().place_busy {
+            return QString::from("Another connection or setup is still in progress.");
+        }
+        let key = key.to_string();
+        self.place_op(
+            "setup-install",
+            key.clone(),
+            "Installing connection support…".into(),
+            move || match gust_remote::setup::install(&key) {
+                Ok(()) => PlaceOutcome::Done("Connection support is ready".into()),
+                Err(message) => PlaceOutcome::Failed(message),
+            },
+        );
+        QString::default()
     }
 
     /// Launch rclone's own configuration tool. Every provider's setup

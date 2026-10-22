@@ -70,7 +70,7 @@ QtObject {
     controller = (source / "ui/tests/tst_connection_controller.qml.in").read_text()
     main_source = (source / "ui/Main.qml").read_text()
     controller = controller.replace("@PLACES_ARRIVED@", block(main_source, "function placesArrived("))
-    functions = ["connectPlace", "tailnetUserEntered", "placeDone", "beginPlaceFeedback", "finishPlaceFeedback", "startTailnetAttempt", "shareAddressEntered", "sharePasswordEntered", "connectShare", "forgetConnectionOwner"]
+    functions = ["connectPlace", "tailnetUserEntered", "placeDone", "beginPlaceFeedback", "finishPlaceFeedback", "startTailnetAttempt", "shareAddressEntered", "sharePasswordEntered", "connectShare", "forgetConnectionOwner", "installSupport", "openPhone", "requireSupport"]
     controller = controller.replace("@CONNECTION_FUNCTIONS@", "\n".join(
         block(main_source, "function " + name + "(") for name in functions if "function " + name + "(" in main_source))
     controller = controller.replace("@CONNECT_HANDLER@", block(main_source, "onConnectRequested:"))

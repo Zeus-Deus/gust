@@ -14,6 +14,80 @@ TestCase {
     SignalSpy { id: openSpy; target: panel; signalName: "openRequested" }
     SignalSpy { id: offSpy; target: panel; signalName: "disconnectRequested" }
     SignalSpy { id: refreshSpy; target: panel; signalName: "refreshRequested" }
+    SignalSpy { id: actionSpy; target: panel; signalName: "actionRequested" }
+
+    function test_setup_does_not_go_blank_while_capabilities_are_loading() {
+        panel.places = {}; refreshSpy.clear(); actionSpy.clear()
+        panel.showSupport("apple")
+        verify(panel.statusTitle.length > 0, "A device click must explain that support is being checked")
+        compare(refreshSpy.count, 1)
+        panel.places = {setup: [{key: "apple", packages: ["gvfs-afc"], installable: true}]}
+        verify(panel.statusBody.indexOf("gvfs-afc") >= 0, "Disclose packages when the snapshot arrives")
+        panel.places = {setup: [{key: "apple", packages: [], installable: true}]}
+        compare(panel.statusTitle, "Support is ready")
+        compare(actionSpy.count, 0)
+        compare(connectSpy.count, 0, "Readiness is not permission to connect")
+    }
+    function test_a_new_connect_view_does_not_retain_old_phone_setup_context() {
+        panel.places = {setup: [{key: "apple", packages: ["gvfs-afc"], installable: true}]}
+        panel.showSupport("apple"); compare(panel.requirement.key, "apple")
+        panel.hide()
+        const p = fixture(); p.sshfs = false
+        p.setup = [{key: "ssh", packages: ["sshfs"], installable: true}]
+        panel.places = p; panel.show()
+        verify(panel.requirement !== null, "Old phone setup context must not hide the current SSH requirement")
+        compare(panel.requirement.key, "ssh", "New Connect must use its own relevant prerequisite")
+    }
+    function test_install_button_remains_visible_at_minimum_window_size() {
+        test.width = 520; test.height = 320
+        const p = fixture(); p.sshfs = false
+        p.setup = [{key: "ssh", packages: ["sshfs", "openssh", "fuse3"], installable: true}]
+        panel.places = p
+        waitForRendering(panel)
+        const button = findChild(panel, "connectionInstallSupport")
+        const notice = findChild(panel, "connectionNotice")
+        verify(button && button.visible)
+        const pt = button.mapToItem(notice, button.width / 2, button.height / 2)
+        verify(pt.y >= 0 && pt.y < notice.height, "Primary setup action must not be hidden below a clipped message: y=" + pt.y + ", notice=" + notice.height)
+    }
+    function test_install_support_is_keyboard_accessible_and_disabled_while_busy() {
+        const p = fixture(); p.sshfs = false
+        p.setup = [{key: "ssh", packages: ["sshfs"], installable: true}]
+        panel.places = p; waitForRendering(panel)
+        const button = findChild(panel, "connectionInstallSupport")
+        button.forceActiveFocus(); actionSpy.clear()
+        keyClick(Qt.Key_Return)
+        compare(actionSpy.count, 1)
+        panel.beginFeedback("setup-install", "ssh", "Installing…")
+        actionSpy.clear(); panel.installSupport()
+        compare(actionSpy.count, 0, "Never start a second package installation")
+    }
+    function test_unsupported_installation_explains_the_manual_route_without_a_dead_button() {
+        const p = fixture(); p.sshfs = false
+        p.setup = [{key: "ssh", packages: ["sshfs"], installable: false}]
+        panel.places = p; waitForRendering(panel)
+        const button = findChild(panel, "connectionInstallSupport")
+        compare(button.visible, false)
+        actionSpy.clear(); panel.installSupport()
+        compare(actionSpy.count, 0)
+        verify(panel.statusBody.indexOf("package manager") >= 0)
+    }
+    function test_missing_support_has_a_real_install_action_without_connecting() {
+        const p = fixture()
+        p.sshfs = false
+        p.setup = [{key: "ssh", packages: ["sshfs"], installable: true}]
+        panel.places = p
+        waitForRendering(panel)
+        const install = findChild(panel, "connectionInstallSupport")
+        verify(install && install.visible, "Missing support must offer an install button, not terminal homework")
+        actionSpy.clear()
+        mouseClick(install, install.width / 2, install.height / 2)
+        compare(actionSpy.count, 1)
+        compare(actionSpy.signalArguments[0][0], "setup-install:ssh")
+        compare(connectSpy.count, 0, "Installation is not permission to connect")
+        verify(panel.statusBody.indexOf("sshfs") >= 0, "State the packages before authorization")
+        verify(panel.statusBody.indexOf("sudo pacman") < 0, "No terminal command as the primary remedy")
+    }
 
     function route(kind, name, target) {
         return { kind: kind, name: name, detail: target, user: "media", path: "/fixture/" + kind,
@@ -29,6 +103,7 @@ TestCase {
     function init() {
         test.width = 1180; test.height = 720
         panel.hide()
+        panel.supportKey = ""
         refreshSpy.clear()
         panel.operation = null
         panel.feedbackTitle = ""; panel.feedbackBody = ""; panel.feedbackFailed = false
@@ -42,8 +117,9 @@ TestCase {
         const p = fixture()
         p.sshfs = false
         panel.places = p
-        compare(panel.statusTitle, "Install sshfs to connect computers")
-        verify(panel.statusBody.indexOf("sudo pacman -S sshfs") >= 0)
+        compare(panel.statusTitle, "Set up computer connections")
+        verify(panel.statusBody.indexOf("sshfs") >= 0)
+        verify(panel.statusBody.indexOf("sudo pacman") < 0)
         waitForRendering(panel)
         const notice = findChild(panel, "connectionNotice")
         verify(notice !== null, "Notice object must exist")

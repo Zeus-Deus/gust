@@ -22,9 +22,42 @@ Item {
     property string feedbackBody: ""
     property bool feedbackFailed: false
     readonly property bool needsSshfs: root.places.sshfs === false && (root.places.computers || []).length > 0
-    readonly property string statusTitle: root.feedbackTitle || (root.needsSshfs ? qsTr("Install sshfs to connect computers") : "")
-    readonly property string statusBody: root.feedbackTitle ? root.feedbackBody : root.needsSshfs
-        ? qsTr("Install sshfs with your package manager, then choose Check again. On Omarchy: sudo pacman -S sshfs") : ""
+    property string supportKey: ""
+    readonly property var requirement: {
+        const key = root.supportKey || (root.needsSshfs ? "ssh" : "")
+        return (root.places.setup || []).find(r => r.key === key)
+            || (key === "ssh" && root.needsSshfs ? {key: "ssh", packages: ["sshfs"], installable: false} : null)
+    }
+    readonly property bool missingSupport: root.requirement !== null && root.requirement.packages.length > 0
+    readonly property bool checkingSupport: root.supportKey !== "" && root.requirement === null
+    readonly property bool supportReady: root.supportKey !== "" && root.requirement !== null && !root.missingSupport
+    readonly property string supportTitle: {
+        const key = root.requirement ? root.requirement.key : ""
+        const titles = {ssh: qsTr("Set up computer connections"), cloud: qsTr("Set up cloud storage"),
+            apple: qsTr("Set up Apple devices"), android: qsTr("Set up Android devices"),
+            camera: qsTr("Set up cameras"), smb: qsTr("Set up Windows shares"), nfs: qsTr("Set up NFS shares")}
+        return titles[key] || qsTr("Set up connection support")
+    }
+    readonly property string statusTitle: root.feedbackTitle || (root.checkingSupport ? qsTr("Checking connection support…")
+        : root.missingSupport ? root.supportTitle : root.supportReady ? qsTr("Support is ready") : "")
+    readonly property string statusBody: root.feedbackTitle ? root.feedbackBody : root.checkingSupport
+        ? qsTr("Checking installed helpers. Nothing opens automatically. Choose Check again if this takes longer than expected.") : root.missingSupport
+        ? (root.requirement.installable
+           ? qsTr("Gust needs %1. Choose Install support and approve the system prompt. Nothing connects automatically.").arg(root.requirement.packages.join(", "))
+           : qsTr("This installation is missing %1. Install Gust with its device and network support using your system package manager, then choose Check again.").arg(root.requirement.packages.join(", ")))
+        : root.supportReady ? qsTr("Choose your device or connection again to open it.") : ""
+    function showSupport(key) {
+        root.show()
+        if (!root.busy) {
+            root.supportKey = key
+            root.feedbackTitle = ""; root.feedbackBody = ""; root.feedbackFailed = false
+            if (root.checkingSupport) root.refreshRequested()
+        }
+    }
+    function installSupport() {
+        if (root.busy || !root.missingSupport || !root.requirement.installable) return
+        root.actionRequested("setup-install:" + root.requirement.key)
+    }
     signal refreshRequested()
     property int current: 0
     property string selectionKey: ""
@@ -45,6 +78,7 @@ Item {
     signal closed()
 
     function show() {
+        if (!root.busy) root.supportKey = ""
         root.routeKey = ""
         root.selectionKey = ""
         root.current = 0
@@ -91,7 +125,7 @@ Item {
         root.feedbackFailed = message !== ""
         root.feedbackTitle = message !== "" ? qsTr("Connection problem") : ""
         root.feedbackBody = message
-        if (message === "" && root.open && (op.endsWith("-connect") || op === "share")) root.hide()
+        if (message === "" && root.open && (op.endsWith("-connect") || op === "share" || op === "phone-open")) root.hide()
         return true
     }
     function showFeedback(title, body, failed) {
@@ -260,6 +294,10 @@ Item {
                 out[key + ":off"] = [Math.round(q.x), Math.round(q.y)]
             }
         }
+        if (root.open && installButton.visible && root.requirement) {
+            const p = installButton.mapToItem(null, installButton.width / 2, installButton.height / 2)
+            out["setup-install:" + root.requirement.key] = [Math.round(p.x), Math.round(p.y)]
+        }
         return out
     }
 
@@ -333,15 +371,19 @@ Item {
                 objectName: "connectionNotice"
                 visible: root.statusTitle !== ""
                 width: parent.width
-                height: visible ? Math.min(noticeContents.implicitHeight + Tokens.spaceMd * 2,
+                height: visible ? Math.min(noticeContents.implicitHeight + noticeActions.height + Tokens.spaceSm + Tokens.spaceMd * 2,
                                            Math.max(Tokens.controlHeight * 2, root.height * 0.30)) : 0
                 color: Tokens.withAlpha(root.feedbackFailed ? Tokens.danger : Tokens.accent, 0.08)
                 border.color: root.feedbackFailed ? Tokens.danger : Tokens.accent
                 border.width: Tokens.borderWidth
                 Flickable {
                     id: noticeView
-                    anchors.fill: parent
+                    anchors.top: parent.top
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.bottom: noticeActions.top
                     anchors.margins: Tokens.spaceMd
+                    anchors.bottomMargin: Tokens.spaceSm
                     contentHeight: noticeContents.implicitHeight
                     clip: true
                     boundsBehavior: Flickable.StopAtBounds
@@ -370,6 +412,43 @@ Item {
                             font.pixelSize: Tokens.fontSmall
                             wrapMode: Text.Wrap
                         }
+                    }
+                }
+                Row {
+                    id: noticeActions
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.bottom: parent.bottom
+                    anchors.margins: Tokens.spaceMd
+                    spacing: Tokens.spaceSm
+                    height: root.busy ? 0 : Tokens.controlHeight
+                        Rectangle {
+                            id: installButton
+                            objectName: "connectionInstallSupport"
+                            visible: root.missingSupport && root.requirement.installable && !root.busy
+                            width: installLabel.implicitWidth + Tokens.spaceLg
+                            height: visible ? Tokens.controlHeight : 0
+                            color: Tokens.accent
+                            activeFocusOnTab: true
+                            Keys.onReturnPressed: root.installSupport()
+                            Keys.onSpacePressed: root.installSupport()
+                            Text {
+                                id: installLabel
+                                anchors.centerIn: parent
+                                text: qsTr("Install support")
+                                textFormat: Text.PlainText
+                                color: Tokens.background
+                                font.family: Tokens.fontFamily
+                                font.pixelSize: Tokens.fontBody
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.installSupport()
+                            }
+                            Accessible.role: Accessible.Button
+                            Accessible.name: qsTr("Install missing connection support")
+                        }
                         Rectangle {
                             objectName: "connectionCheckAgain"
                             visible: !root.busy
@@ -395,7 +474,6 @@ Item {
                             Accessible.role: Accessible.Button
                             Accessible.name: qsTr("Check connection requirements again")
                         }
-                    }
                 }
             }
         }

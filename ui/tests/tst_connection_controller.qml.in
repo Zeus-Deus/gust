@@ -8,12 +8,15 @@ Item {
         id: win
         anchors.fill: parent
         property var placesInfo: ({})
+        property var deviceList: []
         property var connectedPlaces: []
         property var lostPlaces: []
         property var seenLostRoutes: []
         property var dirModel: ({places_json: "{}", location: "/local"})
         property var confirm: ({visible: false})
-        property var prompt: ({visible: false, claimingFocus: false, close: function() { this.visible = false }})
+        property var prompt: ({visible: false, claimingFocus: false, promptCalls: 0,
+            openWith: function() { this.visible = true; this.promptCalls += 1 },
+            close: function() { this.visible = false }})
         QtObject { id: palette; property bool visible: false }
         property var quickLook: ({open: false})
         property var conflictDialog: ({visible: false})
@@ -45,10 +48,20 @@ Item {
             property string location: "/local"
             property string returnError: ""
             property int connectCalls: 0
+            property int installCalls: 0
+            property int phoneCalls: 0
+            property int phoneCancelCalls: 0
+            property int navigationCalls: 0
+            property int cloudSetupCalls: 0
+            function navigate(path) { navigationCalls += 1 }
+            function phone_open(id, apps) { phoneCalls += 1; return "" }
+            function phone_cancel(id) { phoneCancelCalls += 1 }
+            function request_devices() {}
+            function install_support(key) { installCalls += 1; place_busy = returnError === ""; return returnError }
             function remote_connect(name) { connectCalls += 1; place_busy = returnError === ""; return returnError }
             function cloud_connect(name) { return remote_connect(name) }
             function tailnet_connect(name, target, user, trust) { return remote_connect(name) }
-            function cloud_setup() { return returnError }
+            function cloud_setup() { cloudSetupCalls += 1; return returnError }
             function share_check(address) { return "" }
             function share_mount(address, user, domain, password) { return remote_connect(address) }
             function request_places() {}
@@ -84,7 +97,7 @@ Item {
         win.filterInput = {activeFocus: false}; win.searchInput = {activeFocus: false}
         accepted.clear(); rejected.clear()
         connectPanel.operation = null; connectPanel.feedbackTitle = ""; connectPanel.feedbackBody = ""; connectPanel.feedbackFailed = false
-        connectPanel.hide(); win.connectionOwner = null; win.dirModel = fakeModel
+        connectPanel.hide(); connectPanel.supportKey = ""; win.connectionOwner = null; win.dirModel = fakeModel
         fakeModel.place_busy = false; fakeModel.returnError = ""; fakeModel.connectCalls = 0
         win.placesInfo = {sshfs: true, computers: [{name: "studio", routes: [
             {kind: "ssh", name: "studio-lan", detail: "192.0.2.10", online: true, connected: false}]}]}
@@ -96,13 +109,117 @@ Item {
         win.dirModel = {location: tail.path, places_json: JSON.stringify({
             computers: [{name: "Studio", routes: [ssh, tail]}], ssh: [ssh], tailnet: [tail], cloud: []})}
     }
+    function test_add_cloud_offers_helper_setup_before_starting_a_terminal() {
+        fakeModel.cloudSetupCalls = 0
+        win.placesInfo = {setup: [{key: "cloud", packages: ["rclone"], installable: true}]}
+        win.cloudSetupAction()
+        compare(fakeModel.cloudSetupCalls, 0, "Missing rclone must lead to Install support")
+        compare(connectPanel.requirement.key, "cloud")
+    }
+    function test_share_setup_precedes_credentials_and_mount_data() {
+        return [{tag: "smb", address: "//server/share", key: "smb"},
+                {tag: "nfs", address: "nfs://server/export", key: "nfs"}]
+    }
+    function test_share_setup_precedes_credentials_and_mount(row) {
+        win.prompt.promptCalls = 0
+        win.placesInfo = {setup: [{key: row.key, packages: ["gvfs-" + row.key], installable: true}]}
+        win.shareAddressEntered(row.address)
+        compare(fakeModel.connectCalls, 0, "Missing sharing backend must not start a mount")
+        compare(win.prompt.promptCalls, 0, "Do not ask for passwords before support is ready")
+        verify(connectPanel.requirement !== null)
+        compare(connectPanel.requirement.key, row.key)
+    }
+    function test_photos_menu_does_not_reopen_the_last_app_folder() {
+        fakeModel.phoneCalls = 0; fakeModel.navigationCalls = 0
+        win.deviceList = [{name: "apple:fixture", phone: "apple", stateKey: "open", label: "iPhone", mountPoint: "/fixture/app-files"}]
+        win.openPhone("apple:fixture", "open", false, true)
+        compare(fakeModel.navigationCalls, 0, "The Photos menu is not navigation to an app-files mount")
+        compare(fakeModel.phoneCalls, 1, "Explicit Photos must ask the backend for the media URI")
+    }
+    function test_context_menu_open_does_not_cancel_an_existing_phone_attempt() {
+        fakeModel.phoneCalls = 0; fakeModel.phoneCancelCalls = 0
+        win.deviceList = [{name: "apple:fixture", phone: "apple", stateKey: "opening", label: "iPhone"}]
+        win.openPhone("apple:fixture", "opening", false, true)
+        compare(fakeModel.phoneCancelCalls, 0, "A menu item labelled Open must not mean Cancel")
+        compare(fakeModel.phoneCalls, 0, "Do not start another attempt while one is opening")
+    }
+    function test_ready_snapshot_overrides_an_old_missing_package_row() {
+        fakeModel.phoneCalls = 0
+        win.deviceList = [{name: "apple:fixture", phone: "apple", stateKey: "needs-package", label: "iPhone"}]
+        win.placesInfo = {setup: [{key: "apple", packages: [], installable: true}]}
+        win.openPhone("apple:fixture", "needs-package")
+        compare(fakeModel.phoneCalls, 1, "A fresh ready snapshot must let the explicit Open proceed")
+    }
+    function test_worker_missing_support_result_retains_the_install_action() {
+        win.deviceList = [{name: "apple:fixture", phone: "apple", stateKey: "ready", label: "iPhone"}]
+        win.placesInfo = {setup: [{key: "apple", packages: [], installable: true}]}
+        win.openPhone("apple:fixture", "ready")
+        win.placesInfo = {setup: [{key: "apple", packages: ["gvfs-afc"], installable: true}]}
+        win.placeDone("phone-open", "apple:fixture", "Set up device", fakeModel)
+        const install = findChild(connectPanel, "connectionInstallSupport")
+        verify(install && install.visible, "A worker-discovered missing backend must retain the right setup action")
+    }
+    function test_other_transport_requirements_are_checked_before_network_calls_data() {
+        return [{tag: "ssh-without-fuse", kind: "ssh", key: "ssh", packages: ["fuse3"]},
+                {tag: "cloud-without-rclone", kind: "cloud", key: "cloud", packages: ["rclone"]}]
+    }
+    function test_other_transport_requirements_are_checked_before_network_calls(row) {
+        win.placesInfo = {sshfs: true, setup: [{key: row.key, packages: row.packages, installable: true}]}
+        win.connectPlace(row.kind, "studio", "192.0.2.10", "media")
+        compare(fakeModel.connectCalls, 0, "All prerequisites, not just sshfs, must be checked before connecting")
+        compare(connectPanel.requirement.key, row.key)
+        compare(connectPanel.missingSupport, true)
+    }
+    function test_opening_a_phone_keeps_unlock_and_trust_guidance_prominent() {
+        fakeModel.phoneCalls = 0
+        win.deviceList = [{name: "apple:fixture", phone: "apple", stateKey: "ready", label: "iPhone"}]
+        win.placesInfo = {setup: [{key: "apple", packages: [], installable: true}]}
+        win.openPhone("apple:fixture", "ready")
+        compare(fakeModel.phoneCalls, 1)
+        compare(connectPanel.open, true, "Phone setup progress must not be a tiny sidebar/status line")
+        compare(connectPanel.busy, true)
+        verify(connectPanel.statusBody.indexOf("Trust") >= 0)
+        connectPanel.hide()
+        win.placeDone("phone-open", "apple:fixture", "Device is locked", fakeModel)
+        compare(connectPanel.open, false, "Late phone failure must not reopen the panel")
+        connectPanel.show()
+        compare(connectPanel.statusBody, "Device is locked")
+    }
+    function test_phone_missing_backend_opens_setup_without_attempting_a_mount() {
+        fakeModel.phoneCalls = 0
+        win.deviceList = [{name: "apple:fixture", phone: "apple", stateKey: "needs-package", label: "iPhone"}]
+        win.placesInfo = {setup: [{key: "apple", packages: ["gvfs-afc"], installable: true}]}
+        win.openPhone("apple:fixture", "needs-package")
+        compare(fakeModel.phoneCalls, 0, "Missing backend must lead to setup, not a doomed mount")
+        compare(connectPanel.open, true)
+        compare(connectPanel.statusTitle, "Set up Apple devices")
+        verify(connectPanel.missingSupport)
+    }
+    function test_install_action_uses_initiating_owner_and_never_connects() {
+        fakeModel.installCalls = 0
+        win.placesInfo = {sshfs: true, setup: [{key: "apple", packages: ["gvfs-afc"], installable: true}]}
+        connectPanel.showSupport("apple"); wait(0)
+        connectPanel.installSupport()
+        compare(fakeModel.installCalls, 1, "The actual panel action must reach the installer bridge")
+        compare(fakeModel.connectCalls, 0)
+        compare(connectPanel.busy, true)
+        win.placeDone("setup-install", "apple", "", {place_busy: false})
+        compare(connectPanel.busy, true, "Unrelated results must not complete setup")
+        win.placeDone("setup-install", "apple", "", fakeModel)
+        compare(connectPanel.busy, false)
+        compare(connectPanel.open, true)
+        compare(connectPanel.statusTitle, "Support is ready")
+        verify(connectPanel.statusBody.indexOf("Reconnect") >= 0)
+        compare(fakeModel.connectCalls, 0, "Successful installation never mounts the phone")
+    }
     function test_missing_tool_does_not_close_panel_or_start_a_connection() {
         win.placesInfo = Object.assign({}, win.placesInfo, {sshfs: false})
         connectPanel.show(); wait(0)
         connectPanel.activate(connectPanel.rows.findIndex(r => r.type === "place"))
         compare(connectPanel.open, true, "A prerequisite refusal stays where Connect was clicked")
         compare(fakeModel.connectCalls, 0, "Missing tool must be caught before network work")
-        verify(connectPanel.statusBody.indexOf("sudo pacman -S sshfs") >= 0)
+        verify(connectPanel.statusBody.indexOf("sshfs") >= 0)
+        verify(connectPanel.statusBody.indexOf("sudo pacman") < 0)
     }
     function test_actual_connect_handler_tracks_the_matching_worker_result() {
         connectPanel.show(); wait(0)

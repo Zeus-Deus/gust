@@ -246,6 +246,8 @@ Window {
             win.qaDump("share-bad-address")
             return
         }
+        const supportKey = text.trim().toLowerCase().startsWith("nfs://") ? "nfs" : "smb"
+        if (!win.requireSupport(supportKey)) { prompt.close(); return }
         win.shareAddress = text
         // NFS authorises by address, not by account. Asking for a username
         // and password it will never send would be theatre.
@@ -282,7 +284,10 @@ Window {
         win.shareUser = ""
     }
     function connectShare(address, user, password) {
+        const supportKey = address.trim().toLowerCase().startsWith("nfs://") ? "nfs" : "smb"
+        if (!win.requireSupport(supportKey)) return
         if (!win.beginPlaceFeedback("share", "", qsTr("Connecting to shared folder…"))) return
+        connectPanel.supportKey = supportKey
         const model = win.connectionOwner
         const error = model.share_mount(address, user, "", password)
         if (error !== "") { win.alertText = error; win.finishPlaceFeedback("share", "", error, model) }
@@ -337,7 +342,7 @@ Window {
         } else if (message !== "") {
             win.alertText = message
         }
-        if (op.startsWith("device") || op.startsWith("phone")) dirModel.request_devices()
+        if (op.startsWith("device") || op.startsWith("phone") || op === "setup-install") dirModel.request_devices()
         win.refreshPlaces()
         win.qaDump("place-" + op + (message === "" ? "" : "-failed"))
     }
@@ -582,18 +587,35 @@ Window {
     /// A phone row was clicked: browse it if it is open; while it waits for
     /// Trust, a second click stops waiting; otherwise open it (gio asks the
     /// phone; Gust answers the Trust question until the person taps it).
-    function openPhone(id, stateKey) {
+    function openPhone(id, stateKey, apps, fromMenu) {
         const d = win.deviceList.find((x) => x.name === id)
-        if (stateKey === "open" && d && d.mountPoint) { dirModel.navigate(d.mountPoint); return }
+        const requirement = d && (win.placesInfo.setup || []).find(r => r.key === d.phone)
+        if (d && (requirement ? requirement.packages.length > 0 : stateKey === "needs-package")) {
+            connectPanel.showSupport(d.phone)
+            return
+        }
+        if (!apps && !fromMenu && stateKey === "open" && d && d.mountPoint) { dirModel.navigate(d.mountPoint); return }
         if (stateKey === "trust" || stateKey === "unlock" || stateKey === "opening") {
+            if (fromMenu) {
+                connectPanel.showFeedback(qsTr("Waiting for your device"), qsTr("Keep it unlocked and finish any Trust prompt on its screen."), false)
+                return
+            }
             dirModel.phone_cancel(id)
             hints.message = qsTr("Stopped waiting for the phone")
             return
         }
-        // Everything else (ready, needs a package, said no, failed) tries
-        // again: a package installed since is found, and the reason is
-        // told again if it still does not open.
-        dirModel.phone_open(id, false)
+        if (!d) {
+            connectPanel.showFeedback(qsTr("Device is no longer connected"), qsTr("Reconnect it, then choose it under Devices."), false)
+            return
+        }
+        if (!win.beginPlaceFeedback("phone-open", id, qsTr("Opening %1…").arg(d.label))) return
+        connectPanel.supportKey = d.phone
+        connectPanel.feedbackBody = d.phone === "apple"
+            ? qsTr("Unlock your device and tap Trust on its screen if asked. Gust never accepts Trust for you. Close this panel and choose the device again to stop waiting.")
+            : qsTr("Keep your device unlocked. On Android, choose File transfer in its USB notification. Close this panel and choose the device again to stop waiting.")
+        const model = win.connectionOwner
+        const error = model.phone_open(id, apps === true)
+        if (error !== "") win.finishPlaceFeedback("phone-open", id, error, model)
         win.qaDump("phone-open")
     }
 
@@ -705,7 +727,26 @@ Window {
     }
     function finishPlaceFeedback(op, name, message, owner) {
         if (!win.connectionOwner || (owner && owner !== win.connectionOwner)) return
-        if (connectPanel.completeFeedback(op, name, message)) win.connectionOwner = null
+        if (connectPanel.completeFeedback(op, name, message)) {
+            win.connectionOwner = null
+            if (op === "setup-install") {
+                connectPanel.feedbackTitle = message === "" ? qsTr("Support is ready") : qsTr("Setup did not finish")
+                if (message === "") connectPanel.feedbackBody = name === "apple"
+                    ? qsTr("Reconnect your device, unlock it and tap Trust if asked. Then choose it under Devices. Nothing was opened automatically.")
+                    : qsTr("Choose your computer, cloud storage or device again to connect. Nothing was connected automatically.")
+                win.refreshPlaces()
+            }
+        }
+    }
+    function installSupport(key) {
+        if (connectPanel.busy) { connectPanel.showFeedback("", "", false); return }
+        connectPanel.showSupport(key)
+        if (!connectPanel.missingSupport || !connectPanel.requirement.installable) return
+        if (!win.beginPlaceFeedback("setup-install", key, qsTr("Installing connection support…"))) return
+        connectPanel.feedbackBody = qsTr("Approve the system's authorization prompt. Keep Gust open until setup finishes. Closing this panel does not stop package installation.")
+        const model = win.connectionOwner
+        const error = model.install_support(key)
+        if (error !== "") win.finishPlaceFeedback("setup-install", key, error, model)
     }
     function forgetConnectionOwner(model) {
         if (win.pendingTailnet && win.pendingTailnet.model === model) win.pendingTailnet = null
@@ -715,12 +756,16 @@ Window {
             qsTr("The tab that started this attempt was closed. Its connection outcome is unknown; choose Check again before reconnecting."))
         win.connectionOwner = null
     }
-    function connectPlace(kind, name, target, user) {
-        if (kind !== "cloud" && win.placesInfo.sshfs === false) {
-            connectPanel.showFeedback(qsTr("Install sshfs to connect computers"),
-                qsTr("Install sshfs with your package manager, then choose Check again. On Omarchy: sudo pacman -S sshfs"), false)
-            return
+    function requireSupport(key) {
+        const requirement = (win.placesInfo.setup || []).find(r => r.key === key)
+        if ((requirement && requirement.packages.length > 0) || (key === "ssh" && win.placesInfo.sshfs === false)) {
+            connectPanel.showSupport(key)
+            return false
         }
+        return true
+    }
+    function connectPlace(kind, name, target, user) {
+        if (!win.requireSupport(kind === "cloud" ? "cloud" : "ssh")) return
         if (kind === "ssh" || kind === "cloud") {
             const op = kind === "ssh" ? "remote-connect" : "cloud-connect"
             if (!win.beginPlaceFeedback(op, name, qsTr("Connecting to %1…").arg(name))) return
@@ -1482,8 +1527,10 @@ Window {
             if (d) win.openDevice(d.path, d.mounted)
         }
         else if (a === "dv-eject") win.ejectDevice(win.deviceMenuPath)
-        else if (a === "ph-open") dirModel.phone_open(win.phoneMenuId, false)
-        else if (a === "ph-apps") dirModel.phone_open(win.phoneMenuId, true)
+        else if (a === "ph-open" || a === "ph-apps") {
+            const phone = win.deviceList.find(d => d.name === win.phoneMenuId)
+            win.openPhone(win.phoneMenuId, phone ? phone.stateKey : "", a === "ph-apps", true)
+        }
         else if (a === "ph-eject") {
             const err = dirModel.phone_eject(win.phoneMenuId)
             if (err !== "") win.alertText = err
@@ -1652,6 +1699,7 @@ Window {
             if (cerr2 !== "") win.alertText = cerr2
         }
         else if (a === "cloud-setup") {
+            if (!win.requireSupport("cloud")) return
             // rclone's own config tool, in a terminal. Gust never asks
             // for a cloud password and never sees one.
             const serr = dirModel.cloud_setup()
@@ -3245,7 +3293,10 @@ Window {
         onRefreshRequested: win.refreshPlaces()
         onOpenRequested: (path) => { connectPanel.hide(); dirModel.navigate(path) }
         onDisconnectRequested: (kind, name) => win.disconnectPlace(kind, name)
-        onActionRequested: (a) => { win.runAction(a) }
+        onActionRequested: (a) => {
+            if (a.startsWith("setup-install:")) win.installSupport(a.substring(14))
+            else win.runAction(a)
+        }
         onClosed: { win.focusList(); win.qaDump("connect-closed") }
         onVisibleChanged: win.qaDump("connect")
     }

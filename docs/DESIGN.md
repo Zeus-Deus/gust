@@ -788,19 +788,41 @@ on `/dev/bus/usb/<bus>/` says when something was plugged in or pulled.
   in the row what the person has to do ("Unlock your iPhone and tap
   Trust"). A second click stops waiting and answers Cancel. "Don't Trust"
   is told plainly, with how to be asked again.
-- A missing backend is named with its command (`Needs gvfs-afc — sudo
-  pacman -S gvfs-afc`). Gust never installs packages itself. Android needs
-  `gvfs-mtp` (on Omarchy by default); iPhone needs `gvfs-afc`, which pulls
-  in `usbmuxd`.
+- The supported Arch package installs the SSH, cloud, SMB/NFS and USB-device
+  helpers as dependencies, including `gvfs-afc`/`usbmuxd` for Apple devices,
+  `gvfs-mtp` for Android and `gvfs-gphoto2` for cameras. These are part of
+  the file manager experience, not optional terminal homework.
+- Source builds and older installations show missing capabilities prominently
+  in Connect. A phone with missing support opens this setup surface instead
+  of attempting a mount. **Install support** names the packages first and
+  invokes only an allowlisted capability through the system's polkit prompt;
+  Gust never runs as root, collects an administrator password or builds a
+  shell command from a device name/address. Installations are serialized
+  across tabs and results are tied to their initiating model. Failure/cancel
+  stays visible and Check again is discovery-only. Unsupported systems get
+  explicit package-manager guidance instead of a nonworking install button.
+- Installation never connects a device, repeats an interrupted operation or
+  accepts Trust. On success capabilities are refreshed and the person chooses
+  Connect/Open again. An already attached Apple device may need reconnecting
+  so the newly installed udev rule starts usbmuxd. Unlock/Trust remains a
+  decision on the device. Only iOS-exposed media and app file-sharing areas
+  are accessible; this is not unrestricted access to every app or iCloud.
+- Physical-device qualification must respect its authorization boundary:
+  USB detection, pairing validation and a service handshake without directory
+  listing do not establish photo browsing or file-transfer qualification.
 - Eject leaves every folder of the phone the window is in, unmounts photos
   and app files, and is never forced; it refuses while a transfer runs.
 
 **Proven with stand-ins, not with a phone.** `just qa` §37 replaces sysfs,
 the udev database and `gio` with a fake tree and a script that speaks gio's
 own question protocol; everything from detection to eject is Gust's real
-code. A physical iPhone/iPad/Android round trip is still the owner's to do.
+code. Browsing and transfers on physical devices remain unqualified. Separately,
+USB detection, pairing validation, a trusted session and an AFC service handshake
+were verified on one physical iPhone without directory listings, file metadata
+queries, file reads/writes or opening photos. That connection-only check does
+not establish transfer support on every Apple model.
 
-**This has not been qualified against physical hardware.** The VM used for
+**Physical USB storage remains unqualified.** The VM used for
 qualification has no USB device: its only removable block device is an empty
 virtual optical drive, which is exactly one of the cases above but not the
 common one. The discovery logic is unit-tested against captured `lsblk`

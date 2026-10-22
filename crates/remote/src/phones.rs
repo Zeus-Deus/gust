@@ -370,13 +370,13 @@ impl PhoneState {
     /// One calm line for the sidebar.
     pub fn words(&self, kind: PhoneKind) -> String {
         let what = match kind {
-            PhoneKind::Apple => "iPhone",
+            PhoneKind::Apple => "Apple device",
             PhoneKind::Android => "phone",
             PhoneKind::Camera => "camera",
         };
         match self {
             PhoneState::Ready => "Click to open".into(),
-            PhoneState::NeedsPackage(p) => format!("Needs {p} — sudo pacman -S {p}"),
+            PhoneState::NeedsPackage(_) => "Set up device".into(),
             PhoneState::Opening => "Opening…".into(),
             PhoneState::WaitingForTrust => format!("Unlock your {what} and tap Trust"),
             PhoneState::WaitingForUnlock => format!("Unlock your {what} to continue"),
@@ -610,6 +610,37 @@ pub fn unmount(phone: &Phone) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_support_points_to_device_setup_without_a_terminal_command() {
+        for kind in [PhoneKind::Apple, PhoneKind::Android, PhoneKind::Camera] {
+            assert_eq!(
+                PhoneState::NeedsPackage(kind.package()).words(kind),
+                "Set up device"
+            );
+        }
+    }
+
+    #[test]
+    fn apple_trust_unlock_and_refusal_cover_all_apple_devices() {
+        for state in [
+            PhoneState::WaitingForTrust,
+            PhoneState::WaitingForUnlock,
+            PhoneState::Refused,
+        ] {
+            let words = state.words(PhoneKind::Apple);
+            assert!(words.contains("Apple device"), "{words}");
+            assert!(!words.contains("iPhone"), "{words}");
+        }
+        assert_eq!(
+            PhoneState::WaitingForUnlock.words(PhoneKind::Android),
+            "Unlock your phone to continue"
+        );
+        assert_eq!(
+            PhoneState::WaitingForUnlock.words(PhoneKind::Camera),
+            "Unlock your camera to continue"
+        );
+    }
 
     fn fake_device(
         sys: &Path,

@@ -63,8 +63,34 @@ From source:
     install -Dm755 target/release/gust ~/.local/bin/gust
 
 Needs Rust 1.90+, Qt 6 (qt6-base, qt6-declarative) and a Wayland session.
-Optional helpers are listed in `PKGBUILD` (`optdepends`). Gust works without
-each one and says what is missing when you reach for it.
+The Arch package includes the connection and device helpers: OpenSSH, SSHFS,
+FUSE 3, rclone, GVfs with AFC, SMB, NFS, MTP and gphoto2 backends, usbmuxd,
+and polkit. They are required dependencies in both package manifests, not
+optional extras. Unrelated helpers (thumbnails, archives and other features)
+remain in `PKGBUILD`'s `optdepends`; Gust explains when one is missing.
+
+### Connections and phones
+
+Open **Connect…** and choose a computer, share, cloud remote or attached device.
+A source build or older installation may be missing a helper: **Install
+support** shows the required packages before the system's polkit authorization
+prompt. Gust stays unprivileged and never asks you to type an administrator
+password into Gust. On unsupported systems it shows package-manager guidance.
+After installation, choose **Connect/Open** again yourself; **Check again**
+only refreshes discovery. Installing helpers never starts a connection or
+resumes a previous mount attempt.
+
+For an iPhone, iPad or iPod touch, unlock the device and accept **Trust** on
+the device when asked. If it was already attached when support was installed,
+reconnect it if necessary so usbmuxd can discover it. Apple access is limited
+to media and app file-sharing areas exposed by iOS. It is not access to every
+app's private data or all iCloud data, and it is not music-library sync.
+Android uses MTP; cameras use the gphoto2 backend.
+
+The Gust package has no install hooks that change file-manager defaults,
+mount devices, accept pairing/Trust, or enable/start services. Connections
+remain an explicit user action; installing usbmuxd does not bypass the
+phone's own unlock and Trust decisions.
 
 ## Make it the default file manager
 
