@@ -144,28 +144,61 @@ fn covering_mount_hides_old_descendants_without_an_equal_path_record() {
     }
 }
 
+// All row orders for held remote roots and old-root remote children. No I/O.
+fn root_stack_fixtures() -> Vec<Vec<u8>> {
+    let mut fixtures = Vec::new();
+    for parent in [1, 99] {
+        for fs in ["fuse.custom-peer", "nfs4", "cifs"] {
+            let held_remote = [row(1, parent, "/", fs), row(3, 1, "/", "tmpfs")];
+            for reverse in [false, true] {
+                fixtures.push(table(&held_remote, reverse));
+            }
+            let remote_child = [
+                row(1, parent, "/", "ext4"),
+                row(2, 1, "/remote", fs),
+                row(3, 1, "/", "tmpfs"),
+            ];
+            for order in [
+                [0, 1, 2],
+                [0, 2, 1],
+                [1, 0, 2],
+                [1, 2, 0],
+                [2, 0, 1],
+                [2, 1, 0],
+            ] {
+                fixtures.push(
+                    order
+                        .iter()
+                        .map(|i| remote_child[*i].as_str())
+                        .collect::<String>()
+                        .into_bytes(),
+                );
+            }
+        }
+    }
+    fixtures
+}
+
 #[test]
-fn root_overmount_hides_old_root_children() {
-    let mounts = MountInfo::parse(&table(
-        &[
-            row(1, 1, "/", "ext4"),
-            row(2, 1, "/old", "btrfs"),
-            row(3, 1, "/", "tmpfs"),
-            row(4, 3, "/new", "btrfs"),
-        ],
-        true,
-    ))
-    .unwrap();
-    assert_eq!(mounts.resolve(Path::new("/old/file")).unwrap().id, 3);
-    assert_eq!(
-        mounts
-            .visible_mounts()
-            .unwrap()
-            .iter()
-            .map(|m| m.id)
-            .collect::<Vec<_>>(),
-        [3, 4]
-    );
+fn root_overmount_cannot_authorize_local_lookup_from_a_held_root() {
+    for bytes in root_stack_fixtures() {
+        let mounts = MountInfo::parse(&bytes).unwrap();
+        for path in ["/", "/remote/file", "/other/file"] {
+            assert_eq!(
+                mounts.resolve(Path::new(path)),
+                Err(MountTableError::Ambiguous)
+            );
+            assert_eq!(fstype_from_mountinfo(Path::new(path), &bytes), None);
+        }
+    }
+}
+
+#[test]
+fn root_overmount_cannot_publish_an_inventory_from_the_wrong_root() {
+    for bytes in root_stack_fixtures() {
+        let mounts = MountInfo::parse(&bytes).unwrap();
+        assert_eq!(mounts.visible_mounts(), Err(MountTableError::Ambiguous));
+    }
 }
 
 #[test]
@@ -210,17 +243,17 @@ fn unresolved_sibling_stacks_fence_only_their_subtree_but_refuse_inventory() {
 fn branching_overmount_chain_is_ambiguous_and_covered_ambiguity_is_hidden() {
     let rows = [
         row(1, 0, "/", "ext4"),
-        row(2, 1, "/share", "ext4"),
-        row(3, 2, "/share", "btrfs"),
-        row(4, 2, "/share", "cifs"),
+        row(2, 1, "/cover/share", "ext4"),
+        row(3, 2, "/cover/share", "btrfs"),
+        row(4, 2, "/cover/share", "cifs"),
     ];
     let mounts = MountInfo::parse(&table(&rows, false)).unwrap();
     assert_eq!(
-        mounts.resolve(Path::new("/share/file")),
+        mounts.resolve(Path::new("/cover/share/file")),
         Err(MountTableError::Ambiguous)
     );
     let mut covered = rows.to_vec();
-    covered.push(row(5, 1, "/", "tmpfs"));
+    covered.push(row(5, 1, "/cover", "tmpfs"));
     let mounts = MountInfo::parse(&table(&covered, true)).unwrap();
     assert_eq!(
         mounts
@@ -229,7 +262,7 @@ fn branching_overmount_chain_is_ambiguous_and_covered_ambiguity_is_hidden() {
             .iter()
             .map(|m| m.id)
             .collect::<Vec<_>>(),
-        [5]
+        [1, 5]
     );
 }
 
@@ -298,11 +331,11 @@ fn bounds_report_limits_instead_of_partial_inventory() {
     let mut bytes = row(1, 0, "/", "ext4").into_bytes();
     // A deep chain also proves that validation and projection do not recurse.
     for id in 2..=MAX_MOUNTINFO_RECORDS as u64 {
-        bytes.extend_from_slice(row(id, id - 1, "/", "tmpfs").as_bytes());
+        bytes.extend_from_slice(row(id, id - 1, "/stack", "tmpfs").as_bytes());
     }
     let mounts = MountInfo::parse(&bytes).unwrap();
     assert_eq!(
-        mounts.resolve(Path::new("/file")).unwrap().id,
+        mounts.resolve(Path::new("/stack/file")).unwrap().id,
         MAX_MOUNTINFO_RECORDS as u64
     );
     bytes.extend_from_slice(row(MAX_MOUNTINFO_RECORDS as u64 + 1, 1, "/extra", "tmpfs").as_bytes());
