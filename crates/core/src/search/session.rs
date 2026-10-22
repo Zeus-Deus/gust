@@ -202,7 +202,8 @@ pub struct SearchSession {
     cancelled: bool,
     hits: Vec<(SearchHit, usize)>,
     stats: SearchStats,
-    issues: Vec<SearchIssue>,
+    issues: Vec<(SearchIssue, bool)>,
+    walk_issue_count: usize,
 }
 impl SearchSession {
     pub fn new(scope: SearchScope, options: SearchOptions) -> Self {
@@ -222,6 +223,7 @@ impl SearchSession {
             hits: Vec::new(),
             stats: SearchStats::default(),
             issues: Vec::new(),
+            walk_issue_count: 0,
         }
     }
     pub fn set_query(&mut self, query: SearchQuery) {
@@ -235,6 +237,8 @@ impl SearchSession {
         self.hits.clear();
         self.result_limited = false;
         self.cancelled = false;
+        self.issues.retain(|(_, from_walk)| *from_walk);
+        self.stats.issue_count = self.walk_issue_count;
     }
     /// Call for directory-watch changes; no filesystem work occurs here.
     pub fn invalidate(&mut self) {
@@ -245,13 +249,31 @@ impl SearchSession {
         self.set_query(query);
     }
     fn issue(&mut self, path: PathBuf, operation: &'static str, error: std::io::Error) {
+        self.record_issue(path, operation, error, true);
+    }
+    fn query_issue(&mut self, path: PathBuf, operation: &'static str, error: std::io::Error) {
+        self.record_issue(path, operation, error, false);
+    }
+    fn record_issue(
+        &mut self,
+        path: PathBuf,
+        operation: &'static str,
+        error: std::io::Error,
+        from_walk: bool,
+    ) {
+        if from_walk {
+            self.walk_issue_count = self.walk_issue_count.saturating_add(1);
+        }
         self.stats.issue_count = self.stats.issue_count.saturating_add(1);
         if self.issues.len() < self.options.max_issues {
-            self.issues.push(SearchIssue {
-                path,
-                operation,
-                kind: error.kind(),
-            });
+            self.issues.push((
+                SearchIssue {
+                    path,
+                    operation,
+                    kind: error.kind(),
+                },
+                from_walk,
+            ));
         }
     }
     fn start(&mut self) {
@@ -304,7 +326,7 @@ impl SearchSession {
         let path = c.path.clone();
         let depth = c.depth;
         if let Err(e) = fs::symlink_metadata(&path) {
-            self.issue(path, "metadata", e);
+            self.query_issue(path, "metadata", e);
             return;
         }
         if !self.query.tags.is_empty() {
@@ -312,7 +334,7 @@ impl SearchSession {
                 Ok(raw) => {
                     let raw = raw.as_deref().unwrap_or_default();
                     if std::str::from_utf8(raw).is_err() {
-                        self.issue(
+                        self.query_issue(
                             path,
                             "tags",
                             std::io::Error::from(std::io::ErrorKind::InvalidData),
@@ -330,7 +352,7 @@ impl SearchSession {
                     }
                 }
                 Err(e) => {
-                    self.issue(path, "tags", e);
+                    self.query_issue(path, "tags", e);
                     return;
                 }
             }
@@ -486,7 +508,7 @@ impl SearchSession {
             hits: hits.into_iter().map(|(h, _)| h).collect(),
             state,
             stats: self.stats.clone(),
-            issues: self.issues.clone(),
+            issues: self.issues.iter().map(|(issue, _)| issue.clone()).collect(),
         }
     }
 }

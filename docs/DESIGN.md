@@ -245,7 +245,8 @@ retained issues independently of matching results. Reaching a bound never
 reports Complete. Query changes replay cached candidates and then resume the
 same traversal, including after a result limit. Candidate/visit bounds need an
 explicit new session with revised bounds. `refresh()` rechecks cached paths
-and tags; `invalidate()` restarts after directory watch changes. No persistent
+and tags. Query-only errors reset on replay while traversal omissions remain.
+`invalidate()` restarts after directory watch changes. No persistent
 global index or implicit Home crawl is created. Each replay uses fresh no-follow
 metadata/xattrs, so removed/replaced paths and external tag edits are not
 treated as durable cached authority.

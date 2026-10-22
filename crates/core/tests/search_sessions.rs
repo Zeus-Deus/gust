@@ -257,6 +257,15 @@ fn invalid_tag_bytes_are_reported_and_issue_details_are_bounded() {
     assert_eq!(r.stats.issue_count, 6);
     assert_eq!(r.issues.len(), 2);
     assert!(r.hits.is_empty());
+    s.set_query(SearchQuery::filename("file"));
+    let next = finish(&mut s);
+    assert_eq!(next.state, SearchState::Complete);
+    assert_eq!(
+        next.stats.issue_count, 0,
+        "old query errors are not new omissions"
+    );
+    assert_eq!(next.stats.visited, 6);
+    assert_eq!(next.hits.len(), 6);
 }
 
 #[test]
