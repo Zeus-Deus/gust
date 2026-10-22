@@ -443,3 +443,86 @@ fn directory_attribute_refresh_refuses_untracked_new_work() {
         0o700
     );
 }
+
+#[test]
+fn readable_directory_mode_redoes_after_undo_to_zero_and_reopen() {
+    for original_mode in [0o000, 0o100, 0o400] {
+        let f = Fixture::new();
+        let directory = f.0.join("work/dir");
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::write(directory.join("child"), b"retained contents").unwrap();
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(original_mode))
+            .unwrap();
+        let changes = attrs::set_modes(
+            std::slice::from_ref(&directory),
+            attrs::ModeSpec::Exact(0o700),
+        );
+        assert!(changes.failed.is_empty());
+        let mut h = f.open();
+        h.record_modes("Readable directory", &changes.changed)
+            .unwrap();
+        h.undo(&CancelToken::new()).unwrap();
+        assert_eq!(
+            std::fs::metadata(&directory).unwrap().permissions().mode() & 0o777,
+            original_mode
+        );
+        drop(h);
+        let mut h = f.open();
+        h.redo(&CancelToken::new()).unwrap();
+        assert_eq!(
+            std::fs::read(directory.join("child")).unwrap(),
+            b"retained contents"
+        );
+        h.undo(&CancelToken::new()).unwrap();
+        drop(h);
+        f.open().redo(&CancelToken::new()).unwrap();
+    }
+}
+
+#[test]
+fn unreadable_directory_redo_preserves_deep_edits_and_the_pending_fence() {
+    let f = Fixture::new();
+    let directory = f.0.join("work/dir");
+    std::fs::create_dir(&directory).unwrap();
+    std::fs::write(directory.join("child"), b"original").unwrap();
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let changes = attrs::set_modes(
+        std::slice::from_ref(&directory),
+        attrs::ModeSpec::Exact(0o700),
+    );
+    let mut h = f.open();
+    let entry = h
+        .record_modes("Readable directory", &changes.changed)
+        .unwrap();
+    h.undo(&CancelToken::new()).unwrap();
+    let root_before = gust_ops::FileIdentity::of_path(&directory).unwrap();
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::write(directory.join("child"), b"later deep work").unwrap();
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o000)).unwrap();
+    assert!(
+        root_before.matches(&gust_ops::FileIdentity::of_path(&directory).unwrap()),
+        "root identity alone must not authorize the inverse"
+    );
+    drop(h);
+    let mut h = f.open();
+    assert!(matches!(
+        h.redo(&CancelToken::new()),
+        Err(HistoryError::Partial { .. })
+    ));
+    assert_eq!(
+        std::fs::metadata(&directory).unwrap().permissions().mode() & 0o777,
+        0o000
+    );
+    drop(h);
+    let mut h = f.open();
+    assert_eq!(h.entries()[0].status, HistoryStatus::Interrupted);
+    assert_eq!(
+        h.redo(&CancelToken::new()),
+        Err(HistoryError::Barrier(entry.id))
+    );
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(
+        std::fs::read(directory.join("child")).unwrap(),
+        b"later deep work"
+    );
+}

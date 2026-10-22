@@ -85,7 +85,7 @@ fn create_with(
     bytes: &[u8],
 ) -> Result<crate::anchor::FileIdentity, String> {
     use crate::anchor::FileIdentity;
-    use rustix::fs::{AtFlags, Mode, OFlags};
+    use rustix::fs::{Mode, OFlags};
     crate::recursive::validate_name(name).map_err(|e| format!("{e}"))?;
     let (parent, name) = crate::anchor::resolve_parent(&dir.join(name))
         .map_err(|e| crate::engine::plain_io_message(&e))?;
@@ -100,16 +100,19 @@ fn create_with(
         Err(e) => return Err(crate::engine::plain_io_message(&e.into())),
     };
     let mut file = std::fs::File::from(fd);
-    if let Err(error) = file.write_all(bytes).and_then(|_| file.sync_all()) {
-        // The descriptor owns the creation. A replacement at its public name
-        // must not be deleted while cleaning up a failed write.
-        if let (Ok(held), Ok(named)) = (rustix::fs::fstat(&file), parent.stat_child(&name)) {
-            if FileIdentity::from_stat(&held).matches(&FileIdentity::from_stat(&named)) {
-                let _ = rustix::fs::unlinkat(parent.as_fd(), &name, AtFlags::empty());
-                let _ = rustix::fs::fsync(parent.as_fd());
-            }
-        }
-        return Err(crate::engine::plain_io_message(&error));
+    let result = file.write_all(bytes).and_then(|_| file.sync_all());
+    #[cfg(test)]
+    let result = result.and_then(|()| crate::creation_stage::write_result());
+    if let Err(error) = result {
+        #[cfg(test)]
+        crate::creation_stage::before_failed_cleanup();
+        // A failed sync gives no authority to remove a publicly mutable name:
+        // even the held inode may now contain a later writer's work.
+        return Err(format!(
+            "Could not finish creating {}; partial or current data was retained: {}",
+            dir.join(&name).display(),
+            crate::engine::plain_io_message(&error)
+        ));
     }
     let identity = FileIdentity::from_stat(
         &rustix::fs::fstat(&file).map_err(|e| crate::engine::plain_io_message(&e.into()))?,

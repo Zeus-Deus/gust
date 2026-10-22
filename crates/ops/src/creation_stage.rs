@@ -148,9 +148,27 @@ impl Drop for Private<'_> {
 }
 
 #[cfg(test)]
+type WriteResultHook = std::cell::RefCell<Option<Box<dyn FnOnce() -> io::Result<()>>>>;
+#[cfg(test)]
 thread_local! {
     pub(crate) static AFTER_PUBLICATION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
+    pub(crate) static WRITE_RESULT: WriteResultHook =
+        const { std::cell::RefCell::new(None) };
+    pub(crate) static BEFORE_FAILED_CLEANUP: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+#[cfg(test)]
+pub(crate) fn write_result() -> io::Result<()> {
+    WRITE_RESULT.with(|cell| cell.borrow_mut().take().map_or(Ok(()), |run| run()))
+}
+#[cfg(test)]
+pub(crate) fn before_failed_cleanup() {
+    BEFORE_FAILED_CLEANUP.with(|cell| {
+        if let Some(run) = cell.borrow_mut().take() {
+            run();
+        }
+    });
 }
 #[cfg(test)]
 pub(crate) fn after_publication() {
@@ -230,6 +248,49 @@ mod tests {
         });
         assert!(crate::create::create_from_bytes(&f.0, OsStr::new("file"), b"original").is_err());
         assert_eq!(std::fs::read(f.0.join("file")).unwrap(), b"later!!!");
+        assert_eq!(std::fs::read(f.0.join("saved")).unwrap(), b"original");
+    }
+    #[test]
+    fn failed_write_retains_a_stable_later_edit_on_the_same_inode() {
+        let f = Fixture::new();
+        let path = f.0.join("file");
+        WRITE_RESULT.with(|h| {
+            *h.borrow_mut() = Some(Box::new(move || {
+                std::fs::write(path, b"later same-inode work").unwrap();
+                Err(io::Error::other("injected uncertain sync"))
+            }))
+        });
+        let error =
+            crate::create::create_from_bytes(&f.0, OsStr::new("file"), b"original").unwrap_err();
+        assert!(error.contains("retained") && error.contains("file"));
+        assert_eq!(
+            std::fs::read(f.0.join("file")).unwrap(),
+            b"later same-inode work"
+        );
+    }
+    #[test]
+    fn failed_write_retains_a_replacement_at_the_cleanup_boundary() {
+        let f = Fixture::new();
+        let path = f.0.join("file");
+        let saved = f.0.join("saved");
+        WRITE_RESULT.with(|h| {
+            *h.borrow_mut() = Some(Box::new(|| {
+                Err(io::Error::other("injected uncertain sync"))
+            }))
+        });
+        BEFORE_FAILED_CLEANUP.with(|h| {
+            *h.borrow_mut() = Some(Box::new(move || {
+                std::fs::rename(&path, saved).unwrap();
+                std::fs::write(path, b"later replacement").unwrap();
+            }))
+        });
+        let error =
+            crate::create::create_from_bytes(&f.0, OsStr::new("file"), b"original").unwrap_err();
+        assert!(error.contains("retained") && error.contains("file"));
+        assert_eq!(
+            std::fs::read(f.0.join("file")).unwrap(),
+            b"later replacement"
+        );
         assert_eq!(std::fs::read(f.0.join("saved")).unwrap(), b"original");
     }
 }

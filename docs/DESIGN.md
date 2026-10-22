@@ -1582,3 +1582,17 @@ the receipt and preserves later work. Cleanup never recursively removes a
 folder produced by this path. This bounds the demonstrated public-name race;
 it does not promise exclusion of all concurrent same-user writers inside the
 private namespace or after final verification.
+
+A failed regular-file write or sync retains the public entry and reports its
+path as partial/current work; it never unlinks that mutable name. Fresh paired
+stats cannot distinguish Gust's failed bytes from a later same-inode edit.
+No successful creation receipt is returned for that uncertain result.
+
+If a mode inverse explicitly restores readable/searchable permissions on an
+unreadable directory with recorded lineage, preflight checks its exact root
+and attribute but defers traversal. Durable pending intent precedes the actual
+requested mode change, then complete inventory validation is mandatory before
+completion. On validation failure, restore the prior mode only while root
+identity/revision and the just-written mode still match; report Partial and
+retain the pending fence. Other traversal errors remain refusals. No permission
+change is performed solely to admit a forward history receipt.

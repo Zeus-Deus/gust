@@ -76,7 +76,7 @@ impl std::fmt::Display for HistoryError {
             Self::Unsupported(s) | Self::Io(s) => f.write_str(s),
             Self::Partial { from, at, cause } => write!(
                 f,
-                "Recovery changed names; inspect {} and {}: {cause}",
+                "Recovery is incomplete; inspect {} and {}: {cause}",
                 from.display(),
                 at.display()
             ),
@@ -743,7 +743,9 @@ impl History {
                     parent.open()?;
                     let file = open_attr(&path.path(), identity)?;
                     if let Some(lineage) = lineage {
-                        verify_tree(&path.path(), lineage, cancel)?;
+                        if !deferred_mode_lineage(&file, if undo { before } else { after })? {
+                            verify_tree(&path.path(), lineage, cancel)?;
+                        }
                     }
                     if read_attr(&file, if undo { after } else { before })?
                         != *(if undo { after } else { before })
@@ -920,20 +922,58 @@ impl History {
                     if read_attr(&file, expected)? != *expected {
                         return Err(HistoryError::Changed(path.path()));
                     }
-                    write_attr(&file, value)?;
-                    sync_attribute(&file, parent)?;
-                    if read_attr(&file, value)? != *value {
-                        return Err(HistoryError::Changed(path.path()));
-                    }
-                    if let Some(lineage) = lineage {
-                        let current = FileIdentity::from_stat(&rustix::fs::fstat(&file)?);
-                        if let Some(root) =
-                            lineage.iter_mut().find(|node| node.relative.0.is_empty())
-                        {
-                            root.identity = current.into();
-                            root.mode = current.mode;
+                    let deferred = lineage.is_some() && deferred_mode_lineage(&file, value)?;
+                    let mut next_lineage = lineage.clone();
+                    let validation = (|| -> Result<(), HistoryError> {
+                        write_attr(&file, value)?;
+                        sync_attribute(&file, parent)?;
+                        if read_attr(&file, value)? != *value {
+                            return Err(HistoryError::Changed(path.path()));
                         }
+                        let current = FileIdentity::from_stat(&rustix::fs::fstat(&file)?);
+                        if !identity.matches(&current) {
+                            return Err(HistoryError::Changed(path.path()));
+                        }
+                        if let Some(lineage) = &mut next_lineage {
+                            if let Some(root) =
+                                lineage.iter_mut().find(|node| node.relative.0.is_empty())
+                            {
+                                root.mode = current.mode;
+                            }
+                            if deferred {
+                                verify_tree(&path.path(), lineage, cancel)?;
+                            }
+                        }
+                        Ok(())
+                    })();
+                    if let Err(cause) = validation {
+                        if deferred {
+                            let rollback = (|| -> Result<(), HistoryError> {
+                                let current = FileIdentity::from_stat(&rustix::fs::fstat(&file)?);
+                                if !identity.matches(&current) || read_attr(&file, value)? != *value
+                                {
+                                    return Err(HistoryError::Changed(path.path()));
+                                }
+                                write_attr(&file, expected)?;
+                                sync_attribute(&file, parent)?;
+                                if read_attr(&file, expected)? != *expected {
+                                    return Err(HistoryError::Changed(path.path()));
+                                }
+                                Ok(())
+                            })();
+                            let recovery = match rollback {
+                                Ok(()) => "the prior mode was restored".into(),
+                                Err(error) => format!("mode recovery refused: {error}"),
+                            };
+                            return Err(HistoryError::Partial {
+                                from: path.path(),
+                                at: path.path(),
+                                cause: format!("{cause}; {recovery}"),
+                            });
+                        }
+                        return Err(cause);
                     }
+                    *lineage = next_lineage;
                 }
             }
             self.store.records[index].steps[i] = step;
@@ -1395,6 +1435,13 @@ fn refresh_lineage(
 }
 fn metadata_only(file: &File) -> Result<bool, HistoryError> {
     Ok(rustix::fs::fcntl_getfl(file)?.contains(OFlags::PATH))
+}
+fn deferred_mode_lineage(file: &File, requested: &Attr) -> Result<bool, HistoryError> {
+    let stat = rustix::fs::fstat(file)?;
+    Ok(stat.st_mode & 0o170000 == 0o040000
+        && stat.st_uid == rustix::process::geteuid().as_raw()
+        && stat.st_mode & 0o500 != 0o500
+        && matches!(requested, Attr::Mode(mode) if mode & 0o500 == 0o500))
 }
 fn sync_attribute(file: &File, parent: &Parent) -> Result<(), HistoryError> {
     if metadata_only(file)? {
