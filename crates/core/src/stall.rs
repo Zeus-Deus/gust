@@ -13,7 +13,8 @@
 //! syscall; the window keeps running.
 
 use std::io::Read;
-use std::path::Path;
+use std::os::unix::ffi::OsStrExt;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -80,23 +81,29 @@ pub fn can_stall(fstype: &str) -> bool {
 /// Reading /proc is a local operation and cannot itself stall on a hung
 /// remote: the kernel answers from its own tables.
 pub fn fstype_for(path: &Path) -> Option<String> {
-    let mounts = std::fs::read_to_string("/proc/self/mounts").ok()?;
-    let mut best: Option<(usize, String)> = None;
-    for line in mounts.lines() {
-        let mut parts = line.split_whitespace();
+    let mounts = std::fs::read("/proc/self/mounts").ok()?;
+    fstype_from_mounts(path, &mounts)
+}
+
+/// Pure mount-table lookup; never opens, stats or canonicalizes `path`.
+pub fn fstype_from_mounts(path: &Path, mounts: &[u8]) -> Option<String> {
+    let mut best: Option<(usize, &[u8])> = None;
+    for line in mounts.split_inclusive(|b| *b == b'\n') {
+        let line = line.strip_suffix(b"\n").unwrap_or(line);
+        let mut parts = crate::mount_table::fields(line);
         let _dev = parts.next()?;
         let mount_point = parts.next()?;
         let fstype = parts.next()?;
-        // /proc/self/mounts escapes spaces as \040.
-        let mount_point = mount_point.replace("\\040", " ");
+        let mount_point = PathBuf::from(crate::mount_table::decode_field(mount_point));
         if path.starts_with(&mount_point) {
-            let len = mount_point.len();
+            let len = mount_point.as_os_str().as_bytes().len();
             if best.as_ref().is_none_or(|(b, _)| len > *b) {
-                best = Some((len, fstype.to_string()));
+                best = Some((len, fstype));
             }
         }
     }
-    best.map(|(_, f)| f)
+    let (_, fstype) = best?;
+    std::str::from_utf8(fstype).ok().map(str::to_owned)
 }
 
 /// Should this path be probed before being listed?
