@@ -31,6 +31,16 @@ def terminate_owned_group(child):
     # run() keeps its non-raising cancellation handler installed throughout
     # entry, TERM, escalation and retirement. There is no handler transition
     # here for a second signal to interrupt.
+    # A completed leader with no executing group needs no signal. If that
+    # observation is unavailable, retain ownership and retry before signalling
+    # a group whose continued existence has not yet been established.
+    while True:
+        try:
+            if child.poll() is not None and not live_group(child.pid):
+                return
+            break
+        except (OSError, ValueError, IndexError):
+            time.sleep(0.05)
     try:
         os.killpg(child.pid, signal.SIGTERM)
     except OSError:
@@ -84,11 +94,17 @@ def run(command, *, cwd, env, log, timeout=None):
             else:
                 if pending:
                     raise KeyboardInterrupt
-                return code
-    except BaseException:
-        if child is not None:
-            terminate_owned_group(child)
-        raise
+                break
     finally:
-        for sig, handler in handlers.items():
-            signal.signal(sig, handler)
+        try:
+            # wait() observes only the immediate child, including its direct
+            # signal death. Every exit keeps the caller's lease through group
+            # retirement, even a successful status with surviving descendants.
+            if child is not None:
+                terminate_owned_group(child)
+        finally:
+            for sig, handler in handlers.items():
+                signal.signal(sig, handler)
+    if pending:
+        raise KeyboardInterrupt
+    return code

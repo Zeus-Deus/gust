@@ -1481,6 +1481,9 @@ desktop evidence is not qualification of a new binary, architecture or provider.
   during process startup and descendants outliving their immediate parent.
   Cancellation stays deferred throughout cleanup; an unestablished retirement
   retains the lease rather than returning a timeout and releasing ownership.
+  Every immediate-child exit also establishes group retirement before returning
+  its status, including zero/nonzero exits and direct termination of that child.
+  A surviving descendant cannot outlive the caller's lease on a normal return.
   Public failure details are bounded Rust error codes, locked crate identifiers,
   counts and fixed categories; diagnostic prose/paths remain private. Hosted
   library diagnostics may explicitly opt into at most 64 failed integration-test

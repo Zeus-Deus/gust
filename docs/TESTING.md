@@ -61,6 +61,10 @@ around Rust/model checks; `packaging/build-artifact.py` owns it for release buil
 Do not nest those commands inside another acquisition of the same lock. A busy
 lease is SKIP/TEMPFAIL, not a test pass. Direct Cargo commands need an externally
 coordinated build lease.
+The owned command boundary retires surviving descendants before returning any
+immediate-child status, including success, failure or direct child termination.
+Synthetic builder/gate tests verify lease exclusion while those descendants are
+live, retirement before status/receipt publication, and unrelated-process safety.
 
 ## Gate orchestration
 

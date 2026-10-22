@@ -51,6 +51,8 @@ escalates for surviving descendants and waits for retirement before releasing
 the build lease. A cancelled build writes no successful receipt.
 If retirement cannot yet be established, cleanup keeps the lease and retries;
 neither a second cancellation signal nor a retirement deadline releases it.
+Normal child exits use the same retirement boundary: a zero/nonzero status or
+direct termination of Cargo cannot release the lease with compilers still live.
 The digest validates `crates/app/ui -> ../../ui` and hashes the selected QML
 contents; redirected or unaccounted source symlinks invalidate provenance.
 The supported Qt qualification floor is 6.11.2, also declared for both Qt Arch

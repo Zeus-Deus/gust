@@ -245,6 +245,122 @@ print({'QT_VERSION': os.environ['QT_FIXTURE_VERSION'],
 
 
 class BuilderCancellationTests(unittest.TestCase):
+    def test_normal_child_exits_retain_lease_until_surviving_descendants_retire(self):
+        for caller in ("builder", "gate"):
+            for ending in ("0", "7", "signal"):
+                with self.subTest(caller=caller, ending=ending), tempfile.TemporaryDirectory(prefix="gust-normal-retirement-") as temporary:
+                    root = Path(temporary)
+                    source = root / "source"
+                    (source / "packaging").mkdir(parents=True)
+                    (source / "tests").mkdir()
+                    for name in ("build-artifact.py", "qt-contract.py", "owned-process.py"):
+                        shutil.copyfile(ROOT / "packaging" / name, source / "packaging" / name)
+                    shutil.copyfile(ROOT / "tests/release-gates.py", source / "tests/release-gates.py")
+                    (source / "Cargo.toml").write_text("[workspace]\n")
+                    (source / "Cargo.lock").write_text("# synthetic source\n")
+                    (source / "ui").mkdir()
+                    (source / "ui/Main.qml").write_text("// synthetic QML\n")
+                    (source / "crates/app").mkdir(parents=True)
+                    (source / "crates/app/ui").symlink_to("../../ui", target_is_directory=True)
+                    cargo = root / "cargo"
+                    cargo.write_text("""#!/usr/bin/env python3
+import os, subprocess, sys, time
+from pathlib import Path
+base = Path(os.environ['FIXTURE'])
+child = subprocess.Popen([sys.executable, '-c', '''import signal, sys, time
+from pathlib import Path
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+signal.signal(signal.SIGINT, signal.SIG_IGN)
+Path(sys.argv[1]).touch()
+time.sleep(30)
+''', str(base / 'ready')])
+while not (base / 'ready').exists(): time.sleep(0.01)
+(base / 'pids').write_text(str(os.getpid()) + ' ' + str(child.pid))
+while not (base / 'finish-leader').exists(): time.sleep(0.01)
+if os.environ['ENDING'] == '0':
+    output = base / 'source/target/release/gust'
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_bytes(b'inert artifact fixture; never executed')
+sys.exit(int(os.environ['ENDING']))
+""")
+                    cargo.chmod(0o755)
+                    wrapper = root / "invoke.py"
+                    wrapper.write_text("""import importlib.util, json, sys, time
+from pathlib import Path
+from types import SimpleNamespace
+base = Path(sys.argv[1]); caller = sys.argv[2]
+path = 'packaging/build-artifact.py' if caller == 'builder' else 'tests/release-gates.py'
+spec = importlib.util.spec_from_file_location('caller', base / 'source' / path)
+module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+module.qt.selected = lambda: {'version': '6.11.2', 'qmake': '/synthetic/qmake'}
+original = module.owned.terminate_owned_group
+def observed_retirement(child):
+    # Pause at the actual retirement boundary while the descendant is live,
+    # so lease exclusion is deterministic, rather than a timing assertion.
+    (base / 'cleanup-entry').write_text(str(child.poll()))
+    while not (base / 'allow-retirement').exists(): time.sleep(0.01)
+    return original(child)
+module.owned.terminate_owned_group = observed_retirement
+if caller == 'builder':
+    code = module.main(build_lock=base / 'lease')
+else:
+    gates = module.Gates(SimpleNamespace(output=base / 'evidence'))
+    gates.build_lock = base / 'lease'
+    code = gates.command('fixture', ['cargo'], build=True)
+(base / 'result.json').write_text(json.dumps({'code': code}))
+""")
+                    sentinel = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+                    owner = subprocess.Popen([sys.executable, str(wrapper), str(root), caller],
+                        env=dict(os.environ, PATH=str(root) + os.pathsep + os.environ["PATH"],
+                                 FIXTURE=str(root), ENDING=ending),
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                    pids = []
+                    try:
+                        deadline = time.monotonic() + 5
+                        while not (root / "pids").exists() and owner.poll() is None and time.monotonic() < deadline:
+                            time.sleep(0.01)
+                        pids = list(map(int, (root / "pids").read_text().split()))
+                        if ending == "signal":
+                            os.kill(pids[0], signal.SIGTERM)
+                        else:
+                            (root / "finish-leader").touch()
+                        deadline = time.monotonic() + 5
+                        while not (root / "cleanup-entry").exists() and owner.poll() is None and time.monotonic() < deadline:
+                            time.sleep(0.01)
+                        expected_child = -signal.SIGTERM if ending == "signal" else int(ending)
+                        self.assertNotEqual(Path(f"/proc/{pids[1]}/stat").read_text().split()[2], "Z")
+                        with (root / "lease").open("a") as lease:
+                            with self.assertRaises(BlockingIOError):
+                                fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                            self.assertTrue((root / "cleanup-entry").exists(), "returned without retiring surviving descendants")
+                            self.assertEqual(int((root / "cleanup-entry").read_text()), expected_child)
+                            self.assertIsNone(owner.poll())
+                            self.assertFalse((root / "result.json").exists())
+                            self.assertFalse((source / "target/release/gust-build.json").exists())
+                            (root / "allow-retirement").touch()
+                            public, errors = owner.communicate(timeout=5)
+                            self.assertEqual(owner.returncode, 0)
+                            fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        expected = expected_child if caller == "gate" else (0 if ending == "0" else 1)
+                        self.assertEqual(json.loads((root / "result.json").read_text())["code"], expected)
+                        self.assertEqual((source / "target/release/gust-build.json").exists(), caller == "builder" and ending == "0")
+                        for pid in pids:
+                            state = Path(f"/proc/{pid}/stat")
+                            self.assertTrue(not state.exists() or state.read_text().split()[2] == "Z")
+                        self.assertIsNone(sentinel.poll())
+                        self.assertNotIn(str(root), public + errors)
+                    finally:
+                        (root / "allow-retirement").touch()
+                        if owner.poll() is None:
+                            owner.kill(); owner.wait()
+                        owner.communicate(timeout=5)
+                        if pids:
+                            try:
+                                os.killpg(pids[0], signal.SIGKILL)
+                            except ProcessLookupError:
+                                pass
+                        sentinel.terminate(); sentinel.wait()
+
     def test_builder_cancellation_retires_owned_group_before_private_lease_release(self):
         for cancellation, startup, cleanup in ((signal.SIGINT, False, "ordinary"),
                 (signal.SIGTERM, False, "ordinary"), (signal.SIGTERM, True, "ordinary"),
