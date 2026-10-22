@@ -3,6 +3,11 @@
 use std::ffi::OsString;
 use std::os::unix::ffi::OsStringExt;
 
+mod topology;
+pub use topology::{
+    MountInfo, MountRecord, MountTableError, MAX_MOUNTINFO_BYTES, MAX_MOUNTINFO_RECORDS,
+};
+
 /// Decode the four kernel mount-field escapes, once; retain all other bytes.
 pub fn decode_field(field: &[u8]) -> OsString {
     let mut out = Vec::with_capacity(field.len());
