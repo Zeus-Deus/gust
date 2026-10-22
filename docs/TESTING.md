@@ -33,6 +33,13 @@ names already present in Cargo.lock, plus build-script/native-compiler/test-proc
 failure categories. Custom-build-command headers use the same locked-crate
 allowlist; fixed Qt detection/tool, QML generation and cc-rs markers expose only
 booleans. These are observed markers, not an inferred dependency diagnosis.
+Hosted library observation explicitly sets `GUST_PUBLIC_TEST_IDS=1`. This adds
+at most 64 failed integration-test identifiers, each matched exactly to a
+top-level `#[test]` declaration in committed HEAD and an allowlisted Gust crate.
+Only uniquely owned integration targets qualify. Dirty source, unknown targets,
+nested/unit names and unavailable Git metadata cannot supply identifiers;
+unreported failures remain counted as unclassified. Local runs keep identifiers
+private by default. Identifier collection never changes the test result.
 Diagnostic prose, paths, source excerpts and panic payloads
 remain in the private log. Gate output preserves these bounded fields so a
 hosted failure can be investigated without publishing raw evidence.
@@ -170,7 +177,18 @@ qualification. Build receipts record Qt selection. Staging checks reject missing
 mixed or older Qt libraries and require resolution inside the selected SDK. This
 proves only that SDK's staging environment; the Arch package gate separately
 checks the declared versioned runtime dependencies.
-Library observation reports unprovisioned fixture skips explicitly.
+Library observation reports unprovisioned fixture skips explicitly. Frozen
+archive extraction tests require `libarchive-dev`/`pkg-config` to build the native
+helper, `libarchive-tools` for bsdtar fixtures, and runtime libarchive,
+`/usr/bin/bwrap`, `/usr/bin/prlimit` and the matching helper executable. Cargo's
+integration-test build supplies the helper; CI selects that exact debug sibling.
+`bubblewrap` and `util-linux` are explicit hosted prerequisites. A real
+`--unshare-all` user/mount namespace probe is fatal on refusal or timeout; its raw
+output stays private. Kernel/runner/AppArmor policy that denies it remains
+unqualified. CI does not change host namespace policy or bypass isolation.
+Artifact staging runs independently of library observation only after successful
+SDK/app and sandbox admission, and never after cancellation. A failing library
+or sandbox step keeps the job red even if a separate artifact check passes.
 Full `--required` fixtures,
 KVM-only models, desktop/theme, benchmark and hardware/provider qualification
 remain separately required before release; hosted build success cannot certify

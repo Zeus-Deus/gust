@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
 """Run Cargo tests without counting runtime skips as successful tests.
 
-Raw output stays in a private directory under target/test-runs. Only aggregate
-counts reach stdout; logs can contain fixture paths and must not be uploaded.
+Raw output stays in a private directory under target/test-runs. Public output
+uses counts and explicitly allowlisted identifiers, never diagnostic prose.
 --workspace includes the Qt app; other arguments are passed to Cargo.
 """
 
+import io
 import json
 import os
 from pathlib import Path
 import re
 import subprocess
 import sys
+import tarfile
 import tempfile
+import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGES = ("gust-core", "gust-ops", "gust-remote", "gust-thumbs", "gust-testkit")
@@ -27,6 +30,49 @@ KNOWN_CRATES = frozenset(re.findall(r'^name = "([a-zA-Z0-9_-]+)"$',
 
 def enabled(value):
     return value.lower() in {"1", "true"}
+
+
+def public_test_catalogue():
+    """Only committed, unambiguous, top-level integration tests are public IDs.
+
+    Never scan a dirty working tree or infer namespaces from arbitrary log text.
+    Missing Git/source metadata disables identifiers without changing test status.
+    """
+    try:
+        result = subprocess.run(["git", "archive", "HEAD", "crates"], cwd=ROOT,
+                                capture_output=True, timeout=10, check=True)
+        with tarfile.open(fileobj=io.BytesIO(result.stdout)) as archive:
+            members = {m.name: m for m in archive if m.isfile()}
+            crates = {}
+            for name, member in members.items():
+                if re.fullmatch(r"crates/[a-zA-Z0-9_-]+/Cargo.toml", name):
+                    package = tomllib.loads(archive.extractfile(member).read().decode())["package"]["name"]
+                    if package in (*PACKAGES, "gust-app"):
+                        crates[name.rsplit("/", 1)[0]] = package
+            targets = {}
+            for name, member in members.items():
+                match = re.fullmatch(r"(crates/[a-zA-Z0-9_-]+)/tests/([a-zA-Z0-9_]+)\.rs", name)
+                if match and match[1] in crates:
+                    source = archive.extractfile(member).read().decode()
+                    names = set(re.findall(r"(?m)^#\[test\]\r?\n(?:#\[[^\n]*\]\r?\n)*"
+                                           r"fn ([a-zA-Z_][a-zA-Z0-9_]*)\s*\(", source))
+                    targets.setdefault(match[2], []).append((crates[match[1]], names))
+            return {target: owners[0] for target, owners in targets.items() if len(owners) == 1}
+    except (OSError, subprocess.SubprocessError, tarfile.TarError, ValueError, KeyError, UnicodeError):
+        return {}
+
+
+def public_failures(log, catalogue):
+    accepted = set()
+    current = None
+    for line in log.splitlines():
+        if re.match(r"^\s*(?:Running |Doc-tests )", line):
+            target = re.match(r"^\s*Running tests/([a-zA-Z0-9_]+)\.rs \(", line)
+            current = (target[1], catalogue.get(target[1])) if target else None
+        failure = re.fullmatch(r"test ([a-zA-Z_][a-zA-Z0-9_:]*) \.\.\. FAILED", line)
+        if failure and current and current[1] and failure[1] in current[1][1]:
+            accepted.add((current[1][0], current[0], failure[1]))
+    return [dict(zip(("crate", "target", "test"), item)) for item in sorted(accepted)[:64]]
 
 
 def summarize(log, ledger, cargo_exit, required):
@@ -55,7 +101,7 @@ def summarize(log, ledger, cargo_exit, required):
         "skipped": skipped, "ignored": ignored, "required": required,
         "accounting_valid": not invalid,
         # Emit only bounded compiler identifiers/categories, never diagnostic
-        # prose, source excerpts, paths, test names or panic payloads.
+        # prose, source excerpts, paths or panic payloads.
         "diagnostics": {
             "rust_error_codes": sorted(set(re.findall(r"(?m)^error\[(E\d{4})\]:", log)))[:16],
             "failed_crates": sorted(set(re.findall(
@@ -114,6 +160,7 @@ def main(argv):
     # No live clipboard or remote fixture is enabled implicitly. Their owners
     # must provision and opt in to those destructive/interactive test cases.
     command = ["cargo", "test", "--locked", "--no-fail-fast", *packages, *argv]
+    log = ""
     try:
         with (run / "cargo.log").open("w", encoding="utf-8") as output:
             process = subprocess.run(command, cwd=ROOT, env=env, stdout=output,
@@ -124,8 +171,14 @@ def main(argv):
         result = summarize("", "", 127, required)
     result["scope"] = "package-library-unit" if package_unit else "selected-cargo-tests"
     result["excluded_manual_benchmarks"] = [MANUAL_BENCHMARK] if package_unit else []
+    catalogue = public_test_catalogue() if enabled(os.environ.get("GUST_PUBLIC_TEST_IDS", "")) else {}
+    # Unknown/unit/nested/ambiguous names stay private. IDs never affect status.
+    failures = public_failures(log, catalogue) if catalogue else []
+    result["diagnostics"]["failed_test_ids"] = failures
+    result["diagnostics"]["test_identifier_catalogue"] = bool(catalogue)
+    result["diagnostics"]["unclassified_test_failures"] = max(0, result["failed"] - len(failures))
     (run / "summary.json").write_text(json.dumps(result, indent=2) + "\n")
-    # Paths, test names and skip reasons are deliberately private.
+    # Paths, unknown test names and skip reasons are deliberately private.
     print(json.dumps(result, sort_keys=True))
     return 0 if result["status"] == "pass" else 1
 

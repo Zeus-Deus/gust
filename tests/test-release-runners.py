@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import shutil
 import signal
 import sys
 import tempfile
@@ -35,7 +36,7 @@ Path(os.environ['CAPTURE'] + '-' + str(os.getpid())).write_text(json.dumps({
     'argv': sys.argv[1:], 'ledger': os.environ['GUST_SKIP_LEDGER']}))
 if os.environ.get('CASE') == 'skip':
     Path(os.environ['GUST_SKIP_LEDGER']).write_text('SKIP\\tFIXTURE\\tcase\\tprivate fixture missing\\n')
-if os.environ.get('CASE') not in ('empty', 'build-script'):
+if os.environ.get('CASE') not in ('empty', 'build-script', 'public-ids'):
     print('test result: ok. 2 passed; 0 failed; ' + ('1' if os.environ.get('CASE') == 'ignored' else '0') + ' ignored; 0 measured; 0 filtered out;')
 if os.environ.get('CASE') == 'diagnostic':
     print('error[E0425]: private-marker at /synthetic-private/location')
@@ -48,14 +49,24 @@ if os.environ.get('CASE') == 'build-script':
     print('error: failed to run custom build command for `private-marker v0.1.0`')
     print('qmlcachegen failed for /synthetic-private/location: private-marker')
     print('error occurred in cc-rs: private-marker')
-sys.exit(23 if os.environ.get('CASE') in ('failure', 'diagnostic', 'build-script') else 0)
+if os.environ.get('CASE') == 'public-ids':
+    print('     Running tests/archive_complete.rs (/synthetic-private/location)')
+    print('test all_2005_files_are_extracted_even_when_preview_is_truncated ... FAILED')
+    print('test private_marker ... FAILED')
+    print('test private_marker::all_2005_files_are_extracted_even_when_preview_is_truncated ... FAILED')
+    print('     Running tests/private_marker.rs (/synthetic-private/location)')
+    print('test all_2005_files_are_extracted_even_when_preview_is_truncated ... FAILED')
+    print('test result: FAILED. 0 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out;')
+    print('private-marker assertion: /synthetic-private/location')
+sys.exit(23 if os.environ.get('CASE') in ('failure', 'diagnostic', 'build-script', 'public-ids') else 0)
 """)
         cargo.chmod(0o755)
 
-    def run_case(self, case="pass", *args):
+    def run_case(self, case="pass", *args, public_ids=False, runner=RUNNER):
         env = dict(os.environ, PATH=str(self.root) + os.pathsep + os.environ["PATH"],
-                   CASE=case, CAPTURE=str(self.root / "capture"), GUST_ALL_REQUIRED="0")
-        result = subprocess.run([str(RUNNER), *args], env=env, text=True,
+                   CASE=case, CAPTURE=str(self.root / "capture"), GUST_ALL_REQUIRED="0",
+                   GUST_PUBLIC_TEST_IDS="1" if public_ids else "0")
+        result = subprocess.run([str(runner), *args], env=env, text=True,
                                 capture_output=True, timeout=15)
         summary = json.loads(result.stdout)
         self.assertNotIn("private fixture", result.stdout + result.stderr)
@@ -142,6 +153,44 @@ sys.exit(23 if os.environ.get('CASE') in ('failure', 'diagnostic', 'build-script
         self.assertNotIn("private-marker", result.stdout + result.stderr)
         self.assertNotIn("/synthetic-private/", result.stdout + result.stderr)
         self.assertNotIn("v0.1.0", result.stdout + result.stderr)
+
+    def test_public_failures_require_opt_in_and_exact_committed_crate_target_and_name(self):
+        # A tiny committed public-source stand-in proves that dirty declarations
+        # and another crate cannot expand the log disclosure allowlist.
+        fixture = self.root / "source"
+        (fixture / "tests").mkdir(parents=True)
+        for name in ("run-tests.py", "run-tests.sh"):
+            shutil.copy2(ROOT / "tests" / name, fixture / "tests" / name)
+        (fixture / "Cargo.lock").write_text('name = "gust-ops"\n')
+        public_name = "all_2005_files_are_extracted_even_when_preview_is_truncated"
+        for directory, package, target in (("ops", "gust-ops", "archive_complete"),
+                                            ("private", "private_marker", "private_marker")):
+            crate = fixture / "crates" / directory
+            (crate / "tests").mkdir(parents=True)
+            (crate / "Cargo.toml").write_text('[package]\nname = "' + package + '"\n')
+            (crate / "tests" / (target + ".rs")).write_text("#[test]\nfn " + public_name + "() {}\n")
+        commands = (["git", "init", "--initial-branch=fixture"], ["git", "add", "."],
+                    ["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                     "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null",
+                     "commit", "-m", "Synthetic public source"])
+        for command in commands:
+            subprocess.run(command, cwd=fixture, capture_output=True, check=True)
+        source = fixture / "crates/ops/tests/archive_complete.rs"
+        source.write_text(source.read_text() + "#[test]\nfn private_marker() {}\n")
+        for public_ids in (False, True):
+            result, summary = self.run_case("public-ids", public_ids=public_ids,
+                                            runner=fixture / "tests/run-tests.sh")
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(summary["cargo_exit"], 23)
+            self.assertEqual(summary["failed"], 4)
+            self.assertEqual(summary["diagnostics"]["failed_test_ids"], [{
+                "crate": "gust-ops", "target": "archive_complete",
+                "test": "all_2005_files_are_extracted_even_when_preview_is_truncated",
+            }] if public_ids else [])
+            self.assertEqual(summary["diagnostics"]["unclassified_test_failures"], 3 if public_ids else 4)
+            self.assertNotIn("private_marker", result.stdout + result.stderr)
+            self.assertNotIn("private-marker", result.stdout + result.stderr)
+            self.assertNotIn("/synthetic-private/", result.stdout + result.stderr)
 
 
 class FixtureContainmentTests(unittest.TestCase):

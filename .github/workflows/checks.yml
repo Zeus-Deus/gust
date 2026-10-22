@@ -61,7 +61,7 @@ jobs:
       - name: Build and model prerequisites (ephemeral runner)
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends just openssl pkg-config python3-venv libdbus-1-dev libclang-dev libarchive-dev libglib2.0-dev libgl1-mesa-dev libxkbcommon-dev libxcb-cursor0 libxkbcommon-x11-0 qt6-base-dev qt6-declarative-dev qt6-declarative-dev-tools qml6-module-qttest qml6-module-qtquick qml6-module-qtquick-window qml6-module-qtquick-shapes qml6-module-qtqml qml6-module-qtqml-models qml6-module-qtqml-workerscript
+          sudo apt-get install -y --no-install-recommends just openssl pkg-config python3-venv libdbus-1-dev libclang-dev libarchive-dev libarchive-tools bubblewrap util-linux libglib2.0-dev libgl1-mesa-dev libxkbcommon-dev libxcb-cursor0 libxkbcommon-x11-0 qt6-base-dev qt6-declarative-dev qt6-declarative-dev-tools qml6-module-qttest qml6-module-qtquick qml6-module-qtquick-window qml6-module-qtquick-shapes qml6-module-qtqml qml6-module-qtqml-models qml6-module-qtqml-workerscript
           rustup toolchain install stable --profile minimal --component rustfmt
           rustup default stable
       - name: Rust formatting
@@ -111,10 +111,36 @@ jobs:
       - name: Validate selected Qt SDK
         run: python3 packaging/qt-contract.py
       - name: Required app tests (selected SDK)
+        id: app-tests
         run: python3 tests/release-gates.py --gate app --required --output "$RUNNER_TEMP/gust-app"
+      - name: Required archive namespace admission
+        id: archive-admission
+        run: |
+          for tool in /usr/bin/bwrap /usr/bin/prlimit /usr/bin/bsdtar; do
+            if [[ ! -x "$tool" ]]; then
+              echo "{\"archive_namespace_admission\":\"FAIL\",\"missing_tool\":\"${tool##*/}\"}"
+              exit 1
+            fi
+          done
+          if timeout 10 /usr/bin/bwrap --unshare-all --die-with-parent --ro-bind / / --proc /proc --dev /dev -- /usr/bin/true >"$RUNNER_TEMP/archive-sandbox.log" 2>&1; then
+            echo '{"archive_namespace_admission":"PASS"}'
+          else
+            code=$?
+            permission_refused=false
+            if grep -Eq 'Operation not permitted|Permission denied|No permissions to create' "$RUNNER_TEMP/archive-sandbox.log"; then
+              permission_refused=true
+            fi
+            echo "{\"archive_namespace_admission\":\"FAIL\",\"exit_code\":$code,\"permission_refusal_marker\":$permission_refused,\"host_namespace_policy_qualification\":\"pending\"}"
+            exit "$code"
+          fi
       - name: Library observation (unprovisioned fixtures are reported as skips)
+        if: ${{ !cancelled() && steps.app-tests.outcome == 'success' }}
+        env:
+          GUST_PUBLIC_TEST_IDS: '1'
+          GUST_ARCHIVE_HELPER: ${{ github.workspace }}/target/debug/gust-archive-helper
         run: ./tests/run-tests.sh
       - name: Verify declared archive, build it and validate staged files and linking
+        if: ${{ !cancelled() && steps.app-tests.outcome == 'success' && steps.archive-admission.outcome == 'success' }}
         run: python3 packaging/check-source.py --build --architecture "${{ matrix.arch }}" --output "$RUNNER_TEMP/gust-source-package"
       # No artifact upload: raw test logs, source receipts and native/theme
       # evidence remain private. Hosted checks do not qualify a desktop,

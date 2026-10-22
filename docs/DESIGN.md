@@ -1482,7 +1482,14 @@ desktop evidence is not qualification of a new binary, architecture or provider.
   Cancellation stays deferred throughout cleanup; an unestablished retirement
   retains the lease rather than returning a timeout and releasing ownership.
   Public failure details are bounded Rust error codes, locked crate identifiers,
-  counts and fixed categories; diagnostic prose/paths remain private.
+  counts and fixed categories; diagnostic prose/paths remain private. Hosted
+  library diagnostics may explicitly opt into at most 64 failed integration-test
+  identifiers matched exactly to committed public declarations and an owned-crate
+  allowlist. Unknown names/targets remain unreported and counted as unclassified.
+  Archive fixtures require bsdtar, bwrap and prlimit plus real user/mount namespace
+  admission. Refusal is fatal; no unsandboxed fallback or host-policy change
+  qualifies it. Independent artifact staging requires successful SDK/app and
+  sandbox admission, and cannot turn a failed library gate into a pass.
 - Native and theme gates require an explicitly dedicated disposable desktop,
   their actual tools and the installed binary. They must not start on an
   ordinary shared desktop. The desktop runner owns `/tmp/gust-qa.lock`; callers
