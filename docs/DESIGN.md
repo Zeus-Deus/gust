@@ -1713,6 +1713,27 @@ local roots before any candidate access and separately checks the shared,
 private, files and info paths before opening them. Snapshot checks do not
 promise atomic exclusion of concurrent mount changes or syscall deadlines.
 
+Trash selection compares shared mount IDs as well as devices: home preference
+is eligible only when source, root, files and info resolve to one visible local
+mount. An unsupported home mount is skipped before home I/O; unrelated admitted
+local-volume candidates remain usable. A candidate with a separately mounted
+root or child refuses before information publication.
+
+Existing owned legacy Trash directories with read/search access for others but
+no group/other write access remain discoverable without chmod. Listing reports
+a typed actionable repair-required error. Explicit worker-only
+`TrashLocation::repair_legacy_permissions(cancel)` captures no-follow held
+root/files/info descriptors and identities before tightening those same owned
+directories to 0700. It creates no directories, changes no data/Info bytes and
+never recursively repairs or cleans. Replaced, writable-by-others, foreign-owned
+or symlinked layouts refuse; errors after a permission effect carry partial
+location evidence. Checked compatibility listing preserves errors; the original
+Vec-only projection remains a lossy compatibility API and is not authoritative.
+
+Legacy permission repair has no generic inverse receipt. APP retains its forward
+marker and commits an explicit history barrier before invoking the repair; it
+never fabricates a creation or attribute receipt from a post-effect snapshot.
+
 Undo vault placement excludes each retained entry's effective current root,
 including a Trash folder restored by an Undone entry. Empty vaults remain
 retained outside those roots; completing a child Redo never deletes a vault
@@ -1736,24 +1757,3 @@ certificate, exact Info and the complete current inventory all match, including
 every descendant revision and mode. Untracked edits do not gain authority.
 Certificates use no-replace publication and remain retained; collisions,
 unreadable records and metadata limits refuse, with pending/evidence preserved.
-
-Trash selection compares shared mount IDs as well as devices: home preference
-is eligible only when source, root, files and info resolve to one visible local
-mount. An unsupported home mount is skipped before home I/O; unrelated admitted
-local-volume candidates remain usable. A candidate with a separately mounted
-root or child refuses before information publication.
-
-Existing owned legacy Trash directories with read/search access for others but
-no group/other write access remain discoverable without chmod. Listing reports
-a typed actionable repair-required error. Explicit worker-only
-`TrashLocation::repair_legacy_permissions(cancel)` captures no-follow held
-root/files/info descriptors and identities before tightening those same owned
-directories to 0700. It creates no directories, changes no data/Info bytes and
-never recursively repairs or cleans. Replaced, writable-by-others, foreign-owned
-or symlinked layouts refuse; errors after a permission effect carry partial
-location evidence. Checked compatibility listing preserves errors; the original
-Vec-only projection remains a lossy compatibility API and is not authoritative.
-
-Legacy permission repair has no generic inverse receipt. APP retains its forward
-marker and commits an explicit history barrier before invoking the repair; it
-never fabricates a creation or attribute receipt from a post-effect snapshot.
