@@ -527,6 +527,15 @@ Nothing is shared between tabs except the window itself.
 - **A running job belongs to the tab that started it.** Closing that tab
   asks first, exactly as closing the window does; the transfer is never
   silently abandoned.
+- **A stop that was asked for is not a stop that happened.** After a confirmed
+  tab or window close, Gust cancels the job and then waits, with no deadline,
+  until the worker has stopped and cleaned up. The read or write in flight
+  must return first, and on a remote place that is as long as the connection
+  takes to answer. If the user asks to close the window again while it waits,
+  Gust offers **Close without waiting** and says what that leaves behind.
+  Compress and extract work cannot be cancelled part-way, so it holds a close
+  in the same way. A place cannot be disconnected while a transfer or archive
+  work in any tab still uses it, including a transfer that is still stopping.
 - Tab order is the order they were opened. A new tab opens beside the
   active one, not at the end, so "open in new tab" lands where the eye is.
 

@@ -249,7 +249,7 @@ Item {
         win.placeDone("setup-install", "apple", "", fakeModel)
         compare(connectPanel.busy, false)
         compare(connectPanel.open, true)
-        compare(connectPanel.statusTitle, "Support is ready")
+        compare(connectPanel.statusTitle, "Connection support is installed")
         verify(connectPanel.statusBody.indexOf("Reconnect") >= 0)
         compare(fakeModel.connectCalls, 0, "Successful installation never mounts the phone")
     }

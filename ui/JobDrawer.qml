@@ -26,6 +26,20 @@ Rectangle {
     }
     readonly property bool paused: active && !!job.paused
 
+    // When the stop was asked for. A stop waits for the read or write in
+    // flight, which on a dropped connection can take many seconds; counting
+    // the wait shows the card is alive without promising when it ends.
+    property real stoppingSince: 0
+    readonly property bool stopping: active && !!job.stopping
+    onStoppingChanged: stoppingSince = stopping ? Date.now() : 0
+    /// Whole seconds waited so far. Re-read on every poll, since each poll
+    /// replaces `job`.
+    readonly property int stoppingFor: {
+        if (!root.stopping || root.stoppingSince <= 0 || !root.job)
+            return 0
+        return Math.floor((Date.now() - root.stoppingSince) / 1000)
+    }
+
     visible: height > 0
     Behavior on height { NumberAnimation { duration: Tokens.animFast } }
 
@@ -107,11 +121,14 @@ Rectangle {
                 anchors.right: detailText.left
                 anchors.rightMargin: Tokens.spaceLg
                 anchors.verticalCenter: parent.verticalCenter
-                // While stopping, say what it is waiting for: removing the
-                // partial copy can take a while on a slow drive, and a card
-                // that still says "Copying…" invites clicking Cancel again.
+                // While stopping, say what it is waiting for. The stop is
+                // REQUESTED, not done: the read or write in flight has to
+                // return first — from a slow drive or a remote place that
+                // stopped answering — and only then is the unfinished item
+                // removed. A card that still said "Copying…" invited a
+                // second Cancel; one that said "Cancelled" would be a lie.
                 text: !root.active ? ""
-                      : root.job.stopping ? qsTr("Removing the partial copy — waiting for the drive to finish writing…")
+                      : root.stopping ? qsTr("Stop requested — waiting for the current read or write to return, then removing the unfinished item")
                       : root.job.message
                 color: Tokens.foreground
                 font.family: Tokens.fontFamily
@@ -133,8 +150,8 @@ Rectangle {
                     var parts = []
                     // Bytes when there are any worth counting; a batch of
                     // empty files or folders is better told in items.
-                    if (root.job.stopping)
-                        return ""
+                    if (root.stopping)
+                        return root.stoppingFor >= 2 ? qsTr("waiting %1 s").arg(root.stoppingFor) : ""
                     if (root.job.paused)
                         return root.job.bytes_text ? root.job.bytes_text + qsTr("  ·  paused") : qsTr("paused")
                     if (root.job.bytes_text && root.job.state === "Running")
