@@ -2149,6 +2149,50 @@ Host-key scans offer keys for trust only when every key has a fingerprint. Any
 fingerprint helper failure, cancellation or shared-budget exhaustion rejects the
 whole scan; no undisplayed key may remain in a successful trust offer.
 
+### Owned block-device helpers
+
+`remote::block::{mount,unlock,unmount,lock}` run only on a worker, using the
+existing bounded, cancellable owned helper runtime and `helper::CallContext`.
+They retain CORE's device argument builders and unlock parser. Mount returns a
+`PathBuf` preserving accepted UTF-8 bytes; unlock returns the cleartext device
+string. Neither checks candidate metadata, creates a mount directory, probes a device, or performs
+automatic compensation. APP retains kernel-discovery/selection checks and passes
+one cancellation token plus the remaining overall budget across unlock and mount.
+
+`BlockFailure { error: RemoteError, effect: BlockEffect }` distinguishes proven
+`NotStarted`, post-launch `Unknown`, and `Accepted` when the helper reports success
+but its location cannot be decoded safely. Cancellation or timeout after launch
+does not roll back a request already accepted by the device service. Callers must
+check current device state before retrying an uncertain operation. Raw helper
+diagnostics are not returned or logged. Secret bytes are borrowed only for stdin;
+the caller retains and wipes its buffer. Existing input/output and helper-admission
+bounds apply. Device-service CLI output uses English messages with an explicit
+UTF-8 locale and GLib charset overrides. Non-UTF-8 mount locations are unsupported
+by this text adapter and fail with `Protocol`/`Accepted`, rather than returning a
+converted or guessed path. Malformed replies never trigger
+path guesses or filesystem checks. Tests use private executable stand-ins, never
+the real device service, mounts or credentials.
+
+`block::list_devices(&CallContext) -> Result<Vec<gust_core::devices::Device>, BlockFailure>`
+is the worker-only bounded discovery adapter. It runs `lsblk` with CORE's existing
+column selection, requires UTF-8 JSON, and delegates device parsing/filtering to
+`devices::{parse_lsblk_checked,offerable_devices}`. Helper errors,
+invalid replies, cancellation and exhausted parsing budget are failures, never an
+empty-success fallback. A valid empty inventory remains successful. Discovery
+errors carry `NotStarted`: no device-changing request was made, even if the
+read-only discovery helper ran. Its diagnostics remain static and sanitized.
+APP passes the same token and remaining overall budget through discovery and
+subsequent mount/unlock/eject operations; a failed refresh must prevent them.
+A successful inventory requires JSON-correct decoding of every device object and
+its children through CORE's shared fallible parser. Braces and escapes inside
+labels or mount points are data. Invalid rows or children fail the entire refresh;
+validation followed by the legacy string scanner is insufficient for fresh state.
+All `LsblkParseError::{InvalidJson,InvalidShape,Limit}` failures map to static
+`Protocol`/`NotStarted`. CORE owns the 4 MiB/65536-row/32-level limits and decoded
+row/child shape policy; this adapter adds no second parser or lossy fallback.
+Positional array envelopes, rows and children are malformed inventory, including
+otherwise offerable or cleartext rows; they fail with `Protocol`/`NotStarted`.
+
 ### 6.4.3 Transfer cancellation and ownership
 
 `JobHandle::cancel_requested()` acknowledges only the in-memory request. A job
