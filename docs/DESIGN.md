@@ -741,6 +741,8 @@ absence semantics; all other decoded strings are preserved exactly, including
 braces, quotes, backslashes, Unicode, tabs and newlines. Unknown fields are
 ignored. Children must be absent or an array of valid rows. Invalid children
 or fields fail the entire inventory, never a partial successful list.
+Envelope and row boundaries accept JSON objects only, including every child;
+positional array encodings are invalid. Decoded duplicate recognized keys fail.
 
 Preorder flattening preserves explicit parent names; filtering and encrypted
 child joins remain in `offerable_devices`. Bounds are 4 MiB JSON, 65,536 rows
