@@ -52,6 +52,66 @@ pub struct LocationKey {
     location: OsString,
 }
 
+/// Validated byte-preserving local path for an ASCII-only UI boundary.
+/// This identifies a path, not the current filesystem object at that path.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PathToken(LocationKey);
+
+impl PathToken {
+    pub fn from_path(path: &Path) -> Option<Self> {
+        (path.is_absolute() && !path.as_os_str().as_bytes().contains(&0))
+            .then(|| Self(LocationKey::local(path)))
+    }
+
+    pub fn parse(token: &str) -> Option<Self> {
+        let key = LocationKey::from_token(token)?;
+        Self::from_path(key.as_path()?)
+    }
+
+    pub fn to_token(&self) -> String {
+        self.0.to_token()
+    }
+
+    pub fn as_path(&self) -> &Path {
+        Path::new(self.0.location())
+    }
+
+    pub fn location(&self) -> &LocationKey {
+        &self.0
+    }
+}
+
+/// One direct child name. Display escaping is never reversed to obtain it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ChildNameToken(OsString);
+
+impl ChildNameToken {
+    pub fn from_name(name: &OsStr) -> Option<Self> {
+        let b = name.as_bytes();
+        (!b.is_empty() && !b.contains(&0) && !b.contains(&b'/') && b != b"." && b != b"..")
+            .then(|| Self(name.to_owned()))
+    }
+
+    pub fn parse(token: &str) -> Option<Self> {
+        let hex = token.strip_prefix("name:")?;
+        let key = LocationKey::from_token(&format!("local:{hex}"))?;
+        Self::from_name(key.location())
+    }
+
+    pub fn to_token(&self) -> String {
+        let key = LocationKey::local(Path::new(&self.0)).to_token();
+        format!("name:{}", &key["local:".len()..])
+    }
+
+    pub fn name(&self) -> &OsStr {
+        &self.0
+    }
+
+    pub fn resolve(&self, parent: &PathToken) -> PathToken {
+        PathToken(parent.0.join(&self.0))
+    }
+}
+
 impl LocationKey {
     pub fn local(path: impl AsRef<Path>) -> Self {
         LocationKey {
