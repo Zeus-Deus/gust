@@ -9,11 +9,12 @@
 //! private name and renamed into place, so a reader never sees half a PNG and
 //! a crash cannot publish a truncated image.
 
-use crate::cache::{cache_base, file_uri, thumbnail_path, ThumbSize};
+use crate::cache::{cache_base, file_uri, thumbnail_path, thumbnail_path_in, ThumbSize};
 use crate::sandbox::{sandbox_available, validate_output, SandboxSpec, ValidationError};
+use std::io::Read;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::UNIX_EPOCH;
 
 /// Why a thumbnail is not available.
 ///
@@ -73,16 +74,35 @@ fn helpers_for(mime: &str, px: u32) -> Vec<Helper> {
         // multi-page document cannot expand into hundreds of renders. `>`
         // only ever shrinks: a small image keeps its real size.
         let geom = format!("{px}x{px}>");
+        let mut image_args = Vec::new();
+        if mime == "image/jpeg" {
+            // JPEG can discard DCT coefficients while loading. Decode at
+            // twice the final size, keeping enough samples for orientation
+            // and the final filter without expanding a multi-megapixel image.
+            image_args.extend(args(&[
+                "-define",
+                &format!("jpeg:size={}x{}", px * 2, px * 2),
+            ]));
+        }
+        image_args.push("/in/input[0]".into());
+        if mime == "image/jpeg" {
+            // libjpeg also permits a 2x decode for tiny JPEGs. %G is the
+            // original file geometry, so cap that before orientation and
+            // final scaling to preserve the never-enlarge contract.
+            image_args.extend(args(&["-resize", "%G>"]));
+        }
+        image_args.extend(args(&[
+            "-auto-orient",
+            "-thumbnail",
+            &geom,
+            "-strip",
+            "-define",
+            "png:compression-level=1",
+            "png:/out/thumb.png",
+        ]));
         v.push(Helper {
             binary: "magick",
-            args: args(&[
-                "/in/input[0]",
-                "-auto-orient",
-                "-thumbnail",
-                &geom,
-                "-strip",
-                "png:/out/thumb.png",
-            ]),
+            args: image_args,
         });
     }
     if mime == "application/pdf" {
@@ -126,75 +146,145 @@ fn helpers_for(mime: &str, px: u32) -> Vec<Helper> {
 
 /// Can anything on this system thumbnail this MIME type?
 pub fn can_thumbnail(mime: &str) -> bool {
-    !helpers_for(mime, 256).is_empty()
+    mime.starts_with("image/") || mime.starts_with("video/") || mime == "application/pdf"
 }
 
-/// The freedesktop `Thumb::MTime` of the source, as the spec requires.
-fn source_mtime(path: &Path) -> Result<u64, ThumbError> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SourceVersion {
+    dev: u64,
+    ino: u64,
+    len: u64,
+    mtime: u64,
+    mtime_nsec: i64,
+    ctime: i64,
+    ctime_nsec: i64,
+}
+
+impl SourceVersion {
+    fn tag(self) -> String {
+        format!(
+            "{}:{}:{}:{}:{}:{}:{}",
+            self.dev, self.ino, self.len, self.mtime, self.mtime_nsec, self.ctime, self.ctime_nsec
+        )
+    }
+}
+
+fn source_version(path: &Path) -> Result<SourceVersion, ThumbError> {
     let md = path
         .symlink_metadata()
         .map_err(|e| ThumbError::Source(e.to_string()))?;
     if !md.is_file() {
         return Err(ThumbError::Source("not a regular file".into()));
     }
-    md.modified()
-        .ok()
-        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-        .map(|d| d.as_secs())
-        .ok_or_else(|| ThumbError::Source("no modification time".into()))
+    Ok(SourceVersion {
+        dev: md.dev(),
+        ino: md.ino(),
+        len: md.len(),
+        mtime: md
+            .mtime()
+            .try_into()
+            .map_err(|_| ThumbError::Source("no modification time".into()))?,
+        mtime_nsec: md.mtime_nsec(),
+        ctime: md.ctime(),
+        ctime_nsec: md.ctime_nsec(),
+    })
+}
+
+/// The freedesktop `Thumb::MTime` of the source, as the spec requires.
+fn source_mtime(path: &Path) -> Result<u64, ThumbError> {
+    source_version(path).map(|v| v.mtime)
 }
 
 /// Is there already a valid cached thumbnail for this exact file version?
 ///
-/// A cached PNG whose recorded source mtime differs from the file's current
-/// mtime is stale and must be ignored, or an edited image would keep showing
-/// its old preview forever.
+/// Read only a bounded metadata prefix, never the compressed image body.
+/// Gust's source-version tag supplements the spec's seconds-only mtime:
+/// same-second edits and replacements must not reuse another file's preview.
+/// Older thumbnails without that tag are regenerated once.
 pub fn cached(path: &Path, size: ThumbSize) -> Option<PathBuf> {
     let target = thumbnail_path(path, size)?;
-    let want = source_mtime(path).ok()?;
-    let bytes = std::fs::read(&target).ok()?;
-    if png_text_mtime(&bytes)? == want {
-        Some(target)
-    } else {
-        None
-    }
+    let want = source_version(path).ok()?;
+    cached_version(&target, want).then_some(target)
 }
 
-/// Read the `Thumb::MTime` value out of a PNG's tEXt chunks.
-///
-/// Deliberately a bounded scan of chunk headers, not a decoder: it never
-/// interprets image data, only walks the length-prefixed chunk structure.
-fn png_text_mtime(bytes: &[u8]) -> Option<u64> {
-    const HEADER: usize = 8;
-    let mut i = HEADER;
-    // Bounded: stop after a sane number of chunks or at the image data.
-    for _ in 0..64 {
-        if i + 8 > bytes.len() {
+fn cached_version(target: &Path, want: SourceVersion) -> bool {
+    use rustix::fs::{Mode, OFlags};
+    let Ok(fd) = rustix::fs::open(
+        target,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) else {
+        return false;
+    };
+    let mut file = std::fs::File::from(fd);
+    let Ok(md) = file.metadata() else {
+        return false;
+    };
+    // The validated helper output may use its entire 8 MiB budget; allow
+    // the bounded source tags Gust adds without rejecting that valid hit.
+    if !md.is_file() || md.len() > 8 * 1024 * 1024 + 512 {
+        return false;
+    }
+    // Our two source tags are inserted directly after IHDR and fit in this
+    // fixed prefix even at the largest metadata values. No image-sized heap
+    // allocation or read is needed for a hit.
+    let mut prefix = [0; 512];
+    let len = md.len().min(prefix.len() as u64) as usize;
+    if file.read_exact(&mut prefix[..len]).is_err() {
+        return false;
+    }
+    png_source_matches(&mut &prefix[..len], want).unwrap_or(false)
+}
+
+/// Walk bounded PNG metadata without decoding or allocating for chunk lengths.
+fn png_source_matches(reader: &mut impl Read, want: SourceVersion) -> Option<bool> {
+    let mut magic = [0; 8];
+    reader.read_exact(&mut magic).ok()?;
+    if magic != [0x89, b'P', b'N', b'G', 13, 10, 26, 10] {
+        return None;
+    }
+    let want_tag = want.tag();
+    let mut mtime = false;
+    let mut version = false;
+    let mut data = [0; 256];
+    for index in 0..64 {
+        let mut header = [0; 8];
+        reader.read_exact(&mut header).ok()?;
+        let len = u32::from_be_bytes(header[..4].try_into().ok()?) as usize;
+        let kind = &header[4..];
+        if index == 0 && (kind != b"IHDR" || len != 13) {
             return None;
         }
-        let len = u32::from_be_bytes(bytes[i..i + 4].try_into().ok()?) as usize;
-        let kind = &bytes[i + 4..i + 8];
         if kind == b"IDAT" || kind == b"IEND" {
-            return None;
+            return Some(false);
         }
-        let data_start = i + 8;
-        let data_end = data_start.checked_add(len)?;
-        if data_end > bytes.len() {
-            return None;
-        }
-        if kind == b"tEXt" {
-            let data = &bytes[data_start..data_end];
-            if let Some(nul) = data.iter().position(|b| *b == 0) {
-                if &data[..nul] == b"Thumb::MTime" {
-                    return std::str::from_utf8(&data[nul + 1..])
-                        .ok()?
-                        .trim()
-                        .parse()
-                        .ok();
+        if kind == b"tEXt" && len <= data.len() {
+            reader.read_exact(&mut data[..len]).ok()?;
+            let text = &data[..len];
+            if let Some(value) = text.strip_prefix(b"Thumb::MTime\0") {
+                mtime = std::str::from_utf8(value).ok()?.parse::<u64>().ok()? == want.mtime;
+                if !mtime {
+                    return Some(false);
+                }
+            } else if let Some(value) = text.strip_prefix(b"Gust::SourceVersion\0") {
+                version = value == want_tag.as_bytes();
+                if !version {
+                    return Some(false);
                 }
             }
+        } else {
+            let mut remaining = len;
+            while remaining > 0 {
+                let n = remaining.min(data.len());
+                reader.read_exact(&mut data[..n]).ok()?;
+                remaining -= n;
+            }
         }
-        i = data_end + 4; // skip the CRC
+        let mut crc = [0; 4];
+        reader.read_exact(&mut crc).ok()?;
+        if mtime && version {
+            return Some(true);
+        }
     }
     None
 }
@@ -205,8 +295,20 @@ fn png_text_mtime(bytes: &[u8]) -> Option<u64> {
 /// descriptor, and writes the freedesktop cache atomically. Returns quickly
 /// when a valid cached thumbnail already exists.
 pub fn thumbnail(path: &Path, mime: &str, size: ThumbSize) -> Result<PathBuf, ThumbError> {
-    if let Some(hit) = cached(path, size) {
-        return Ok(hit);
+    let base = cache_base().ok_or_else(|| ThumbError::Cache("no cache dir".into()))?;
+    thumbnail_in(&base, path, mime, size)
+}
+
+fn thumbnail_in(
+    base: &Path,
+    path: &Path,
+    mime: &str,
+    size: ThumbSize,
+) -> Result<PathBuf, ThumbError> {
+    let version = source_version(path)?;
+    let target = thumbnail_path_in(base, path, size);
+    if cached_version(&target, version) {
+        return Ok(target);
     }
     if !sandbox_available() {
         return Err(ThumbError::SandboxUnavailable);
@@ -215,10 +317,7 @@ pub fn thumbnail(path: &Path, mime: &str, size: ThumbSize) -> Result<PathBuf, Th
     if helpers.is_empty() {
         return Err(ThumbError::NoHelper);
     }
-    let mtime = source_mtime(path)?;
-    let target =
-        thumbnail_path(path, size).ok_or_else(|| ThumbError::Cache("no cache dir".into()))?;
-    let base = cache_base().ok_or_else(|| ThumbError::Cache("no cache dir".into()))?;
+    let mtime = version.mtime;
 
     // Private scratch for the helper's output, inside our own cache. Unique
     // per render: files copied in the same second share an mtime, and two
@@ -240,15 +339,20 @@ pub fn thumbnail(path: &Path, mime: &str, size: ThumbSize) -> Result<PathBuf, Th
         }
     };
 
-    // Record the source mtime so a later edit invalidates this thumbnail.
-    let tagged = with_mtime_text(&out, mtime);
+    // A helper may have read while the source was edited or replaced. Never
+    // publish those bytes as a verified preview of either version.
+    if let Err(e) = verify_source(path, version) {
+        let _ = std::fs::remove_dir_all(&scratch);
+        return Err(e);
+    }
+    let tagged = with_source_text(&out, version);
 
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent).map_err(|e| ThumbError::Cache(e.to_string()))?;
     }
     // Stage then rename: a reader never sees a half-written PNG.
     let stage = target.with_file_name(format!(
-        ".gust-staging-{}-{}",
+        ".gust-staging-{}-{n}-{}",
         std::process::id(),
         target
             .file_name()
@@ -264,6 +368,14 @@ pub fn thumbnail(path: &Path, mime: &str, size: ThumbSize) -> Result<PathBuf, Th
         return Err(e);
     }
     Ok(target)
+}
+
+fn verify_source(path: &Path, version: SourceVersion) -> Result<(), ThumbError> {
+    if source_version(path)? == version {
+        Ok(())
+    } else {
+        Err(ThumbError::Source("file changed while rendering".into()))
+    }
 }
 
 /// The number of pages in a PDF, from `pdfinfo` run in the sandbox.
@@ -429,11 +541,11 @@ fn run_helpers(path: &Path, helpers: &[Helper], scratch: &Path) -> Result<Vec<u8
     Err(last)
 }
 
-/// Insert a `Thumb::MTime` tEXt chunk right after the PNG header.
-fn with_mtime_text(png: &[u8], mtime: u64) -> Vec<u8> {
-    let mut key = b"Thumb::MTime".to_vec();
+/// Encode a PNG tEXt chunk, including the CRC required by PNG readers.
+fn text_chunk(name: &[u8], value: &[u8]) -> Vec<u8> {
+    let mut key = name.to_vec();
     key.push(0);
-    key.extend_from_slice(mtime.to_string().as_bytes());
+    key.extend_from_slice(value);
 
     let mut chunk = Vec::new();
     chunk.extend_from_slice(&(key.len() as u32).to_be_bytes());
@@ -443,9 +555,18 @@ fn with_mtime_text(png: &[u8], mtime: u64) -> Vec<u8> {
     crc_input.extend_from_slice(&key);
     chunk.extend_from_slice(&crc32(&crc_input).to_be_bytes());
 
+    chunk
+}
+
+fn with_source_text(png: &[u8], version: SourceVersion) -> Vec<u8> {
+    let mut chunk = text_chunk(b"Thumb::MTime", version.mtime.to_string().as_bytes());
+    chunk.extend_from_slice(&text_chunk(
+        b"Gust::SourceVersion",
+        version.tag().as_bytes(),
+    ));
     let mut out = Vec::with_capacity(png.len() + chunk.len());
     // Header, then IHDR (which must stay first), then our text chunk.
-    let ihdr_end = if png.len() > 8 {
+    let ihdr_end = if png.len() >= 12 {
         let len = u32::from_be_bytes(png[8..12].try_into().unwrap_or([0; 4])) as usize;
         (8 + 8 + len + 4).min(png.len())
     } else {
@@ -587,7 +708,7 @@ mod tests {
         let d = std::env::temp_dir().join(format!("gust-thumb-race-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
-        std::env::set_var("XDG_CACHE_HOME", d.join("cache"));
+        let cache = d.join("cache/thumbnails");
         let when =
             std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_760_000_000);
         let mut imgs = Vec::new();
@@ -613,9 +734,15 @@ mod tests {
             imgs.push(p);
         }
         let run = |list: Vec<PathBuf>| {
+            let cache = cache.clone();
             std::thread::spawn(move || {
                 list.iter()
-                    .map(|p| (p.clone(), thumbnail(p, "image/png", ThumbSize::Normal)))
+                    .map(|p| {
+                        (
+                            p.clone(),
+                            thumbnail_in(&cache, p, "image/png", ThumbSize::Normal),
+                        )
+                    })
                     .collect::<Vec<_>>()
             })
         };
@@ -698,40 +825,219 @@ mod tests {
     }
 
     #[test]
-    fn an_mtime_tag_round_trips() {
+    fn jpeg_decode_hints_keep_aspect_ratio_and_never_enlarge_small_images() {
+        gust_testkit::skip_unless!(
+            sandbox_available() && gust_testkit::have("magick"),
+            "thumbnails",
+            "bwrap or ImageMagick is not installed"
+        );
+        let d = tmp("jpeg-hint");
+        let cache = d.join("cache");
+        for (name, geometry, expected) in [
+            ("photo.jpg", "2400x1600", [(128, 85), (1024, 683)]),
+            ("rotated.jpg", "2400x1600", [(85, 128), (683, 1024)]),
+            ("small.jpg", "61x47", [(61, 47), (61, 47)]),
+        ] {
+            let source = d.join(name);
+            assert!(Command::new("magick")
+                .args(["-size", geometry, "gradient:"])
+                .arg(&source)
+                .status()
+                .unwrap()
+                .success());
+            if name == "rotated.jpg" {
+                // Minimal little-endian EXIF IFD with Orientation=6.
+                let jpeg = fs::read(&source).unwrap();
+                let exif =
+                    b"Exif\0\0II\x2a\0\x08\0\0\0\x01\0\x12\x01\x03\0\x01\0\0\0\x06\0\0\0\0\0\0\0";
+                let mut tagged = jpeg[..2].to_vec();
+                tagged.extend_from_slice(&[0xff, 0xe1]);
+                tagged.extend_from_slice(&((exif.len() + 2) as u16).to_be_bytes());
+                tagged.extend_from_slice(exif);
+                tagged.extend_from_slice(&jpeg[2..]);
+                fs::write(&source, tagged).unwrap();
+            }
+            for (size, (width, height)) in [ThumbSize::Normal, ThumbSize::XxLarge]
+                .into_iter()
+                .zip(expected)
+            {
+                let target = thumbnail_in(&cache, &source, "image/jpeg", size).unwrap();
+                let png = validate_output(&target, 8 * 1024 * 1024).unwrap();
+                assert_eq!(u32::from_be_bytes(png[16..20].try_into().unwrap()), width);
+                assert_eq!(u32::from_be_bytes(png[20..24].try_into().unwrap()), height);
+                assert!(cached_version(&target, source_version(&source).unwrap()));
+                // A valid hit needs neither the original helper nor a
+                // supported MIME, so this exercises the actual hit branch.
+                assert_eq!(
+                    thumbnail_in(&cache, &source, "text/plain", size).unwrap(),
+                    target
+                );
+            }
+        }
+        fs::remove_dir_all(d).unwrap();
+    }
+
+    fn png_header() -> Vec<u8> {
         let mut png = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
-        // A minimal IHDR chunk.
         png.extend_from_slice(&13u32.to_be_bytes());
         png.extend_from_slice(b"IHDR");
         png.extend_from_slice(&[0u8; 13]);
         png.extend_from_slice(&0u32.to_be_bytes());
+        png
+    }
 
-        let tagged = with_mtime_text(&png, 1_726_000_000);
-        assert_eq!(png_text_mtime(&tagged), Some(1_726_000_000));
-        assert_eq!(&tagged[..8], &png[..8], "the PNG header must stay intact");
+    fn example_version() -> SourceVersion {
+        SourceVersion {
+            dev: 1,
+            ino: 2,
+            len: 3,
+            mtime: 1_726_000_000,
+            mtime_nsec: 4,
+            ctime: 5,
+            ctime_nsec: 6,
+        }
     }
 
     #[test]
-    fn a_png_without_our_tag_is_treated_as_stale() {
-        let mut png = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
-        png.extend_from_slice(&13u32.to_be_bytes());
-        png.extend_from_slice(b"IHDR");
-        png.extend_from_slice(&[0u8; 13]);
-        png.extend_from_slice(&0u32.to_be_bytes());
-        assert_eq!(png_text_mtime(&png), None);
+    fn source_tags_round_trip_without_reading_image_data() {
+        let png = png_header();
+        let version = example_version();
+        let tagged = with_source_text(&png, version);
+        // A reader ending immediately after the tags proves that a cache
+        // hit never needs to read/decode the compressed image body.
+        assert_eq!(
+            png_source_matches(&mut tagged.as_slice(), version),
+            Some(true)
+        );
+        assert_eq!(&tagged[..8], &png[..8], "the PNG header must stay intact");
+        assert_eq!(&tagged[12..16], b"IHDR", "IHDR must stay first");
+    }
+
+    #[test]
+    fn legacy_seconds_only_tags_cannot_prove_the_source_version() {
+        let version = example_version();
+        let mut png = png_header();
+        png.extend(text_chunk(
+            b"Thumb::MTime",
+            version.mtime.to_string().as_bytes(),
+        ));
+        assert_ne!(png_source_matches(&mut png.as_slice(), version), Some(true));
+    }
+
+    #[test]
+    fn edits_and_replacements_with_the_same_second_mtime_invalidate_the_cache() {
+        let d = tmp("source-version");
+        let source = d.join("source.png");
+        let target = d.join("thumbnail.png");
+        fs::write(&source, b"original").unwrap();
+        let epoch = std::time::UNIX_EPOCH + std::time::Duration::new(1_760_000_000, 100);
+        fs::File::options()
+            .write(true)
+            .open(&source)
+            .unwrap()
+            .set_modified(epoch)
+            .unwrap();
+        let original = source_version(&source).unwrap();
+        fs::write(&target, with_source_text(&png_header(), original)).unwrap();
+        assert!(cached_version(&target, original));
+
+        fs::write(&source, b"modified").unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&source)
+            .unwrap()
+            .set_modified(epoch + std::time::Duration::from_nanos(100))
+            .unwrap();
+        let edited = source_version(&source).unwrap();
+        assert_eq!(edited.mtime, original.mtime);
+        assert!(!cached_version(&target, edited));
+        assert!(verify_source(&source, original).is_err());
+
+        let replacement = d.join("replacement.png");
+        fs::write(&replacement, b"replaced").unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&replacement)
+            .unwrap()
+            .set_modified(epoch)
+            .unwrap();
+        fs::rename(&replacement, &source).unwrap();
+        let replaced = source_version(&source).unwrap();
+        assert_eq!(replaced.mtime, original.mtime);
+        assert_eq!(replaced.mtime_nsec, original.mtime_nsec);
+        assert_eq!(replaced.len, original.len);
+        assert_ne!(replaced.ino, original.ino);
+        assert!(!cached_version(&target, replaced));
+        assert!(verify_source(&source, original).is_err());
+        fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn cache_metadata_is_bounded_and_rejects_symlinks_fifos_and_oversize_files() {
+        let d = tmp("cache-bounds");
+        let version = example_version();
+        let real = d.join("real.png");
+        fs::write(&real, with_source_text(&png_header(), version)).unwrap();
+        assert!(cached_version(&real, version));
+        let link = d.join("link.png");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert!(!cached_version(&link, version));
+        assert!(!cached_version(&d, version));
+
+        let fifo = d.join("fifo.png");
+        rustix::fs::mknodat(
+            rustix::fs::CWD,
+            &fifo,
+            rustix::fs::FileType::Fifo,
+            rustix::fs::Mode::from_bits_truncate(0o600),
+            0,
+        )
+        .unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            tx.send(cached_version(&fifo, version)).unwrap();
+        });
+        assert!(!rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("FIFO cache must not block"));
+
+        fs::File::options()
+            .write(true)
+            .open(&real)
+            .unwrap()
+            .set_len(8 * 1024 * 1024 + 513)
+            .unwrap();
+        assert!(!cached_version(&real, version));
+        // Valid source tags beyond the read budget must not admit a hit.
+        let mut reordered = png_header();
+        reordered.extend(text_chunk(b"Other", &vec![b'x'; 70 * 1024]));
+        reordered.extend(text_chunk(
+            b"Thumb::MTime",
+            version.mtime.to_string().as_bytes(),
+        ));
+        reordered.extend(text_chunk(b"Gust::SourceVersion", version.tag().as_bytes()));
+        fs::write(&real, reordered).unwrap();
+        assert!(!cached_version(&real, version));
+        fs::remove_dir_all(d).unwrap();
     }
 
     #[test]
     fn a_truncated_png_does_not_panic_the_scanner() {
         for n in 0..40usize {
             let bytes = vec![0x89u8; n];
-            let _ = png_text_mtime(&bytes);
+            let _ = png_source_matches(&mut bytes.as_slice(), example_version());
         }
         // A chunk claiming a huge length must not read out of bounds.
         let mut png = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
         png.extend_from_slice(&u32::MAX.to_be_bytes());
         png.extend_from_slice(b"tEXt");
-        assert_eq!(png_text_mtime(&png), None);
+        assert_eq!(
+            png_source_matches(&mut png.as_slice(), example_version()),
+            None
+        );
+        for n in 0..12 {
+            let _ = with_source_text(&png[..n], example_version());
+        }
     }
 
     #[test]

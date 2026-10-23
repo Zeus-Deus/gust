@@ -220,9 +220,118 @@ fn trim_zeros(s: &[u8]) -> &[u8] {
     &s[k..]
 }
 
+/// The same two-stage order as `natural_cmp`, prepared once per name.
+/// Numeric tokens start at ASCII `0` (all digits have the same order relative
+/// to non-digits), followed by a big-endian significant length and digits.
+/// Equal numeric tokens ignore leading zeros; the original bytes break ties.
+#[derive(Eq, PartialEq)]
+struct NaturalKey {
+    bytes: Vec<u8>,
+    original: usize,
+}
+
+impl NaturalKey {
+    fn encoded_len(name: &OsStr) -> usize {
+        let name = name.as_bytes();
+        let mut len = name.len(); // Original bytes used to break ties.
+        let mut i = 0;
+        while i < name.len() {
+            if name[i].is_ascii_digit() {
+                let start = i;
+                while i < name.len() && name[i].is_ascii_digit() {
+                    i += 1;
+                }
+                len = len
+                    .saturating_add(1 + std::mem::size_of::<usize>())
+                    .saturating_add(trim_zeros(&name[start..i]).len());
+            } else {
+                len = len.saturating_add(1);
+                i += 1;
+            }
+        }
+        len
+    }
+
+    fn new(name: &OsStr) -> Self {
+        let capacity = Self::encoded_len(name);
+        let name = name.as_bytes();
+        let mut bytes = Vec::with_capacity(capacity);
+        let mut i = 0;
+        while i < name.len() {
+            if name[i].is_ascii_digit() {
+                let start = i;
+                while i < name.len() && name[i].is_ascii_digit() {
+                    i += 1;
+                }
+                let digits = trim_zeros(&name[start..i]);
+                bytes.push(b'0');
+                bytes.extend_from_slice(&digits.len().to_be_bytes());
+                bytes.extend_from_slice(digits);
+            } else {
+                bytes.push(name[i].to_ascii_lowercase());
+                i += 1;
+            }
+        }
+        let original = bytes.len();
+        bytes.extend_from_slice(name);
+        Self { bytes, original }
+    }
+}
+
+impl Ord for NaturalKey {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.bytes[..self.original]
+            .cmp(&other.bytes[..other.original])
+            .then_with(|| self.bytes[self.original..].cmp(&other.bytes[other.original..]))
+    }
+}
+
+impl PartialOrd for NaturalKey {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+const NATURAL_SORT_CACHE_BUDGET: usize = 16 * 1024 * 1024;
+
+fn cached_natural_sort_fits(entries: &[Entry]) -> bool {
+    // sort_by_cached_key stores (key, original index). usize conservatively
+    // covers its smaller index types too; tuple padding is included.
+    let record_size = std::mem::size_of::<((bool, NaturalKey), usize)>();
+    let Some(remaining) = entries
+        .len()
+        .checked_mul(record_size)
+        .and_then(|records| NATURAL_SORT_CACHE_BUDGET.checked_sub(records))
+    else {
+        return false;
+    };
+    // Short names can fit even with a digit run at every other byte. Prove
+    // that cheap upper bound first, avoiding a second byte scan in that case.
+    if entries
+        .iter()
+        .try_fold(remaining, |remaining, entry| {
+            let len = entry.name.len();
+            let upper_bound = len.saturating_mul(2).saturating_add(
+                len.div_ceil(2)
+                    .saturating_mul(1 + std::mem::size_of::<usize>()),
+            );
+            remaining.checked_sub(upper_bound)
+        })
+        .is_some()
+    {
+        return true;
+    }
+    entries
+        .iter()
+        .try_fold(remaining, |remaining, entry| {
+            remaining.checked_sub(NaturalKey::encoded_len(&entry.name))
+        })
+        .is_some()
+}
+
 pub fn sort_entries(entries: &mut [Entry], spec: SortSpec) {
     use std::cmp::Ordering;
-    entries.sort_by(|x, y| {
+    let compare = |x: &Entry, y: &Entry| {
         if spec.dirs_first {
             let dx = x.kind == EntryKind::Dir;
             let dy = y.kind == EntryKind::Dir;
@@ -257,7 +366,51 @@ pub fn sort_entries(entries: &mut [Entry], spec: SortSpec) {
         } else {
             ord.reverse()
         }
-    });
+    };
+    if spec.field == SortField::Name && entries.len() >= 1000 {
+        // Metadata fills commonly revisit an already sorted snapshot. Avoid
+        // allocating keys in that case, while still accepting unsorted input.
+        if entries
+            .windows(2)
+            .all(|pair| compare(&pair[0], &pair[1]) != Ordering::Greater)
+        {
+            return;
+        }
+        // Reverse runs need no keys. Equal rows must keep their input order,
+        // so only a strictly reversed run can take this path.
+        if entries
+            .windows(2)
+            .all(|pair| compare(&pair[0], &pair[1]) == Ordering::Greater)
+        {
+            entries.reverse();
+            return;
+        }
+        // Bound requested scratch bytes before allocating any expanded keys.
+        // Digit-heavy or very large listings keep the stable comparator path.
+        if !cached_natural_sort_fits(entries) {
+            entries.sort_by(compare);
+            return;
+        }
+        // Cache numeric parsing and sort compact keys instead of repeatedly
+        // scanning names while moving the much larger metadata-bearing rows.
+        if spec.ascending {
+            entries.sort_by_cached_key(|e| {
+                (
+                    spec.dirs_first && e.kind != EntryKind::Dir,
+                    NaturalKey::new(&e.name),
+                )
+            });
+        } else {
+            entries.sort_by_cached_key(|e| {
+                (
+                    spec.dirs_first && e.kind != EntryKind::Dir,
+                    std::cmp::Reverse(NaturalKey::new(&e.name)),
+                )
+            });
+        }
+    } else {
+        entries.sort_by(compare);
+    }
 }
 
 /// What the Kind column shows: "folder", "link", the extension in lower
@@ -363,5 +516,221 @@ mod tests {
     fn dotfile_has_no_extension() {
         assert_eq!(extension_of(OsStr::new(".bashrc")), OsStr::new(""));
         assert_eq!(extension_of(OsStr::new("a.tar.zst")), OsStr::new("zst"));
+    }
+
+    #[test]
+    fn cached_natural_keys_match_raw_comparison() {
+        let mut names = vec![
+            OsString::new(),
+            OsString::from("A00a"),
+            OsString::from("a0A"),
+            OsString::from("a00"),
+            OsString::from("a0000a"),
+            OsString::from_vec(vec![b'0'; 255]),
+            OsString::from_vec(vec![b'9'; 255]),
+        ];
+        for number in [0, 1, 9, 10, 99, 100, u64::MAX] {
+            for zeros in [0, 1, 8] {
+                for prefix in ["", "file", "FILE", "."] {
+                    for suffix in ["", "a", ".txt", "00", "\u{80}"] {
+                        names.push(OsString::from(format!(
+                            "{prefix}{}{number}{suffix}",
+                            "0".repeat(zeros)
+                        )));
+                    }
+                }
+            }
+        }
+        // Include every byte (even NUL, although the filesystem disallows it)
+        // and digit/case boundaries in names of different lengths.
+        let alphabet = b"00129aAZ./\x00\x7f\x80\xff";
+        let mut seed = 0x1428b02d_u64;
+        for byte in 0..=255 {
+            names.push(OsString::from_vec(vec![byte]));
+        }
+        for length in 0..256 {
+            let bytes = (0..length)
+                .map(|_| {
+                    seed ^= seed << 13;
+                    seed ^= seed >> 7;
+                    seed ^= seed << 17;
+                    alphabet[seed as usize % alphabet.len()]
+                })
+                .collect();
+            names.push(OsString::from_vec(bytes));
+        }
+        let keys: Vec<_> = names.iter().map(|n| NaturalKey::new(n)).collect();
+        for (name, key) in names.iter().zip(&keys) {
+            assert_eq!(key.bytes.len(), NaturalKey::encoded_len(name));
+            assert_eq!(key.bytes.capacity(), key.bytes.len());
+        }
+        for (i, a) in names.iter().enumerate() {
+            for (j, b) in names.iter().enumerate() {
+                assert_eq!(keys[i].cmp(&keys[j]), natural_cmp(a, b), "{a:?} / {b:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn large_name_sort_preserves_grouping_direction_and_equal_rows() {
+        let entries: Vec<_> = (0..1300)
+            .map(|i| {
+                let mut name = format!("file{:03}", (i * 37) % 257).into_bytes();
+                if i % 7 == 0 {
+                    name.push(0xff);
+                }
+                let mut entry = Entry::new(
+                    OsString::from_vec(name),
+                    if i % 3 == 0 {
+                        EntryKind::Dir
+                    } else {
+                        EntryKind::File
+                    },
+                );
+                // Equal names can represent distinct rows. Their original
+                // order must survive the cached stable sort and its fast path.
+                entry.id = EntryId(i as u64);
+                entry
+            })
+            .collect();
+        assert!(cached_natural_sort_fits(&entries));
+        assert_name_sort_matches_comparator(&entries);
+    }
+
+    #[test]
+    fn strictly_reversed_100k_names_match_comparator() {
+        let entries: Vec<_> = (0..100_000)
+            .rev()
+            .map(|i| {
+                let mut entry = e(&format!("entry-{i:06}.dat"), EntryKind::File);
+                entry.id = EntryId(i as u64);
+                entry
+            })
+            .collect();
+        assert_eq!(entries[0].name.as_bytes(), b"entry-099999.dat");
+        assert_eq!(entries.last().unwrap().name.as_bytes(), b"entry-000000.dat");
+        assert!(cached_natural_sort_fits(&entries));
+        assert_name_sort_matches_comparator(&entries);
+    }
+
+    #[test]
+    fn reverse_name_sort_respects_direction_and_directories() {
+        for ascending in [true, false] {
+            let mut entries = Vec::new();
+            // With directories first, files must lead the reversed run for
+            // both name directions. Include non-UTF-8 raw names as well.
+            for kind in [EntryKind::File, EntryKind::Dir] {
+                for i in 0..700 {
+                    let number = if ascending { 699 - i } else { i };
+                    let mut name = format!("entry-{number:06}.dat").into_bytes();
+                    name.push(0xff);
+                    let mut entry = Entry::new(OsString::from_vec(name), kind);
+                    entry.id = EntryId(entries.len() as u64);
+                    entries.push(entry);
+                }
+            }
+            assert_name_sort_matches_comparator(&entries);
+        }
+    }
+
+    #[test]
+    fn reverse_name_sort_keeps_equal_rows_stable() {
+        let mut entries: Vec<_> = (0..1300)
+            .rev()
+            .map(|i| {
+                let mut entry = e(&format!("entry-{i:06}.dat"), EntryKind::File);
+                entry.id = EntryId(i as u64);
+                entry
+            })
+            .collect();
+        // A late equal pair must reject reversal even after a long strict run.
+        let mut equal = entries[1200].clone();
+        equal.id = EntryId(1300);
+        entries.insert(1201, equal);
+        assert_name_sort_matches_comparator(&entries);
+    }
+
+    #[test]
+    fn digit_heavy_100k_names_fall_back_without_changing_order() {
+        // Valid 236-byte names with 116 numeric runs previously used almost
+        // 200 MiB of sort scratch through expansion and repeated reallocations.
+        let suffix = "a1".repeat(115);
+        let entries: Vec<_> = (0..100_000)
+            .map(|i| {
+                let mut entry = e(
+                    &format!("{:05}-{suffix}", (i * 7919) % 50_000),
+                    if i % 3 == 0 {
+                        EntryKind::Dir
+                    } else {
+                        EntryKind::File
+                    },
+                );
+                entry.id = EntryId(i as u64);
+                entry
+            })
+            .collect();
+        assert_eq!(entries[0].name.len(), 236);
+        assert!(!cached_natural_sort_fits(&entries));
+        assert_name_sort_matches_comparator(&entries);
+    }
+
+    #[test]
+    fn normal_100k_names_still_use_cached_sort() {
+        let entries: Vec<_> = (0..100_000)
+            .map(|i| {
+                let mut entry = e(
+                    &format!("file{:05}.txt", (i * 7919) % 50_000),
+                    EntryKind::File,
+                );
+                entry.id = EntryId(i as u64);
+                entry
+            })
+            .collect();
+        assert!(cached_natural_sort_fits(&entries));
+        assert_name_sort_matches_comparator(&entries);
+    }
+
+    #[test]
+    fn cached_sort_budget_includes_record_overhead() {
+        let entries = vec![e(&"a".repeat(60), EntryKind::File); 100_000];
+        let key_bytes = entries.len() * NaturalKey::encoded_len(&entries[0].name);
+        assert!(key_bytes < NATURAL_SORT_CACHE_BUDGET);
+        assert!(!cached_natural_sort_fits(&entries));
+    }
+
+    fn assert_name_sort_matches_comparator(entries: &[Entry]) {
+        for ascending in [true, false] {
+            for dirs_first in [true, false] {
+                let spec = SortSpec {
+                    field: SortField::Name,
+                    ascending,
+                    dirs_first,
+                };
+                let mut expected = entries.to_vec();
+                expected.sort_by(|a, b| {
+                    if dirs_first && (a.kind == EntryKind::Dir) != (b.kind == EntryKind::Dir) {
+                        return (b.kind == EntryKind::Dir).cmp(&(a.kind == EntryKind::Dir));
+                    }
+                    let order = natural_cmp(&a.name, &b.name);
+                    if ascending {
+                        order
+                    } else {
+                        order.reverse()
+                    }
+                });
+                let expected_ids: Vec<_> = expected.iter().map(|e| e.id).collect();
+                let mut actual = entries.to_vec();
+                sort_entries(&mut actual, spec);
+                assert_eq!(
+                    actual.iter().map(|e| e.id).collect::<Vec<_>>(),
+                    expected_ids
+                );
+                sort_entries(&mut actual, spec);
+                assert_eq!(
+                    actual.iter().map(|e| e.id).collect::<Vec<_>>(),
+                    expected_ids
+                );
+            }
+        }
     }
 }

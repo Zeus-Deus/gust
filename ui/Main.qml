@@ -1220,8 +1220,7 @@ Window {
         sessionSaveTimer.restart()
         // Only Grid shows thumbnails. Asking for them anywhere else would
         // spend a sandbox launch per file for something nobody can see.
-        if (m === "grid")
-            dirModel.request_thumbnails()
+        dirModel.request_thumbnails(m === "grid")
         focusList()
         qaDump("view")
     }
@@ -1239,8 +1238,7 @@ Window {
             // switcher says one view while the pane shows another.
             if (win.activeTab >= 0) win.tabViews[win.activeTab] = want
             win.refreshPanes()
-            if (want === "grid")
-                dirModel.request_thumbnails()
+            dirModel.request_thumbnails(want === "grid")
             qaDump("view")
         }
     }

@@ -114,7 +114,7 @@ Item {
                 }
 
                 Repeater {
-                    model: root.columns
+                    model: root.open ? root.columns : []
                     delegate: Column {
                         id: column
                         required property var modelData

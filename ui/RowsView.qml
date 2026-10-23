@@ -64,13 +64,14 @@ FocusScope {
     // read for what the user can see rather than for the whole folder.
     // Debounced: a fling reports once it slows, not on every frame.
     function reportRows() {
-        if (!root.model || list.count === 0) return
+        if (!root.visible || !root.model || list.count === 0) return
         // Arithmetic, not indexAt(): at the very bottom indexAt() can miss
         // and answer -1, which read as "row 0" and fetched nothing.
         const first = Math.max(0, Math.floor((list.contentY - list.originY) / Tokens.rowHeight))
         root.model.want_rows(first, Math.ceil(list.height / Tokens.rowHeight) + 1)
     }
     Timer { id: rowsReport; interval: 40; onTriggered: root.reportRows() }
+    onVisibleChanged: if (visible) rowsReport.restart()
 
     /// Where a keyboard-opened menu should appear: under the cursor row,
     /// in window coordinates.
@@ -237,10 +238,10 @@ FocusScope {
                 id: list
                 width: parent.width
                 height: parent.height - header.height
-                model: root.model
+                model: root.visible ? root.model : null
                 clip: true
                 focus: true
-                currentIndex: (root.model ? root.model.cursor : 0)
+                currentIndex: model ? root.model.cursor : -1
                 // Keep the keyboard cursor visible without animating the view
                 // under the user (reduced-motion friendly).
                 highlightMoveDuration: 0
