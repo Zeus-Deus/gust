@@ -8,6 +8,8 @@
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
+#[path = "media.rs"]
+pub mod media;
 #[path = "openwith.rs"]
 pub mod with;
 use std::process::{Command, Stdio};
