@@ -122,10 +122,42 @@ fn private(dir: &DirHandle) -> io::Result<()> {
     }
     Ok(())
 }
+/// Explicit worker repair is needed; listing never changes permissions.
+#[derive(Debug)]
+pub struct LegacyTrashNeedsRepair {
+    pub root: PathBuf,
+}
+impl std::fmt::Display for LegacyTrashNeedsRepair {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Existing Trash at {:?} needs an explicit private-permission repair before it can be used; its data was preserved.", self.root)
+    }
+}
+impl std::error::Error for LegacyTrashNeedsRepair {}
+fn safe_legacy(dir: &DirHandle) -> io::Result<bool> {
+    if private(dir).is_ok() {
+        return Ok(false);
+    }
+    let s = dir.stat_self()?;
+    if s.st_uid != rustix::process::geteuid().as_raw()
+        || s.st_mode & 0o700 != 0o700
+        || s.st_mode & 0o022 != 0
+        || s.st_mode & 0o7000 != 0
+    {
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied, "Trash layout is not eligible for automatic private-permission repair; inspect ownership and directory permissions"));
+    }
+    Ok(true)
+}
 fn existing_private(path: &Path) -> io::Result<Option<DirHandle>> {
     match history_tree::open_dir(path) {
         Ok(d) => {
-            private(&d)?;
+            if safe_legacy(&d)? {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    LegacyTrashNeedsRepair {
+                        root: path.to_path_buf(),
+                    },
+                ));
+            }
             Ok(Some(d))
         }
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
@@ -294,6 +326,9 @@ pub(crate) fn verify_info_original(bytes: &[u8], base: &Path, original: &Path) -
 }
 impl TrashLocation {
     fn handles(&self, create: bool) -> io::Result<(DirHandle, DirHandle)> {
+        self.handles_mode(create, false)
+    }
+    fn handles_mode(&self, create: bool, allow_legacy: bool) -> io::Result<(DirHandle, DirHandle)> {
         let mounts = mounts()?;
         local_location(self, &mounts)?;
         if self.trash.files != self.trash.root().join("files")
@@ -318,7 +353,7 @@ impl TrashLocation {
         } else {
             history_tree::open_dir(self.trash.root())?
         };
-        private(&root)?;
+        self.directory_mode(&root, allow_legacy)?;
         for name in ["files", "info"] {
             if create {
                 match rustix::fs::mkdirat(root.as_fd(), name, Mode::from_bits_truncate(0o700)) {
@@ -327,7 +362,7 @@ impl TrashLocation {
                     Err(e) => return Err(e.into()),
                 }
             }
-            private(&root.open_child_dir(OsStr::new(name))?)?;
+            self.directory_mode(&root.open_child_dir(OsStr::new(name))?, allow_legacy)?;
         }
         let files = root.open_child_dir(OsStr::new("files"))?;
         let info = root.open_child_dir(OsStr::new("info"))?;
@@ -342,11 +377,111 @@ impl TrashLocation {
         }
         Ok((files, info))
     }
+    fn directory_mode(&self, dir: &DirHandle, allow_legacy: bool) -> io::Result<()> {
+        if safe_legacy(dir)? && !allow_legacy {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                LegacyTrashNeedsRepair {
+                    root: self.trash.root().to_path_buf(),
+                },
+            ));
+        }
+        Ok(())
+    }
+    /// Explicit worker command. Discovery/listing never invokes this repair.
+    /// Only held owned non-writable-by-others legacy directories are tightened.
+    /// Caller retains a forward marker and durable pre-effect history barrier.
+    pub fn repair_legacy_permissions(&self, cancel: &CancelToken) -> io::Result<()> {
+        check(cancel)?;
+        let (files, info) = self.handles_mode(false, true)?;
+        let (parent, name) = anchor::resolve_parent(self.trash.root())?;
+        let root = parent.open_child_dir(&name)?;
+        safe_legacy(&root)?;
+        let dirs = [&root, &files, &info];
+        let mut expected = [
+            FileIdentity::from_stat(&root.stat_self()?),
+            FileIdentity::from_stat(&files.stat_self()?),
+            FileIdentity::from_stat(&info.stat_self()?),
+        ];
+        let parent_id = FileIdentity::from_stat(&parent.stat_self()?);
+        let verify = |expected: &[FileIdentity; 3]| -> io::Result<()> {
+            let (named_parent, _) = anchor::resolve_parent(self.trash.root())?;
+            let named_parent_id = FileIdentity::from_stat(&named_parent.stat_self()?);
+            if (parent_id.dev, parent_id.ino) != (named_parent_id.dev, named_parent_id.ino) {
+                return Err(invalid("Trash repair parent was replaced"));
+            }
+            let named = [
+                parent.stat_child(&name)?,
+                root.stat_child(OsStr::new("files"))?,
+                root.stat_child(OsStr::new("info"))?,
+            ];
+            for i in 0..3 {
+                if FileIdentity::from_stat(&named[i]) != expected[i]
+                    || FileIdentity::from_stat(&dirs[i].stat_self()?) != expected[i]
+                {
+                    return Err(invalid("Trash layout changed during permission repair"));
+                }
+                safe_legacy(dirs[i])?;
+            }
+            Ok(())
+        };
+        let mut changed = false;
+        let result = (|| {
+            verify(&expected)?;
+            for i in [1, 2, 0] {
+                check(cancel)?;
+                verify(&expected)?;
+                if expected[i].mode & 0o077 == 0 {
+                    continue;
+                }
+                #[cfg(test)]
+                BEFORE_LEGACY_REPAIR.with(|hook| {
+                    let run = hook.borrow_mut().take();
+                    if let Some(run) = run {
+                        run();
+                    }
+                });
+                check(cancel)?;
+                rustix::fs::fchmod(dirs[i].as_fd(), Mode::from_bits_truncate(0o700))?;
+                changed = true;
+                #[cfg(test)]
+                AFTER_LEGACY_REPAIR.with(|hook| {
+                    let run = hook.borrow_mut().take();
+                    if let Some(run) = run {
+                        run();
+                    }
+                });
+                expected[i].mode = (expected[i].mode & !0o7777) | 0o700;
+                rustix::fs::fsync(dirs[i].as_fd())?;
+                verify(&expected)?;
+            }
+            Ok(())
+        })();
+        result.map_err(|error| {
+            if changed {
+                partial(
+                    error,
+                    vec![
+                        self.trash.root().to_path_buf(),
+                        self.trash.files.clone(),
+                        self.trash.info.clone(),
+                    ],
+                )
+            } else {
+                error
+            }
+        })
+    }
     pub fn trash_path(&self, path: &Path, cancel: &CancelToken) -> io::Result<TrashReceipt> {
         check(cancel)?;
         let mount_table = mounts()?;
         local_path(path, &mount_table)?;
-        local_path(self.trash.root(), &mount_table)?;
+        local_location(self, &mount_table)?;
+        same_local_mount(
+            self.trash.root(),
+            mount_table.resolve(path).map_err(mount_error)?.id,
+            &mount_table,
+        )?;
         if path.starts_with(self.trash.root()) || self.trash.root().starts_with(path) {
             return Err(invalid(
                 "A Trash directory or its ancestor cannot be trashed",
@@ -779,15 +914,26 @@ fn local_path(path: &Path, mounts: &MountInfo) -> io::Result<()> {
     }
 }
 fn local_location(location: &TrashLocation, mounts: &MountInfo) -> io::Result<()> {
-    if let Some(top) = &location.topdir {
-        local_path(top, mounts)?;
+    let mount = mounts
+        .resolve(location.trash.root())
+        .map_err(mount_error)?
+        .id;
+    same_local_mount(location.trash.root(), mount, mounts)?;
+    for path in [&location.trash.files, &location.trash.info] {
+        same_local_mount(path, mount, mounts)?;
     }
-    for path in [
-        location.trash.root(),
-        &location.trash.files,
-        &location.trash.info,
-    ] {
-        local_path(path, mounts)?;
+    if let Some(top) = &location.topdir {
+        same_local_mount(top, mount, mounts)?;
+    }
+    Ok(())
+}
+fn same_local_mount(path: &Path, expected: u64, mounts: &MountInfo) -> io::Result<()> {
+    local_path(path, mounts)?;
+    if mounts.resolve(path).map_err(mount_error)?.id != expected {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Trash requires one rename-compatible mount",
+        ));
     }
     Ok(())
 }
@@ -825,7 +971,9 @@ fn candidates(top: &Path, mounts: &MountInfo) -> Vec<TrashLocation> {
     let uid = rustix::process::geteuid().as_raw();
     let shared = top.join(".Trash");
     let mut out = Vec::new();
-    if local_path(&shared, mounts).is_ok()
+    if mounts
+        .resolve(top)
+        .is_ok_and(|top| same_local_mount(&shared, top.id, mounts).is_ok())
         && open_shared(&shared).is_ok_and(|d| d.stat_self().is_ok_and(|s| s.st_mode & 0o1000 != 0))
     {
         out.push(TrashLocation {
@@ -847,7 +995,7 @@ fn usable(location: &TrashLocation, dev: u64) -> io::Result<()> {
         for name in ["files", "info"] {
             match root.open_child_dir(OsStr::new(name)) {
                 Ok(dir) => {
-                    private(&dir)?;
+                    location.directory_mode(&dir, false)?;
                     if dir.stat_self()?.st_dev != dev {
                         return Err(invalid("Trash child is on another filesystem"));
                     }
@@ -862,16 +1010,25 @@ fn usable(location: &TrashLocation, dev: u64) -> io::Result<()> {
 /// Read-only selection. Directory creation belongs to the admitted mutation.
 pub fn select_location(path: &Path, home: &TrashDir) -> io::Result<TrashLocation> {
     let mounts = mounts()?;
-    local_path(path, &mounts)?;
-    local_path(home.root(), &mounts)?;
+    select_location_with(path, home, &mounts)
+}
+fn select_location_with(
+    path: &Path,
+    home: &TrashDir,
+    mounts: &MountInfo,
+) -> io::Result<TrashLocation> {
+    local_path(path, mounts)?;
+    let source_mount = mounts.resolve(path).map_err(mount_error)?.id;
     let (parent, name) = anchor::resolve_parent(path)?;
     let dev = parent.stat_child(&name)?.st_dev;
     let home_location = TrashLocation {
         trash: home.clone(),
         topdir: None,
     };
-    if nearest_dev(home.root())? == dev {
-        local_location(&home_location, &mounts)?;
+    if same_local_mount(home.root(), source_mount, mounts).is_ok()
+        && local_location(&home_location, mounts).is_ok()
+        && nearest_dev(home.root())? == dev
+    {
         usable(&home_location, dev)?;
         return Ok(home_location);
     }
@@ -880,8 +1037,11 @@ pub fn select_location(path: &Path, home: &TrashDir) -> io::Result<TrashLocation
         .map_err(mount_error)?
         .mount_point
         .clone();
-    for location in candidates(&top, &mounts) {
-        if local_location(&location, &mounts).is_ok() && usable(&location, dev).is_ok() {
+    for location in candidates(&top, mounts) {
+        if same_local_mount(location.trash.root(), source_mount, mounts).is_ok()
+            && local_location(&location, mounts).is_ok()
+            && usable(&location, dev).is_ok()
+        {
             return Ok(location);
         }
     }
@@ -901,21 +1061,25 @@ fn inventory_roots(mounts: &MountInfo) -> io::Result<Vec<PathBuf>> {
 }
 /// Existing locations only; listing never creates directories on mounted media.
 pub fn locations(home: &TrashDir) -> io::Result<Vec<TrashLocation>> {
+    locations_with(home, &mounts()?)
+}
+fn locations_with(home: &TrashDir, mounts: &MountInfo) -> io::Result<Vec<TrashLocation>> {
     let mut out = Vec::new();
     let home_location = TrashLocation {
         trash: home.clone(),
         topdir: None,
     };
-    let mounts = mounts()?;
     // Refuse an incomplete inventory before touching any candidate directory.
-    let roots = inventory_roots(&mounts)?;
-    if local_location(&home_location, &mounts).is_ok() && home_location.handles(false).is_ok() {
+    let roots = inventory_roots(mounts)?;
+    if local_location(&home_location, mounts).is_ok()
+        && home_location.handles_mode(false, true).is_ok()
+    {
         out.push(home_location);
     }
     for top in roots {
-        for location in candidates(&top, &mounts) {
-            if local_location(&location, &mounts).is_ok()
-                && location.handles(false).is_ok()
+        for location in candidates(&top, mounts) {
+            if local_location(&location, mounts).is_ok()
+                && location.handles_mode(false, true).is_ok()
                 && !out.contains(&location)
             {
                 out.push(location);
@@ -966,6 +1130,8 @@ fn verify_at(
 type MoveHook = Box<dyn FnOnce()>;
 #[cfg(test)]
 thread_local! {
+    static AFTER_LEGACY_REPAIR:std::cell::RefCell<Option<MoveHook>>=const { std::cell::RefCell::new(None) };
+    static BEFORE_LEGACY_REPAIR:std::cell::RefCell<Option<MoveHook>>=const { std::cell::RefCell::new(None) };
     static AFTER_MOVE:std::cell::RefCell<Option<MoveHook>>=const { std::cell::RefCell::new(None) };
     static BEFORE_MOVE:std::cell::RefCell<Option<MoveHook>>=const { std::cell::RefCell::new(None) };
     static BEFORE_RESTORE_PARENT:std::cell::RefCell<Option<MoveHook>>=const { std::cell::RefCell::new(None) };
@@ -1544,6 +1710,205 @@ mod tests {
         assert!(!l.trash.root().exists());
         assert_eq!(fs::read_dir(root.join("elsewhere")).unwrap().count(), 0);
         fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn equal_devices_on_distinct_mounts_choose_source_volume_trash() {
+        let (root, home, file) = fixture();
+        for reverse in [false, true] {
+            let home_top = root.join("Trash");
+            let volume = root.join("work");
+            let rows = [
+                (1, 0, "/", "ext4"),
+                (2, 1, volume.to_str().unwrap(), "ext4"),
+            ];
+            let mounts = parse_mounts(&table(&rows, reverse)).unwrap();
+            assert_eq!(
+                nearest_dev(&home_top).unwrap(),
+                FileIdentity::of_path(&file).unwrap().dev
+            );
+            let chosen = select_location_with(&file, &home.trash, &mounts).unwrap();
+            assert_eq!(
+                chosen.topdir,
+                Some(volume),
+                "device equality cannot choose home across bind mounts"
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn network_home_is_skipped_without_access_for_local_volume_trash() {
+        let (root, _, file) = fixture();
+        let home_top = root.join("remote-home");
+        std::os::unix::fs::symlink(root.join("missing"), &home_top).unwrap();
+        let home = TrashDir::at(home_top.join("Trash"));
+        for kind in ["nfs4", "fuse.sshfs", "unknownfs"] {
+            for reverse in [false, true] {
+                let volume = root.join("work");
+                let rows = [
+                    (1, 0, "/", "ext4"),
+                    (2, 1, home_top.to_str().unwrap(), kind),
+                    (3, 1, volume.to_str().unwrap(), "ext4"),
+                ];
+                let mounts = parse_mounts(&table(&rows, reverse)).unwrap();
+                let result = select_location_with(&file, &home, &mounts);
+                assert!(
+                    result.is_ok(),
+                    "unsupported home must not block a local volume: {result:?}"
+                );
+                assert_eq!(result.unwrap().topdir, Some(volume));
+            }
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn separately_mounted_trash_children_refuse_even_on_equal_devices() {
+        let rows = [
+            (1, 0, "/", "ext4"),
+            (2, 1, "/volume", "ext4"),
+            (3, 2, "/volume/.Trash-0/files", "ext4"),
+        ];
+        let location = TrashLocation {
+            trash: TrashDir::at("/volume/.Trash-0"),
+            topdir: Some(PathBuf::from("/volume")),
+        };
+        for reverse in [false, true] {
+            assert!(
+                local_location(&location, &parse_mounts(&table(&rows, reverse)).unwrap()).is_err(),
+                "distinct files mount must refuse before candidate access"
+            );
+        }
+    }
+    #[test]
+    fn legacy_owned_layout_is_discovered_without_mutation() {
+        let (root, location, _) = fixture();
+        for dir in [
+            location.trash.root(),
+            &location.trash.files,
+            &location.trash.info,
+        ] {
+            fs::create_dir_all(dir).unwrap();
+            fs::set_permissions(dir, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        fs::write(location.trash.files.join("old"), b"legacy data").unwrap();
+        let rows = [
+            (1, 0, "/", "unknownfs"),
+            (2, 1, root.to_str().unwrap(), "ext4"),
+        ];
+        let mounts = parse_mounts(&table(&rows, false)).unwrap();
+        let locations = locations_with(&location.trash, &mounts).unwrap();
+        assert!(
+            locations.contains(&location),
+            "legacy owned Trash must stay discoverable for explicit repair"
+        );
+        for dir in [
+            location.trash.root(),
+            &location.trash.files,
+            &location.trash.info,
+        ] {
+            assert_eq!(
+                fs::metadata(dir).unwrap().permissions().mode() & 0o777,
+                0o755
+            );
+        }
+        assert_eq!(
+            fs::read(location.trash.files.join("old")).unwrap(),
+            b"legacy data"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn legacy_repair_cancellation_after_one_chmod_retains_partial_evidence() {
+        let (root, location, _) = fixture();
+        for dir in [
+            location.trash.root(),
+            &location.trash.files,
+            &location.trash.info,
+        ] {
+            fs::create_dir_all(dir).unwrap();
+            fs::set_permissions(dir, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let cancel = CancelToken::new();
+        AFTER_LEGACY_REPAIR.with(|hook| {
+            let stop = cancel.clone();
+            *hook.borrow_mut() = Some(Box::new(move || stop.cancel()));
+        });
+        let error = location.repair_legacy_permissions(&cancel).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+        assert!(error
+            .get_ref()
+            .unwrap()
+            .downcast_ref::<TrashPartial>()
+            .is_some());
+        assert_eq!(
+            fs::metadata(&location.trash.files)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        assert_eq!(
+            fs::metadata(location.trash.root())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o755
+        );
+        location
+            .repair_legacy_permissions(&CancelToken::new())
+            .unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn legacy_repair_uses_original_descriptors_and_never_chmods_a_replacement() {
+        let (root, location, _) = fixture();
+        for dir in [
+            location.trash.root(),
+            &location.trash.files,
+            &location.trash.info,
+        ] {
+            fs::create_dir_all(dir).unwrap();
+            fs::set_permissions(dir, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        fs::write(location.trash.files.join("old"), b"keep").unwrap();
+        let kept = root.join("retained-old-trash");
+        BEFORE_LEGACY_REPAIR.with(|hook| {
+            let path = location.trash.root().to_path_buf();
+            let kept = kept.clone();
+            *hook.borrow_mut() = Some(Box::new(move || {
+                fs::rename(&path, &kept).unwrap();
+                for dir in [&path, &path.join("files"), &path.join("info")] {
+                    fs::create_dir_all(dir).unwrap();
+                    fs::set_permissions(dir, fs::Permissions::from_mode(0o755)).unwrap();
+                }
+                fs::write(path.join("files/later"), b"later work").unwrap();
+            }));
+        });
+        let error = location
+            .repair_legacy_permissions(&CancelToken::new())
+            .unwrap_err();
+        assert!(error
+            .get_ref()
+            .unwrap()
+            .downcast_ref::<TrashPartial>()
+            .is_some());
+        assert_eq!(fs::read(kept.join("files/old")).unwrap(), b"keep");
+        assert_eq!(
+            fs::read(location.trash.files.join("later")).unwrap(),
+            b"later work"
+        );
+        for dir in [
+            location.trash.root(),
+            &location.trash.files,
+            &location.trash.info,
+        ] {
+            assert_eq!(
+                fs::metadata(dir).unwrap().permissions().mode() & 0o777,
+                0o755
+            );
+        }
         fs::remove_dir_all(root).unwrap();
     }
 }
