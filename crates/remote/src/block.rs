@@ -508,6 +508,29 @@ mod tests {
     }
 
     #[test]
+    fn evidence_numeric_representation_errors_stay_static_protocol_failures() {
+        let cancel = CancelToken::new();
+        for (field, raw) in [
+            ("disk-seq", "1e400"),
+            ("disk-seq", "-1e400"),
+            ("kname", "1e400"),
+            ("maj:min", "1e400"),
+            ("disk-seq", "1e+"),
+        ] {
+            // Even an excluded invalid row refuses the complete capture instead
+            // of authorizing the valid row that preceded it.
+            let json = format!(
+                r#"{{"blockdevices":[{},{{"name":"invalid","path":"/dev/invalid","type":"disk","{field}":{raw}}}]}}"#,
+                evidence_source()
+            );
+            let fixture = Fixture::new(&format!("print({json:?})"));
+            let failure =
+                observe_devices_using(fixture.python_command(), &context(&cancel)).unwrap_err();
+            assert_eq!(failure, evidence_failure(ErrorCode::Protocol));
+        }
+    }
+
+    #[test]
     fn evidence_missing_and_ambiguous_instances_stay_typed_unavailable() {
         use devices::DeviceEvidenceUnavailable::*;
         for (field, value) in [
