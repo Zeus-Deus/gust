@@ -1557,6 +1557,11 @@ expected format, no symlink/FIFO.
 
 ### 6.4.2 Owned remote helper calls
 
+Noninteractive helper stdin borrows the caller's bytes for the duration of the
+owned call instead of copying them into an internal queue. The caller retains
+responsibility for the source buffer's lifetime and any required wiping. Existing
+interactive response queues and cancellation/descendant ownership remain unchanged.
+
 Remote service calls run on workers. `helper::CallContext { cancel: &CancelToken,
 timeout: Duration }` gives each call one overall budget. `RemoteError` carries a
 typed code and an actionable message; cancellation never claims rollback or
@@ -1580,8 +1585,3 @@ one-shot helpers still terminate leftover descendants even after a successful ex
 Host-key scans offer keys for trust only when every key has a fingerprint. Any
 fingerprint helper failure, cancellation or shared-budget exhaustion rejects the
 whole scan; no undisplayed key may remain in a successful trust offer.
-
-Noninteractive helper stdin borrows the caller's bytes for the duration of the
-owned call instead of copying them into an internal queue. The caller retains
-responsibility for the source buffer's lifetime and any required wiping. Existing
-interactive response queues and cancellation/descendant ownership remain unchanged.
