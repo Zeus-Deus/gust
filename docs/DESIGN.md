@@ -863,6 +863,27 @@ only to mount and unmount, which are the operations that need privilege and
 a user's intent. Listing devices therefore works on a machine with no UDisks
 daemon at all; the actions are simply unavailable, and say so.
 
+`devices::parse_lsblk_checked(&str) -> Result<Vec<RawBlock>, LsblkParseError>`
+is the shared pure discovery parser. Errors are `InvalidJson`, `InvalidShape`
+or `Limit`, with fixed diagnostic text that never includes the input. The
+envelope requires a `blockdevices` array; every row and child requires nonempty
+string `name`, `path` and `type`. Optional `size` is a string (default empty),
+`rm`/`hotplug` are booleans (default false), and `fstype`/`label`/`mountpoint`/
+`pkname` are absent, null or strings. Empty optional strings retain legacy
+absence semantics; all other decoded strings are preserved exactly, including
+braces, quotes, backslashes, Unicode, tabs and newlines. Unknown fields are
+ignored. Children must be absent or an array of valid rows. Invalid children
+or fields fail the entire inventory, never a partial successful list.
+Envelope and row boundaries accept JSON objects only, including every child;
+positional array encodings are invalid. Decoded duplicate recognized keys fail.
+
+Preorder flattening preserves explicit parent names; filtering and encrypted
+child joins remain in `offerable_devices`. Bounds are 4 MiB JSON, 65,536 rows
+and 32 row levels; exceeding a bound returns `Limit`, never omitted rows.
+`parse_lsblk` remains a compatibility adapter that loses errors; fallible
+discovery callers use the checked API and propagate refusal before any changing
+action. Parsing performs no candidate I/O, location normalization or admission.
+
 ### What counts as a device worth showing
 
 A volume is offered when it is **removable or hotplug** and is not the

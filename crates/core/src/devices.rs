@@ -11,6 +11,11 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+mod lsblk;
+pub use lsblk::{
+    parse_lsblk_checked, LsblkParseError, MAX_LSBLK_BYTES, MAX_LSBLK_DEPTH, MAX_LSBLK_ROWS,
+};
+
 /// What kind of thing this is, in words a person uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeviceKind {
@@ -200,71 +205,10 @@ pub fn offerable_devices(raw: &[RawBlock]) -> Vec<Device> {
         .collect()
 }
 
-/// Parse `lsblk --json` output into raw rows, flattening children.
-///
-/// Written against the real shape rather than a schema: `lsblk` nests
-/// partitions under their disk, and a partition is what a user mounts.
+/// Compatibility adapter; errors become an empty list. Fallible refreshes must
+/// use `parse_lsblk_checked` to distinguish refusal from an empty inventory.
 pub fn parse_lsblk(json: &str) -> Vec<RawBlock> {
-    let mut out = Vec::new();
-    // A tiny scanner rather than a JSON dependency in this crate: the shape
-    // is fixed and every value is a string, a bool or null.
-    for chunk in json.split('{').skip(1) {
-        let obj = chunk.split('}').next().unwrap_or("");
-        let Some(name) = json_str(obj, "name") else {
-            continue;
-        };
-        out.push(RawBlock {
-            name,
-            path: json_str(obj, "path").unwrap_or_default(),
-            size: json_str(obj, "size").unwrap_or_default(),
-            removable: json_bool(obj, "rm"),
-            hotplug: json_bool(obj, "hotplug"),
-            kind: json_str(obj, "type").unwrap_or_default(),
-            fstype: json_str(obj, "fstype"),
-            label: json_str(obj, "label"),
-            mount_point: json_str(obj, "mountpoint"),
-            parent: json_str(obj, "pkname"),
-        });
-    }
-    out
-}
-
-fn json_str(obj: &str, key: &str) -> Option<String> {
-    let needle = format!("\"{key}\"");
-    let at = obj.find(&needle)?;
-    let after = obj[at + needle.len()..].trim_start();
-    let after = after.strip_prefix(':')?.trim_start();
-    if after.starts_with("null") {
-        return None;
-    }
-    let rest = after.strip_prefix('"')?;
-    let mut value = String::new();
-    let mut escaped = false;
-    for c in rest.chars() {
-        if escaped {
-            value.push(c);
-            escaped = false;
-        } else if c == '\\' {
-            escaped = true;
-        } else if c == '"' {
-            return if value.is_empty() { None } else { Some(value) };
-        } else {
-            value.push(c);
-        }
-    }
-    None
-}
-
-fn json_bool(obj: &str, key: &str) -> bool {
-    let needle = format!("\"{key}\"");
-    let Some(at) = obj.find(&needle) else {
-        return false;
-    };
-    obj[at + needle.len()..]
-        .trim_start()
-        .strip_prefix(':')
-        .map(|r| r.trim_start().starts_with("true"))
-        .unwrap_or(false)
+    parse_lsblk_checked(json).unwrap_or_default()
 }
 
 /// The devices the sidebar shows: only ones a click can do something with.
