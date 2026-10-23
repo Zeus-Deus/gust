@@ -1404,12 +1404,50 @@ not an assertion that frontend bindings are complete.
 
 `ArchiveRequest::Extract` carries archive/destination/policy/password;
 `Create` carries directory, byte-preserving names, destination, format and
-password. The format enum reserves TarZstd, Zip and SevenZip; creation is
-unavailable until its separately verified worker implementation lands.
+password. Creation supports TarZstd, Zip and SevenZip through the sandbox helper. ZIP
+password creation uses AES-256; password creation for the other formats is
+explicitly unsupported by the current writer. Sources are enumerated through
+held no-follow descriptors, bounded to 200,000 entries/32 MiB metadata/16 GiB
+input, and revalidated before publication. Captured mtime/nanoseconds travel
+with each member; TAR preserves nanoseconds, ZIP Unix seconds, and 7z 100 ns
+precision. Missing times are not invented. Cancellation/deadline is checked
+after the durable intent and publication callback, immediately before rename.
+Regular files must supply exactly their admitted size and unchanged identity; links are stored, never followed.
+The parent streams bounded frames; the helper sees no source path or writable
+location except an exclusively owned output file and a private 256 MiB
+tmpfs spool (required by the 7z writer). Spool exhaustion fails closed.
+A completed writer is closed, its complete inventory checked, and the output fsynced before one
+journaled atomic no-replace publication. Cancellation never deletes sources.
+The ordinary result record has JobKind::Compress and the created file identity;
+extracted is None. A partial publication error retains its precise receipt.
 Passwords are moved into a
 redacted secret type and transported only on helper stdin, never argv, env,
 logs or files. Unsupported encryption modes fail explicitly. Multipart
 archives are outside this contract.
+
+### Archive writer date admission
+
+Creation validates every admitted member timestamp before creating staging or
+starting the writer/payload stream. `ArchiveError::UnsupportedTimestamp` carries
+the selected format, relative byte-path and exact source seconds/nanoseconds.
+No source date is clamped or discarded. Current supported ranges are inclusive:
+TAR+Zstd seconds `i64::MIN+1..=i64::MAX`, normalized nanoseconds; ZIP seconds
+`0..=2147483647`, normalized source nanoseconds with whole-second output; 7z
+seconds `0..=1833029933770`, with nanoseconds at the final second limited to
+`955161599` (100 ns output precision). The ZIP range is deliberately conservative
+across signed/unsigned 32-bit timestamp readers. TAR's minimum integer and
+negative 7z dates are excluded because the native path cannot preserve them.
+The helper applies the same bounds before each native header. Complete output
+timestamp comparison remains mandatory, including nanosecond precision.
+
+Creation defines filename encoding per format: full PAX uses binary headers
+to retain Unix byte names and link targets; ZIP retains its original byte names
+and sets UTF-8 flags from the filename alone (opaque names stay unflagged).
+Symlink target bytes are content and never determine ZIP's filename flag;
+7z requires UTF-8 names and link targets for its UTF-16 representation. Invalid
+7z encodings return `UnsupportedEncoding { format, member }` before staging or
+payload. The codec's private process initializes its character locale before
+native conversion; parent locale and parse-warning refusal remain unchanged.
 
 ### An owned new extraction folder
 
