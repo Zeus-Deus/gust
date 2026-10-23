@@ -1768,3 +1768,40 @@ stops the walk before another removal. Retained paths are explicitly last-known
 uncertain location hints (`DeleteError::locations_uncertain`), not guarantees
 that a renamed private tree remains at that string. These checks do not claim atomic exclusion of every concurrent
 same-user mutation inside a newly created private namespace.
+
+## 7.6 Confirmed Empty Trash
+
+`trash::prepare_empty(locations, cancel)` runs on a worker over the complete
+explicit location scope from checked mount discovery, never visible/cache rows.
+It returns an opaque plan with memory-only summary/cache accounting. Aggregate
+metadata is bounded at 32 MiB and 200,000 entries; limits refuse the whole plan,
+never return a confirmed prefix. Duplicate or overlapping locations refuse.
+Every files/info entry is enumerated; eligible pairs retain complete original
+receipts and no-follow same-mount inventories. Unpaired entries and any root
+containing reserved Gust recovery names are retained and counted, not swept.
+A paired item that cannot be completely admitted refuses preparation. Original
+restore-parent paths are not opened just to permanently discard Trash data.
+
+The caller retains the plan behind an opaque ID and obtains an explicit
+irreversible confirmation of its item/descendant counts and retained evidence.
+`plan.confirm_irreversible()` consumes that exact plan into execution authority.
+`confirmed.execute(history, cancel, progress)` revalidates the complete plan,
+persists a history barrier before staging, then publishes private durable
+intents before claiming each exact Info/data pair with no-replace. APP retains
+its forward marker and owns the History lock and worker through completion.
+No confirmation is inferred from paths, a stale model, or a timeout.
+
+Data deletion consumes the already-confirmed complete inventory, using the
+corrected permanent worker's private final-entry claims and ancestry guards.
+It never resnapshots new contents into deletion authority. Exact Info inodes and
+intents remain in private recovery storage; no evidence or history vault is
+recursively removed. Progress counts real data removals and fully completed
+items, excluding metadata retention. Cancellation/error may retain claims even
+with zero removed counts; locations are last-known uncertain hints. New or
+changed work refuses; final success describes only the confirmed eligible scope
+and explicitly reports retained entries. Retained entries count untouched
+root-level recovery objects and files/info directory entries; a protected pair
+counts twice. Outcome information_retained counts exact claimed Info records,
+including incomplete items. Recovery metadata deliberately remains after success.
+No Undo, automatic replay/cleanup, blocking-filesystem deadline, or real-user
+Trash exercise is implied.

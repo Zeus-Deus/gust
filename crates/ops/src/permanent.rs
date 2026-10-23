@@ -17,6 +17,7 @@
 use std::path::{Component, Path, PathBuf};
 #[path = "permanent_worker.rs"]
 mod worker;
+pub(crate) use worker::{admit_tree, delete_admitted, mount_id};
 pub use worker::{
     delete_permanently_with_cancel, delete_permanently_with_progress, DeleteError, DeleteFailure,
     DeletePhase, DeleteProgress,

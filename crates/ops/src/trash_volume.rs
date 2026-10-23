@@ -1,10 +1,16 @@
 //! Descriptor-bound per-volume Trash and identity receipts.
+#[path = "trash_empty.rs"]
+mod empty;
 #[path = "trash_lineage.rs"]
 pub(crate) mod lineage;
 use super::{TrashDir, TrashEntry, TrashedItem};
 use crate::{
     anchor::{self, DirHandle, FileIdentity},
     history_tree,
+};
+pub use empty::{
+    prepare_empty, ConfirmedEmptyTrash, EmptyTrashError, EmptyTrashFailure, EmptyTrashOutcome,
+    EmptyTrashPhase, EmptyTrashPlan, EmptyTrashProgress, EmptyTrashSummary,
 };
 use gust_core::{
     lister::CancelToken,
@@ -472,6 +478,14 @@ impl TrashLocation {
         Err(io::Error::other("No free Trash slot is available"))
     }
     pub fn receipt_named(&self, name: &OsStr, cancel: &CancelToken) -> io::Result<TrashReceipt> {
+        self.receipt_named_inner(name, cancel, true)
+    }
+    fn receipt_named_inner(
+        &self,
+        name: &OsStr,
+        cancel: &CancelToken,
+        restore_parent: bool,
+    ) -> io::Result<TrashReceipt> {
         check(cancel)?;
         let iname = info_name(name)?;
         let (files, info) = self.handles(false)?;
@@ -506,11 +520,15 @@ impl TrashLocation {
             },
             location: self.clone(),
             canonical: self.clone(),
-            original_parent: optional_dir(
-                original
-                    .parent()
-                    .ok_or_else(|| invalid("Missing restore parent"))?,
-            )?,
+            original_parent: if restore_parent {
+                optional_dir(
+                    original
+                        .parent()
+                        .ok_or_else(|| invalid("Missing restore parent"))?,
+                )?
+            } else {
+                None
+            },
             original,
             name: name.into(),
             root_dir: FileIdentity::from_stat(

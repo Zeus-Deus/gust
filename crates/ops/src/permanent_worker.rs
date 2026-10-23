@@ -99,8 +99,8 @@ fn identity(parent: &DirHandle, name: &OsStr) -> Result<FileIdentity, DeleteFail
         .map(|s| FileIdentity::from_stat(&s))
         .map_err(io_failure)
 }
-type Tree = BTreeMap<PathBuf, FileIdentity>;
-fn mount_id(parent: &DirHandle, name: &OsStr) -> Result<u64, DeleteFailure> {
+pub(crate) type Tree = BTreeMap<PathBuf, FileIdentity>;
+pub(crate) fn mount_id(parent: &DirHandle, name: &OsStr) -> Result<u64, DeleteFailure> {
     #[cfg(test)]
     if NO_MOUNT_ID.with(|fail| fail.get()) {
         return Err(DeleteFailure::Unsupported);
@@ -503,6 +503,37 @@ pub fn delete_permanently_with_progress(
     target: &Path,
     expected: Option<RecordedIdentity>,
     cancel: &CancelToken,
+    progress: impl FnMut(DeleteProgress),
+) -> Result<Removed, DeleteError> {
+    delete_impl(folder, target, expected, None, cancel, progress)
+}
+pub(crate) fn admit_tree(target: &Path, cancel: &CancelToken) -> Result<Tree, DeleteFailure> {
+    let (parent, name) = anchor::resolve_parent(target).map_err(io_failure)?;
+    snapshot(&parent, &name, cancel, &mut |_| {})
+}
+pub(crate) fn delete_admitted(
+    folder: &Path,
+    target: &Path,
+    admitted: &Tree,
+    parent: (FileIdentity, u64),
+    cancel: &CancelToken,
+    progress: impl FnMut(DeleteProgress),
+) -> Result<Removed, DeleteError> {
+    delete_impl(
+        folder,
+        target,
+        None,
+        Some((admitted, parent)),
+        cancel,
+        progress,
+    )
+}
+fn delete_impl(
+    folder: &Path,
+    target: &Path,
+    expected: Option<RecordedIdentity>,
+    admitted: Option<(&Tree, (FileIdentity, u64))>,
+    cancel: &CancelToken,
     mut progress: impl FnMut(DeleteProgress),
 ) -> Result<Removed, DeleteError> {
     let mut removed = Removed::default();
@@ -513,6 +544,13 @@ pub fn delete_permanently_with_progress(
         let (parent, name) = anchor::resolve_parent(target).map_err(io_failure)?;
         let parent_identity = FileIdentity::from_stat(&parent.stat_self().map_err(io_failure)?);
         let tree = snapshot(&parent, &name, cancel, &mut progress)?;
+        if admitted.is_some_and(|(admitted, (id, mount))| {
+            admitted != &tree
+                || directory_key(id) != directory_key(parent_identity)
+                || mount_id(&parent, OsStr::new("")) != Ok(mount)
+        }) {
+            return Err(DeleteFailure::Changed);
+        }
         let root = *tree.get(Path::new("")).ok_or(DeleteFailure::Changed)?;
         if expected.is_some_and(|expected| !expected.matches(&root)) {
             return Err(DeleteFailure::Changed);

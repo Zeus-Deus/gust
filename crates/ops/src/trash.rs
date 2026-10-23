@@ -14,7 +14,9 @@ mod volume;
 pub(crate) use volume::lineage::Binding as TrashLineageBinding;
 pub(crate) use volume::{authenticated_info, verify_info_original};
 pub use volume::{
-    locations, select_location, RestoredReceipt, TrashLocation, TrashPartial, TrashReceipt,
+    locations, prepare_empty, select_location, ConfirmedEmptyTrash, EmptyTrashError,
+    EmptyTrashFailure, EmptyTrashOutcome, EmptyTrashPhase, EmptyTrashPlan, EmptyTrashProgress,
+    EmptyTrashSummary, RestoredReceipt, TrashLocation, TrashPartial, TrashReceipt,
 };
 
 use crate::anchor::resolve_parent;
