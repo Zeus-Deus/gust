@@ -7,8 +7,17 @@
 
 use std::path::{Component, Path, PathBuf};
 
+#[path = "archive_create.rs"]
+mod create;
 #[path = "archive_io.rs"]
 pub mod io;
+#[path = "archive_jobs.rs"]
+pub mod jobs;
+#[doc(hidden)]
+#[path = "archive_protocol.rs"]
+pub mod protocol;
+#[path = "archive_stage.rs"]
+mod stage;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArchiveEntryKind {
@@ -84,6 +93,9 @@ impl Default for ExtractPolicy {
 ///
 /// Returns the safe relative path, or `None` if it must be rejected.
 pub fn safe_member_path(name: &str) -> Option<PathBuf> {
+    if name.as_bytes().contains(&0) {
+        return None;
+    }
     let p = Path::new(name);
     if p.is_absolute() {
         return None;
@@ -190,18 +202,23 @@ pub fn vet_entries(
     (ok, bad)
 }
 
-/// Staging directory for an extraction, inside the destination so the commit
-/// is a same-filesystem rename.
+/// A prospective staging name, never an ownership record. Production code
+/// exclusively creates and retains a descriptor-bound `Stage` instead.
 pub fn staging_dir(dest: &Path) -> PathBuf {
-    dest.join(format!(".gust-extract-{}", std::process::id()))
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    dest.join(format!(".gust-extract-{}-{stamp}", std::process::id()))
 }
 
-/// A failed extraction must not leave partial output looking like success.
-pub fn cleanup_staging(staging: &Path) -> std::io::Result<()> {
-    if staging.exists() {
-        std::fs::remove_dir_all(staging)?;
-    }
-    Ok(())
+/// A pathname cannot prove staging ownership. Retained for compatibility,
+/// but refuses deletion; execution cleans only its exclusively owned Stage.
+pub fn cleanup_staging(_staging: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::PermissionDenied,
+        "archive cleanup requires an ownership-bound staging handle",
+    ))
 }
 
 #[cfg(test)]
@@ -325,15 +342,15 @@ mod tests {
     }
 
     #[test]
-    fn staging_is_removed_on_cleanup() {
+    fn path_only_cleanup_cannot_delete_foreign_work() {
         let d = std::env::temp_dir().join(format!("gust-ex-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
-        let s = staging_dir(&d);
-        std::fs::create_dir_all(s.join("partial")).unwrap();
-        std::fs::write(s.join("partial/half.txt"), b"incomplete").unwrap();
-        cleanup_staging(&s).unwrap();
-        assert!(!s.exists(), "partial output must not survive a failure");
-        std::fs::remove_dir_all(&d).ok();
+        let staging = stage::Stage::create(&d).unwrap();
+        let name = staging.name.clone();
+        std::fs::write(d.join(&name).join("partial"), b"incomplete").unwrap();
+        assert!(cleanup_staging(&d.join(&name)).is_err());
+        drop(staging);
+        assert!(!d.join(name).exists());
+        std::fs::remove_dir(&d).unwrap();
     }
 }

@@ -350,9 +350,9 @@ pub fn lock(device: &str, ctx: &CallContext<'_>) -> Result<(), BlockFailure> {
 mod tests {
     use super::*;
     use gust_core::lister::CancelToken;
-    use std::fs::{DirBuilder, Permissions};
+    use std::fs::DirBuilder;
     use std::os::unix::ffi::OsStrExt;
-    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    use std::os::unix::fs::DirBuilderExt;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
     use std::time::{Duration, Instant};
@@ -370,20 +370,26 @@ mod tests {
                 NEXT.fetch_add(1, Ordering::Relaxed)
             ));
             DirBuilder::new().mode(0o700).create(&root).unwrap();
+            let source = root.join("fixture-source");
             let helper = root.join("fixture-helper");
-            std::fs::write(&helper, format!("#!/usr/bin/python3\n{body}\n")).unwrap();
-            std::fs::set_permissions(&helper, Permissions::from_mode(0o700)).unwrap();
+            std::fs::write(&source, format!("#!/usr/bin/python3\n{body}\n")).unwrap();
+            // A concurrent test's fork can inherit this process's write
+            // descriptor until that child execs, making our exec fail with
+            // ETXTBSY. A separate process creates the executable instead.
+            let installed = Command::new("install")
+                .args(["-m", "700"])
+                .arg(&source)
+                .arg(&helper)
+                .status()
+                .unwrap();
+            assert!(installed.success());
             Self { root, helper }
         }
         fn program(&self) -> &OsStr {
             self.helper.as_os_str()
         }
-        fn python_command(&self) -> Command {
-            // Launch an immutable interpreter: concurrent fixture writes can
-            // otherwise make executing a newly written script fail ETXTBSY.
-            let mut command = Command::new("/usr/bin/python3");
-            command.arg(&self.helper);
-            command
+        fn command(&self) -> Command {
+            Command::new(self.program())
         }
     }
     impl Drop for Fixture {
@@ -428,7 +434,7 @@ mod tests {
     fn capture_evidence(rows: serde_json::Value) -> Vec<devices::DeviceObservation> {
         let fixture = evidence_fixture(&serde_json::json!({"blockdevices":rows}));
         let cancel = CancelToken::new();
-        observe_devices_using(fixture.python_command(), &context(&cancel)).unwrap()
+        observe_devices_using(fixture.command(), &context(&cancel)).unwrap()
     }
 
     #[test]
@@ -498,7 +504,7 @@ mod tests {
         let json = r#"{"blockdevices":[{"name":"fixture1","kname":"fixture1","path":"/dev/fixture1","type":"disk","rm":true,"fstype":"ext4","maj:min":"8:0","disk-seq":41,"unknown":1e400}]}"#;
         let fixture = Fixture::new(&format!("print({json:?})"));
         let cancel = CancelToken::new();
-        let listed = observe_devices_using(fixture.python_command(), &context(&cancel)).unwrap();
+        let listed = observe_devices_using(fixture.command(), &context(&cancel)).unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].device().path, "/dev/fixture1");
         assert!(matches!(
@@ -524,8 +530,7 @@ mod tests {
                 evidence_source()
             );
             let fixture = Fixture::new(&format!("print({json:?})"));
-            let failure =
-                observe_devices_using(fixture.python_command(), &context(&cancel)).unwrap_err();
+            let failure = observe_devices_using(fixture.command(), &context(&cancel)).unwrap_err();
             assert_eq!(failure, evidence_failure(ErrorCode::Protocol));
         }
     }
@@ -637,8 +642,7 @@ mod tests {
             serde_json::json!({"blockdevices":[invalid_sequence]}),
         ] {
             let fixture = evidence_fixture(&reply);
-            let failure =
-                observe_devices_using(fixture.python_command(), &context(&cancel)).unwrap_err();
+            let failure = observe_devices_using(fixture.command(), &context(&cancel)).unwrap_err();
             assert_eq!(failure, evidence_failure(ErrorCode::Protocol));
         }
         for body in [
@@ -648,7 +652,7 @@ mod tests {
         ] {
             let fixture = Fixture::new(body);
             assert_eq!(
-                observe_devices_using(fixture.python_command(), &context(&cancel)).unwrap_err(),
+                observe_devices_using(fixture.command(), &context(&cancel)).unwrap_err(),
                 evidence_failure(ErrorCode::Protocol)
             );
         }
@@ -658,8 +662,7 @@ mod tests {
     fn evidence_unsupported_profile_never_falls_back_or_exposes_diagnostics() {
         let fixture = Fixture::new("import pathlib,sys\np=pathlib.Path(__file__).with_name('calls')\np.write_text(p.read_text()+'1' if p.exists() else '1')\nprint('{\"blockdevices\":[]}')\nsys.stderr.write('synthetic-private-diagnostic')\nsys.exit(1)");
         let cancel = CancelToken::new();
-        let failure =
-            observe_devices_using(fixture.python_command(), &context(&cancel)).unwrap_err();
+        let failure = observe_devices_using(fixture.command(), &context(&cancel)).unwrap_err();
         assert_eq!(failure, evidence_failure(ErrorCode::Unsupported));
         assert!(failure.error.message.contains("util-linux"));
         assert!(!format!("{failure:?}").contains("synthetic-private-diagnostic"));
@@ -686,12 +689,12 @@ mod tests {
             timeout: Duration::ZERO,
         };
         assert_eq!(
-            observe_devices_using(fixture.python_command(), &zero).unwrap_err(),
+            observe_devices_using(fixture.command(), &zero).unwrap_err(),
             evidence_failure(ErrorCode::Timeout)
         );
         cancel.cancel();
         assert_eq!(
-            observe_devices_using(fixture.python_command(), &context(&cancel)).unwrap_err(),
+            observe_devices_using(fixture.command(), &context(&cancel)).unwrap_err(),
             evidence_failure(ErrorCode::Cancelled)
         );
         assert!(!fixture.root.join("started").exists());
@@ -702,7 +705,7 @@ mod tests {
         };
         let start = Instant::now();
         assert_eq!(
-            observe_devices_using(fixture.python_command(), &short).unwrap_err(),
+            observe_devices_using(fixture.command(), &short).unwrap_err(),
             evidence_failure(ErrorCode::Timeout)
         );
         assert!(start.elapsed() < Duration::from_secs(2));
@@ -718,8 +721,7 @@ mod tests {
             assert!(marker.exists());
             stop.cancel();
         });
-        let failure =
-            observe_devices_using(fixture.python_command(), &context(&token)).unwrap_err();
+        let failure = observe_devices_using(fixture.command(), &context(&token)).unwrap_err();
         worker.join().unwrap();
         assert_eq!(failure, evidence_failure(ErrorCode::Cancelled));
     }

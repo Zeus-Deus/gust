@@ -52,7 +52,7 @@ impl SandboxSpec {
             "usr/lib".into(),
             "/lib".into(),
             "--symlink".into(),
-            "usr/lib".into(),
+            "usr/lib64".into(),
             "/lib64".into(),
             "--symlink".into(),
             "usr/bin".into(),

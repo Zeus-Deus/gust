@@ -130,21 +130,14 @@ pub fn plan_drop(
 /// tables, so this never touches (or stalls on) the files being dragged.
 pub fn mount_points(mounts: &str) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = mounts
-        .lines()
-        .filter_map(|l| l.split_whitespace().nth(1))
-        .map(|m| PathBuf::from(unescape_mount(m)))
+        .as_bytes()
+        .split(|b| *b == b'\n')
+        .filter_map(|line| crate::mount_table::fields(line).nth(1))
+        .map(|m| PathBuf::from(crate::mount_table::decode_field(m)))
         .collect();
     out.sort_by_key(|p| std::cmp::Reverse(p.as_os_str().len()));
     out.dedup();
     out
-}
-
-/// `/proc/self/mounts` escapes space, tab, newline and backslash as octal.
-fn unescape_mount(m: &str) -> String {
-    m.replace("\\040", " ")
-        .replace("\\011", "\t")
-        .replace("\\012", "\n")
-        .replace("\\134", "\\")
 }
 
 /// The mount a path lives on: the longest mount point that contains it.
