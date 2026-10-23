@@ -1411,6 +1411,36 @@ redacted secret type and transported only on helper stdin, never argv, env,
 logs or files. Unsupported encryption modes fail explicitly. Multipart
 archives are outside this contract.
 
+### An owned new extraction folder
+
+`ArchiveRequest::ExtractIntoNew` carries the same fields as Extract, but its
+absolute destination must not exist and its parent must already exist. The
+worker builds and validates the whole folder in private staging under that
+parent, then durably records a root publication intent and publishes it with
+one atomic no-replace rename. Password/decode failures leave the requested
+folder absent. `ArchiveError::DestinationExists` never reuses another folder.
+The success/partial receipt includes the root and every created descendant;
+APP performs no mkdir before job admission or during polling.
+
+### Durable archive admission and password outcomes
+
+`archive::jobs::start_journalled(id, request, Journal)` preserves the existing
+`start` signature and runs all journal I/O on its worker. It durably records
+Planned before staging, an entry intent before each directory creation or
+no-replace publication, committed identity receipts after each effect, and a
+terminal state including any partial receipt. Compact append-only entry
+updates avoid rewriting an ever-growing full job for every member. Journal
+load folds these updates into their admitted job; an interrupted intent is
+reported for inspection, never automatically replayed or deleted. Journal
+paths preserve OS bytes while accepting legacy string-encoded paths.
+
+`ArchiveError::PasswordRequired` and `IncorrectPassword` are typed helper
+outcomes. App code must branch on these variants, never parse helper prose.
+A missing password is detected from libarchive's encrypted-entry metadata;
+a supplied password that fails the library's passphrase verification is
+reported separately from corruption/unsupported-format errors. Passwords
+remain confined to stdin and private decoder memory.
+
 ## 6.16 Bulk rename
 
 Mockup C gives it a key of its own (`R`). It is the most dangerous ordinary

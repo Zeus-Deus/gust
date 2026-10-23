@@ -15,6 +15,8 @@ unsafe extern "C" {
     fn archive_read_data(a: *mut c_void, data: *mut c_void, len: usize) -> isize;
     fn archive_read_data_skip(a: *mut c_void) -> c_int;
     fn archive_read_free(a: *mut c_void) -> c_int;
+    fn archive_error_string(a: *mut c_void) -> *const c_char;
+    fn archive_entry_is_encrypted(entry: *mut c_void) -> c_int;
     fn archive_entry_pathname(entry: *mut c_void) -> *const c_char;
     fn archive_entry_mode(entry: *mut c_void) -> u32;
     fn archive_entry_size(entry: *mut c_void) -> i64;
@@ -42,6 +44,30 @@ unsafe fn bytes(ptr: *const c_char) -> Result<Vec<u8>, ()> {
     Ok(value.to_vec())
 }
 
+/// libarchive exposes passphrase verification failures through its fixed
+/// library diagnostics, not a localized command prompt. Classify here and
+/// emit only typed outcomes; never return the diagnostic or secret bytes.
+unsafe fn failure_frame(archive: *mut c_void, has_password: bool) -> Frame {
+    // SAFETY: this is the current reader's terminated diagnostic string.
+    let message = unsafe { archive_error_string(archive) };
+    if message.is_null() {
+        return Frame::Failed;
+    }
+    let message = unsafe { CStr::from_ptr(message) }.to_bytes();
+    let contains = |word: &[u8]| message.windows(word.len()).any(|part| part == word);
+    if has_password && (contains(b"Incorrect passphrase") || contains(b"Incorrect password")) {
+        Frame::IncorrectPassword
+    } else if !has_password
+        && (contains(b"Passphrase required")
+            || contains(b"passphrase required")
+            || contains(b"password required"))
+    {
+        Frame::PasswordRequired
+    } else {
+        Frame::Failed
+    }
+}
+
 fn run() -> Result<(), ()> {
     let mut input = std::io::stdin().lock();
     let mut output = std::io::stdout().lock();
@@ -55,6 +81,7 @@ fn run() -> Result<(), ()> {
     input.read_exact(&mut request).map_err(|_| ())?;
     let mut request_value: ReadRequest = serde_json::from_slice(&request).map_err(|_| ())?;
     protocol::wipe(&mut request);
+    let has_password = !request_value.password.is_empty();
     let password = CString::new(std::mem::take(&mut request_value.password)).map_err(|_| ())?;
     // SAFETY: all calls use this live owned reader and valid buffers; no
     // libarchive pointer escapes the helper or survives its owning reader.
@@ -89,8 +116,11 @@ fn run() -> Result<(), ()> {
             }
             // Warnings are not proof of a complete or unambiguous parse.
             if status != 0 || entry.is_null() {
-                return Err(());
+                protocol::write_frame(&mut output, &failure_frame(archive.0, has_password))
+                    .map_err(|_| ())?;
+                return Ok(());
             }
+            let encrypted = archive_entry_is_encrypted(entry) > 0;
             let hard = archive_entry_hardlink(entry);
             let link = if !hard.is_null() {
                 hard
@@ -122,12 +152,22 @@ fn run() -> Result<(), ()> {
                     }
                 }
                 b'R' => {
+                    if encrypted && !has_password {
+                        protocol::write_frame(&mut output, &Frame::PasswordRequired)
+                            .map_err(|_| ())?;
+                        return Ok(());
+                    }
                     let mut data = [0; protocol::DATA_CHUNK];
                     loop {
                         let count =
                             archive_read_data(archive.0, data.as_mut_ptr().cast(), data.len());
                         if count < 0 {
-                            return Err(());
+                            protocol::write_frame(
+                                &mut output,
+                                &failure_frame(archive.0, has_password),
+                            )
+                            .map_err(|_| ())?;
+                            return Ok(());
                         }
                         if count == 0 {
                             break;

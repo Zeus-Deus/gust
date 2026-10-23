@@ -58,6 +58,7 @@ impl Stage {
         }
         clear(&self.dir)?;
         rustix::fs::unlinkat(self.parent.as_fd(), &self.name, AtFlags::REMOVEDIR)?;
+        rustix::fs::fsync(self.parent.as_fd())?;
         Ok(())
     }
 }
