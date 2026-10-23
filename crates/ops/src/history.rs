@@ -200,9 +200,19 @@ struct Store {
 pub struct History {
     directory: DirHandle,
     name: OsString,
-    _lock: File,
+    _lock: OwnerLock,
     store: Store,
     state_identity: Option<FileIdentity>,
+}
+/// The `flock` belongs to the open file description, not the descriptor. A
+/// child spawned by any thread shares that description from fork until exec
+/// closes its CLOEXEC copy, so closing alone can leave the next owner facing
+/// `WouldBlock`. Unlocking releases it for every copy.
+struct OwnerLock(File);
+impl Drop for OwnerLock {
+    fn drop(&mut self) {
+        let _ = rustix::fs::flock(&self.0, rustix::fs::FlockOperation::Unlock);
+    }
 }
 fn checkpoint(cancel: &CancelToken) -> Result<(), HistoryError> {
     if cancel.is_cancelled() {
@@ -266,6 +276,7 @@ impl History {
         )?);
         owned_regular(&lock)?;
         rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockExclusive)?;
+        let lock = OwnerLock(lock);
         let (store, state_identity) = match rustix::fs::openat(
             directory.as_fd(),
             &name,
@@ -1856,6 +1867,24 @@ mod recovery_tests {
         assert!(!root.join("work/file").exists());
         drop(history);
         std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn dropped_owner_releases_the_lock_a_spawning_child_still_shares() {
+        let f = Fixture::new();
+        let history = f.history();
+        // A child between fork and exec holds this same open file description.
+        let child_copy = history._lock.0.try_clone().unwrap();
+        drop(history);
+        let reopened = f.history();
+        assert_eq!(
+            History::open(f.0.join("state/history"))
+                .err()
+                .unwrap()
+                .kind(),
+            io::ErrorKind::WouldBlock
+        );
+        drop(reopened);
+        drop(child_copy);
     }
     struct Fixture(PathBuf);
     impl Fixture {
