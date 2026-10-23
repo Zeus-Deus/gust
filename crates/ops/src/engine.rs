@@ -163,10 +163,19 @@ pub(crate) fn publish_noreplace(
 }
 
 /// Give each operation its own stage; O_EXCL still refuses any old occupant.
-fn staging_name() -> OsString {
+fn staging_name(final_name: &OsStr) -> OsString {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let sequence = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    OsString::from(format!(".gust-staging-{}-{sequence}", std::process::id()))
+    loop {
+        let sequence = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        #[cfg(test)]
+        let sequence = publication_tests::NEXT_STAGE_SEQUENCE
+            .with(|v| v.take())
+            .unwrap_or(sequence);
+        let candidate = OsString::from(format!(".gust-staging-{}-{sequence}", std::process::id()));
+        if candidate != final_name {
+            return candidate;
+        }
+    }
 }
 
 /// Remove a staging file after a failure and drop its claim — but only if
@@ -294,16 +303,25 @@ impl RegularPublication {
 
     /// Test the real operation on an empty private alias, before payload I/O.
     /// This is per upload, not a capability cache or a probe of the final name.
-    fn prepare(self, dir: &DirHandle, stage: &OsStr) -> OpResult<()> {
+    fn prepare(self, dir: &DirHandle, stage: &OsStr, final_name: &OsStr) -> OpResult<()> {
         if matches!(self, Self::Rename) {
             return Ok(());
         }
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let sequence = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let alias = OsString::from(format!(
-            ".gust-staging-{}-probe-{sequence}",
-            std::process::id()
-        ));
+        let alias = loop {
+            let sequence = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            #[cfg(test)]
+            let sequence = publication_tests::NEXT_PROBE_SEQUENCE
+                .with(|v| v.take())
+                .unwrap_or(sequence);
+            let candidate = OsString::from(format!(
+                ".gust-staging-{}-probe-{sequence}",
+                std::process::id()
+            ));
+            if candidate != final_name {
+                break candidate;
+            }
+        };
         let path = dir.path().join(&alias);
         let claim = crate::staging::claim(&path).map_err(OpError::Recovery)?;
         // An ambiguous link reply might already have created the alias. Keep
@@ -463,7 +481,7 @@ pub(crate) fn stage_regular_file(
     let expected_len = u64::try_from(st.st_size)
         .map_err(|_| OpError::Refused("source reported an invalid file size".into()))?;
 
-    let stage = staging_name();
+    let stage = staging_name(dst_name);
     // Record ownership BEFORE the file exists. A staging file with no claim is
     // never reclaimed by the sweep, so the claim must be durable first.
     let staged_abs = dst_dir.path().join(&stage);
@@ -511,7 +529,7 @@ pub(crate) fn stage_regular_file(
     }
 
     let publication = RegularPublication::for_directory(dst_dir);
-    if let Err(e) = publication.prepare(dst_dir, &stage) {
+    if let Err(e) = publication.prepare(dst_dir, &stage, dst_name) {
         drop(dst);
         discard_staged(dst_dir, &stage, &claim, 0);
         return Err(e);
@@ -668,7 +686,7 @@ pub(crate) fn copy_symlink_with_policy(
         };
     }
     let target = rustix::fs::readlinkat(src_dir.as_fd(), src_name, Vec::new())?;
-    let stage = staging_name();
+    let stage = staging_name(dst_name);
     let staged_abs = dst_dir.path().join(&stage);
     let claim = Some(crate::staging::claim(&staged_abs).map_err(OpError::Recovery)?);
     if let Err(e) = rustix::fs::symlinkat(target.as_c_str(), dst_dir.as_fd(), &stage) {

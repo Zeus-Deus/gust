@@ -4,6 +4,8 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 
 thread_local! {
+    pub(crate) static NEXT_STAGE_SEQUENCE: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+    pub(crate) static NEXT_PROBE_SEQUENCE: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
     pub(crate) static WRITE_LIMIT: std::cell::Cell<usize> = const { std::cell::Cell::new(usize::MAX) };
     static AFTER_WRITE: std::cell::RefCell<Option<Box<dyn FnMut()>>> = const { std::cell::RefCell::new(None) };
     pub(crate) static DISCARD_ERROR: std::cell::Cell<Option<rustix::io::Errno>> = const { std::cell::Cell::new(None) };
@@ -42,6 +44,8 @@ impl Drop for LinkPublication {
         crate::anchor::LINK_ERROR.with(|v| v.set(None));
         crate::anchor::LINK_REPLY_ERROR.with(|v| v.set(None));
         WRITE_LIMIT.with(|v| v.set(usize::MAX));
+        NEXT_STAGE_SEQUENCE.with(|v| v.set(None));
+        NEXT_PROBE_SEQUENCE.with(|v| v.set(None));
         AFTER_WRITE.with(|v| *v.borrow_mut() = None);
     }
 }
@@ -61,6 +65,135 @@ fn staged_link(f: &Fixture) -> (Staged, DirHandle, OsString) {
     .unwrap()
     .unwrap();
     (staged, dd, dn)
+}
+
+#[test]
+fn publication_stage_candidate_equal_to_final_stays_private_until_commit() {
+    for link in [false, true] {
+        let f = Fixture::new(&format!("stage-final-collision-{link}"));
+        let _link = LinkPublication::new(&f.0);
+        USE_LINK.with(|v| v.set(link));
+        NEXT_STAGE_SEQUENCE.with(|v| v.set(Some(0)));
+        let final_path = f.0.join(format!(".gust-staging-{}-0", std::process::id()));
+        let (sd, sn) = resolve_parent(&f.0.join("source")).unwrap();
+        let (dd, dn) = resolve_parent(&final_path).unwrap();
+        let observed = std::rc::Rc::new(std::cell::Cell::new(0));
+        let writes = observed.clone();
+        let during_write = final_path.clone();
+        WRITE_LIMIT.with(|v| v.set(2));
+        AFTER_WRITE.with(|v| {
+            *v.borrow_mut() = Some(Box::new(move || {
+                assert!(
+                    during_write.symlink_metadata().is_err(),
+                    "the requested final name must not expose an incomplete stage"
+                );
+                writes.set(writes.get() + 1);
+            }));
+        });
+        let staged = stage_regular_file(
+            &sd,
+            &sn,
+            &dd,
+            &dn,
+            ConflictPolicy::Ask,
+            &CancelToken::new(),
+            &mut |_| {},
+            true,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(observed.get(), 3, "exercise real short writes");
+        assert_ne!(staged.stage, dn);
+        assert!(final_path.symlink_metadata().is_err());
+        assert!(crate::staging::load_all()
+            .iter()
+            .all(|c| c.path != final_path));
+        assert_eq!(staged.commit(&dd, &dn).unwrap(), 6);
+        assert_eq!(fs::read(&final_path).unwrap(), b"SOURCE");
+        assert_eq!(fs::read(f.0.join("source")).unwrap(), b"SOURCE");
+    }
+}
+
+#[test]
+fn publication_probe_candidate_equal_to_final_never_probes_public_name() {
+    let f = Fixture::new("probe-final-collision");
+    let _link = LinkPublication::new(&f.0);
+    NEXT_PROBE_SEQUENCE.with(|v| v.set(Some(0)));
+    let final_path =
+        f.0.join(format!(".gust-staging-{}-probe-0", std::process::id()));
+    let (sd, sn) = resolve_parent(&f.0.join("source")).unwrap();
+    let (dd, dn) = resolve_parent(&final_path).unwrap();
+    // The real empty link succeeds, then its reply is lost. This keeps the
+    // alias observable instead of allowing an unsafe transient final probe
+    // to be hidden by the normal preflight unlink.
+    crate::anchor::LINK_REPLY_ERROR.with(|v| v.set(Some(rustix::io::Errno::IO)));
+    let mut progress = 0;
+    assert!(copy_regular_file_with(
+        &sd,
+        &sn,
+        &dd,
+        &dn,
+        ConflictPolicy::Ask,
+        &CancelToken::new(),
+        &mut |n| progress = n,
+    )
+    .is_err());
+    assert_eq!(progress, 0);
+    assert!(final_path.symlink_metadata().is_err());
+    let claims = crate::staging::load_all();
+    assert_eq!(claims.len(), 1);
+    assert_ne!(claims[0].path, final_path);
+    assert_eq!(fs::read(&claims[0].path).unwrap(), b"");
+    let previous_record = fs::read(&claims[0].claim_file).unwrap();
+
+    NEXT_PROBE_SEQUENCE.with(|v| v.set(Some(0)));
+    let during_write = final_path.clone();
+    AFTER_WRITE.with(|v| {
+        *v.borrow_mut() = Some(Box::new(move || {
+            assert!(during_write.symlink_metadata().is_err());
+        }));
+    });
+    let staged = stage_regular_file(
+        &sd,
+        &sn,
+        &dd,
+        &dn,
+        ConflictPolicy::Ask,
+        &CancelToken::new(),
+        &mut |_| {},
+        true,
+    )
+    .unwrap()
+    .unwrap();
+    assert!(final_path.symlink_metadata().is_err());
+    assert_eq!(staged.commit(&dd, &dn).unwrap(), 6);
+    assert_eq!(fs::read(final_path).unwrap(), b"SOURCE");
+    assert_eq!(fs::read(&claims[0].claim_file).unwrap(), previous_record);
+    assert_eq!(fs::read(&claims[0].path).unwrap(), b"");
+    assert_eq!(fs::read(f.0.join("source")).unwrap(), b"SOURCE");
+}
+
+#[test]
+fn publication_symlink_stage_candidate_equal_to_final_waits_for_rename() {
+    let f = Fixture::new("symlink-stage-final-collision");
+    let _link = LinkPublication::new(&f.0);
+    NEXT_STAGE_SEQUENCE.with(|v| v.set(Some(0)));
+    fs::remove_file(f.0.join("source")).unwrap();
+    std::os::unix::fs::symlink("unread-target", f.0.join("source")).unwrap();
+    let final_path = f.0.join(format!(".gust-staging-{}-0", std::process::id()));
+    let (sd, sn) = resolve_parent(&f.0.join("source")).unwrap();
+    let (dd, dn) = resolve_parent(&final_path).unwrap();
+    let before_commit = final_path.clone();
+    at_publication(move || assert!(before_commit.symlink_metadata().is_err()));
+    copy_symlink(&sd, &sn, &dd, &dn).unwrap();
+    assert_eq!(
+        fs::read_link(final_path).unwrap(),
+        Path::new("unread-target")
+    );
+    assert_eq!(
+        fs::read_link(f.0.join("source")).unwrap(),
+        Path::new("unread-target")
+    );
 }
 
 #[test]

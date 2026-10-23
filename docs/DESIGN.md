@@ -458,7 +458,9 @@ object descriptor, not a re-resolved pathname. Lossless lexical paths remain
 only as recovery locations; new claim records encode path bytes so
 non-UTF-8 names and newlines cannot redirect ownership or inject fields.
 Each operation gets a unique stage and exclusively creates its initial
-claim. Version 2 requires every recognized field exactly once and canonical
+claim. Stage and probe names exclude the requested final name before any
+claim or filesystem effect, even when that name resembles private staging.
+Version 2 requires every recognized field exactly once and canonical
 hex path bytes. Updates fsync a separate private record before atomic local
 replacement. Interrupted updates leave a complete prior or new record.
 Legacy, unknown-version, malformed, duplicate/extra-field and truncated
