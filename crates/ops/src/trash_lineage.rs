@@ -4,6 +4,8 @@ use crate::journal::RecordedIdentity;
 use serde::{Deserialize, Serialize};
 
 const DIRECTORY: &str = ".gust-lineage";
+#[cfg(test)]
+thread_local! { pub(super) static READ_PROBE: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) }; }
 const LIMIT: usize = 32 * 1024 * 1024;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Binding {
@@ -53,12 +55,22 @@ fn key(info: RecordedIdentity, data: FileIdentity) -> String {
     )
 }
 fn read(dir: &DirHandle, name: &OsStr, allowance: usize) -> io::Result<Vec<u8>> {
+    read_with_mount(dir, name, allowance, None)
+}
+fn read_with_mount(
+    dir: &DirHandle,
+    name: &OsStr,
+    allowance: usize,
+    mount: Option<u64>,
+) -> io::Result<Vec<u8>> {
+    check_mount_at(dir, name, mount)?;
     let mut file = File::from(rustix::fs::openat(
         dir.as_fd(),
         name,
         OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
         Mode::empty(),
     )?);
+    check_fd_mount(file.as_fd(), OsStr::new(""), mount)?;
     let before = FileIdentity::from_stat(&rustix::fs::fstat(&file)?);
     let stat = rustix::fs::fstat(&file)?;
     if stat.st_uid != rustix::process::geteuid().as_raw() || stat.st_mode & 0o170077 != 0o100000 {
@@ -70,9 +82,17 @@ fn read(dir: &DirHandle, name: &OsStr, allowance: usize) -> io::Result<Vec<u8>> 
         return Err(invalid("Trash lineage metadata limit"));
     }
     let mut bytes = Vec::new();
+    #[cfg(test)]
+    READ_PROBE.with(|probe| {
+        if let Some(n) = probe.get() {
+            probe.set(Some(n + 1));
+        }
+    });
     Read::by_ref(&mut file)
         .take(allowance as u64 + 1)
         .read_to_end(&mut bytes)?;
+    check_fd_mount(file.as_fd(), OsStr::new(""), mount)?;
+    check_mount_at(dir, name, mount)?;
     if bytes.len() > allowance
         || before != FileIdentity::from_stat(&rustix::fs::fstat(&file)?)
         || before != FileIdentity::from_stat(&dir.stat_child(name)?)
@@ -231,20 +251,35 @@ impl Binding {
         tree: &BTreeMap<PathBuf, FileIdentity>,
         metadata: &mut usize,
     ) -> io::Result<bool> {
+        self.matches_with_mount(info, tree, metadata, None)
+    }
+    pub(super) fn matches_with_mount(
+        &self,
+        info: &DirHandle,
+        tree: &BTreeMap<PathBuf, FileIdentity>,
+        metadata: &mut usize,
+        mount: Option<u64>,
+    ) -> io::Result<bool> {
         let root = self.data_path();
         let data = *tree
             .get(&root)
             .ok_or_else(|| invalid("Missing Trash lineage root"))?;
+        match check_mount_at(info, OsStr::new(DIRECTORY), mount) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+            result => result?,
+        }
         let dir = match info.open_child_dir(OsStr::new(DIRECTORY)) {
             Ok(dir) => dir,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
             Err(error) => return Err(error),
         };
+        check_mount_at(&dir, OsStr::new(""), mount)?;
         private(&dir)?;
-        let bytes = match read(
+        let bytes = match read_with_mount(
             &dir,
             OsStr::new(&key(self.info_identity, data)),
             LIMIT.saturating_sub(*metadata),
+            mount,
         ) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),

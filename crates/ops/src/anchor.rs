@@ -45,6 +45,12 @@ impl DirHandle {
 
     /// Open a subdirectory *relative to this handle*, refusing symlinks.
     pub fn open_child_dir(&self, name: &OsStr) -> io::Result<Self> {
+        #[cfg(test)]
+        TRAVERSAL_PROBE.with(|p| {
+            if let (true, Some((opens, stats))) = (name == OsStr::new("mounted"), p.get()) {
+                p.set(Some((opens + 1, stats)));
+            }
+        });
         let fd = rustix::fs::openat(
             self.fd.as_fd(),
             name,
@@ -63,6 +69,12 @@ impl DirHandle {
 
     /// `fstatat` a child without following symlinks.
     pub fn stat_child(&self, name: &OsStr) -> io::Result<rustix::fs::Stat> {
+        #[cfg(test)]
+        TRAVERSAL_PROBE.with(|p| {
+            if let (true, Some((opens, stats))) = (name == OsStr::new("sentinel"), p.get()) {
+                p.set(Some((opens, stats + 1)));
+            }
+        });
         Ok(rustix::fs::statat(
             self.fd.as_fd(),
             name,
@@ -78,6 +90,8 @@ impl DirHandle {
 
 #[cfg(test)]
 thread_local! {
+    /// Private Empty Trash traversal counters: blocked child opens/inner stats.
+    pub(crate) static TRAVERSAL_PROBE: std::cell::Cell<Option<(usize, usize)>> = const { std::cell::Cell::new(None) };
     /// One-shot kernel-support injection; filesystem effects stay real.
     pub(crate) static UNSUPPORTED_ERRNO: std::cell::Cell<Option<rustix::io::Errno>> =
         const { std::cell::Cell::new(None) };

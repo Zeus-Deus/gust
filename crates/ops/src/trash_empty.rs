@@ -87,6 +87,12 @@ impl std::fmt::Display for EnumerationLimit {
 }
 impl std::error::Error for EnumerationLimit {}
 fn fail(error: io::Error) -> EmptyTrashError {
+    if let Some(failure) = error
+        .get_ref()
+        .and_then(|e| e.downcast_ref::<InventoryFailure>())
+    {
+        return admission_failure(failure.0.clone());
+    }
     if error.get_ref().is_some_and(|e| e.is::<EnumerationLimit>()) {
         return limit();
     }
@@ -121,6 +127,20 @@ fn admission_failure(reason: DeleteFailure) -> EmptyTrashError {
         fail(delete_failure(reason))
     }
 }
+fn checkpoint_failure(error: io::Error) -> DeleteFailure {
+    if let Some(failure) = error
+        .get_ref()
+        .and_then(|e| e.downcast_ref::<InventoryFailure>())
+    {
+        return failure.0.clone();
+    }
+    match error.kind() {
+        io::ErrorKind::Interrupted => DeleteFailure::Cancelled,
+        io::ErrorKind::InvalidData => DeleteFailure::Changed,
+        io::ErrorKind::Unsupported => DeleteFailure::Unsupported,
+        kind => DeleteFailure::Io(kind),
+    }
+}
 fn delete_failure(reason: DeleteFailure) -> io::Error {
     let kind = match reason {
         DeleteFailure::Cancelled => io::ErrorKind::Interrupted,
@@ -136,7 +156,8 @@ fn delete_failure(reason: DeleteFailure) -> io::Error {
 fn dir_key(id: FileIdentity) -> (u64, u64, u32) {
     (id.dev, id.ino, id.mode)
 }
-fn entries(dir: &DirHandle, cancel: &CancelToken) -> io::Result<Entries> {
+fn entries(dir: &DirHandle, cancel: &CancelToken, mount: u64) -> io::Result<Entries> {
+    check_mount_at(dir, OsStr::new(""), Some(mount))?;
     let mut out = Entries::new();
     let mut bytes = 0usize;
     for entry in rustix::fs::Dir::read_from(dir.as_fd())? {
@@ -151,6 +172,7 @@ fn entries(dir: &DirHandle, cancel: &CancelToken) -> io::Result<Entries> {
             return Err(io::Error::new(io::ErrorKind::InvalidData, EnumerationLimit));
         }
         let name = OsStr::from_bytes(raw);
+        check_mount_at(dir, name, Some(mount))?;
         out.insert(
             name.to_owned(),
             FileIdentity::from_stat(&dir.stat_child(name)?),
@@ -190,13 +212,15 @@ impl Scope {
     }
     fn verify_names(&self, cancel: &CancelToken) -> io::Result<()> {
         let (files, info) = self.handles()?;
-        if entries(&files, cancel)? != self.files || entries(&info, cancel)? != self.info {
+        if entries(&files, cancel, self.mount)? != self.files
+            || entries(&info, cancel, self.mount)? != self.info
+        {
             return Err(invalid(
                 "Trash scope changed after admission; new work was preserved",
             ));
         }
         let root = history_tree::open_dir(self.location.trash.root())?;
-        let mut evidence = entries(&root, cancel)?;
+        let mut evidence = entries(&root, cancel, self.mount)?;
         evidence.remove(OsStr::new("files"));
         evidence.remove(OsStr::new("info"));
         if let Some((name, id)) = &self.run {
@@ -288,7 +312,7 @@ pub fn prepare_empty(
             return Err(fail(invalid("Duplicate Trash location in confirmed scope")));
         }
         let mount = permanent::mount_id(&root, OsStr::new("")).map_err(admission_failure)?;
-        let mut evidence = entries(&root, cancel).map_err(fail)?;
+        let mut evidence = entries(&root, cancel, mount).map_err(fail)?;
         evidence.remove(OsStr::new("files"));
         evidence.remove(OsStr::new("info"));
         let mut scope = Scope {
@@ -297,8 +321,8 @@ pub fn prepare_empty(
             files_id: FileIdentity::from_stat(&files.stat_self().map_err(fail)?),
             info_id: FileIdentity::from_stat(&info.stat_self().map_err(fail)?),
             mount,
-            files: entries(&files, cancel).map_err(fail)?,
-            info: entries(&info, cancel).map_err(fail)?,
+            files: entries(&files, cancel, mount).map_err(fail)?,
+            info: entries(&info, cancel, mount).map_err(fail)?,
             receipts: Vec::new(),
             evidence,
             run: None,
@@ -333,7 +357,7 @@ pub fn prepare_empty(
                 continue;
             }
             let receipt = location
-                .receipt_named_inner(name, cancel, false)
+                .receipt_named_inner(name, cancel, false, Some(scope.mount))
                 .map_err(fail)?;
             if protected(&receipt) {
                 continue;
@@ -412,6 +436,7 @@ impl Run {
     fn verify_pair(&self, pair: &DirHandle, name: &str, expected: FileIdentity) -> io::Result<()> {
         self.verify()?;
         private(pair)?;
+        check_mount_at(&self.dir, OsStr::new(name), Some(self.mount))?;
         let current = history_tree::open_dir(&self.path.join(name))?;
         for dir in [pair, &current] {
             if dir_key(FileIdentity::from_stat(&dir.stat_self()?)) != dir_key(expected)
@@ -561,7 +586,7 @@ impl ConfirmedEmptyTrash {
                     let info_path = receipt.info_path();
                     let info_tree = BTreeMap::from([(info_path.clone(), receipt.info)]);
                     run.verify_pair(&pair, &pair_name, pair_id).map_err(fail)?;
-                    move_checked(
+                    move_checked_on_mount(
                         &info,
                         &iname,
                         &info_path,
@@ -570,9 +595,12 @@ impl ConfirmedEmptyTrash {
                         &pair_path.join("info"),
                         &info_tree,
                         cancel,
+                        Some(scope.mount),
                     )
                     .map_err(fail)?;
-                    let (_, id, bytes) = open_info(&pair, OsStr::new("info")).map_err(fail)?;
+                    let (_, id, bytes) =
+                        open_info_with_mount(&pair, OsStr::new("info"), Some(scope.mount))
+                            .map_err(fail)?;
                     if id != receipt.info || bytes != receipt.info_bytes {
                         return Err(fail(invalid("Claimed Trash information changed")));
                     }
@@ -580,7 +608,7 @@ impl ConfirmedEmptyTrash {
                     scope.info.remove(&iname);
                     scope.verify_names(cancel).map_err(fail)?;
                     run.verify_pair(&pair, &pair_name, pair_id).map_err(fail)?;
-                    move_checked(
+                    move_checked_on_mount(
                         &files,
                         &receipt.name,
                         &receipt.data_path(),
@@ -589,6 +617,7 @@ impl ConfirmedEmptyTrash {
                         &pair_path.join("data"),
                         &receipt.tree,
                         cancel,
+                        Some(scope.mount),
                     )
                     .map_err(fail)?;
                     scope.files.remove(&receipt.name);
@@ -601,7 +630,9 @@ impl ConfirmedEmptyTrash {
                         }
                     });
                     scope.verify_names(cancel).map_err(fail)?;
-                    let (_, id, bytes) = open_info(&pair, OsStr::new("info")).map_err(fail)?;
+                    let (_, id, bytes) =
+                        open_info_with_mount(&pair, OsStr::new("info"), Some(scope.mount))
+                            .map_err(fail)?;
                     if id != receipt.info || bytes != receipt.info_bytes {
                         return Err(fail(invalid(
                             "Claimed Trash information changed before deletion",
@@ -615,6 +646,12 @@ impl ConfirmedEmptyTrash {
                         &admitted,
                         (pair_id, scope.mount),
                         cancel,
+                        &|| {
+                            check(cancel)
+                                .and_then(|_| scope.handles().map(|_| ()))
+                                .and_then(|_| run.verify_pair(&pair, &pair_name, pair_id))
+                                .map_err(checkpoint_failure)
+                        },
                         |p| {
                             let current = EmptyTrashOutcome {
                                 removed: Removed {
@@ -649,7 +686,9 @@ impl ConfirmedEmptyTrash {
                     outcome.removed.dirs += removed.dirs;
                     run.verify_pair(&pair, &pair_name, pair_id).map_err(fail)?;
                     scope.verify_names(cancel).map_err(fail)?;
-                    let (_, id, bytes) = open_info(&pair, OsStr::new("info")).map_err(fail)?;
+                    let (_, id, bytes) =
+                        open_info_with_mount(&pair, OsStr::new("info"), Some(scope.mount))
+                            .map_err(fail)?;
                     if id != receipt.info || bytes != receipt.info_bytes {
                         return Err(fail(invalid("Retained Trash information changed")));
                     }

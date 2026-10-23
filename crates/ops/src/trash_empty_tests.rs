@@ -245,3 +245,280 @@ fn aggregate_metadata_limit_refuses_instead_of_confirming_a_prefix() {
         .filter_map(Result::ok)
         .any(|e| e.file_name().as_bytes().starts_with(b".gust-empty-")));
 }
+
+struct MountProbe;
+impl MountProbe {
+    fn begin(cross: bool) -> Self {
+        permanent::CROSS_MOUNT.with(|flag| flag.set(cross));
+        anchor::TRAVERSAL_PROBE.with(|p| p.set(Some((0, 0))));
+        Self
+    }
+    fn counts(&self) -> (usize, usize) {
+        anchor::TRAVERSAL_PROBE.with(|p| p.get().unwrap())
+    }
+}
+impl Drop for MountProbe {
+    fn drop(&mut self) {
+        permanent::CROSS_MOUNT.with(|flag| flag.set(false));
+        permanent::CROSS_MOUNT_FD.with(|flag| flag.set(None));
+        INFO_READ_PROBE.with(|probe| probe.set(None));
+        lineage::READ_PROBE.with(|probe| probe.set(None));
+        anchor::TRAVERSAL_PROBE.with(|p| p.set(None));
+    }
+}
+fn mounted_fixture() -> Fixture {
+    let f = Fixture::new();
+    fs::create_dir(f.0.join("work/tree/mounted")).unwrap();
+    fs::write(
+        f.0.join("work/tree/mounted/sentinel"),
+        b"never inspect mounted contents",
+    )
+    .unwrap();
+    f.receipt();
+    f
+}
+#[test]
+fn preparation_rejects_descendant_mount_before_open_or_enumeration() {
+    let f = mounted_fixture();
+    let probe = MountProbe::begin(true);
+    let result = prepare_empty(&[f.location()], &CancelToken::new());
+    assert_eq!(
+        probe.counts(),
+        (0, 0),
+        "a rejected mount was traversed during preparation"
+    );
+    assert_eq!(result.unwrap_err().reason, EmptyTrashFailure::Unsupported);
+}
+#[test]
+fn revalidation_rejects_new_mount_before_open_or_enumeration() {
+    let f = mounted_fixture();
+    let plan = prepare_empty(&[f.location()], &CancelToken::new())
+        .unwrap()
+        .confirm_irreversible();
+    let probe = MountProbe::begin(true);
+    let mut h = f.history();
+    let result = plan.execute(&mut h, &CancelToken::new(), |_| {});
+    assert_eq!(
+        probe.counts(),
+        (0, 0),
+        "a rejected mount was traversed after confirmation"
+    );
+    assert_eq!(result.unwrap_err().reason, EmptyTrashFailure::Unsupported);
+    assert!(h.entries().is_empty());
+    assert_eq!(fs::read_dir(f.location().trash.files).unwrap().count(), 1);
+}
+#[test]
+fn data_preclaim_rejects_new_mount_without_traversal() {
+    let f = mounted_fixture();
+    let plan = prepare_empty(&[f.location()], &CancelToken::new())
+        .unwrap()
+        .confirm_irreversible();
+    let probe = MountProbe::begin(false);
+    AFTER_MOVE.with(|h| {
+        *h.borrow_mut() = Some(Box::new(|| {
+            permanent::CROSS_MOUNT.with(|flag| flag.set(true));
+            anchor::TRAVERSAL_PROBE.with(|p| p.set(Some((0, 0))));
+        }))
+    });
+    let result = plan.execute(&mut f.history(), &CancelToken::new(), |_| {});
+    assert_eq!(
+        probe.counts(),
+        (0, 0),
+        "data preclaim traversed a new mount"
+    );
+    assert!(result.is_err());
+    assert_eq!(fs::read_dir(f.location().trash.files).unwrap().count(), 1);
+    assert!(f.run().join("item-000000/info").exists());
+}
+#[test]
+fn data_postclaim_rejects_new_mount_without_traversal() {
+    let f = mounted_fixture();
+    let plan = prepare_empty(&[f.location()], &CancelToken::new())
+        .unwrap()
+        .confirm_irreversible();
+    let probe = MountProbe::begin(false);
+    AFTER_MOVE.with(|h| {
+        *h.borrow_mut() = Some(Box::new(|| {
+            AFTER_MOVE.with(|next| {
+                *next.borrow_mut() = Some(Box::new(|| {
+                    permanent::CROSS_MOUNT.with(|flag| flag.set(true));
+                    anchor::TRAVERSAL_PROBE.with(|p| p.set(Some((0, 0))));
+                }))
+            });
+        }))
+    });
+    let result = plan.execute(&mut f.history(), &CancelToken::new(), |_| {});
+    assert_eq!(
+        probe.counts(),
+        (0, 0),
+        "data postclaim traversed a new mount"
+    );
+    assert!(result.is_err());
+    assert_eq!(fs::read_dir(f.location().trash.files).unwrap().count(), 1);
+    assert!(f.run().join("item-000000/info").exists());
+}
+
+fn outer_binding_case(move_trash: bool) {
+    let f = Fixture::new();
+    fs::write(f.0.join("work/tree/second"), b"remaining work").unwrap();
+    fs::write(f.0.join("work/tree/third"), b"remaining work").unwrap();
+    let r = f.receipt();
+    let info_id = FileIdentity::of_path(&r.info_path()).unwrap();
+    let info_bytes = fs::read(r.info_path()).unwrap();
+    let plan = prepare_empty(&[f.location()], &CancelToken::new())
+        .unwrap()
+        .confirm_irreversible();
+    let mut moved = false;
+    let mut finished = false;
+    let e = plan
+        .execute(&mut f.history(), &CancelToken::new(), |p| {
+            finished |= p.phase == EmptyTrashPhase::Finished;
+            if !moved && p.outcome.removed.files == 1 {
+                let run = f.run();
+                if move_trash {
+                    let trash = f.location().trash.root().to_path_buf();
+                    let old_trash = f.0.join("retained-trash");
+                    fs::rename(&trash, &old_trash).unwrap();
+                    fs::create_dir(&trash).unwrap();
+                    fs::set_permissions(&trash, fs::Permissions::from_mode(0o700)).unwrap();
+                    for name in ["files", "info"] {
+                        fs::create_dir(trash.join(name)).unwrap();
+                        fs::set_permissions(trash.join(name), fs::Permissions::from_mode(0o700))
+                            .unwrap();
+                    }
+                    fs::rename(old_trash.join(run.file_name().unwrap()), &run).unwrap();
+                } else {
+                    let old_run = f.0.join("retained-run");
+                    fs::rename(&run, &old_run).unwrap();
+                    fs::create_dir(&run).unwrap();
+                    fs::set_permissions(&run, fs::Permissions::from_mode(0o700)).unwrap();
+                    fs::rename(old_run.join("item-000000"), run.join("item-000000")).unwrap();
+                }
+                fs::write(run.join("replacement-evidence"), b"retain replacement").unwrap();
+                moved = true;
+            }
+        })
+        .unwrap_err();
+    assert_eq!(
+        e.outcome.removed,
+        Removed { files: 1, dirs: 0 },
+        "lost outer authority did not stop the worker"
+    );
+    assert_eq!(e.outcome.items_completed, 0);
+    assert!(!finished);
+    assert!(!e.retained.is_empty());
+    let run = f.run();
+    let pair = run.join("item-000000");
+    let stage = fs::read_dir(&pair)
+        .unwrap()
+        .filter_map(Result::ok)
+        .find(|e| e.file_name().as_bytes().starts_with(b".gust-delete-"))
+        .unwrap()
+        .path();
+    assert_eq!(fs::read_dir(stage.join("item")).unwrap().count(), 2);
+    assert!(stage.join("intent.json").exists());
+    assert!(pair.join("intent.json").exists());
+    assert_eq!(FileIdentity::of_path(&pair.join("info")).unwrap(), info_id);
+    assert_eq!(fs::read(pair.join("info")).unwrap(), info_bytes);
+    assert_eq!(
+        fs::read(run.join("replacement-evidence")).unwrap(),
+        b"retain replacement"
+    );
+    if move_trash {
+        assert!(f.0.join("retained-trash").exists());
+    } else {
+        assert!(f.0.join("retained-run/intent.json").exists());
+    }
+}
+#[test]
+fn moved_pair_cannot_hide_lost_run_outer_binding() {
+    outer_binding_case(false);
+}
+#[test]
+fn moved_run_cannot_hide_lost_trash_outer_binding() {
+    outer_binding_case(true);
+}
+
+#[test]
+fn opened_directory_mount_is_checked_before_enumeration() {
+    let f = mounted_fixture();
+    let root = f.location().trash.files.join("tree").join("mounted");
+    let id = FileIdentity::of_path(&root).unwrap();
+    let probe = MountProbe::begin(false);
+    permanent::CROSS_MOUNT_FD.with(|flag| flag.set(Some((id.dev, id.ino))));
+    let result = prepare_empty(&[f.location()], &CancelToken::new());
+    assert_eq!(probe.counts(), (1, 0));
+    assert_eq!(result.unwrap_err().reason, EmptyTrashFailure::Unsupported);
+}
+#[test]
+fn opened_info_mount_is_checked_before_reading_bytes() {
+    let f = Fixture::new();
+    let r = f.receipt();
+    let id = FileIdentity::of_path(&r.info_path()).unwrap();
+    let _probe = MountProbe::begin(false);
+    INFO_READ_PROBE.with(|p| p.set(Some(0)));
+    permanent::CROSS_MOUNT_FD.with(|flag| flag.set(Some((id.dev, id.ino))));
+    let result = prepare_empty(&[f.location()], &CancelToken::new());
+    assert_eq!(INFO_READ_PROBE.with(|p| p.get()), Some(0));
+    assert_eq!(result.unwrap_err().reason, EmptyTrashFailure::Unsupported);
+}
+#[test]
+fn opened_lineage_mount_is_checked_before_reading_certificate() {
+    let f = Fixture::new();
+    let r = f.receipt();
+    let data = r.data_path();
+    fs::create_dir(data.join("temporary-revision")).unwrap();
+    fs::remove_dir(data.join("temporary-revision")).unwrap();
+    let tree = history_tree::snapshot(&data, &CancelToken::new()).unwrap();
+    assert_ne!(tree.get(&data), Some(&r.data));
+    // Protocol fixture: the production inverse is the only ordinary publisher.
+    r.lineage_binding()
+        .publish(&tree, &CancelToken::new())
+        .unwrap();
+    let record = fs::read_dir(f.location().trash.info.join(".gust-lineage"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let id = FileIdentity::of_path(&record).unwrap();
+    let _probe = MountProbe::begin(false);
+    lineage::READ_PROBE.with(|p| p.set(Some(0)));
+    permanent::CROSS_MOUNT_FD.with(|flag| flag.set(Some((id.dev, id.ino))));
+    let result = prepare_empty(&[f.location()], &CancelToken::new());
+    assert_eq!(lineage::READ_PROBE.with(|p| p.get()), Some(0));
+    assert_eq!(result.unwrap_err().reason, EmptyTrashFailure::Unsupported);
+}
+
+#[test]
+fn final_unlink_with_lost_outer_binding_never_reports_finished() {
+    let f = Fixture::new();
+    let location = f.location();
+    location
+        .trash_path(&f.0.join("work/tree/child"), &CancelToken::new())
+        .unwrap();
+    let plan = prepare_empty(&[location], &CancelToken::new())
+        .unwrap()
+        .confirm_irreversible();
+    let mut moved = false;
+    let mut finished = false;
+    let e = plan
+        .execute(&mut f.history(), &CancelToken::new(), |p| {
+            finished |= p.phase == EmptyTrashPhase::Finished;
+            if !moved && p.outcome.removed.files == 1 {
+                let run = f.run();
+                let old = f.0.join("retained-run");
+                fs::rename(&run, &old).unwrap();
+                fs::create_dir(&run).unwrap();
+                fs::set_permissions(&run, fs::Permissions::from_mode(0o700)).unwrap();
+                fs::rename(old.join("item-000000"), run.join("item-000000")).unwrap();
+                moved = true;
+            }
+        })
+        .unwrap_err();
+    assert_eq!(e.outcome.removed, Removed { files: 1, dirs: 0 });
+    assert_eq!(e.outcome.items_completed, 0);
+    assert!(!finished);
+    assert!(f.run().join("item-000000/info").exists());
+    assert!(f.0.join("retained-run/intent.json").exists());
+}
