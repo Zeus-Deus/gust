@@ -2360,6 +2360,127 @@ start error; cancellation/timeouts never stand in for its terminal completion.
 APP may use the typed failure as no-effect evidence while holding/reconciling
 its own forward marker. No filesystem I/O is added to GUI observer polling.
 
+## 7.4 Same-volume Trash and restoration receipts
+
+Read-only `trash::locations(home)` discovers existing validated home and volume
+Trash directories, including both safe shared-sticky `.Trash/uid` and private
+`.Trash-uid` locations. `select_location(path,home)` chooses without creating
+anything. Only admitted `TrashLocation::trash_path(path,cancel)` creates owned
+private storage. Home Trash remains preferred on its filesystem; cross-volume
+copy/delete and permanent-delete fallbacks are never substituted. Layout and
+relative volume restore paths follow the freedesktop Trash specification.
+
+`TrashLocation { trash, topdir }` provides list, trash_path, receipt_named and
+restore. TrashReceipt retains the byte slot, location, exact data/info
+identities and full subtree; APP holds it behind an opaque ID. QML does not
+supply a restore destination. The exclusive private .trashinfo record is
+synced before the no-replace move; data and parent directories are synced
+before success. Info records bind original bytes to the admitted root identity.
+Restoration verifies both records and data, uses no-follow parents and atomic
+no-replace, then moves the exact info record into an exclusive private recovery vault
+after data is durable. No public-name info unlink is performed.
+Changed records, replaced slots, unreadable descendants, new work and occupied
+restore paths refuse with both data and receipt preserved. A crash or late I/O
+error retains enough durable information for inspection; no guessed deletion
+or automatic replay occurs. Legacy free APIs remain compatible.
+
+The backend lists existing locations without mkdir and bounds mount/list/info
+metadata. Unsupported atomic no-replace support stays a refusal. Discovery and
+all Trash I/O run on workers; stalled filesystem syscalls have no asserted
+cancellation deadline. Permanent deletion retains its separate confirmation.
+
+
+Trash receipts expose display projections but privately bind the canonical
+location, byte slot, original path, data/info identities, parent directory
+identities and complete inventory. Mutated projections refuse. Volume paths
+are relative to their bound mount root; home paths are absolute. Bounded proc
+mount parsing uses CORE's shared byte decoder; automatic discovery skips
+network/FUSE/unknown types before touching candidates. Explicit selection also
+refuses these types, with no remote probe or permanent-delete fallback.
+
+`TrashLocation::restore` retains the original information inode in a private
+recovery vault. Worker-only `TrashReceipt::restore_history_supported(cancel)`
+preflights known missing parents without effects. Its RestoredReceipt exposes
+`history_supported()`; recreation
+of missing original parents remains compatible but requires a caller barrier,
+as those parent creations have no inverse receipt. A durable private intent
+precedes parent creation/data movement and remains for inspection. I/O errors
+once intent or metadata has been published carry downcastable `TrashPartial`
+locations; callers never infer no effect from generic Err. Pending artifacts
+are never automatically replayed or recursively removed.
+
+`History::record_trash(label, receipts)` and `record_restored(label, receipts)`
+admit only exact receipt inventories, information bytes and private bindings.
+Trash Undo restores data before retaining info; Redo restores info before data.
+Restoration Undo restores info before data; Redo restores data before retaining
+info. Every internal step uses existing durable pending intent and no-replace
+identity checks. Info inodes survive Undo/Redo, and new descendants, replaced
+parents, records or occupied names refuse. APP still owns forward markers and
+capacity/barrier reservation before effects and holds History through admission.
+
+
+`TrashReceipt::inventory_len()` and `retained_bytes()` are memory-only cache
+accounting. The charge includes all owned path/slot capacities, info capacity
+and a conservative per-tree-node allowance; it is not an allocator/RSS reading.
+APP bounds the aggregate cache and reports limits instead of retaining an
+unbounded set of individually bounded receipts.
+
+
+Trash path admission and discovery consume CORE MountInfo::resolve and
+visible_mounts from one bounded kernel mountinfo snapshot. The shared parent-ID
+projection handles stacked mounts and covered descendants; no flat/first/last
+fallback or independent Trash topology parser remains. A malformed, limited
+or ambiguous inventory refuses explicitly. Unrelated path resolution may
+remain available outside an ambiguous subtree. Discovery establishes visible
+local roots before any candidate access and separately checks the shared,
+private, files and info paths before opening them. Snapshot checks do not
+promise atomic exclusion of concurrent mount changes or syscall deadlines.
+
+Trash selection compares shared mount IDs as well as devices: home preference
+is eligible only when source, root, files and info resolve to one visible local
+mount. An unsupported home mount is skipped before home I/O; unrelated admitted
+local-volume candidates remain usable. A candidate with a separately mounted
+root or child refuses before information publication.
+
+Existing owned legacy Trash directories with read/search access for others but
+no group/other write access remain discoverable without chmod. Listing reports
+a typed actionable repair-required error. Explicit worker-only
+`TrashLocation::repair_legacy_permissions(cancel)` captures no-follow held
+root/files/info descriptors and identities before tightening those same owned
+directories to 0700. It creates no directories, changes no data/Info bytes and
+never recursively repairs or cleans. Replaced, writable-by-others, foreign-owned
+or symlinked layouts refuse; errors after a permission effect carry partial
+location evidence. Checked compatibility listing preserves errors; the original
+Vec-only projection remains a lossy compatibility API and is not authoritative.
+
+Legacy permission repair has no generic inverse receipt. APP retains its forward
+marker and commits an explicit history barrier before invoking the repair; it
+never fabricates a creation or attribute receipt from a post-effect snapshot.
+
+Undo vault placement excludes each retained entry's effective current root,
+including a Trash folder restored by an Undone entry. Empty vaults remain
+retained outside those roots; completing a child Redo never deletes a vault
+or relaxes the ancestor's complete inventory.
+
+Restore retains an initially existing target parent through its mutation and
+checks that the public parent path still names it before moving data. A parent
+renamed or replaced after initial admission refuses with retained intent,
+including receipts acquired while that parent was absent. Only the initially
+missing-parent branch may create parents; its terminal receipt always requires
+the existing caller history barrier.
+
+Validated directory lineage and native Trash information remain coherent via
+private, bounded revision certificates. A typed Trash history record binds the
+canonical data/info directories, exact Info identity/bytes and its data step.
+Before returning refreshed data to Trash, durable inverse pending precedes an
+exclusive certificate containing that already-admitted complete inventory.
+The original Info inode and bytes are never rewritten. Native listing and
+receipt acquisition accept an otherwise stale root revision only when this
+certificate, exact Info and the complete current inventory all match, including
+every descendant revision and mode. Untracked edits do not gain authority.
+Certificates use no-replace publication and remain retained; collisions,
+unreadable records and metadata limits refuse, with pending/evidence preserved.
+
 ## 12. Release qualification and shared test runners
 
 Release evidence distinguishes source checks, model seams, native desktop
