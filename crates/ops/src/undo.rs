@@ -225,7 +225,7 @@ pub fn plan_undo(job: &Job) -> UndoPlan {
             // data the copy never wrote, which is the merged-copy data-loss
             // case. So the recorded set is filtered to what the operation
             // created, and anything pre-existing is deliberately left.
-            JobKind::Copy | JobKind::Extract => {
+            JobKind::Copy | JobKind::Extract | JobKind::Compress => {
                 if dest.is_dir() {
                     let recorded: BTreeMap<PathBuf, RecordedIdentity> = job
                         .subtree_identities

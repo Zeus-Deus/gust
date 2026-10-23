@@ -422,6 +422,81 @@ Browsing and downloading can still work; the local source is retained after
 this refusal. Connecting successfully does not imply upload support. Gust
 never substitutes an overwrite-capable rename or replays the refused operation.
 
+### 6.4.3 File-send services
+
+`send::taildrop(target, paths, context)` and
+`send::localsend(peer, paths, context)` return `Result<SendReceipt, SendFailure>`.
+`SendReceipt { accepted_files }` counts receiver protocol acceptance.
+`SendFailure { error, accepted_files, delivery_uncertain }` retains known partial
+completion without claiming rollback. `LocalSendPeer { address: SocketAddr,
+public_key_pin: String }` requires an explicitly trusted SHA-256 SPKI pin
+(`sha256//BASE64`), distinct from LocalSend's certificate fingerprint. The pin
+authenticates self-signed TLS; redirects and proxies are disabled.
+They are explicit sends, never discovery side effects, moves, or source deletion.
+Taildrop uses the installed local Tailscale CLI and reports policy/offline refusal.
+LocalSend uses its v2 prepare/upload/cancel protocol over explicitly pinned TLS;
+receiver approval is required. Session tokens travel in private helper stdin,
+never argv/environment/logs/files. Inputs are bounded regular local files; source
+identity changes refuse transfer. Cancellation best-effort cancels the receiver
+session and reports possible partial delivery. A receipt means protocol acceptance,
+not proof of receiver persistence or physical-device/provider qualification.
+
+`send::inspect_localsend(address, context)` explicitly fetches an untrusted peer
+certificate and returns `LocalSendIdentity { peer, certificate_fingerprint }`.
+The app presents that fingerprint for comparison with the receiver; only an
+explicit trust choice permits `localsend(identity.peer, ...)`. Inspection itself
+never persists trust, sends file metadata, or accepts the inspected identity.
+OpenSSL is used through bounded pipes for certificate/public-key parsing; an
+ephemeral client certificate/key is generated for mutual TLS, retained only in a
+sealed owner-only memfd and reused for every request in that send session. It is
+never written to a disk/config file or passed as secret bytes in argv/env. Inherited TLS-keylog/debug
+settings are removed from owned helpers so they cannot persist session secrets.
+`send::localsend_with_pin(peer, paths, Option<String>, context)` supports a
+receiver PIN through the same private request pipe; the default `localsend`
+adapter supplies no PIN. A rejected PIN is an actionable authentication result,
+never a request to change receiver settings or weaken TLS.
+
+Send source admission refuses every FUSE subtype, including types absent from
+the general remote-stall classifier, before opening or querying source metadata.
+Cancelling LocalSend during prepare/receiver approval best-effort posts `cancel`
+without a session ID using the same trusted peer and client identity. Cleanup
+uses a fresh token and at most one second of the remaining overall budget;
+it preserves the original cancellation and delivery uncertainty and never retries
+file data. This is synthetic protocol coverage, not physical receiver qualification.
+
+Send admission uses CORE's shared byte-preserving mount-table classification.
+Kernel-escaped mount names (backslash, tab, newline and space) must select the
+visible mount by mount-ID/parent topology before the source is opened; classification
+must not canonicalize or query the source path. Synthetic mount-table-to-admission
+regressions cover FUSE subtypes, NFS and CIFS under escaped mount names. Exercise
+the shared parser and the pre-open policy together; a filesystem-name policy
+alone does not establish correct admission.
+
+`send::check_source_location(path) -> Result<(), RemoteError>` exposes the exact
+absolute/path/filesystem predicate used first by `Source::open`. It reads only
+the kernel mount table, with no candidate open, lstat, stat or canonicalization.
+The APP worker calls it before shelf `OwnedPath`/`Target` or shown-selection
+identity validation, then uses the existing send handlers. Source opening repeats this
+same guard; identity checks remain required afterward. The check does not make
+subsequent filesystem calls atomic with changes to the kernel mount table.
+
+Send admission must refuse mount visibility that the shared classification cannot
+establish. A stacked local/FUSE or network mount must not become eligible because
+of table order, equal mount-path lengths, or a longer descendant entry hidden by
+an ambiguous ancestor. Synthetic stacked-table tests exercise the same admission
+guard without candidate I/O; callers must not substitute a first/last-row rule.
+Production fixtures use `stall::fstype_from_mountinfo(path, bytes)`, matching
+`fstype_for` without opening candidates. The conservative flat-table compatibility
+seam remains covered separately. A uniquely resolved local mount over autofs stays
+eligible; remote mounts and descendants hidden below them cannot borrow the type
+of a covered local mount. An ambiguous subtree does not reject unrelated siblings.
+
+The process's held filesystem root is also the starting point for absolute source
+lookup. A mount stacked at `/` must not hide a remote root or its remote children
+from source admission. CORE conservatively treats a starting-root same-point stack
+as globally ambiguous for resolution and inventory; source admission refuses every
+path in that snapshot. Ordinary non-root overmount behavior remains unchanged.
+
 ## 6.5 Permanent delete
 
 The one operation with no undo. Reached only where Trash is genuinely
@@ -1336,12 +1411,80 @@ not an assertion that frontend bindings are complete.
 
 `ArchiveRequest::Extract` carries archive/destination/policy/password;
 `Create` carries directory, byte-preserving names, destination, format and
-password. The format enum reserves TarZstd, Zip and SevenZip; creation is
-unavailable until its separately verified worker implementation lands.
+password. Creation supports TarZstd, Zip and SevenZip through the sandbox helper. ZIP
+password creation uses AES-256; password creation for the other formats is
+explicitly unsupported by the current writer. Sources are enumerated through
+held no-follow descriptors, bounded to 200,000 entries/32 MiB metadata/16 GiB
+input, and revalidated before publication. Captured mtime/nanoseconds travel
+with each member; TAR preserves nanoseconds, ZIP Unix seconds, and 7z 100 ns
+precision. Missing times are not invented. Cancellation/deadline is checked
+after the durable intent and publication callback, immediately before rename.
+Regular files must supply exactly their admitted size and unchanged identity; links are stored, never followed.
+The parent streams bounded frames; the helper sees no source path or writable
+location except an exclusively owned output file and a private 256 MiB
+tmpfs spool (required by the 7z writer). Spool exhaustion fails closed.
+A completed writer is closed, its complete inventory checked, and the output fsynced before one
+journaled atomic no-replace publication. Cancellation never deletes sources.
+The ordinary result record has JobKind::Compress and the created file identity;
+extracted is None. A partial publication error retains its precise receipt.
 Passwords are moved into a
 redacted secret type and transported only on helper stdin, never argv, env,
 logs or files. Unsupported encryption modes fail explicitly. Multipart
 archives are outside this contract.
+
+### Archive writer date admission
+
+Creation validates every admitted member timestamp before creating staging or
+starting the writer/payload stream. `ArchiveError::UnsupportedTimestamp` carries
+the selected format, relative byte-path and exact source seconds/nanoseconds.
+No source date is clamped or discarded. Current supported ranges are inclusive:
+TAR+Zstd seconds `i64::MIN+1..=i64::MAX`, normalized nanoseconds; ZIP seconds
+`0..=2147483647`, normalized source nanoseconds with whole-second output; 7z
+seconds `0..=1833029933770`, with nanoseconds at the final second limited to
+`955161599` (100 ns output precision). The ZIP range is deliberately conservative
+across signed/unsigned 32-bit timestamp readers. TAR's minimum integer and
+negative 7z dates are excluded because the native path cannot preserve them.
+The helper applies the same bounds before each native header. Complete output
+timestamp comparison remains mandatory, including nanosecond precision.
+
+Creation defines filename encoding per format: full PAX uses binary headers
+to retain Unix byte names and link targets; ZIP retains its original byte names
+and sets UTF-8 flags from the filename alone (opaque names stay unflagged).
+Symlink target bytes are content and never determine ZIP's filename flag;
+7z requires UTF-8 names and link targets for its UTF-16 representation. Invalid
+7z encodings return `UnsupportedEncoding { format, member }` before staging or
+payload. The codec's private process initializes its character locale before
+native conversion; parent locale and parse-warning refusal remain unchanged.
+
+### An owned new extraction folder
+
+`ArchiveRequest::ExtractIntoNew` carries the same fields as Extract, but its
+absolute destination must not exist and its parent must already exist. The
+worker builds and validates the whole folder in private staging under that
+parent, then durably records a root publication intent and publishes it with
+one atomic no-replace rename. Password/decode failures leave the requested
+folder absent. `ArchiveError::DestinationExists` never reuses another folder.
+The success/partial receipt includes the root and every created descendant;
+APP performs no mkdir before job admission or during polling.
+
+### Durable archive admission and password outcomes
+
+`archive::jobs::start_journalled(id, request, Journal)` preserves the existing
+`start` signature and runs all journal I/O on its worker. It durably records
+Planned before staging, an entry intent before each directory creation or
+no-replace publication, committed identity receipts after each effect, and a
+terminal state including any partial receipt. Compact append-only entry
+updates avoid rewriting an ever-growing full job for every member. Journal
+load folds these updates into their admitted job; an interrupted intent is
+reported for inspection, never automatically replayed or deleted. Journal
+paths preserve OS bytes while accepting legacy string-encoded paths.
+
+`ArchiveError::PasswordRequired` and `IncorrectPassword` are typed helper
+outcomes. App code must branch on these variants, never parse helper prose.
+A missing password is detected from libarchive's encrypted-entry metadata;
+a supplied password that fails the library's passphrase verification is
+reported separately from corruption/unsupported-format errors. Passwords
+remain confined to stdin and private decoder memory.
 
 ## 6.16 Bulk rename
 
@@ -1895,6 +2038,11 @@ ordinary 1080p clips. This limits virtual address space, not resident memory.
 The CPU, wall-clock, process-count and output-size limits still apply.
 
 ### 6.4.2 Owned remote helper calls
+
+Noninteractive helper stdin borrows the caller's bytes for the duration of the
+owned call instead of copying them into an internal queue. The caller retains
+responsibility for the source buffer's lifetime and any required wiping. Existing
+interactive response queues and cancellation/descendant ownership remain unchanged.
 
 Remote service calls run on workers. `helper::CallContext { cancel: &CancelToken,
 timeout: Duration }` gives each call one overall budget. `RemoteError` carries a

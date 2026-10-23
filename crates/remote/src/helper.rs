@@ -1,6 +1,7 @@
 //! Owned, bounded subprocess calls. No command text or diagnostics are logged.
 use gust_core::lister::CancelToken;
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::io::{Read, Write};
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -296,7 +297,14 @@ fn run_inner(
         nonblocking(&stdout)?;
         nonblocking(&stderr)?;
         let mut stdin = Some(stdin);
-        let mut pending = input.to_vec();
+        // Noninteractive secrets stay in the caller's borrowed buffer. Only
+        // interactive responses need an owned queue that can grow.
+        let mut pending: Cow<'_, [u8]> = Cow::Borrowed(input);
+        #[cfg(test)]
+        assert!(
+            interactive || std::ptr::eq(pending.as_ptr(), input.as_ptr()),
+            "noninteractive stdin must borrow the caller buffer"
+        );
         let mut written = 0;
         let mut out = Vec::new();
         let mut err = Vec::new();
@@ -332,12 +340,12 @@ fn run_inner(
             let previous = out.len();
             let out_done = drain(&mut stdout, &mut out)?;
             let err_done = drain(&mut stderr, &mut err)?;
-            if out.len() != previous {
+            if interactive && out.len() != previous {
                 if let Some(answer) = respond(&out[previous..]) {
                     if pending.len() + answer.len() > 1024 * 1024 {
                         return Err(RemoteError::new(ErrorCode::Protocol));
                     }
-                    pending.extend_from_slice(&answer);
+                    pending.to_mut().extend_from_slice(&answer);
                 }
             }
             let status = owned
