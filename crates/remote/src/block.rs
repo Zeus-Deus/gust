@@ -293,9 +293,9 @@ pub fn lock(device: &str, ctx: &CallContext<'_>) -> Result<(), BlockFailure> {
 mod tests {
     use super::*;
     use gust_core::lister::CancelToken;
-    use std::fs::{DirBuilder, Permissions};
+    use std::fs::DirBuilder;
     use std::os::unix::ffi::OsStrExt;
-    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    use std::os::unix::fs::DirBuilderExt;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
     use std::time::{Duration, Instant};
@@ -313,9 +313,19 @@ mod tests {
                 NEXT.fetch_add(1, Ordering::Relaxed)
             ));
             DirBuilder::new().mode(0o700).create(&root).unwrap();
+            let source = root.join("fixture-source");
             let helper = root.join("fixture-helper");
-            std::fs::write(&helper, format!("#!/usr/bin/python3\n{body}\n")).unwrap();
-            std::fs::set_permissions(&helper, Permissions::from_mode(0o700)).unwrap();
+            std::fs::write(&source, format!("#!/usr/bin/python3\n{body}\n")).unwrap();
+            // A concurrent test's fork can inherit this process's write
+            // descriptor until that child execs, making our exec fail with
+            // ETXTBSY. A separate process creates the executable instead.
+            let installed = Command::new("install")
+                .args(["-m", "700"])
+                .arg(&source)
+                .arg(&helper)
+                .status()
+                .unwrap();
+            assert!(installed.success());
             Self { root, helper }
         }
         fn program(&self) -> &OsStr {
