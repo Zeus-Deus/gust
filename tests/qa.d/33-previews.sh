@@ -27,6 +27,16 @@ cat > "$stub/xdg-open" <<'STUB'
 printf '%s\n' "$@" > /tmp/gust-fixture-OPENED
 STUB
 chmod 755 "$stub/xdg-open"
+# Media activation now sends the visible playlist to mpv. Keep this handoff
+# assertion isolated; media-navigation.py exercises the real player.
+cat > "$stub/mpv" <<'STUB'
+#!/usr/bin/env python3
+import pathlib, sys, urllib.parse
+start = int(next(arg.split("=", 1)[1] for arg in sys.argv if arg.startswith("--playlist-start=")))
+paths = [line for line in sys.stdin.read().splitlines() if line.startswith("file://")]
+pathlib.Path("/tmp/gust-fixture-OPENED").write_bytes(urllib.parse.unquote_to_bytes(paths[start][7:]) + b"\n")
+STUB
+chmod 755 "$stub/mpv"
 rm -f /tmp/gust-fixture-OPENED
 export QA_PATH_PREPEND="$stub"
 
@@ -164,7 +174,7 @@ if need ffmpegthumbnailer; then
   key Return; sleep 1.2
   expect "Enter closed Quick Look"               "d['quickLookOpen']" "False"
   if [[ -f /tmp/gust-fixture-OPENED ]] && grep -q "clip.mp4" /tmp/gust-fixture-OPENED; then
-    ok "Enter opened clip.mp4 with the desktop's player"
+    ok "Enter handed clip.mp4 to the media player"
   else
     bad "Enter did not hand the video to the opener"
   fi
