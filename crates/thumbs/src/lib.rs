@@ -6,8 +6,11 @@
 
 pub mod audio;
 pub mod cache;
+mod helper;
+pub mod preview;
 pub mod render;
 pub mod sandbox;
+pub mod video;
 
 pub use cache::{thumbnail_path, ThumbSize};
 pub use sandbox::{validate_output, SandboxSpec, ValidationError};

@@ -833,6 +833,94 @@ string state into following lines or windows; character literals remain strings.
 Trailing decimal points remain numeric before an exponent or suffix, including
 hexadecimal exponent forms; annotation does not validate literal semantics.
 
+### 6.9.4 Rich preview backend contract
+
+`gust_thumbs::preview` extends the existing sandbox helper contract, independently
+of the viewport thumbnail worker/cache. All calls below run on workers. The app
+owns cancellation and generation/entry identity checks before publishing results.
+No original image, font, document or media stream goes to an in-process decoder.
+
+- `capability(PreviewKind)` returns exact missing system tools. Installed tools
+  are prerequisites, not proof that a particular codec or sandbox works.
+- `inspect(path, kind, &CancelToken) -> Result<PreviewDocument, PreviewError>`
+  holds a no-follow/nonblocking regular input descriptor, refuses inputs over
+  512 MiB (16 GiB for streamed audio/video) and owns a private mode-0700 scratch
+  directory. `info()` reports page
+  count, bounded display metadata and dependency/format notes. A document holds
+  its input descriptor until drop; changes to that object are refused.
+- `PreviewDocument::page(page, px, cancel)` accepts 1-based pages (at most
+  10,000) and 1..=2048 pixels. `RasterPage` contains bounded PNG bytes and
+  header dimensions. A consumer can request successive visible pages for
+  continuous scrolling; no whole-document rasterization or eager page queue.
+- ImageMagick renders images and font specimens; RAW uses `dcraw_emu` half-size
+  conversion followed by ImageMagick. Optional `exiftool` supplies an allowlist
+  of camera/exposure/dimension tags, excluding GPS and serial numbers. Missing
+  EXIF tooling is a note and does not prevent image rendering.
+- Poppler supplies PDF page counts and pages. LibreOffice supplies bounded
+  Office/HTML-to-PDF conversion in an isolated disposable profile with macro
+  security set to its highest level, without network access, user configuration
+  or adjacent files. HTML is
+  static document rendering; scripts, navigation and external resources are
+  not an interactive browser. Supported Office types depend on the installed
+  import filters; focused fixtures cover RTF and DOCX, not every Office format.
+  Font samples use fixed specimen text only.
+- Helpers run under bwrap+prlimit or fail closed. Source paths preserve OS bytes.
+  Parent-enforced wall/output limits and cancellation cover startup, pipe reads
+  and rendering; helper groups are owned, killed and reaped. Output is opened
+  no-follow/nonblocking, bounded and checked before returning. Errors distinguish
+  cancellation, unavailable tools, invalid request, source change, limits,
+  helper failure and rejected output. Raw helper stderr is never a UI/log payload.
+  Rich helper scratch tmpfs is capped at 64 MiB; the output tree is monitored
+  through held directory descriptors (128 MiB / 4096 entries / depth 12), in
+  addition to per-file prlimit and parent read caps. Conversion PDF output is
+  capped at 64 MiB. Rich rendering has a 20-second CPU / 30-second wall budget
+  and 1 GiB address-space cap (3 GiB for LibreOffice startup); core dumps are
+  disabled. Source descriptors are passed via child-only inherited owned
+  clones, separate from stdin. Availability never implies every camera/codec works.
+- Core owns long-text/JSON/CSV/TSV/TOML windows and compare parsers (§6.9.2). The app
+  consumes those APIs alongside helper-backed documents, without duplicating
+  parsers in the thumbnail crate.
+
+These APIs are backend support, not evidence that UI widgets are integrated or
+visually qualified. Actual interaction changes stay local pending user review.
+
+Media control preserves `audio::Player` compatibility: `set_volume(0..=1)` and
+`set_muted(bool)` affect bounded PCM samples before the desktop sink sees them;
+`volume()`/`muted()` return requested state. Nonfinite seek/volume values are
+ignored. Stop also cancels a pending sandbox probe/startup; owned child handles
+replace shared numeric PIDs. `PreviewDocument::frame(seconds, px, cancel)`
+provides bounded sandboxed video seek frames for an embedded preview. Playing
+original video through Qt/libav in the app process remains prohibited.
+
+`video::Player::start(path, px)` returns immediately and exposes `status`,
+`set_paused`, `toggle`, `seek`, `set_volume`, `volume`, `set_muted`, `muted`,
+and `stop`. Its status fields are `state` (the existing `audio::PlayState`),
+`pos`, `duration`, `frame: Option<Arc<RasterPage>>`, `frame_id`, `volume`,
+`muted`, `why`. A sandboxed ffmpeg emits 12-fps size-bounded PNGs; the worker
+keeps one latest frame with a monotonic id. The app publishes a provider URL,
+never an original-media URL, and uses the id to avoid re-decoding unchanged
+frames. Optional sound uses the existing PCM player and the same held input
+identity. Missing sound support leaves video available with a reason. Paused
+seeks render one new frame; stopping cancels probing, decoder reads and audio.
+
+Streaming audio/video helpers have no writable host output bind: their `/out`
+is an empty read-only private tmpfs. Their owned streaming spawn path enforces
+this independently of capture/output-tree monitoring. Both relays recheck the
+held source revision periodically, while paused, and before each PCM write or
+frame publication; a changed source stops playback and invalidates video output.
+Only active audio playback supplies the video clock. Ended/failed audio releases
+the video to monotonic timing, so unequal stream lengths still reach video end.
+A successful empty decode after a seek near/beyond the end triggers bounded
+look-behind retries (at most eight, with a shared 15-second deadline), retaining
+the last recovered frame. Recovery uses the first video stream's endpoint,
+relative to the input start, rather than a possibly much longer audio/container
+duration. The final retry starts at zero if that stream hint is absent or
+inaccurate; the same time/cancellation bounds still apply. The public duration
+and requested position remain on the full media timeline. Paused seeks into an
+audio-only tail retain the final video PNG and their requested position; seeks
+at or beyond duration reach Ended, and a later seek can restart playback.
+An empty decode at the start or malformed/incomplete PNG output remains an error.
+
 ## 6.10 Scoped content search (`:grep`)
 
 `:find` matches names; `:grep` matches *contents* (plan §2, §4). Both are
