@@ -2207,6 +2207,10 @@ current bounds again. Every previewable row in those bounds is eligible; a
 fixed prefix limit must not strand tiles on large or zoomed-out viewports.
 Grid image items reload updated cached files instead of retaining stale Qt
 decoded-image cache entries after live replacement.
+The grid bounds decoded PNGs to the normal thumbnail's 128-pixel box. Aspect
+ratio is preserved by the displayed item's geometry, not a decoder fit mode
+that can enlarge a small PNG to cover the requested decode box. Zoom and
+display scale change painting without enlarging the cached source pixels.
 
 Cached thumbnails carry `Gust::SourceVersion` alongside `Thumb::MTime`: device,
 inode, length, nanosecond mtime and ctime identify the rendered source version.

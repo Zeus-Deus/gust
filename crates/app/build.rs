@@ -11,6 +11,7 @@ fn main() {
         "ui/QuickLook.qml",
         "ui/RowsView.qml",
         "ui/IconGridView.qml",
+        "ui/GridThumbnail.qml",
         "ui/ColumnsView.qml",
         "ui/Sidebar.qml",
         "ui/Breadcrumbs.qml",
