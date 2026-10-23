@@ -2244,6 +2244,109 @@ before browsing. Existing `Unknown`/`Accepted` wording and absence of automatic
 compensation remain. These observations do not freeze hotplug, service state or
 filesystem contents, or promise atomicity between validation and an action.
 
+## 7.2 Worker-owned job observers
+
+Cloneable `jobs::JobObserver` and `archive::jobs::ArchiveObserver` retain only
+memory snapshots and cancellation tokens. Observers never join or cancel on
+drop. The original handle remains worker-owned; its existing APIs stay intact.
+Job observers also expose pause/resume/is_paused/cancel_requested/record for
+existing progress controls. APP can hold a history admission lock and job
+handle on a worker until the terminal receipt, while GUI code polls an
+observer. Cancellation is acknowledged only by a terminal worker snapshot.
+
+## 7.3 Persistent typed recovery
+
+`history::History::open(path)` opens a private, byte-preserving durable store
+under an exclusive nonblocking lock. Open/drop around each serialized worker
+command, including admission through receipt; another Gust process can acquire
+the store between commands. A GUI poll must never open it. `entries()` returns
+loaded HistoryEntry { id, label, kind, status, created_unix }. Typed receipt
+methods record confirmed jobs, created files, RenameMade, links, modes, owners
+and tags. Rename receipts retain a complete inventory from before mutation;
+recording must not adopt later descendants as operation-owned work.
+
+`undo/redo(cancel)` returns a typed entry or refusal; `undo_many/redo_many`
+returns completed entries and the first refusal without consuming its cursor.
+Created objects move intact into private same-volume vaults; redo returns the
+same objects, never rereads changed originals. New actions retire redo offers
+but never implicitly delete preserved vault bytes. Every inverse uses held
+parents, full descendant identities, no-follow traversal and no-replace moves.
+An unreadable, changed, newly occupied, unsupported or cancelled inverse
+preserves work. Overlapping rename batches and cross-volume inverses refuse
+until a safe explicit protocol is available; legacy recovery remains available.
+
+Durable intent precedes inverse effects. Restart with a pending intent fences
+history behind an Interrupted entry; no automatic replay or guessed cleanup.
+Irreversible/untracked mutations admit an explicit barrier. Unknown historical
+jobs are not silently imported. Parent directory mtime changes from validated
+tracked inverses may refresh older ancestor receipts only after exact inventory,
+all inode identities and every non-directory identity still match. Untracked
+new work prevents this refresh and blocks the older inverse.
+
+Admission keeps the original receipt's root identity as authority; a later
+inventory only verifies it. Inventories are compared by relative byte-path
+keys, including root-last extraction receipts. Directory attribute entries
+retain complete lineage before refreshing directory revisions after tracked
+child inverses. Attribute aliases for one inode and identical transition are
+coalesced; disagreeing transitions refuse before inverse effects.
+
+An inverse source-name race is checked against the held destination parent.
+A mismatching moved object is restored with identity checks and no-replace;
+an occupied recovery name yields `HistoryError::Partial { from, at, cause }`
+and preserves both objects and the durable pending fence. This does not
+exclude every concurrent writer after verification. Owned unreadable modes
+use metadata-only descriptors and descriptor-relative metadata syscalls,
+without temporarily granting read access; their metadata is synced through
+the held filesystem. Unsupported kernel operations refuse explicitly.
+
+
+### Owned new-folder and link receipts
+
+`create::new_folder_recorded(dir,name)` returns FolderCreated with the created
+root's held identity while it is empty, after syncing the directory and parent.
+`History::record_folders(label, receipts)` admits only those exact still-empty
+objects; later children are new work, never adopted as created descendants.
+Forward link creation resolves its parent without following symlinks and
+returns the existing LinkMade identity/target receipt. Bulk path-pair outcomes
+remain an explicit history barrier until pre-mutation receipts are available.
+
+Creation receipts originate before public-name readback. Regular files retain
+the descriptor returned by exclusive creation through write/sync and receipt
+capture. Folder/link creation captures identity in an exclusive mode-0700
+private namespace, then publishes with no-replace and checks the public entry
+against that original identity. A replacement or new child at readback refuses
+the receipt and preserves later work. Cleanup never recursively removes a
+folder produced by this path. This bounds the demonstrated public-name race;
+it does not promise exclusion of all concurrent same-user writers inside the
+private namespace or after final verification.
+
+A failed regular-file write or sync retains the public entry and reports its
+path as partial/current work; it never unlinks that mutable name. Fresh paired
+stats cannot distinguish Gust's failed bytes from a later same-inode edit.
+No successful creation receipt is returned for that uncertain result.
+
+Nested permission batches reconcile directory lineage only from the batch's
+recorded mode transitions and each verified applied inode. Preflight derives
+the expected current modes from Applied/Undone status, including older stored
+lineage, then retains complete inventory, identity and revision checks. Each
+successful mode step updates matching inode modes in the same batch's lineage;
+no current directory snapshot is adopted as new authority.
+
+A confirmed job with any completed pre-existing destination root requires an
+explicit barrier rather than a partial inverse that silently omits that root.
+Ownership inverse policy matches the forward guard: privileged regular files
+refuse during admission/preflight, before pending or effects; owned setgid
+directories remain eligible with exact identity, group and lineage checks.
+
+If a mode inverse explicitly restores readable/searchable permissions on an
+unreadable directory with recorded lineage, preflight checks its exact root
+and attribute but defers traversal. Durable pending intent precedes the actual
+requested mode change, then complete inventory validation is mandatory before
+completion. On validation failure, restore the prior mode only while root
+identity/revision and the just-written mode still match; report Partial and
+retain the pending fence. Other traversal errors remain refusals. No permission
+change is performed solely to admit a forward history receipt.
+
 ## 12. Release qualification and shared test runners
 
 Release evidence distinguishes source checks, model seams, native desktop

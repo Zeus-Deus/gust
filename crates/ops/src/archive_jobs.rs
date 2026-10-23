@@ -66,7 +66,34 @@ pub struct ArchiveHandle {
     progress: Arc<Mutex<ArchiveProgress>>,
     worker: Option<std::thread::JoinHandle<()>>,
 }
+/// A cloneable in-memory view with no join or Drop cancellation.
+#[derive(Clone)]
+pub struct ArchiveObserver {
+    cancel: CancelToken,
+    progress: Arc<Mutex<ArchiveProgress>>,
+}
+impl ArchiveObserver {
+    pub fn snapshot(&self) -> ArchiveProgress {
+        self.progress
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+    pub fn cancel(&self) {
+        self.cancel.cancel();
+    }
+    pub fn is_finished(&self) -> bool {
+        self.snapshot().phase.is_terminal()
+    }
+}
 impl ArchiveHandle {
+    pub fn observer(&self) -> ArchiveObserver {
+        ArchiveObserver {
+            cancel: self.cancel.clone(),
+            progress: self.progress.clone(),
+        }
+    }
+
     pub fn snapshot(&self) -> ArchiveProgress {
         self.progress
             .lock()

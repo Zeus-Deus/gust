@@ -45,6 +45,7 @@ pub struct RenameMade {
     pub original: PathBuf,
     pub renamed: PathBuf,
     identity: crate::anchor::FileIdentity,
+    pub(crate) subtree: std::collections::BTreeMap<PathBuf, crate::anchor::FileIdentity>,
     parent_dev: u64,
     parent_ino: u64,
 }
@@ -74,11 +75,23 @@ pub fn rename_recorded(
     }
     let identity = FileIdentity::from_stat(&parent.stat_child(&old_name)?);
     let parent_identity = FileIdentity::from_stat(&parent.stat_self()?);
+    let inventory = crate::history_tree::snapshot(path, &gust_core::lister::CancelToken::new())?;
+    let renamed = path.with_file_name(new_name);
+    let subtree = inventory
+        .into_iter()
+        .map(|(original, identity)| {
+            let relative = original
+                .strip_prefix(path)
+                .map_err(|_| crate::engine::OpError::Refused("invalid rename inventory".into()))?;
+            Ok((renamed.join(relative), identity))
+        })
+        .collect::<Result<_, crate::engine::OpError>>()?;
     rename_verified(&parent, &old_name, new_name, &identity)?;
     Ok(RenameMade {
         original: path.to_path_buf(),
         renamed: path.with_file_name(new_name),
         identity,
+        subtree,
         parent_dev: parent_identity.dev,
         parent_ino: parent_identity.ino,
     })
@@ -208,21 +221,30 @@ pub fn link_name_for(dir: &Path, target: &Path) -> std::ffi::OsString {
 }
 
 /// Make a symbolic link `dir/name` pointing at `target` (absolute). Never
-/// replaces anything: `symlink(2)` fails on an existing name.
+/// replaces anything: publish the privately identified link with no-replace.
 pub fn create_link(target: &Path, dir: &Path, name: &OsStr) -> Result<LinkMade, String> {
     crate::recursive::validate_name(name).map_err(|e| format!("{e}"))?;
     if !target.is_absolute() {
         return Err("a link needs a full path to point at".into());
     }
     let link = dir.join(name);
-    match std::os::unix::fs::symlink(target, &link) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            return Err("something with that name already exists".into())
-        }
-        Err(e) => return Err(crate::engine::plain_io_message(&e)),
-    }
-    let ident = ident(&link).map_err(|e| crate::engine::plain_io_message(&e))?;
+    let (parent, name) =
+        crate::anchor::resolve_parent(&link).map_err(|e| crate::engine::plain_io_message(&e))?;
+    let identity =
+        crate::creation_stage::publish(&parent, &name, crate::creation_stage::Kind::Link(target))
+            .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::AlreadyExists {
+                "something with that name already exists".into()
+            } else {
+                crate::engine::plain_io_message(&e)
+            }
+        })?;
+    let ident = Ident {
+        dev: identity.dev,
+        ino: identity.ino,
+        mtime: identity.mtime,
+        mtime_nsec: identity.mtime_nsec,
+    };
     Ok(LinkMade {
         link,
         target: target.to_path_buf(),

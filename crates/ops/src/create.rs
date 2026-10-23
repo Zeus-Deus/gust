@@ -9,13 +9,31 @@ use std::ffi::OsStr;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
+/// An empty folder and the identity captured while creating it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FolderCreated {
+    pub path: PathBuf,
+    pub(crate) identity: crate::anchor::FileIdentity,
+}
+
+pub fn new_folder_recorded(dir: &Path, name: &OsStr) -> Result<FolderCreated, String> {
+    crate::recursive::validate_name(name).map_err(|e| e.to_string())?;
+    let path = dir.join(name);
+    let (parent, name) =
+        crate::anchor::resolve_parent(&path).map_err(|e| crate::engine::plain_io_message(&e))?;
+    let identity =
+        crate::creation_stage::publish(&parent, &name, crate::creation_stage::Kind::Folder)
+            .map_err(|e| crate::engine::plain_io_message(&e))?;
+    Ok(FolderCreated { path, identity })
+}
+
 /// A template is copied, never executed and never followed: bounded so a
 /// huge or endless file (a FIFO planted in Templates) cannot hang Gust.
 pub const TEMPLATE_MAX_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Create an empty file `dir/name`. Errors are plain sentences.
 pub fn new_empty_file(dir: &Path, name: &OsStr) -> Result<(), String> {
-    create_with(dir, name, &[])
+    create_with(dir, name, &[]).map(|_| ())
 }
 
 /// Create `dir/name` with the bytes of `template`. The template must be a
@@ -23,7 +41,7 @@ pub fn new_empty_file(dir: &Path, name: &OsStr) -> Result<(), String> {
 /// [`TEMPLATE_MAX_BYTES`].
 pub fn new_from_template(dir: &Path, name: &OsStr, template: &Path) -> Result<(), String> {
     let bytes = read_template(template)?;
-    create_with(dir, name, &bytes)
+    create_with(dir, name, &bytes).map(|_| ())
 }
 
 fn read_template(template: &Path) -> Result<Vec<u8>, String> {
@@ -61,27 +79,59 @@ fn read_template(template: &Path) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
-fn create_with(dir: &Path, name: &OsStr, bytes: &[u8]) -> Result<(), String> {
+fn create_with(
+    dir: &Path,
+    name: &OsStr,
+    bytes: &[u8],
+) -> Result<crate::anchor::FileIdentity, String> {
+    use crate::anchor::FileIdentity;
+    use rustix::fs::{Mode, OFlags};
     crate::recursive::validate_name(name).map_err(|e| format!("{e}"))?;
-    let target = dir.join(name);
-    let mut f = match std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&target)
-    {
-        Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            return Err("a file with that name already exists".into())
-        }
-        Err(e) => return Err(crate::engine::plain_io_message(&e)),
+    let (parent, name) = crate::anchor::resolve_parent(&dir.join(name))
+        .map_err(|e| crate::engine::plain_io_message(&e))?;
+    let fd = match rustix::fs::openat(
+        parent.as_fd(),
+        &name,
+        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::from_bits_truncate(0o666),
+    ) {
+        Ok(fd) => fd,
+        Err(rustix::io::Errno::EXIST) => return Err("a file with that name already exists".into()),
+        Err(e) => return Err(crate::engine::plain_io_message(&e.into())),
     };
-    if let Err(e) = f.write_all(bytes).and_then(|_| f.sync_all()) {
-        // Our own half-written file, created a moment ago: never leave it.
-        drop(f);
-        let _ = std::fs::remove_file(&target);
-        return Err(crate::engine::plain_io_message(&e));
+    let mut file = std::fs::File::from(fd);
+    let result = file.write_all(bytes).and_then(|_| file.sync_all());
+    #[cfg(test)]
+    let result = result.and_then(|()| crate::creation_stage::write_result());
+    if let Err(error) = result {
+        #[cfg(test)]
+        crate::creation_stage::before_failed_cleanup();
+        // A failed sync gives no authority to remove a publicly mutable name:
+        // even the held inode may now contain a later writer's work.
+        return Err(format!(
+            "Could not finish creating {}; partial or current data was retained: {}",
+            dir.join(&name).display(),
+            crate::engine::plain_io_message(&error)
+        ));
     }
-    Ok(())
+    let identity = FileIdentity::from_stat(
+        &rustix::fs::fstat(&file).map_err(|e| crate::engine::plain_io_message(&e.into()))?,
+    );
+    #[cfg(test)]
+    crate::creation_stage::after_publication();
+    let named = FileIdentity::from_stat(
+        &parent
+            .stat_child(&name)
+            .map_err(|e| crate::engine::plain_io_message(&e))?,
+    );
+    if !identity.matches(&named)
+        || identity.mode != named.mode
+        || identity.size != bytes.len() as u64
+    {
+        return Err("the created file changed; current work was preserved".into());
+    }
+    rustix::fs::fsync(parent.as_fd()).map_err(|e| crate::engine::plain_io_message(&e.into()))?;
+    Ok(identity)
 }
 
 /// The biggest image a paste will write (a screenshot of a 8K display as
@@ -118,9 +168,14 @@ pub fn create_from_bytes(dir: &Path, name: &OsStr, bytes: &[u8]) -> Result<Creat
     if bytes.len() > PASTE_MAX_BYTES {
         return Err("that image is too large to paste as a file".into());
     }
-    create_with(dir, name, bytes)?;
+    let held = create_with(dir, name, bytes)?;
     let path = dir.join(name);
-    let ident = crate::attrs::ident_of(&path).map_err(|e| crate::engine::plain_io_message(&e))?;
+    let ident = crate::attrs::Ident {
+        dev: held.dev,
+        ino: held.ino,
+        mtime: held.mtime,
+        mtime_nsec: held.mtime_nsec,
+    };
     Ok(Created {
         path,
         ident,

@@ -108,7 +108,57 @@ pub struct JobHandle {
     record: Arc<Mutex<crate::journal::Job>>,
 }
 
+/// A cloneable in-memory view; the worker owner retains the join handle.
+#[derive(Clone)]
+pub struct JobObserver {
+    progress: Arc<Mutex<JobProgress>>,
+    cancel: CancelToken,
+    record: Arc<Mutex<crate::journal::Job>>,
+}
+impl JobObserver {
+    pub fn snapshot(&self) -> JobProgress {
+        self.progress
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+    pub fn record(&self) -> crate::journal::Job {
+        self.record
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+    pub fn cancel(&self) {
+        self.cancel.cancel();
+    }
+    pub fn cancel_requested(&self) -> bool {
+        self.cancel.is_cancelled()
+    }
+    pub fn is_finished(&self) -> bool {
+        self.snapshot().is_finished()
+    }
+    pub fn pause(&self) {
+        if !self.is_finished() {
+            self.cancel.pause();
+        }
+    }
+    pub fn resume(&self) {
+        self.cancel.resume();
+    }
+    pub fn is_paused(&self) -> bool {
+        self.cancel.is_paused() && !self.is_finished()
+    }
+}
+
 impl JobHandle {
+    pub fn observer(&self) -> JobObserver {
+        JobObserver {
+            progress: self.progress.clone(),
+            cancel: self.cancel.clone(),
+            record: self.record.clone(),
+        }
+    }
+
     /// True once `cancel` was asked for. The worker may still be cleaning up
     /// (removing a partial file can wait on writes already sent to a slow
     /// drive), so this is "stopping", not "stopped".
