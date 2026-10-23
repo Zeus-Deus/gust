@@ -328,6 +328,17 @@ pub(crate) fn stage_regular_file(
         OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         Mode::empty(),
     )?;
+    let source_identity = FileIdentity::from_stat(&st);
+    let st = rustix::fs::fstat(&src)?;
+    if classify(&st) != FileClass::Regular
+        || !source_identity.matches(&FileIdentity::from_stat(&st))
+    {
+        return Err(OpError::Refused(
+            "source changed before copying; nothing was published".into(),
+        ));
+    }
+    let expected_len = u64::try_from(st.st_size)
+        .map_err(|_| OpError::Refused("source reported an invalid file size".into()))?;
 
     let stage = staging_name(dst_name);
     // Record ownership BEFORE the file exists. A staging file with no claim is
@@ -388,7 +399,19 @@ pub(crate) fn stage_regular_file(
             if cancel.checkpoint() {
                 return Err(OpError::Cancelled);
             }
-            let n = rustix::io::read(&src, &mut buf)?;
+            // A disconnected FUSE source can report EOF without changing
+            // its stat identity. Exercise that exact case without mutating
+            // the source in the regression tests.
+            #[cfg(test)]
+            let early_eof = tests::EARLY_EOF_AFTER
+                .with(|limit| limit.get().is_some_and(|after| written >= after));
+            #[cfg(not(test))]
+            let early_eof = false;
+            let n = if early_eof {
+                0
+            } else {
+                rustix::io::read(&src, &mut buf)?
+            };
             if n == 0 {
                 break;
             }
@@ -408,6 +431,18 @@ pub(crate) fn stage_regular_file(
                 reported = written;
                 on_bytes(written);
             }
+        }
+
+        if written != expected_len {
+            return Err(OpError::Refused(format!(
+                "The source changed or stopped responding: expected {expected_len} bytes but received {written}. Nothing was published and the source was not removed. Reconnect if needed and try again."
+            )));
+        }
+        if !source_identity.matches(&FileIdentity::from_stat(&rustix::fs::fstat(&src)?)) {
+            return Err(OpError::Refused(
+                "source changed during copying; nothing was published and the source was not removed"
+                    .into(),
+            ));
         }
 
         // Preserve mode (minus setuid/setgid — never applied blindly).
@@ -628,6 +663,115 @@ pub(crate) mod publication_tests;
 mod tests {
     use super::*;
     use std::fs;
+
+    thread_local! {
+        pub(super) static EARLY_EOF_AFTER: std::cell::Cell<Option<u64>> = const {
+            std::cell::Cell::new(None)
+        };
+    }
+
+    struct EarlyEof;
+    impl EarlyEof {
+        fn after(bytes: u64) -> Self {
+            EARLY_EOF_AFTER.with(|limit| limit.set(Some(bytes)));
+            Self
+        }
+    }
+    impl Drop for EarlyEof {
+        fn drop(&mut self) {
+            EARLY_EOF_AFTER.with(|limit| limit.set(None));
+        }
+    }
+
+    #[test]
+    fn early_eof_copy_never_publishes_or_confirms() {
+        let d = tmp("early-eof-copy");
+        let source = d.join("source.bin");
+        let dest = d.join("dest");
+        fs::create_dir(&dest).unwrap();
+        let original = vec![73; 4 * 1024 * 1024];
+        fs::write(&source, &original).unwrap();
+        let before = FileIdentity::of_path(&source).unwrap();
+        let mut job = plan_job(
+            "early-eof",
+            JobKind::Copy,
+            std::slice::from_ref(&source),
+            &dest,
+            ConflictPolicy::Ask,
+        );
+        let _fault = EarlyEof::after(256 * 1024);
+        let result = run_copy_job(&mut job, &CancelToken::new());
+        assert!(matches!(result, Err(OpError::Refused(_))), "{result:?}");
+        assert_eq!(job.state, JobState::Failed);
+        assert!(job.entries.iter().all(|entry| !entry.done));
+        assert_eq!(fs::read(&source).unwrap(), original);
+        assert!(before.matches(&FileIdentity::of_path(&source).unwrap()));
+        assert_eq!(fs::read_dir(&dest).unwrap().count(), 0);
+        assert!(!crate::staging::load_all()
+            .iter()
+            .any(|claim| claim.path.parent() == Some(dest.as_path())));
+        fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn early_eof_cross_fs_move_keeps_the_unchanged_source() {
+        let d = tmp("early-eof-move");
+        let source = d.join("source.bin");
+        let dest = d.join("dest");
+        fs::create_dir(&dest).unwrap();
+        let original = vec![91; 4 * 1024 * 1024];
+        fs::write(&source, &original).unwrap();
+        let before = FileIdentity::of_path(&source).unwrap();
+        let (sd, sn) = handles(&d, "source.bin");
+        let (dd, dn) = handles(&dest, "source.bin");
+        let _fault = EarlyEof::after(256 * 1024);
+        let result = move_cross_fs(&sd, &sn, &dd, &dn, ConflictPolicy::Ask, &CancelToken::new());
+        assert!(matches!(result, Err(OpError::Refused(_))), "{result:?}");
+        assert_eq!(fs::read(&source).unwrap(), original);
+        assert!(before.matches(&FileIdentity::of_path(&source).unwrap()));
+        assert_eq!(fs::read_dir(&dest).unwrap().count(), 0);
+        assert!(!crate::staging::load_all()
+            .iter()
+            .any(|claim| claim.path.parent() == Some(dest.as_path())));
+        fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn source_changed_during_copy_is_not_published() {
+        use std::io::Write;
+        let d = tmp("changed-copy");
+        let source = d.join("source.bin");
+        let dest = d.join("dest");
+        fs::create_dir(&dest).unwrap();
+        let mut original = vec![61; 4 * 1024 * 1024];
+        fs::write(&source, &original).unwrap();
+        let (sd, sn) = handles(&d, "source.bin");
+        let (dd, dn) = handles(&dest, "source.bin");
+        let mut changed = false;
+        let result = copy_regular_file_with(
+            &sd,
+            &sn,
+            &dd,
+            &dn,
+            ConflictPolicy::Ask,
+            &CancelToken::new(),
+            &mut |_| {
+                if !changed {
+                    changed = true;
+                    let mut file = fs::OpenOptions::new().write(true).open(&source).unwrap();
+                    file.write_all(&[17]).unwrap();
+                    file.set_modified(std::time::SystemTime::UNIX_EPOCH)
+                        .unwrap();
+                }
+            },
+        );
+        assert!(changed);
+        assert!(matches!(result, Err(OpError::Refused(_))), "{result:?}");
+        original[0] = 17;
+        assert_eq!(fs::read(&source).unwrap(), original);
+        assert_eq!(fs::read_dir(&dest).unwrap().count(), 0);
+        fs::remove_dir_all(&d).unwrap();
+    }
 
     fn tmp(tag: &str) -> PathBuf {
         let p = std::env::temp_dir().join(format!("gust-ops-{tag}-{}", std::process::id()));

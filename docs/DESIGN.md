@@ -150,6 +150,13 @@ planned → running → committing → (remote-pending) → confirmed
   insufficient: an intermediate directory can be swapped mid-walk.
 - Cross-device move = copy, verify, commit, then unlink **only** the source
   that was verified unchanged (dev+ino+mtime+size).
+- A regular-file copy must receive exactly the size recorded from its held
+  source descriptor, and that descriptor's identity/version must still match
+  after reading. A zero-byte read alone is not proof of complete delivery:
+  an interrupted SSHFS read can return early EOF while the source's size and
+  identity remain unchanged. A short or changed read fails before publication,
+  keeps the source, and cleans up or retains the staging claim for recovery.
+  It must never confirm a copy or authorize a move's source removal.
 - Special files (FIFO, socket, device, symlink) are classified and handled by
   explicit policy, never copied blindly.
 
