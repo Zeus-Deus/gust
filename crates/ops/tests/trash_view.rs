@@ -4,6 +4,7 @@
 
 use gust_ops::trash::{list, restore_named, trash_path, TrashDir};
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
 fn setup(tag: &str) -> (PathBuf, TrashDir) {
@@ -32,6 +33,9 @@ fn entries_written_by_other_file_managers_are_listed() {
     let (d, t) = setup("foreign");
     fs::create_dir_all(t.root().join("files")).unwrap();
     fs::create_dir_all(t.root().join("info")).unwrap();
+    for path in [t.root(), &t.files, &t.info] {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
     fs::write(t.root().join("files/café.txt"), b"x").unwrap();
     fs::write(
         t.root().join("info/café.txt.trashinfo"),
@@ -52,6 +56,9 @@ fn a_record_without_its_file_or_a_file_without_a_record_is_not_listed_as_restora
     let (_d, t) = setup("orphans");
     fs::create_dir_all(t.root().join("files")).unwrap();
     fs::create_dir_all(t.root().join("info")).unwrap();
+    for path in [t.root(), &t.files, &t.info] {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
     fs::write(
         t.root().join("info/gone.trashinfo"),
         "[Trash Info]\nPath=/x/gone\nDeletionDate=2026-01-01T00:00:00\n",
@@ -99,6 +106,9 @@ fn a_hostile_record_cannot_restore_into_a_relative_path() {
     let (_d, t) = setup("hostile");
     fs::create_dir_all(t.root().join("files")).unwrap();
     fs::create_dir_all(t.root().join("info")).unwrap();
+    for path in [t.root(), &t.files, &t.info] {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
     fs::write(t.root().join("files/evil"), b"x").unwrap();
     fs::write(
         t.root().join("info/evil.trashinfo"),

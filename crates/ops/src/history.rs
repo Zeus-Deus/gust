@@ -171,6 +171,13 @@ enum Step {
 struct Record {
     entry: HistoryEntry,
     steps: Vec<Step>,
+    #[serde(default)]
+    native_trash: Vec<NativeTrash>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct NativeTrash {
+    data_step: usize,
+    binding: crate::trash::TrashLineageBinding,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Pending {
@@ -372,6 +379,15 @@ impl History {
         kind: HistoryKind,
         steps: Vec<Step>,
     ) -> Result<HistoryEntry, HistoryError> {
+        self.admit_native(label, kind, steps, Vec::new())
+    }
+    fn admit_native(
+        &mut self,
+        label: &str,
+        kind: HistoryKind,
+        steps: Vec<Step>,
+        native_trash: Vec<NativeTrash>,
+    ) -> Result<HistoryEntry, HistoryError> {
         self.fence()?;
         let steps = normalize_attribute_aliases(steps)?;
         if label.is_empty()
@@ -401,6 +417,7 @@ impl History {
         self.store.records.push(Record {
             entry: entry.clone(),
             steps,
+            native_trash,
         });
         self.store.cursor = self.store.records.len();
         if let Err(e) = self.save() {
@@ -482,6 +499,99 @@ impl History {
             )?);
         }
         self.admit(label, HistoryKind::Create, steps)
+    }
+    /// Admit a completed typed Trash move. The original information inode
+    /// participates in both directions, rather than deleting/recreating it.
+    pub fn record_trash(
+        &mut self,
+        label: &str,
+        receipts: &[crate::trash::TrashReceipt],
+    ) -> Result<HistoryEntry, HistoryError> {
+        let mut steps = Vec::new();
+        let mut native_trash = Vec::new();
+        let mut names = std::collections::BTreeSet::new();
+        for receipt in receipts {
+            receipt.verify(&CancelToken::new())?;
+            receipt.verify_original_parent()?;
+            let data = receipt.data_path();
+            let info = receipt.info_path();
+            for path in [&data, &info, receipt.original_path()] {
+                if !names.insert(path.to_path_buf()) {
+                    return Err(HistoryError::Unsupported(
+                        "Overlapping Trash receipts need a barrier".into(),
+                    ));
+                }
+            }
+            native_trash.push(NativeTrash {
+                data_step: steps.len() + 1,
+                binding: receipt.lineage_binding(),
+            });
+            steps.push(move_step(
+                &info,
+                None,
+                vec![TreeNode {
+                    relative: SavedPath::new(Path::new("")),
+                    identity: receipt.info.into(),
+                    mode: receipt.info.mode,
+                }],
+            )?);
+            steps.push(move_step(
+                &data,
+                Some(receipt.original_path()),
+                receipt_tree(&data, &receipt.tree)?,
+            )?);
+            receipt.verify(&CancelToken::new())?;
+            receipt.verify_original_parent()?;
+        }
+        self.admit_native(label, HistoryKind::Trash, steps, native_trash)
+    }
+    pub fn record_restored(
+        &mut self,
+        label: &str,
+        receipts: &[crate::trash::RestoredReceipt],
+    ) -> Result<HistoryEntry, HistoryError> {
+        let mut steps = Vec::new();
+        let mut native_trash = Vec::new();
+        let mut names = std::collections::BTreeSet::new();
+        for receipt in receipts {
+            if !receipt.history_supported() {
+                return Err(HistoryError::Unsupported(
+                    "Restoration created missing parents; preserve a history barrier".into(),
+                ));
+            }
+            receipt.verify(&CancelToken::new())?;
+            let data = receipt.trash.data_path();
+            let info = receipt.trash.info_path();
+            for path in [&data, &info, &receipt.original, receipt.info_path()] {
+                if !names.insert(path.to_path_buf()) {
+                    return Err(HistoryError::Unsupported(
+                        "Overlapping restoration receipts need a barrier".into(),
+                    ));
+                }
+            }
+            native_trash.push(NativeTrash {
+                data_step: steps.len(),
+                binding: receipt.trash.lineage_binding(),
+            });
+            steps.push(move_step(
+                &receipt.original,
+                Some(&data),
+                receipt_tree(&data, &receipt.trash.tree)?,
+            )?);
+            steps.push(move_step(
+                receipt.info_path(),
+                Some(&info),
+                vec![TreeNode {
+                    relative: SavedPath::new(Path::new("")),
+                    identity: receipt.trash.info.into(),
+                    mode: receipt.trash.info.mode,
+                }],
+            )?);
+        }
+        for receipt in receipts {
+            receipt.verify(&CancelToken::new())?;
+        }
+        self.admit_native(label, HistoryKind::Trash, steps, native_trash)
     }
     pub fn record_renames(
         &mut self,
@@ -697,6 +807,11 @@ impl History {
         } else {
             (0..record.steps.len()).collect()
         };
+        if record.entry.kind == HistoryKind::Trash && record.native_trash.is_empty() {
+            record.native_trash = legacy_native_bindings(&record)?;
+            self.store.records[index].native_trash = record.native_trash.clone();
+            self.save()?;
+        }
         // Check all identities and occupancy before any inverse effect. Names
         // overlapping another step are refused, retaining the whole receipt.
         let mut occupied = std::collections::BTreeSet::new();
@@ -870,8 +985,16 @@ impl History {
                     let source = source_parent.open()?;
                     let target = target_parent.open()?;
                     verify_tree_at(&source, &from, tree, cancel)?;
+                    for native in &record.native_trash {
+                        if native.data_step == i && native.binding.data_path() == to {
+                            native
+                                .binding
+                                .publish(&materialize_tree(&to, tree), cancel)?;
+                        }
+                    }
                     #[cfg(test)]
                     run_hook(&BEFORE_INVERSE_RENAME);
+                    checkpoint(cancel)?;
                     anchor::rename_noreplace(
                         &source,
                         from.file_name()
@@ -1020,16 +1143,31 @@ impl History {
     }
     fn vault_base(&self, from: &Path) -> Result<PathBuf, HistoryError> {
         let dev = FileIdentity::of_path(from)?.dev;
-        let roots: Vec<_> = self
-            .store
-            .records
-            .iter()
-            .flat_map(|r| r.steps.iter())
-            .map(|s| match s {
-                Step::Move { present, .. } => present.path(),
-                Step::Attr { path, .. } => path.path(),
-            })
-            .collect();
+        let mut roots = Vec::new();
+        for record in &self.store.records {
+            for step in &record.steps {
+                match step {
+                    Step::Move {
+                        present,
+                        restore,
+                        vault,
+                        ..
+                    } => {
+                        roots.push(present.path());
+                        if record.entry.status == HistoryStatus::Undone {
+                            if let Some(current) = restore
+                                .as_ref()
+                                .map(SavedPath::path)
+                                .or_else(|| vault.as_ref().map(|v| v.path.path().join("item")))
+                            {
+                                roots.push(current);
+                            }
+                        }
+                    }
+                    Step::Attr { path, .. } => roots.push(path.path()),
+                }
+            }
+        }
         for parent in from.ancestors().skip(1) {
             let dir = crate::history_tree::open_dir(parent)?;
             let s = dir.stat_self()?;
@@ -1150,6 +1288,152 @@ fn compare_tree(root: &Path, expected: &Tree, current: Tree) -> Result<(), Histo
         return Err(HistoryError::Changed(root.to_path_buf()));
     }
     Ok(())
+}
+fn receipt_tree(root: &Path, tree: &BTreeMap<PathBuf, FileIdentity>) -> Result<Tree, HistoryError> {
+    tree.iter()
+        .map(|(path, id)| {
+            Ok(TreeNode {
+                relative: SavedPath::new(
+                    path.strip_prefix(root)
+                        .map_err(|_| HistoryError::IdentityUnknown(path.clone()))?,
+                ),
+                identity: (*id).into(),
+                mode: id.mode,
+            })
+        })
+        .collect()
+}
+fn materialize_tree(root: &Path, tree: &Tree) -> BTreeMap<PathBuf, FileIdentity> {
+    tree.iter()
+        .map(|node| {
+            (
+                root.join(node.relative.path()),
+                FileIdentity {
+                    dev: node.identity.dev,
+                    ino: node.identity.ino,
+                    mtime: node.identity.mtime,
+                    mtime_nsec: node.identity.mtime_nsec,
+                    size: node.identity.size,
+                    mode: node.mode,
+                },
+            )
+        })
+        .collect()
+}
+// Earlier typed Trash records already retain the complete data tree and exact
+// Info/parent identities. Recover only their structural relationship; current
+// filesystem data never supplies a replacement inventory or root authority.
+fn legacy_native_bindings(record: &Record) -> Result<Vec<NativeTrash>, HistoryError> {
+    let unsupported = || {
+        HistoryError::Unsupported(
+            "Unknown legacy Trash receipt shape; preserve a history barrier".into(),
+        )
+    };
+    let (pairs, remainder) = record.steps.as_chunks::<2>();
+    if !remainder.is_empty() {
+        return Err(unsupported());
+    }
+    let mut result = Vec::new();
+    for (pair, steps) in pairs.iter().enumerate() {
+        let (data_index, info_index) = if matches!(&steps[0], Step::Move { restore: None, .. }) {
+            (1, 0)
+        } else {
+            (0, 1)
+        };
+        let Step::Move {
+            present: data_present,
+            restore: data_restore,
+            present_parent: data_parent,
+            restore_parent: data_restore_parent,
+            ..
+        } = &steps[data_index]
+        else {
+            return Err(unsupported());
+        };
+        let (data, files, original) = if data_index == 1 {
+            (
+                data_present.path(),
+                data_parent,
+                data_restore.as_ref().ok_or_else(unsupported)?.path(),
+            )
+        } else {
+            (
+                data_restore.as_ref().ok_or_else(unsupported)?.path(),
+                data_restore_parent.as_ref().ok_or_else(unsupported)?,
+                data_present.path(),
+            )
+        };
+        let Step::Move {
+            present,
+            restore,
+            present_parent,
+            restore_parent,
+            vault,
+            tree,
+        } = &steps[info_index]
+        else {
+            return Err(unsupported());
+        };
+        let (info_path, info_parent) = if info_index == 0 {
+            (present.path(), present_parent)
+        } else {
+            (
+                restore.as_ref().ok_or_else(unsupported)?.path(),
+                restore_parent.as_ref().ok_or_else(unsupported)?,
+            )
+        };
+        let base = info_path
+            .parent()
+            .and_then(Path::parent)
+            .ok_or_else(unsupported)?;
+        let name = data.file_name().ok_or_else(unsupported)?;
+        let mut info_name = name.to_os_string();
+        info_name.push(".trashinfo");
+        if files.path.path() != base.join("files")
+            || info_parent.path.path() != base.join("info")
+            || info_path != base.join("info").join(info_name)
+            || tree.len() != 1
+            || !tree[0].relative.0.is_empty()
+            || tree[0].mode & 0o170000 != 0o100000
+        {
+            return Err(unsupported());
+        }
+        let (current, current_parent) = if record.entry.status == HistoryStatus::Applied {
+            (present.path(), present_parent)
+        } else if let Some(restore) = restore {
+            (
+                restore.path(),
+                restore_parent.as_ref().ok_or_else(unsupported)?,
+            )
+        } else {
+            let vault = vault.as_ref().ok_or_else(unsupported)?;
+            (vault.path.path().join("item"), vault)
+        };
+        let parent = current_parent.open()?;
+        let (identity, bytes) = crate::trash::authenticated_info(
+            &parent,
+            current.file_name().ok_or_else(unsupported)?,
+        )?;
+        if !tree[0].identity.matches(&identity) || tree[0].mode != identity.mode {
+            return Err(HistoryError::Changed(current));
+        }
+        crate::trash::verify_info_original(&bytes, base, &original)?;
+        result.push(NativeTrash {
+            data_step: pair * 2 + data_index,
+            binding: crate::trash::TrashLineageBinding::new(
+                &crate::trash::TrashLocation {
+                    trash: crate::trash::TrashDir::at(base),
+                    topdir: None,
+                },
+                name,
+                FileIdentity::from_stat(&files.open()?.stat_self()?),
+                FileIdentity::from_stat(&info_parent.open()?.stat_self()?),
+                identity,
+                bytes,
+            ),
+        });
+    }
+    Ok(result)
 }
 fn move_step(present: &Path, restore: Option<&Path>, mut tree: Tree) -> Result<Step, HistoryError> {
     tree.sort_by(|a, b| a.relative.0.cmp(&b.relative.0));
