@@ -113,6 +113,15 @@ jobs:
       - name: Required app tests (selected SDK)
         id: app-tests
         run: python3 tests/release-gates.py --gate app --required --output "$RUNNER_TEMP/gust-app"
+      # Ubuntu's AppArmor denies unprivileged user namespaces; Arch, the release
+      # target, does not. Grant `userns` to the system bwrap alone so the real
+      # sandbox can start. Nothing is unsandboxed and refusal below stays fatal.
+      - name: Allow user namespaces for the system bwrap only (ephemeral runner)
+        run: |
+          printf '%s\n' 'abi <abi/4.0>,' 'include <tunables/global>' \
+            'profile bwrap /usr/bin/bwrap flags=(unconfined) {' '  userns,' '}' |
+            sudo tee /etc/apparmor.d/gust-ci-bwrap >/dev/null
+          sudo apparmor_parser -r /etc/apparmor.d/gust-ci-bwrap
       - name: Required archive namespace admission
         id: archive-admission
         run: |

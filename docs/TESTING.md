@@ -188,8 +188,10 @@ helper, `libarchive-tools` for bsdtar fixtures, and runtime libarchive,
 integration-test build supplies the helper; CI selects that exact debug sibling.
 `bubblewrap` and `util-linux` are explicit hosted prerequisites. A real
 `--unshare-all` user/mount namespace probe is fatal on refusal or timeout; its raw
-output stays private. Kernel/runner/AppArmor policy that denies it remains
-unqualified. CI does not change host namespace policy or bypass isolation.
+output stays private. Ubuntu's AppArmor denies unprivileged user namespaces
+(Arch does not), so the ephemeral runner loads a profile granting `userns` to
+`/usr/bin/bwrap` alone. That admits the real sandbox; CI never disables it, runs
+untrusted bytes unsandboxed or treats a refusal as anything but a failure.
 Artifact staging runs independently of library observation only after successful
 SDK/app and sandbox admission, and never after cancellation. A failing library
 or sandbox step keeps the job red even if a separate artifact check passes.

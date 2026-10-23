@@ -1490,8 +1490,9 @@ desktop evidence is not qualification of a new binary, architecture or provider.
   identifiers matched exactly to committed public declarations and an owned-crate
   allowlist. Unknown names/targets remain unreported and counted as unclassified.
   Archive fixtures require bsdtar, bwrap and prlimit plus real user/mount namespace
-  admission. Refusal is fatal; no unsandboxed fallback or host-policy change
-  qualifies it. Independent artifact staging requires successful SDK/app and
+  admission. Refusal is fatal and there is no unsandboxed fallback. Hosted
+  Ubuntu runners grant `userns` to `/usr/bin/bwrap` alone (Arch has no such
+  AppArmor restriction); that admits the sandbox, never bypasses it. Independent artifact staging requires successful SDK/app and
   sandbox admission, and cannot turn a failed library gate into a pass.
   The frozen SMB availability fixture requires a successful `gio --help` and
   the installed SMB backend descriptor; their presence does not qualify a mount.
