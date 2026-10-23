@@ -406,6 +406,8 @@ fn run(
             });
             return;
         }
+        #[cfg(test)]
+        planning_cancellation_tests::before_plan();
         match recursive::plan_tree(&src, &cancel) {
             Ok(plan) => {
                 total_entries += plan.entry_count().max(1);
@@ -446,6 +448,17 @@ fn run(
                     fat_check.too_large.extend(p.too_large);
                     fat_check.renamed.extend(p.renamed);
                 }
+            }
+            Err(crate::engine::OpError::Cancelled) => {
+                if let Err(e) = set_rec(&|r| r.state = JobState::Cancelled) {
+                    lost(e);
+                    return;
+                }
+                set(&progress, |p| {
+                    p.state = JobState::Cancelled;
+                    p.message = "Cancelled".into();
+                });
+                return;
             }
             Err(e) => {
                 let _ = set_rec(&|r| r.state = crate::journal::JobState::Failed);
@@ -1377,6 +1390,125 @@ mod undo_tests {
             assert_eq!(fs::read(d.join("dest").join(n)).unwrap(), n.as_bytes());
         }
         fs::remove_dir_all(&d).ok();
+    }
+}
+
+#[cfg(test)]
+mod planning_cancellation_tests {
+    use super::*;
+    use std::cell::RefCell;
+    use std::sync::mpsc;
+
+    thread_local! {
+        static BEFORE_PLAN: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) };
+    }
+
+    pub(super) fn before_plan() {
+        BEFORE_PLAN.with(|hook| {
+            if let Some(hook) = hook.borrow_mut().take() {
+                hook();
+            }
+        });
+    }
+
+    #[test]
+    fn cancelled_planning_stays_running_until_return_then_records_cancelled() {
+        exercise_planning_cancel(false);
+    }
+
+    #[test]
+    fn cancelled_planning_reports_a_failed_terminal_journal_write() {
+        exercise_planning_cancel(true);
+    }
+
+    fn exercise_planning_cancel(block_journal: bool) {
+        let root = std::env::temp_dir().join(format!(
+            "gust-plan-cancel-{block_journal}-{}-{}",
+            std::process::id(),
+            crate::journal::now_unix()
+        ));
+        let source = root.join("source");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("payload"), b"keep source").unwrap();
+        let journal_path = root.join("journal");
+        let record = Arc::new(Mutex::new(crate::journal::Job::new(
+            "planning",
+            JobKind::Copy,
+        )));
+        let progress = Arc::new(Mutex::new(JobProgress::new(
+            "planning".into(),
+            JobKind::Copy,
+        )));
+        let cancel = CancelToken::new();
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let worker = {
+            let progress = Arc::clone(&progress);
+            let record = Arc::clone(&record);
+            let cancel = cancel.clone();
+            let source = source.clone();
+            let journal_path = journal_path.clone();
+            let blocked_journal = journal_path.clone();
+            let dest_dir = root.join("destination");
+            std::thread::spawn(move || {
+                BEFORE_PLAN.with(|hook| {
+                    *hook.borrow_mut() = Some(Box::new(move || {
+                        entered_tx.send(()).unwrap();
+                        release_rx.recv().unwrap();
+                        if block_journal {
+                            std::fs::remove_file(&blocked_journal).unwrap();
+                            std::fs::create_dir(&blocked_journal).unwrap();
+                        }
+                    }));
+                });
+                run(
+                    Request::Copy {
+                        sources: vec![source],
+                        dest_dir,
+                    },
+                    ConflictPolicy::Ask,
+                    Default::default(),
+                    progress,
+                    cancel,
+                    record,
+                    Some(crate::journal::Journal::new(journal_path)),
+                    None,
+                );
+            })
+        };
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        cancel.cancel();
+        assert_eq!(progress.lock().unwrap().state, JobState::Running);
+        assert_eq!(record.lock().unwrap().state, JobState::Running);
+        assert!(
+            !worker.is_finished(),
+            "cancellation has not completed planning"
+        );
+        release_tx.send(()).unwrap();
+        worker.join().unwrap();
+        let expected = if block_journal {
+            JobState::Failed
+        } else {
+            JobState::Cancelled
+        };
+        assert_eq!(progress.lock().unwrap().state, expected);
+        assert_eq!(record.lock().unwrap().state, expected);
+        assert!(!record.lock().unwrap().offers_undo());
+        if block_journal {
+            assert!(progress.lock().unwrap().message.contains("recovery record"));
+        } else {
+            let persisted = crate::journal::Journal::new(journal_path).load();
+            assert_eq!(persisted.last().unwrap().state, JobState::Cancelled);
+            assert!(!persisted.last().unwrap().offers_undo());
+        }
+        assert_eq!(
+            std::fs::read(source.join("payload")).unwrap(),
+            b"keep source"
+        );
+        assert!(!root.join("destination").exists());
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
 

@@ -2060,3 +2060,19 @@ one-shot helpers still terminate leftover descendants even after a successful ex
 Host-key scans offer keys for trust only when every key has a fingerprint. Any
 fingerprint helper failure, cancellation or shared-budget exhaustion rejects the
 whole scan; no undisplayed key may remain in a successful trust offer.
+
+### 6.4.3 Transfer cancellation and ownership
+
+`JobHandle::cancel_requested()` acknowledges only the in-memory request. A job
+remains nonterminal while planning, transfer, durability work or staging cleanup
+is still running. A cancelled recursive plan ends as `JobState::Cancelled`, not
+`Failed`, after the worker returns from planning and records that outcome.
+Callers retain the worker handle and any transfer/history ownership until they
+consume its actual completion; requesting cancellation grants no recovery or
+disconnect authority. Existing staging claims remain live through cleanup.
+
+Cancellation checkpoints cannot interrupt a blocked FUSE read, write, metadata,
+fsync, close or unlink. An outage can therefore delay both cancellation and
+process reaping until the transport returns or the filesystem reports failure.
+Helper deadlines do not impose transfer syscall or reaping deadlines. Neither
+force-unmount nor a synthetic terminal state is a cancellation mechanism.
