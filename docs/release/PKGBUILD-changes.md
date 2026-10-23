@@ -21,7 +21,7 @@ Both also explicitly require `usbmuxd` for Apple-device support.
 Every other program Gust calls is required too, so installing the package is
 the whole setup: `wl-clipboard`, `xdg-utils`, `xdg-terminal-exec`, `zoxide`,
 `bubblewrap`, `util-linux`, `imagemagick`, `ffmpegthumbnailer`, `ffmpeg`,
-`pipewire-audio`, `poppler`, `libarchive`, `udisks2` and
+`pipewire-audio`, `poppler`, `mpv`, `libarchive`, `udisks2` and
 `xdg-desktop-portal`. `tailscale` is the only `optdepends` entry: it is a
 network service tied to the user's own account, so Gust uses it when present
 and never installs it. Every required package is in Arch's official

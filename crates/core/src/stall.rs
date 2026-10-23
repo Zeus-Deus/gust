@@ -12,8 +12,9 @@
 //! thing that reliably ends a stuck FUSE wait. The child holds the stuck
 //! syscall; the window keeps running.
 
+use std::collections::BTreeSet;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -75,33 +76,52 @@ pub fn can_stall(fstype: &str) -> bool {
     )
 }
 
-/// The filesystem type of the mount `path` sits on, from /proc/self/mounts.
+/// The visible filesystem type, from bounded /proc/self/mountinfo topology.
 ///
 /// Reading /proc is a local operation and cannot itself stall on a hung
 /// remote: the kernel answers from its own tables.
 pub fn fstype_for(path: &Path) -> Option<String> {
-    let mounts = std::fs::read_to_string("/proc/self/mounts").ok()?;
-    let mut best: Option<(usize, String)> = None;
-    for line in mounts.lines() {
-        let mut parts = line.split_whitespace();
+    let file = std::fs::File::open("/proc/self/mountinfo").ok()?;
+    let mut bytes = Vec::new();
+    file.take(crate::mount_table::MAX_MOUNTINFO_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    fstype_from_mountinfo(path, &bytes)
+}
+
+/// Pure visible-mount lookup; never opens, stats or canonicalizes `path`.
+pub fn fstype_from_mountinfo(path: &Path, mountinfo: &[u8]) -> Option<String> {
+    let mounts = crate::mount_table::MountInfo::parse(mountinfo).ok()?;
+    Some(mounts.resolve(path).ok()?.fs_type.clone())
+}
+
+/// Conservative compatibility lookup: a flat table cannot establish visibility.
+pub fn fstype_from_mounts(path: &Path, mounts: &[u8]) -> Option<String> {
+    if mounts.len() > crate::mount_table::MAX_MOUNTINFO_BYTES {
+        return None;
+    }
+    let mut seen = BTreeSet::new();
+    let mut common: Option<&[u8]> = None;
+    for line in mounts.split_inclusive(|b| *b == b'\n') {
+        let line = line.strip_suffix(b"\n").unwrap_or(line);
+        let mut parts = crate::mount_table::fields(line);
         let _dev = parts.next()?;
         let mount_point = parts.next()?;
         let fstype = parts.next()?;
-        // /proc/self/mounts escapes spaces as \040.
-        let mount_point = mount_point.replace("\\040", " ");
+        let mount_point = PathBuf::from(crate::mount_table::decode_field(mount_point));
         if path.starts_with(&mount_point) {
-            let len = mount_point.len();
-            if best.as_ref().is_none_or(|(b, _)| len > *b) {
-                best = Some((len, fstype.to_string()));
+            if !seen.insert(mount_point) || common.is_some_and(|fs| fs != fstype) {
+                return None;
             }
+            common = Some(fstype);
         }
     }
-    best.map(|(_, f)| f)
+    std::str::from_utf8(common?).ok().map(str::to_owned)
 }
 
 /// Should this path be probed before being listed?
 pub fn needs_probe(path: &Path) -> bool {
-    fstype_for(path).map(|f| can_stall(&f)).unwrap_or(false)
+    fstype_for(path).map(|f| can_stall(&f)).unwrap_or(true)
 }
 
 /// Ask a short-lived child process whether a directory answers.
