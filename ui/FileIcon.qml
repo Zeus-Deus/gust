@@ -54,7 +54,7 @@ Item {
     readonly property var folderGlyphs: ({
         documents: 0xF0219, downloads: 0xF01DA, music: 0xF0387,
         pictures: 0xF02E9, videos: 0xF0230, home: 0xF02DC,
-        desktop: 0xF0379, templates: 0xF1517, public: 0xF000E
+        desktop: 0xF0379, templates: 0xF1517, "public": 0xF000E
     })
 
     // --- folder: 50 x 42 units, bottom-aligned in the box ----------------
