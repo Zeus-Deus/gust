@@ -1,4 +1,6 @@
 //! Descriptor-bound per-volume Trash and identity receipts.
+#[path = "trash_empty.rs"]
+mod empty;
 #[path = "trash_lineage.rs"]
 pub(crate) mod lineage;
 use super::{TrashDir, TrashEntry, TrashedItem};
@@ -6,11 +8,18 @@ use crate::{
     anchor::{self, DirHandle, FileIdentity},
     history_tree,
 };
+pub use empty::{
+    prepare_empty, ConfirmedEmptyTrash, EmptyTrashError, EmptyTrashFailure, EmptyTrashOutcome,
+    EmptyTrashPhase, EmptyTrashPlan, EmptyTrashProgress, EmptyTrashSummary,
+};
 use gust_core::{
     lister::CancelToken,
     mount_table::{MountInfo, MountTableError, MAX_MOUNTINFO_BYTES},
 };
-use rustix::fs::{Mode, OFlags};
+use rustix::{
+    fd::{AsFd, BorrowedFd},
+    fs::{Mode, OFlags},
+};
 use std::{
     collections::BTreeMap,
     ffi::{OsStr, OsString},
@@ -41,6 +50,7 @@ pub struct TrashReceipt {
     pub(crate) info: FileIdentity,
     pub(crate) tree: BTreeMap<PathBuf, FileIdentity>,
     pub(crate) info_bytes: Vec<u8>,
+    inventory_mount: Option<u64>,
 }
 #[derive(Debug, Clone)]
 pub struct RestoredReceipt {
@@ -187,13 +197,26 @@ fn remap(
         })
         .collect()
 }
+#[cfg(test)]
+thread_local! {
+    static INFO_READ_PROBE: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
 fn open_info(dir: &DirHandle, name: &OsStr) -> io::Result<(File, FileIdentity, Vec<u8>)> {
+    open_info_with_mount(dir, name, None)
+}
+fn open_info_with_mount(
+    dir: &DirHandle,
+    name: &OsStr,
+    mount: Option<u64>,
+) -> io::Result<(File, FileIdentity, Vec<u8>)> {
+    check_mount_at(dir, name, mount)?;
     let mut file = File::from(rustix::fs::openat(
         dir.as_fd(),
         name,
         OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
         Mode::empty(),
     )?);
+    check_fd_mount(file.as_fd(), OsStr::new(""), mount)?;
     let st = rustix::fs::fstat(&file)?;
     if st.st_mode & 0o170000 != 0o100000
         || st.st_uid != rustix::process::geteuid().as_raw()
@@ -202,6 +225,12 @@ fn open_info(dir: &DirHandle, name: &OsStr) -> io::Result<(File, FileIdentity, V
         return Err(invalid("Trash information is not an owned regular record"));
     }
     let mut bytes = Vec::new();
+    #[cfg(test)]
+    INFO_READ_PROBE.with(|probe| {
+        if let Some(n) = probe.get() {
+            probe.set(Some(n + 1));
+        }
+    });
     Read::by_ref(&mut file)
         .take(65537)
         .read_to_end(&mut bytes)?;
@@ -212,6 +241,8 @@ fn open_info(dir: &DirHandle, name: &OsStr) -> io::Result<(File, FileIdentity, V
     if !id.matches(&FileIdentity::from_stat(&rustix::fs::fstat(&file)?)) {
         return Err(invalid("Trash record changed while reading"));
     }
+    check_fd_mount(file.as_fd(), OsStr::new(""), mount)?;
+    check_mount_at(dir, name, mount)?;
     Ok((file, id, bytes))
 }
 fn decode(value: &[u8]) -> io::Result<Vec<u8>> {
@@ -598,6 +629,7 @@ impl TrashLocation {
                     info: info_id,
                     tree: remap(&tree, path, &target)?,
                     info_bytes: bytes,
+                    inventory_mount: None,
                 };
                 receipt.verify(cancel)?;
                 Ok(receipt)
@@ -607,16 +639,25 @@ impl TrashLocation {
         Err(io::Error::other("No free Trash slot is available"))
     }
     pub fn receipt_named(&self, name: &OsStr, cancel: &CancelToken) -> io::Result<TrashReceipt> {
+        self.receipt_named_inner(name, cancel, true, None)
+    }
+    fn receipt_named_inner(
+        &self,
+        name: &OsStr,
+        cancel: &CancelToken,
+        restore_parent: bool,
+        mount: Option<u64>,
+    ) -> io::Result<TrashReceipt> {
         check(cancel)?;
         let iname = info_name(name)?;
         let (files, info) = self.handles(false)?;
-        let (_, info_id, bytes) = open_info(&info, &iname)?;
+        let (_, info_id, bytes) = open_info_with_mount(&info, &iname, mount)?;
         let (original, _, recorded) = parse_info(&bytes, self)?;
         if original.starts_with(self.trash.root()) || self.trash.root().starts_with(&original) {
             return Err(invalid("Unsafe Trash restore destination"));
         }
         let path = self.trash.files.join(name);
-        let tree = history_tree::snapshot_at(&files, name, &path, cancel)?;
+        let tree = snapshot_at_with_mount(&files, name, &path, cancel, mount)?;
         let data = *tree
             .get(&path)
             .ok_or_else(|| invalid("Missing Trash data"))?;
@@ -629,7 +670,7 @@ impl TrashLocation {
                 info_id,
                 bytes.clone(),
             );
-            if !binding.matches(&info, &tree, &mut 0)? {
+            if !binding.matches_with_mount(&info, &tree, &mut 0, mount)? {
                 return Err(invalid("Trash slot was replaced or changed"));
             }
         }
@@ -641,11 +682,15 @@ impl TrashLocation {
             },
             location: self.clone(),
             canonical: self.clone(),
-            original_parent: optional_dir(
-                original
-                    .parent()
-                    .ok_or_else(|| invalid("Missing restore parent"))?,
-            )?,
+            original_parent: if restore_parent {
+                optional_dir(
+                    original
+                        .parent()
+                        .ok_or_else(|| invalid("Missing restore parent"))?,
+                )?
+            } else {
+                None
+            },
             original,
             name: name.into(),
             root_dir: FileIdentity::from_stat(
@@ -666,6 +711,7 @@ impl TrashLocation {
             info: info_id,
             tree,
             info_bytes: bytes,
+            inventory_mount: mount,
         };
         receipt.verify(cancel)?;
         Ok(receipt)
@@ -1113,6 +1159,58 @@ fn ensure_absent(parent: &DirHandle, name: &OsStr) -> io::Result<()> {
         Err(e) => Err(e),
     }
 }
+#[derive(Debug)]
+struct InventoryFailure(crate::permanent::DeleteFailure);
+impl std::fmt::Display for InventoryFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Trash mount-aware inventory refused: {:?}", self.0)
+    }
+}
+impl std::error::Error for InventoryFailure {}
+fn inventory_error(reason: crate::permanent::DeleteFailure) -> io::Error {
+    use crate::permanent::DeleteFailure;
+    let kind = match reason {
+        DeleteFailure::Cancelled => io::ErrorKind::Interrupted,
+        DeleteFailure::Unsupported => io::ErrorKind::Unsupported,
+        DeleteFailure::Io(kind) => kind,
+        _ => io::ErrorKind::InvalidData,
+    };
+    io::Error::new(kind, InventoryFailure(reason))
+}
+fn check_fd_mount(fd: BorrowedFd<'_>, name: &OsStr, mount: Option<u64>) -> io::Result<()> {
+    if let Some(mount) = mount {
+        if crate::permanent::fd_mount_id(fd, OsStr::new("")).map_err(inventory_error)? != mount
+            || crate::permanent::fd_mount_id(fd, name).map_err(inventory_error)? != mount
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "Trash mount binding changed",
+            ));
+        }
+    }
+    Ok(())
+}
+fn check_mount_at(dir: &DirHandle, name: &OsStr, mount: Option<u64>) -> io::Result<()> {
+    check_fd_mount(dir.as_fd(), name, mount)
+}
+fn snapshot_at_with_mount(
+    parent: &DirHandle,
+    name: &OsStr,
+    path: &Path,
+    cancel: &CancelToken,
+    mount: Option<u64>,
+) -> io::Result<BTreeMap<PathBuf, FileIdentity>> {
+    match mount {
+        Some(mount) => crate::permanent::inventory_at(parent, name, mount, cancel)
+            .map(|tree| {
+                tree.into_iter()
+                    .map(|(relative, id)| (path.join(relative), id))
+                    .collect()
+            })
+            .map_err(inventory_error),
+        None => history_tree::snapshot_at(parent, name, path, cancel),
+    }
+}
 fn verify_at(
     parent: &DirHandle,
     name: &OsStr,
@@ -1120,7 +1218,17 @@ fn verify_at(
     tree: &BTreeMap<PathBuf, FileIdentity>,
     cancel: &CancelToken,
 ) -> io::Result<()> {
-    let current = history_tree::snapshot_at(parent, name, path, cancel)?;
+    verify_at_with_mount(parent, name, path, tree, cancel, None)
+}
+fn verify_at_with_mount(
+    parent: &DirHandle,
+    name: &OsStr,
+    path: &Path,
+    tree: &BTreeMap<PathBuf, FileIdentity>,
+    cancel: &CancelToken,
+    mount: Option<u64>,
+) -> io::Result<()> {
+    let current = snapshot_at_with_mount(parent, name, path, cancel, mount)?;
     if &current != tree {
         return Err(invalid("Trash subtree changed; current work was preserved"));
     }
@@ -1150,7 +1258,23 @@ fn move_checked(
     tree: &BTreeMap<PathBuf, FileIdentity>,
     cancel: &CancelToken,
 ) -> io::Result<()> {
-    verify_at(source, name, from, tree, cancel)?;
+    move_checked_on_mount(source, name, from, target, to_name, to, tree, cancel, None)
+}
+#[allow(clippy::too_many_arguments)]
+fn move_checked_on_mount(
+    source: &DirHandle,
+    name: &OsStr,
+    from: &Path,
+    target: &DirHandle,
+    to_name: &OsStr,
+    to: &Path,
+    tree: &BTreeMap<PathBuf, FileIdentity>,
+    cancel: &CancelToken,
+    mount: Option<u64>,
+) -> io::Result<()> {
+    check_mount_at(source, OsStr::new(""), mount)?;
+    check_mount_at(target, OsStr::new(""), mount)?;
+    verify_at_with_mount(source, name, from, tree, cancel, mount)?;
     ensure_absent(target, to_name)?;
     check(cancel)?;
     #[cfg(test)]
@@ -1169,12 +1293,13 @@ fn move_checked(
         }
     });
     let evidence = vec![from.into(), to.into()];
+    check_mount_at(target, to_name, mount).map_err(|e| partial(e, evidence.clone()))?;
     let moved = target
         .stat_child(to_name)
         .map(|s| FileIdentity::from_stat(&s))
         .map_err(|e| partial(e, evidence.clone()))?;
     let mapped = remap(tree, from, to)?;
-    if let Err(error) = verify_at(target, to_name, to, &mapped, cancel) {
+    if let Err(error) = verify_at_with_mount(target, to_name, to, &mapped, cancel, mount) {
         let recover = (|| -> io::Result<()> {
             if FileIdentity::from_stat(&target.stat_child(to_name)?) != moved {
                 return Err(invalid("Moved item changed before recovery"));
@@ -1308,7 +1433,12 @@ impl TrashReceipt {
             return Err(invalid("Trash receipt has invalid original binding"));
         }
         if recorded.is_some_and(|id| !id.matches(&self.data))
-            && !self.lineage_binding().matches(&info, &self.tree, &mut 0)?
+            && !self.lineage_binding().matches_with_mount(
+                &info,
+                &self.tree,
+                &mut 0,
+                self.inventory_mount,
+            )?
         {
             return Err(invalid("Trash receipt has no matching directory lineage"));
         }
@@ -1326,12 +1456,20 @@ impl TrashReceipt {
     }
     pub(crate) fn verify(&self, cancel: &CancelToken) -> io::Result<()> {
         let (files, info) = self.bindings()?;
-        let (_, id, bytes) = open_info(&info, &info_name(&self.name)?)?;
+        let (_, id, bytes) =
+            open_info_with_mount(&info, &info_name(&self.name)?, self.inventory_mount)?;
         if id != self.info || bytes != self.info_bytes {
             return Err(invalid("Trash information changed"));
         }
         let path = self.canonical.trash.files.join(&self.name);
-        verify_at(&files, &self.name, &path, &self.tree, cancel)?;
+        verify_at_with_mount(
+            &files,
+            &self.name,
+            &path,
+            &self.tree,
+            cancel,
+            self.inventory_mount,
+        )?;
         if self.tree.get(&path) != Some(&self.data) {
             return Err(invalid("Trash receipt root mismatch"));
         }

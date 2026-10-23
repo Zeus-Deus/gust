@@ -23,6 +23,11 @@ use gust_core::location::Cap;
 use std::io;
 use std::path::{Path, PathBuf};
 
+pub use volume::{
+    prepare_empty, ConfirmedEmptyTrash, EmptyTrashError, EmptyTrashFailure, EmptyTrashOutcome,
+    EmptyTrashPhase, EmptyTrashPlan, EmptyTrashProgress, EmptyTrashSummary,
+};
+
 /// A freedesktop trash location: `files/` holds the data, `info/` the records.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TrashDir {

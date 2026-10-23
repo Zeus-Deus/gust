@@ -99,14 +99,20 @@ fn identity(parent: &DirHandle, name: &OsStr) -> Result<FileIdentity, DeleteFail
         .map(|s| FileIdentity::from_stat(&s))
         .map_err(io_failure)
 }
-type Tree = BTreeMap<PathBuf, FileIdentity>;
-fn mount_id(parent: &DirHandle, name: &OsStr) -> Result<u64, DeleteFailure> {
+pub(crate) type Tree = BTreeMap<PathBuf, FileIdentity>;
+pub(crate) fn mount_id(parent: &DirHandle, name: &OsStr) -> Result<u64, DeleteFailure> {
+    fd_mount_id(parent.as_fd(), name)
+}
+pub(crate) fn fd_mount_id(
+    fd: rustix::fd::BorrowedFd<'_>,
+    name: &OsStr,
+) -> Result<u64, DeleteFailure> {
     #[cfg(test)]
     if NO_MOUNT_ID.with(|fail| fail.get()) {
         return Err(DeleteFailure::Unsupported);
     }
     let stat = rustix::fs::statx(
-        parent.as_fd(),
+        fd,
         name,
         AtFlags::EMPTY_PATH | AtFlags::SYMLINK_NOFOLLOW | AtFlags::NO_AUTOMOUNT,
         rustix::fs::StatxFlags::MNT_ID,
@@ -117,6 +123,14 @@ fn mount_id(parent: &DirHandle, name: &OsStr) -> Result<u64, DeleteFailure> {
     }
     #[cfg(test)]
     if CROSS_MOUNT.with(|cross| cross.get()) && name == OsStr::new("mounted") {
+        return Ok(stat.stx_mnt_id.wrapping_add(1));
+    }
+    #[cfg(test)]
+    if name.is_empty()
+        && CROSS_MOUNT_FD
+            .with(|id| id.get())
+            .is_some_and(|id| rustix::fs::fstat(fd).is_ok_and(|st| (st.st_dev, st.st_ino) == id))
+    {
         return Ok(stat.stx_mnt_id.wrapping_add(1));
     }
     Ok(stat.stx_mnt_id)
@@ -150,8 +164,11 @@ fn snapshot(
             if depth > 64 || self.tree.len() >= 200_000 || self.metadata > 32 * 1024 * 1024 {
                 return Err(DeleteFailure::Limit);
             }
+            if mount_id(parent, name)? != self.mount {
+                return Err(DeleteFailure::Unsupported);
+            }
             let id = identity(parent, name)?;
-            if id.dev != self.dev || mount_id(parent, name)? != self.mount {
+            if id.dev != self.dev {
                 return Err(DeleteFailure::Unsupported);
             }
             self.tree.insert(relative.to_path_buf(), id);
@@ -163,9 +180,10 @@ fn snapshot(
             check(self.cancel)?;
             if id.mode & 0o170000 == 0o040000 {
                 let dir = parent.open_child_dir(name).map_err(io_failure)?;
-                if FileIdentity::from_stat(&dir.stat_self().map_err(io_failure)?) != id
-                    || mount_id(&dir, OsStr::new(""))? != self.mount
-                {
+                if mount_id(&dir, OsStr::new(""))? != self.mount {
+                    return Err(DeleteFailure::Unsupported);
+                }
+                if FileIdentity::from_stat(&dir.stat_self().map_err(io_failure)?) != id {
                     return Err(DeleteFailure::Changed);
                 }
                 for entry in
@@ -189,12 +207,16 @@ fn snapshot(
             Ok(())
         }
     }
+    let mount = mount_id(parent, OsStr::new(""))?;
+    if mount_id(parent, name)? != mount {
+        return Err(DeleteFailure::Unsupported);
+    }
     let dev = identity(parent, name)?.dev;
     let mut walk = Walk {
         tree: Tree::new(),
         metadata: 0,
         dev,
-        mount: mount_id(parent, OsStr::new(""))?,
+        mount,
         cancel,
         progress,
     };
@@ -276,9 +298,11 @@ struct Namespace<'a> {
     original: &'a Path,
     parent_identity: FileIdentity,
     mount: u64,
+    checkpoint: &'a dyn Fn() -> Result<(), DeleteFailure>,
 }
 impl Namespace<'_> {
     fn verify(&self, chain: &[Binding<'_>]) -> Result<(), DeleteFailure> {
+        (self.checkpoint)()?;
         // Re-resolve only to verify that the retained parent is still named;
         // all mutation remains descriptor-relative to the admitted handles.
         let (current, _) = anchor::resolve_parent(self.original).map_err(io_failure)?;
@@ -503,21 +527,75 @@ pub fn delete_permanently_with_progress(
     target: &Path,
     expected: Option<RecordedIdentity>,
     cancel: &CancelToken,
+    progress: impl FnMut(DeleteProgress),
+) -> Result<Removed, DeleteError> {
+    delete_impl(folder, target, expected, None, cancel, &|| Ok(()), progress)
+}
+pub(crate) fn admit_tree(target: &Path, cancel: &CancelToken) -> Result<Tree, DeleteFailure> {
+    let (parent, name) = anchor::resolve_parent(target).map_err(io_failure)?;
+    snapshot(&parent, &name, cancel, &mut |_| {})
+}
+pub(crate) fn inventory_at(
+    parent: &DirHandle,
+    name: &OsStr,
+    mount: u64,
+    cancel: &CancelToken,
+) -> Result<Tree, DeleteFailure> {
+    if mount_id(parent, OsStr::new(""))? != mount || mount_id(parent, name)? != mount {
+        return Err(DeleteFailure::Unsupported);
+    }
+    snapshot(parent, name, cancel, &mut |_| {})
+}
+pub(crate) fn delete_admitted(
+    folder: &Path,
+    target: &Path,
+    admitted: &Tree,
+    parent: (FileIdentity, u64),
+    cancel: &CancelToken,
+    checkpoint: &dyn Fn() -> Result<(), DeleteFailure>,
+    progress: impl FnMut(DeleteProgress),
+) -> Result<Removed, DeleteError> {
+    delete_impl(
+        folder,
+        target,
+        None,
+        Some((admitted, parent)),
+        cancel,
+        checkpoint,
+        progress,
+    )
+}
+fn delete_impl(
+    folder: &Path,
+    target: &Path,
+    expected: Option<RecordedIdentity>,
+    admitted: Option<(&Tree, (FileIdentity, u64))>,
+    cancel: &CancelToken,
+    checkpoint: &dyn Fn() -> Result<(), DeleteFailure>,
     mut progress: impl FnMut(DeleteProgress),
 ) -> Result<Removed, DeleteError> {
     let mut removed = Removed::default();
     let mut retained = Vec::new();
     let result = (|| -> Result<Removed, DeleteFailure> {
         check(cancel)?;
+        checkpoint()?;
         super::check(folder, target).map_err(DeleteFailure::Refused)?;
         let (parent, name) = anchor::resolve_parent(target).map_err(io_failure)?;
         let parent_identity = FileIdentity::from_stat(&parent.stat_self().map_err(io_failure)?);
         let tree = snapshot(&parent, &name, cancel, &mut progress)?;
+        if admitted.is_some_and(|(admitted, (id, mount))| {
+            admitted != &tree
+                || directory_key(id) != directory_key(parent_identity)
+                || mount_id(&parent, OsStr::new("")) != Ok(mount)
+        }) {
+            return Err(DeleteFailure::Changed);
+        }
         let root = *tree.get(Path::new("")).ok_or(DeleteFailure::Changed)?;
         if expected.is_some_and(|expected| !expected.matches(&root)) {
             return Err(DeleteFailure::Changed);
         }
         check(cancel)?;
+        checkpoint()?;
         retained.push(target.to_path_buf());
         let (stage, path) = stage(&parent, folder, &mut retained).map_err(io_failure)?;
         let intent = serde_json::to_vec(&serde_json::json!({"version":1,"original":target.as_os_str().as_bytes(),"root":RecordedIdentity::from(root),"entries":tree.len(),"irreversible":true})).map_err(|e| io_failure(e.into()))?;
@@ -539,6 +617,7 @@ pub fn delete_permanently_with_progress(
         #[cfg(test)]
         before_claim();
         check(cancel)?;
+        checkpoint()?;
         stage_still_named(&parent, &stage, &path)?;
         let item = OsStr::new("item");
         anchor::rename_noreplace(&parent, &name, &stage, item).map_err(io_failure)?;
@@ -586,6 +665,7 @@ pub fn delete_permanently_with_progress(
             original: target,
             parent_identity,
             mount: mount_id(&stage, OsStr::new(""))?,
+            checkpoint,
         };
         let mut deletion = Deletion {
             tree: &tree,
@@ -623,7 +703,8 @@ thread_local! {
     static BEFORE_UNLINK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     static AFTER_ENTRY_CLAIM: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     static NO_MOUNT_ID: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    static CROSS_MOUNT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    pub(crate) static CROSS_MOUNT_FD: std::cell::Cell<Option<(u64, u64)>> = const { std::cell::Cell::new(None) };
+    pub(crate) static CROSS_MOUNT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 #[cfg(test)]
 fn before_claim() {
