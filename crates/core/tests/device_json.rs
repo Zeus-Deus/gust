@@ -254,3 +254,70 @@ fn compatibility_adapter_uses_the_same_correct_decoder_but_loses_errors() {
     assert_eq!(raw[0].mount_point.as_deref(), Some("/synthetic/a\nb"));
     assert!(parse_lsblk(r#"{"blockdevices":[null]}"#).is_empty());
 }
+
+fn positional_row(kind: &str, parent: Value) -> Value {
+    json!([
+        "fixture",
+        "/dev/fixture",
+        kind,
+        "4G",
+        true,
+        false,
+        "ext4",
+        "BACKUP",
+        "/synthetic/mounted",
+        parent,
+        []
+    ])
+}
+
+#[test]
+fn positional_empty_envelope_is_invalid_shape() {
+    assert_eq!(
+        parse_lsblk_checked("[[]]").unwrap_err(),
+        LsblkParseError::InvalidShape
+    );
+}
+
+#[test]
+fn positional_envelope_with_an_object_row_is_invalid_shape() {
+    let input = json!([[row()]]).to_string();
+    assert_eq!(
+        parse_lsblk_checked(&input).unwrap_err(),
+        LsblkParseError::InvalidShape
+    );
+}
+
+#[test]
+fn positional_device_row_is_invalid_shape() {
+    let input = inventory(positional_row("part", Value::Null));
+    assert_eq!(
+        parse_lsblk_checked(&input).unwrap_err(),
+        LsblkParseError::InvalidShape
+    );
+}
+
+#[test]
+fn positional_child_row_is_invalid_shape() {
+    let mut node = row();
+    node["children"] = json!([positional_row("part", json!("fixture"))]);
+    assert_eq!(
+        parse_lsblk_checked(&inventory(node)).unwrap_err(),
+        LsblkParseError::InvalidShape
+    );
+}
+
+#[test]
+fn positional_crypt_child_cannot_join_an_encrypted_device() {
+    let mut node = row();
+    node["rm"] = json!(true);
+    node["fstype"] = json!("crypto_LUKS");
+    let mut child = positional_row("crypt", json!("fixture"));
+    child[0] = json!("dm-fixture");
+    child[1] = json!("/dev/mapper/fixture");
+    node["children"] = json!([child]);
+    assert_eq!(
+        parse_lsblk_checked(&inventory(node)).unwrap_err(),
+        LsblkParseError::InvalidShape
+    );
+}

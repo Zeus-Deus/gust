@@ -22,9 +22,31 @@ impl std::fmt::Display for LsblkParseError {
 }
 impl std::error::Error for LsblkParseError {}
 
+// Derived structs also accept positional sequences. Keep their typed field and
+// duplicate-key checks, but admit only a JSON map at each inventory boundary.
+struct Object<T>(T);
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for Object<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct MapVisitor<T>(std::marker::PhantomData<T>);
+        impl<'de, T: Deserialize<'de>> serde::de::Visitor<'de> for MapVisitor<T> {
+            type Value = Object<T>;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a JSON object")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                map: A,
+            ) -> Result<Self::Value, A::Error> {
+                T::deserialize(serde::de::value::MapAccessDeserializer::new(map)).map(Object)
+            }
+        }
+        deserializer.deserialize_map(MapVisitor(std::marker::PhantomData))
+    }
+}
+
 #[derive(Deserialize)]
 struct Envelope {
-    blockdevices: Vec<Node>,
+    blockdevices: Vec<Object<Node>>,
 }
 #[derive(Deserialize)]
 struct Node {
@@ -43,7 +65,7 @@ struct Node {
     mountpoint: Option<String>,
     pkname: Option<String>,
     #[serde(default)]
-    children: Vec<Node>,
+    children: Vec<Object<Node>>,
 }
 
 /// Parse the entire inventory or refuse it. Strings are decoded once by serde;
@@ -52,7 +74,7 @@ pub fn parse_lsblk_checked(json: &str) -> Result<Vec<RawBlock>, LsblkParseError>
     if json.len() > MAX_LSBLK_BYTES {
         return Err(LsblkParseError::Limit);
     }
-    let envelope: Envelope = serde_json::from_str(json).map_err(|error| {
+    let Object(envelope): Object<Envelope> = serde_json::from_str(json).map_err(|error| {
         // Serde's recursion guard can fire before the flattened row-depth check.
         // Only its fixed category is exposed, never its input-bearing diagnostic.
         if error.to_string().starts_with("recursion limit exceeded") {
@@ -67,7 +89,7 @@ pub fn parse_lsblk_checked(json: &str) -> Result<Vec<RawBlock>, LsblkParseError>
         .blockdevices
         .into_iter()
         .rev()
-        .map(|node| (node, 1))
+        .map(|Object(node)| (node, 1))
         .collect();
     let mut out = Vec::new();
     while let Some((node, depth)) = stack.pop() {
@@ -81,7 +103,7 @@ pub fn parse_lsblk_checked(json: &str) -> Result<Vec<RawBlock>, LsblkParseError>
             node.children
                 .into_iter()
                 .rev()
-                .map(|child| (child, depth + 1)),
+                .map(|Object(child)| (child, depth + 1)),
         );
         out.push(RawBlock {
             name: node.name,
