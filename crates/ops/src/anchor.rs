@@ -17,6 +17,7 @@ use std::path::{Component, Path};
 #[derive(Debug)]
 pub struct DirHandle {
     fd: OwnedFd,
+    path: std::path::PathBuf,
     /// Kept for diagnostics only — never re-resolved for I/O.
     display: String,
 }
@@ -30,6 +31,16 @@ impl DirHandle {
         &self.display
     }
 
+    /// Lossless lexical path for mount evidence and recovery records only.
+    /// Filesystem mutations continue to use the held descriptor.
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub(crate) fn fstype(&self) -> Option<String> {
+        fstype_for_fd(&self.fd)
+    }
+
     /// Open the root `/` as the walk anchor.
     pub fn open_root() -> io::Result<Self> {
         let fd = rustix::fs::open(
@@ -39,6 +50,7 @@ impl DirHandle {
         )?;
         Ok(DirHandle {
             fd,
+            path: "/".into(),
             display: "/".to_string(),
         })
     }
@@ -59,6 +71,7 @@ impl DirHandle {
         )?;
         Ok(DirHandle {
             fd,
+            path: self.path.join(name),
             display: format!(
                 "{}/{}",
                 self.display.trim_end_matches('/'),
@@ -86,6 +99,47 @@ impl DirHandle {
     pub fn stat_self(&self) -> io::Result<rustix::fs::Stat> {
         Ok(rustix::fs::fstat(self.fd.as_fd())?)
     }
+}
+
+/// Match the held mount, including after an ancestor rename. Proc reads are
+/// local and bounded; detached, missing or ambiguous mount evidence is Unknown.
+pub(crate) fn fstype_for_fd(fd: impl AsFd) -> Option<String> {
+    use rustix::fd::AsRawFd;
+    use std::io::Read;
+    fn bounded(path: impl AsRef<Path>, limit: usize) -> Option<Vec<u8>> {
+        let mut bytes = Vec::new();
+        std::fs::File::open(path)
+            .ok()?
+            .take(limit as u64 + 1)
+            .read_to_end(&mut bytes)
+            .ok()?;
+        (bytes.len() <= limit).then_some(bytes)
+    }
+    let fdinfo = bounded(
+        format!("/proc/self/fdinfo/{}", fd.as_fd().as_raw_fd()),
+        64 * 1024,
+    )?;
+    let mounts = bounded(
+        "/proc/self/mountinfo",
+        gust_core::mount_table::MAX_MOUNTINFO_BYTES,
+    )?;
+    fstype_from_fdinfo(&fdinfo, &mounts)
+}
+
+fn fstype_from_fdinfo(fdinfo: &[u8], mounts: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(fdinfo).ok()?;
+    let mut ids = text.lines().filter_map(|l| l.strip_prefix("mnt_id:"));
+    let id: u64 = ids.next()?.trim().parse().ok()?;
+    if id == 0 || ids.next().is_some() {
+        return None;
+    }
+    let table = gust_core::mount_table::MountInfo::parse(mounts).ok()?;
+    table
+        .visible_mounts()
+        .ok()?
+        .into_iter()
+        .find(|m| m.id == id)
+        .map(|m| m.fs_type.clone())
 }
 
 #[cfg(test)]
@@ -131,7 +185,7 @@ pub fn rename_noreplace(
         Ok(()) => Ok(()),
         Err(Errno::INVAL) | Err(Errno::NOSYS) | Err(Errno::OPNOTSUPP) => Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            "This location cannot publish without replacing another item. Use a destination with atomic no-replace rename support; this item was not moved.",
+            "This place cannot safely add this item without risking another item. The original was kept. Choose a different destination.",
         )),
         Err(e) => Err(e.into()),
     }
@@ -143,6 +197,38 @@ pub fn rename_noreplace_paths(from: &Path, to: &Path) -> io::Result<()> {
     let (fd, fname) = resolve_parent(from)?;
     let (td, tname) = resolve_parent(to)?;
     rename_noreplace(&fd, &fname, &td, &tname)
+}
+
+/// Publish a completed regular-file stage by adding a name atomically.
+/// Unlike a move, success leaves the staging alias for separate cleanup.
+/// Empty flags deliberately do not follow a substituted source symlink.
+pub(crate) fn link_noreplace(
+    dir: &DirHandle,
+    stage: &OsStr,
+    destination: &OsStr,
+) -> io::Result<()> {
+    #[cfg(test)]
+    if let Some(e) = LINK_ERROR.with(|v| v.take()) {
+        return Err(e.into());
+    }
+    rustix::fs::linkat(
+        dir.as_fd(),
+        stage,
+        dir.as_fd(),
+        destination,
+        rustix::fs::AtFlags::empty(),
+    )?;
+    #[cfg(test)]
+    if let Some(e) = LINK_REPLY_ERROR.with(|v| v.take()) {
+        return Err(e.into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static LINK_ERROR: std::cell::Cell<Option<rustix::io::Errno>> = const { std::cell::Cell::new(None) };
+    pub(crate) static LINK_REPLY_ERROR: std::cell::Cell<Option<rustix::io::Errno>> = const { std::cell::Cell::new(None) };
 }
 
 /// Walk an absolute path component-by-component, holding a descriptor at each
@@ -346,5 +432,49 @@ mod tests {
         assert!(!before.matches(&after));
         assert_ne!(before.mode & 0o170000, after.mode & 0o170000);
         fs::remove_dir_all(&d).ok();
+    }
+}
+
+#[cfg(test)]
+mod byte_path_tests {
+    use super::*;
+    use std::os::unix::ffi::OsStringExt;
+
+    #[test]
+    fn mount_evidence_path_preserves_bytes_hidden_by_diagnostic_labels() {
+        let root = std::env::temp_dir().join(format!("gust-anchor-bytes-{}", std::process::id()));
+        let parent = root.join(std::ffi::OsString::from_vec(b"place-\xff".to_vec()));
+        std::fs::create_dir_all(&parent).unwrap();
+        let (dir, _) = resolve_parent(&parent.join("final")).unwrap();
+        assert_eq!(dir.path(), parent);
+        assert_ne!(dir.path().as_os_str(), OsStr::new(dir.display()));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod held_mount_tests {
+    use super::*;
+
+    #[test]
+    fn renamed_mount_path_cannot_reclassify_a_held_remote_descriptor_as_local() {
+        let mounts =
+            b"10 1 0:1 / / rw - ext4 root rw\n20 10 0:2 / /moved/place rw - fuse.sshfs remote rw\n";
+        let table = gust_core::mount_table::MountInfo::parse(mounts).unwrap();
+        assert_eq!(
+            table.resolve(Path::new("/old/place")).unwrap().fs_type,
+            "ext4"
+        );
+        assert_eq!(
+            fstype_from_fdinfo(b"pos:\t0\nmnt_id:\t20\n", mounts).as_deref(),
+            Some("fuse.sshfs")
+        );
+        assert_eq!(fstype_from_fdinfo(b"mnt_id:\t99\n", mounts), None);
+        assert_eq!(
+            fstype_from_fdinfo(b"mnt_id:\t20\nmnt_id:\t10\n", mounts),
+            None
+        );
+        assert_eq!(fstype_from_fdinfo(b"mnt_id:\tinvalid\n", mounts), None);
+        assert_eq!(fstype_from_fdinfo(b"mnt_id:\t20\n", b"truncated"), None);
     }
 }

@@ -486,6 +486,29 @@ fn run(
         })
         .and_then(|d| gust_core::stall::fstype_for(&d))
         .unwrap_or_default();
+    #[cfg(test)]
+    let guard_override = publication_tests::DEST_FSTYPE.with(|v| v.take());
+    if matches!(req, Request::Move { .. }) {
+        // Resolve the actual destination directory, then match its held mount
+        // id. A saved path label is not authority over the descriptor's mount.
+        let evidence = req
+            .dest_dir()
+            .and_then(|d| crate::anchor::resolve_parent(&d.join(".gust-move-evidence")).ok())
+            .and_then(|(dir, _)| dir.fstype());
+        #[cfg(test)]
+        let evidence = guard_override.map(str::to_owned).or(evidence);
+        if let Err(e) = crate::engine::require_move_durability_on(evidence.as_deref()) {
+            if let Err(e) = set_rec(&|r| r.state = crate::journal::JobState::Failed) {
+                lost(e);
+                return;
+            }
+            set(&progress, |p| {
+                p.state = JobState::Failed;
+                p.message = e.to_string();
+            });
+            return;
+        }
+    }
     let fat_names = crate::fat::is_fat(&dest_fstype);
     let mut fat_check = crate::fat::Preflight::default();
 
