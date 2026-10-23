@@ -31,6 +31,16 @@ pub enum ArchiveError {
     PasswordRequired,
     IncorrectPassword,
     DestinationExists,
+    UnsupportedTimestamp {
+        format: ArchiveFormat,
+        member: PathBuf,
+        seconds: i64,
+        nanoseconds: u32,
+    },
+    UnsupportedEncoding {
+        format: ArchiveFormat,
+        member: PathBuf,
+    },
     Unsupported(String),
     Failed(String),
     Cancelled,
@@ -49,6 +59,15 @@ impl ArchiveError {
                 "Archives need a working bubblewrap and prlimit sandbox.".into()
             }
             Self::DestinationExists => "The destination already exists; choose a new name.".into(),
+            Self::UnsupportedTimestamp { format, member, .. } => {
+                let name = match format {
+                    ArchiveFormat::TarZstd => "TAR+Zstd",
+                    ArchiveFormat::Zip => "ZIP (1970–2038)",
+                    ArchiveFormat::SevenZip => "7z",
+                };
+                format!("{} has a date outside the supported {name} creation range; choose another archive format.", member.display())
+            }
+            Self::UnsupportedEncoding { member, .. } => format!("{} has a name or link target this archive format cannot represent; choose TAR+Zstd.", member.display()),
             Self::PasswordRequired => "This archive needs a password.".into(),
             Self::IncorrectPassword => "The archive password was not accepted.".into(),
             Self::Unsupported(name) => format!("Gust cannot read {name} as an archive."),
@@ -115,6 +134,20 @@ pub enum ArchiveFormat {
     TarZstd,
     Zip,
     SevenZip,
+}
+impl ArchiveFormat {
+    pub(crate) fn writer_format(self) -> super::protocol::WriteFormat {
+        match self {
+            Self::TarZstd => super::protocol::WriteFormat::TarZstd,
+            Self::Zip => super::protocol::WriteFormat::Zip,
+            Self::SevenZip => super::protocol::WriteFormat::SevenZip,
+        }
+    }
+    /// Inclusive supported source timestamps; output precision is format-specific.
+    /// ZIP deliberately uses the common signed/unsigned 32-bit reader interval.
+    pub fn creation_timestamp_range(self) -> ((i64, u32), (i64, u32)) {
+        self.writer_format().timestamp_range()
+    }
 }
 
 pub(super) fn helper_path() -> Option<PathBuf> {
@@ -263,7 +296,7 @@ pub fn list_command(path: &Path, sandbox: bool) -> std::io::Result<Command> {
         "usr/lib",
         "/lib",
         "--symlink",
-        "usr/lib",
+        "usr/lib64",
         "/lib64",
         "--symlink",
         "usr/bin",
@@ -568,7 +601,7 @@ impl Reader {
                 "usr/lib",
                 "/lib",
                 "--symlink",
-                "usr/lib",
+                "usr/lib64",
                 "/lib64",
                 "--proc",
                 "/proc",
@@ -700,9 +733,20 @@ impl Reader {
                     return Err(protocol_error());
                 }
                 // A successfully terminated stream cannot carry trailing frames.
+                // The sandbox may still hold the write end briefly after bwrap
+                // exits, so wait for EOF instead of treating WouldBlock as an error.
                 let mut byte = [0];
-                if self.output.read(&mut byte)? != 0 {
-                    return Err(protocol_error());
+                loop {
+                    self.check(cancel)?;
+                    match self.output.read(&mut byte) {
+                        Ok(0) => break,
+                        Ok(_) => return Err(protocol_error()),
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(Duration::from_millis(5))
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                        Err(e) => return Err(e.into()),
+                    }
                 }
                 let now =
                     crate::anchor::FileIdentity::from_stat(&rustix::fs::fstat(&self.archive)?);

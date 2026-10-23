@@ -283,7 +283,7 @@ fn independent_mtimes(path: &std::path::Path) -> Vec<(String, i64, i64)> {
     };
     let inherited = std::fs::File::open(path).unwrap();
     let mut command = Command::new("/usr/bin/bwrap");
-    command.args(["--unshare-all","--die-with-parent","--clearenv","--setenv","LC_ALL","C.UTF-8","--ro-bind","/usr","/usr","--symlink","usr/lib","/lib","--symlink","usr/lib","/lib64","--proc","/proc","--dev","/dev","--ro-bind-fd"]).arg(inherited.as_raw_fd().to_string()).arg("/input").args(["/usr/bin/prlimit","--as=536870912","--cpu=10","--nofile=64","--fsize=0","--","/usr/bin/python3","-B","-c",r#"
+    command.args(["--unshare-all","--die-with-parent","--clearenv","--setenv","LC_ALL","C.UTF-8","--ro-bind","/usr","/usr","--symlink","usr/lib","/lib","--symlink","usr/lib64","/lib64","--proc","/proc","--dev","/dev","--ro-bind-fd"]).arg(inherited.as_raw_fd().to_string()).arg("/input").args(["/usr/bin/prlimit","--as=536870912","--cpu=10","--nofile=64","--fsize=0","--","/usr/bin/python3","-B","-c",r#"
 import ctypes as c,json
 lib=c.CDLL('libarchive.so');p=c.c_void_p
 lib.archive_read_new.restype=p
@@ -333,7 +333,7 @@ fn all_formats_keep_admitted_file_directory_and_link_timestamps() {
     names.push("stamp-link".into());
     let stamp = rustix::fs::Timespec {
         tv_sec: 1_700_000_123,
-        tv_nsec: 456_789_100,
+        tv_nsec: 456_789_123,
     };
     let times = rustix::fs::Timestamps {
         last_access: stamp,
@@ -356,7 +356,7 @@ fn all_formats_keep_admitted_file_directory_and_link_timestamps() {
         .unwrap();
     }
     for (format, extension, nsec) in [
-        (ArchiveFormat::TarZstd, "tar.zst", 456_789_100),
+        (ArchiveFormat::TarZstd, "tar.zst", 456_789_123),
         (ArchiveFormat::Zip, "zip", 0),
         (ArchiveFormat::SevenZip, "7z", 456_789_100),
     ] {
@@ -378,4 +378,278 @@ fn all_formats_keep_admitted_file_directory_and_link_timestamps() {
             assert_eq!(nanoseconds, nsec, "{extension}");
         }
     }
+}
+
+fn unsupported_date_refuses_before_any_payload(format: ArchiveFormat, seconds: i64) {
+    let f = Fixture::new();
+    let source = f.0.join("source");
+    std::fs::write(source.join("a-first"), b"payload must not stream").unwrap();
+    let invalid = source.join("z-date");
+    std::fs::write(&invalid, b"keep source").unwrap();
+    let stamp = rustix::fs::Timespec {
+        tv_sec: seconds,
+        tv_nsec: 123_456_789,
+    };
+    let times = rustix::fs::Timestamps {
+        last_access: stamp,
+        last_modification: stamp,
+    };
+    let (parent, name) = gust_ops::resolve_parent(&invalid).unwrap();
+    rustix::fs::utimensat(
+        parent.as_fd(),
+        name,
+        &times,
+        rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+    )
+    .unwrap();
+    assert_eq!(
+        gust_ops::FileIdentity::of_path(&invalid).unwrap().mtime,
+        seconds
+    );
+    let destination = f.0.join("unused.archive");
+    let mut callbacks = Vec::new();
+    let result = io::create_with(
+        &source,
+        &["a-first".into(), "z-date".into()],
+        &destination,
+        format,
+        None,
+        &CancelToken::new(),
+        &mut |phase, _, bytes| callbacks.push((phase, bytes)),
+    );
+    assert_eq!(
+        result,
+        Err(ArchiveError::UnsupportedTimestamp {
+            format,
+            member: "z-date".into(),
+            seconds,
+            nanoseconds: 123_456_789
+        })
+    );
+    assert!(callbacks.is_empty(), "payload started: {callbacks:?}");
+    assert!(!destination.exists());
+    assert_eq!(std::fs::read(invalid).unwrap(), b"keep source");
+    assert_eq!(
+        std::fs::read_dir(&f.0).unwrap().count(),
+        1,
+        "no staging was admitted"
+    );
+}
+#[test]
+fn negative_7z_date_is_typed_before_payload_streaming() {
+    unsupported_date_refuses_before_any_payload(ArchiveFormat::SevenZip, -1);
+}
+#[test]
+fn wide_zip_date_is_typed_before_payload_streaming() {
+    unsupported_date_refuses_before_any_payload(ArchiveFormat::Zip, 4_294_967_296);
+}
+
+fn name_round_trip(format: ArchiveFormat, bytes: &[u8]) {
+    use std::os::unix::ffi::OsStringExt;
+    let f = Fixture::new();
+    let source = f.0.join("source");
+    let name = OsString::from_vec(bytes.to_vec());
+    std::fs::write(source.join(&name), b"exact bytes").unwrap();
+    std::os::unix::fs::symlink(std::path::Path::new(&name), source.join("link")).unwrap();
+    let destination = f.0.join("names.archive");
+    io::create_with(
+        &source,
+        &[name.clone(), "link".into()],
+        &destination,
+        format,
+        None,
+        &CancelToken::new(),
+        &mut |_, _, _| {},
+    )
+    .unwrap();
+    let out = f.0.join("out");
+    std::fs::create_dir(&out).unwrap();
+    io::extract(&destination, &out, &Default::default()).unwrap();
+    assert_eq!(std::fs::read(out.join(&name)).unwrap(), b"exact bytes");
+    assert_eq!(
+        std::fs::read_link(out.join("link")).unwrap().as_os_str(),
+        &name
+    );
+}
+#[test]
+fn tar_unicode_name_and_link_target_round_trip() {
+    name_round_trip(ArchiveFormat::TarZstd, "é.txt".as_bytes());
+}
+#[test]
+fn zip_unicode_name_and_link_target_round_trip() {
+    name_round_trip(ArchiveFormat::Zip, "é.txt".as_bytes());
+}
+#[test]
+fn sevenzip_unicode_name_and_link_target_round_trip() {
+    name_round_trip(ArchiveFormat::SevenZip, "é.txt".as_bytes());
+}
+#[test]
+fn tar_raw_name_and_link_target_round_trip() {
+    name_round_trip(ArchiveFormat::TarZstd, b"raw-\xff");
+}
+#[test]
+fn zip_raw_name_and_link_target_round_trip() {
+    name_round_trip(ArchiveFormat::Zip, b"raw-\xff");
+}
+#[test]
+fn sevenzip_raw_name_refuses_before_payload() {
+    use std::os::unix::ffi::OsStringExt;
+    let f = Fixture::new();
+    let source = f.0.join("source");
+    let name = OsString::from_vec(b"raw-\xff".to_vec());
+    std::fs::write(source.join(&name), b"preserve").unwrap();
+    let destination = f.0.join("raw.7z");
+    let mut callbacks = 0;
+    let result = io::create_with(
+        &source,
+        std::slice::from_ref(&name),
+        &destination,
+        ArchiveFormat::SevenZip,
+        None,
+        &CancelToken::new(),
+        &mut |_, _, _| callbacks += 1,
+    );
+    assert_eq!(
+        result,
+        Err(ArchiveError::UnsupportedEncoding {
+            format: ArchiveFormat::SevenZip,
+            member: name.clone().into()
+        })
+    );
+    assert_eq!(callbacks, 0);
+    assert!(!destination.exists());
+    assert_eq!(std::fs::read(source.join(name)).unwrap(), b"preserve");
+}
+
+#[test]
+fn sevenzip_raw_link_target_refuses_before_payload() {
+    use std::os::unix::ffi::OsStringExt;
+    let f = Fixture::new();
+    let source = f.0.join("source");
+    let target = OsString::from_vec(b"raw-\xff".to_vec());
+    std::os::unix::fs::symlink(&target, source.join("z-link")).unwrap();
+    let destination = f.0.join("raw-target.7z");
+    let mut callbacks = 0;
+    let result = io::create_with(
+        &source,
+        &["-dash".into(), "z-link".into()],
+        &destination,
+        ArchiveFormat::SevenZip,
+        None,
+        &CancelToken::new(),
+        &mut |_, _, _| callbacks += 1,
+    );
+    assert_eq!(
+        result,
+        Err(ArchiveError::UnsupportedEncoding {
+            format: ArchiveFormat::SevenZip,
+            member: "z-link".into()
+        })
+    );
+    assert_eq!(callbacks, 0);
+    assert!(!destination.exists());
+    assert_eq!(
+        std::fs::read_link(source.join("z-link"))
+            .unwrap()
+            .as_os_str(),
+        &target
+    );
+}
+#[test]
+fn zip_mixed_unicode_and_opaque_members_keep_exact_names_and_link_targets() {
+    use std::os::unix::ffi::OsStringExt;
+    let f = Fixture::new();
+    let source = f.0.join("source");
+    let names = [
+        OsString::from_vec(b"a-raw-\xff".to_vec()),
+        OsString::from("é.txt"),
+    ];
+    let mut selection = Vec::new();
+    for (index, name) in names.iter().enumerate() {
+        std::fs::write(source.join(name), b"exact").unwrap();
+        let link = format!("link-{index}");
+        std::os::unix::fs::symlink(name, source.join(&link)).unwrap();
+        selection.push(name.clone());
+        selection.push(link.into());
+    }
+    let destination = f.0.join("mixed.zip");
+    io::create_with(
+        &source,
+        &selection,
+        &destination,
+        ArchiveFormat::Zip,
+        None,
+        &CancelToken::new(),
+        &mut |_, _, _| {},
+    )
+    .unwrap();
+    let out = f.0.join("out");
+    std::fs::create_dir(&out).unwrap();
+    io::extract(&destination, &out, &Default::default()).unwrap();
+    for (index, name) in names.iter().enumerate() {
+        assert_eq!(std::fs::read(out.join(name)).unwrap(), b"exact");
+        assert_eq!(
+            std::fs::read_link(out.join(format!("link-{index}")))
+                .unwrap()
+                .as_os_str(),
+            name
+        );
+    }
+}
+
+#[test]
+fn zip_unicode_link_name_with_opaque_target_has_correct_independent_encoding() {
+    use std::{
+        os::{
+            fd::AsRawFd,
+            unix::{ffi::OsStringExt, process::CommandExt},
+        },
+        process::{Command, Stdio},
+    };
+    let f = Fixture::new();
+    let source = f.0.join("source");
+    let name = OsString::from("é-link");
+    let target = OsString::from_vec(b"raw-\xff-\x80".to_vec());
+    std::os::unix::fs::symlink(&target, source.join(&name)).unwrap();
+    let destination = f.0.join("encoding.zip");
+    io::create_with(
+        &source,
+        std::slice::from_ref(&name),
+        &destination,
+        ArchiveFormat::Zip,
+        None,
+        &CancelToken::new(),
+        &mut |_, _, _| {},
+    )
+    .unwrap();
+    let inherited = std::fs::File::open(&destination).unwrap();
+    let mut command = Command::new("/usr/bin/bwrap");
+    command.args(["--unshare-all","--die-with-parent","--clearenv","--ro-bind","/usr","/usr","--symlink","usr/lib","/lib","--symlink","usr/lib64","/lib64","--proc","/proc","--dev","/dev","--ro-bind-fd"]).arg(inherited.as_raw_fd().to_string()).arg("/input").args(["/usr/bin/prlimit","--as=536870912","--cpu=10","--nofile=64","--fsize=0","--","/usr/bin/python3","-B","-c",r#"
+import json,struct,zipfile
+with zipfile.ZipFile('/input') as z:
+ entries=z.infolist();assert len(entries)==1
+ info=entries[0]
+ with open('/input','rb') as raw:
+  raw.seek(info.header_offset);header=raw.read(30)
+ assert header[:4]==b'PK\x03\x04'
+ print(json.dumps({'name':info.filename,'central':info.flag_bits,'local':struct.unpack_from('<H',header,6)[0],'target':z.read(info).hex()}))
+"#]).stdin(Stdio::null()).stderr(Stdio::null());
+    // SAFETY: child-only async-signal-safe fcntl on an owned input descriptor.
+    unsafe {
+        command.pre_exec(move || {
+            rustix::io::fcntl_setfd(&inherited, rustix::io::FdFlags::empty())
+                .map_err(std::io::Error::from)
+        });
+    }
+    let output = command.output().unwrap();
+    assert!(output.status.success(), "independent ZIP reader failed");
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["name"], "é-link", "{result}");
+    assert_ne!(result["central"].as_u64().unwrap() & 0x800, 0, "{result}");
+    assert_ne!(result["local"].as_u64().unwrap() & 0x800, 0, "{result}");
+    assert_eq!(result["target"], "7261772dff2d80", "{result}");
+    assert_eq!(
+        std::fs::read_link(source.join(name)).unwrap().as_os_str(),
+        &target
+    );
 }

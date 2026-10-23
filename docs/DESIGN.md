@@ -22,6 +22,19 @@ LocationKey  = provider_id + ":" + opaque_location_bytes
 location bytes. Metadata and thumbnail results carry `EntryId` + `generation`
 and are dropped if either no longer matches.
 
+### 1.1 Byte tokens at the UI boundary
+
+`location::PathToken` validates the existing `local:<hex OS bytes>` encoding
+as an absolute, NUL-free local path. `ChildNameToken` encodes one nonempty
+child component as `name:<hex OS bytes>` and rejects `/`, NUL, `.` and `..`.
+Both expose fallible parsing, byte-preserving resolution and an ASCII token.
+They perform no filesystem I/O. They identify a path, not authority to operate
+on an unchanged inode; operation admission still checks identity separately.
+The bridge publishes tokens alongside escaped labels and activates by token.
+Labels can collide (newline versus literal `<U+000A>`, or invalid UTF-8 versus
+replacement characters), so reverse lookup by display text is forbidden.
+Existing `LocationKey` serialization remains compatible.
+
 ## 2. Capabilities
 
 ```rust
@@ -223,6 +236,68 @@ crawl (plan §2, §4).
 - Searching does not change the folder being browsed. Leaving the results
   returns to where the user was.
 
+### 6.3.1 Reusable filename/tag sessions
+
+`search::SearchSession` is worker-owned. Construction and `set_query` do no
+I/O. `advance(entry_budget, cancel, on_hit)` resumes a bounded walk and streams
+hits; `snapshot()` returns its currently ranked hits and explicit state.
+`SearchReport` carries query generation, visited/cached counts, exclusions,
+bounded issue details and total issue count. Running, Complete, Partial
+(I/O omissions), Cancelled, Limited (named bounds) and Failed are distinct.
+Depth counts root children as level one; depth zero admits no entries. Hidden
+directories are pruned unless requested. Symlinks are returned but never
+descended. Device boundaries, depth and generated-tree pruning are counted
+and disclosed. Generated-tree pruning is configurable. Known generated names
+are pruned before attempting to open their contents; cache markers are checked
+only after secure child admission and must have the standard signature.
+Nonlocal providers are refused by this local walker. Network/FUSE local roots
+require `SearchOptions::allow_remote` for
+this explicit root after the caller's stall guard. Reaching the configured
+depth is reported as Limited(Depth), with a pruned-directory count.
+
+`SearchOptions` bounds visited entries, cached candidates/path bytes and
+retained issues independently of matching results. Reaching a bound never
+reports Complete. Query changes replay cached candidates and then resume the
+same traversal, including after a result limit. Candidate/visit bounds need an
+explicit new session with revised bounds. `refresh()` rechecks cached paths
+and tags. Query-only errors reset on replay while traversal omissions remain.
+`invalidate()` restarts after directory watch changes. No persistent
+global index or implicit Home crawl is created. Each replay uses fresh no-follow
+metadata/xattrs, so removed/replaced paths and external tag edits are not
+treated as durable cached authority.
+
+Enumeration, candidate metadata, tag reads and cache markers share descriptor
+anchoring. A session retains its root descriptor and caches each candidate's
+parent device/inode. Replay resolves parents beneath that root with kernel
+no-symlink resolution, verifies the parent identity and rejects a changed root
+or parent as an explicit issue. Candidate metadata and tags come from a held
+object; cache markers are opened relative to the admitted child directory.
+No candidate/cache-marker read follows a reconstructed user pathname. Device
+restriction is enforced during resolution, before touching a crossed mount;
+cross-device descent requires both scope widening and explicit remote admission.
+Unsupported secure resolution fails explicitly. Stamps fence a read, not later
+operation authority; filesystem changes after verification remain possible.
+
+`SearchSession::project_hits(cancel)` returns `SearchProjection { report,
+entries }` from row data captured during descriptor-anchored evaluation. It
+performs no new filesystem calls. `SearchEntry` contains byte `path` and
+`relative_path`, `EntryKind`, existing `entry::Metadata`, a `SearchSourceStamp`
+(generation/device/inode/size/nanosecond mtime+ctime), and optional `tag_error`.
+Consumers create rows from relative_path/kind/metadata; they never call
+`symlink_metadata` or `fill_metadata` on search-hit paths. Symlink target state
+remains unknown; retrieval does not probe a target. A zero tag mask with
+`tag_error` means unavailable, and the projection report includes that issue.
+Filename matching itself does not require successful tag decoration. Existing
+`SearchHit { path, score }` and report APIs remain compatible. Captured stamps
+are snapshots, not authorization for a later filesystem operation.
+
+`SearchQuery::parse` accepts filename terms and conjunctive `tag:Red` or
+`tag:"word tag"` terms; invalid/empty tag syntax is an error. Colour names
+match ASCII case-insensitively; unknown word tags match exactly after trimming.
+`tags::read_raw` remains compatible; retrieval errors are retained in reports,
+not silently interpreted as untagged. Legacy `find_by_name` is a Vec-returning
+adapter; new bridge code must consume the explicit report/session API.
+
 ## 6.4 Remote places
 
 A remote place is a *suggestion* until the user connects it. Nothing in Gust
@@ -339,6 +414,81 @@ rename, Gust refuses publication rather than risk replacing another file.
 Browsing and downloading can still work; the local source is retained after
 this refusal. Connecting successfully does not imply upload support. Gust
 never substitutes an overwrite-capable rename or replays the refused operation.
+
+### 6.4.3 File-send services
+
+`send::taildrop(target, paths, context)` and
+`send::localsend(peer, paths, context)` return `Result<SendReceipt, SendFailure>`.
+`SendReceipt { accepted_files }` counts receiver protocol acceptance.
+`SendFailure { error, accepted_files, delivery_uncertain }` retains known partial
+completion without claiming rollback. `LocalSendPeer { address: SocketAddr,
+public_key_pin: String }` requires an explicitly trusted SHA-256 SPKI pin
+(`sha256//BASE64`), distinct from LocalSend's certificate fingerprint. The pin
+authenticates self-signed TLS; redirects and proxies are disabled.
+They are explicit sends, never discovery side effects, moves, or source deletion.
+Taildrop uses the installed local Tailscale CLI and reports policy/offline refusal.
+LocalSend uses its v2 prepare/upload/cancel protocol over explicitly pinned TLS;
+receiver approval is required. Session tokens travel in private helper stdin,
+never argv/environment/logs/files. Inputs are bounded regular local files; source
+identity changes refuse transfer. Cancellation best-effort cancels the receiver
+session and reports possible partial delivery. A receipt means protocol acceptance,
+not proof of receiver persistence or physical-device/provider qualification.
+
+`send::inspect_localsend(address, context)` explicitly fetches an untrusted peer
+certificate and returns `LocalSendIdentity { peer, certificate_fingerprint }`.
+The app presents that fingerprint for comparison with the receiver; only an
+explicit trust choice permits `localsend(identity.peer, ...)`. Inspection itself
+never persists trust, sends file metadata, or accepts the inspected identity.
+OpenSSL is used through bounded pipes for certificate/public-key parsing; an
+ephemeral client certificate/key is generated for mutual TLS, retained only in a
+sealed owner-only memfd and reused for every request in that send session. It is
+never written to a disk/config file or passed as secret bytes in argv/env. Inherited TLS-keylog/debug
+settings are removed from owned helpers so they cannot persist session secrets.
+`send::localsend_with_pin(peer, paths, Option<String>, context)` supports a
+receiver PIN through the same private request pipe; the default `localsend`
+adapter supplies no PIN. A rejected PIN is an actionable authentication result,
+never a request to change receiver settings or weaken TLS.
+
+Send source admission refuses every FUSE subtype, including types absent from
+the general remote-stall classifier, before opening or querying source metadata.
+Cancelling LocalSend during prepare/receiver approval best-effort posts `cancel`
+without a session ID using the same trusted peer and client identity. Cleanup
+uses a fresh token and at most one second of the remaining overall budget;
+it preserves the original cancellation and delivery uncertainty and never retries
+file data. This is synthetic protocol coverage, not physical receiver qualification.
+
+Send admission uses CORE's shared byte-preserving mount-table classification.
+Kernel-escaped mount names (backslash, tab, newline and space) must select the
+visible mount by mount-ID/parent topology before the source is opened; classification
+must not canonicalize or query the source path. Synthetic mount-table-to-admission
+regressions cover FUSE subtypes, NFS and CIFS under escaped mount names. Exercise
+the shared parser and the pre-open policy together; a filesystem-name policy
+alone does not establish correct admission.
+
+`send::check_source_location(path) -> Result<(), RemoteError>` exposes the exact
+absolute/path/filesystem predicate used first by `Source::open`. It reads only
+the kernel mount table, with no candidate open, lstat, stat or canonicalization.
+The APP worker calls it before shelf `OwnedPath`/`Target` or shown-selection
+identity validation, then uses the existing send handlers. Source opening repeats this
+same guard; identity checks remain required afterward. The check does not make
+subsequent filesystem calls atomic with changes to the kernel mount table.
+
+Send admission must refuse mount visibility that the shared classification cannot
+establish. A stacked local/FUSE or network mount must not become eligible because
+of table order, equal mount-path lengths, or a longer descendant entry hidden by
+an ambiguous ancestor. Synthetic stacked-table tests exercise the same admission
+guard without candidate I/O; callers must not substitute a first/last-row rule.
+Production fixtures use `stall::fstype_from_mountinfo(path, bytes)`, matching
+`fstype_for` without opening candidates. The conservative flat-table compatibility
+seam remains covered separately. A uniquely resolved local mount over autofs stays
+eligible; remote mounts and descendants hidden below them cannot borrow the type
+of a covered local mount. An ambiguous subtree does not reject unrelated siblings.
+
+The process's held filesystem root is also the starting point for absolute source
+lookup. A mount stacked at `/` must not hide a remote root or its remote children
+from source admission. CORE conservatively treats a starting-root same-point stack
+as globally ambiguous for resolution and inventory; source admission refuses every
+path in that snapshot. Ordinary non-root overmount behavior remains unchanged.
 
 ## 6.5 Permanent delete
 
@@ -608,9 +758,161 @@ never decodes an untrusted byte in Gust's own process.
   sandboxed `ffprobe`, sanitised. Closing Quick Look kills both processes.
 - **Video** shows a frame and says "Enter plays it in your video player".
   Enter in Quick Look closes the preview and opens the file with its
-  default application, as Enter does in the list.
+  media viewer, with neighbouring media available (§6.18.1), as Enter does
+  in the list.
 - A file named like audio that is not audio says "Cannot play: …" and
   shows no controls.
+
+### 6.9.2 Structured preview payloads (core)
+
+`structured::parse(bytes, format, window, limits, cancel)` returns plain-data,
+serializable text/table/tree payloads for Text, JSON, CSV, TSV and TOML.
+`compare` returns a bounded line diff. Payloads are text, never HTML, active
+links or commands. UTF-8 BOM is consumed; other BOM encodings are explicitly
+unsupported, invalid UTF-8 and binary input are distinct states. CSV/TSV use
+logical records (quoted delimiters/newlines and doubled quotes), not physical
+line splits. Row windows retain absolute zero-based row/line offsets and the
+total count of the bounded input; a truncated source never claims a complete
+file count. Byte/row/column/cell/node/depth/diff-work bounds are disclosed by
+name. Malformed structured input is Invalid, and an input cut at a byte bound
+is never presented as a fully validated document. Cancellation clears payloads.
+JSON node paths use escaped JSON pointers, separately from their display value.
+Cell-byte limits apply to rendered text, including expanded tabs, replacement
+characters and escaped display paths. Clipping preserves UTF-8 boundaries and
+reports CellBytes when any rendered output is omitted. A shortened display path
+never replaces the raw JSON pointer identity; oversized raw pointers remain
+explicitly omitted as before.
+
+`structured::read_source(path, max_bytes, cancel)` is worker-only: no-follow,
+nonblocking open, regular files only, one extra byte to distinguish exact
+limits, metadata before/after and current-path identity checks. It returns
+`PreviewSource` with bytes, explicit truncation and nanosecond `FileStamp`
+(device/inode/size/mtime/ctime); `PreviewSource::parse` carries the read limit
+into the payload. Changed/replaced inputs are refused. These stamps are cache
+and stale-preview fences, not operation/Undo authority. Remote callers still
+need explicit opt-in and stall isolation; cancellation cannot interrupt a
+blocked kernel syscall. Existing Quick Look APIs remain compatibility paths.
+
+### 6.9.3 Bounded code roles (core)
+
+`syntax::preview_source(&PreviewSource, &OsStr, PreviewWindow, &PreviewLimits,
+&CancelToken)` returns additive `CodePreview { preview: Preview, syntax:
+SyntaxAnnotations }`. The existing text payload and all display budgets remain
+unchanged. Language selection uses only the supplied filename extension; no
+path access, code execution, parser process or browser is involved.
+
+`SyntaxAnnotations` serializes `language` as null or `rust`, `python`,
+`javascript`, `typescript`, `qml`, `c`, `cpp`, `shell`, `go`, `java`; `state` as
+`complete`, `unsupported`, `unavailable`, `limited`, `cancelled`; and `lines` as
+arrays of spans. A span contains `start_utf16`, `len_utf16`, and `role`, where
+role is `keyword`, `string`, `comment` or `number`. Offsets are zero-based UTF-16
+code units into the exact sanitized display line returned in the same preview
+and window. Neither boundary splits a surrogate pair. Spans are ordered and do
+not overlap; uncovered text remains plain. No source strings, markup or colors
+are included in annotations. APP adds `syntax` alongside its existing text
+projection; UI maps roles to theme tokens without interpreting source as HTML.
+
+Complete/limited annotation arrays align with `PreviewPayload::Text.lines`.
+Unknown languages use unsupported/plain fallback; invalid/binary/unavailable
+text has no annotations. A hard 16,384-span cap reports limited and leaves the
+remaining text plain; it never discards plain preview text. Lexical state is
+carried through skipped lines in the bounded source prefix, so paged comments
+and strings retain their roles. Existing byte/row/cell truncation remains in
+`preview.state`, separately from annotation completion. Cancellation clears
+both the preview payload and all spans. These are lexical hints for common
+code families, not grammar validation or executable/source identity.
+C++ digit separators stay within numeric tokens so they cannot introduce
+string state into following lines or windows; character literals remain strings.
+Trailing decimal points remain numeric before an exponent or suffix, including
+hexadecimal exponent forms; annotation does not validate literal semantics.
+
+### 6.9.4 Rich preview backend contract
+
+`gust_thumbs::preview` extends the existing sandbox helper contract, independently
+of the viewport thumbnail worker/cache. All calls below run on workers. The app
+owns cancellation and generation/entry identity checks before publishing results.
+No original image, font, document or media stream goes to an in-process decoder.
+
+- `capability(PreviewKind)` returns exact missing system tools. Installed tools
+  are prerequisites, not proof that a particular codec or sandbox works.
+- `inspect(path, kind, &CancelToken) -> Result<PreviewDocument, PreviewError>`
+  holds a no-follow/nonblocking regular input descriptor, refuses inputs over
+  512 MiB (16 GiB for streamed audio/video) and owns a private mode-0700 scratch
+  directory. `info()` reports page
+  count, bounded display metadata and dependency/format notes. A document holds
+  its input descriptor until drop; changes to that object are refused.
+- `PreviewDocument::page(page, px, cancel)` accepts 1-based pages (at most
+  10,000) and 1..=2048 pixels. `RasterPage` contains bounded PNG bytes and
+  header dimensions. A consumer can request successive visible pages for
+  continuous scrolling; no whole-document rasterization or eager page queue.
+- ImageMagick renders images and font specimens; RAW uses `dcraw_emu` half-size
+  conversion followed by ImageMagick. Optional `exiftool` supplies an allowlist
+  of camera/exposure/dimension tags, excluding GPS and serial numbers. Missing
+  EXIF tooling is a note and does not prevent image rendering.
+- Poppler supplies PDF page counts and pages. LibreOffice supplies bounded
+  Office/HTML-to-PDF conversion in an isolated disposable profile with macro
+  security set to its highest level, without network access, user configuration
+  or adjacent files. HTML is
+  static document rendering; scripts, navigation and external resources are
+  not an interactive browser. Supported Office types depend on the installed
+  import filters; focused fixtures cover RTF and DOCX, not every Office format.
+  Font samples use fixed specimen text only.
+- Helpers run under bwrap+prlimit or fail closed. Source paths preserve OS bytes.
+  Parent-enforced wall/output limits and cancellation cover startup, pipe reads
+  and rendering; helper groups are owned, killed and reaped. Output is opened
+  no-follow/nonblocking, bounded and checked before returning. Errors distinguish
+  cancellation, unavailable tools, invalid request, source change, limits,
+  helper failure and rejected output. Raw helper stderr is never a UI/log payload.
+  Rich helper scratch tmpfs is capped at 64 MiB; the output tree is monitored
+  through held directory descriptors (128 MiB / 4096 entries / depth 12), in
+  addition to per-file prlimit and parent read caps. Conversion PDF output is
+  capped at 64 MiB. Rich rendering has a 20-second CPU / 30-second wall budget
+  and 1 GiB address-space cap (3 GiB for LibreOffice startup); core dumps are
+  disabled. Source descriptors are passed via child-only inherited owned
+  clones, separate from stdin. Availability never implies every camera/codec works.
+- Core owns long-text/JSON/CSV/TSV/TOML windows and compare parsers (§6.9.2). The app
+  consumes those APIs alongside helper-backed documents, without duplicating
+  parsers in the thumbnail crate.
+
+These APIs are backend support, not evidence that UI widgets are integrated or
+visually qualified. Actual interaction changes stay local pending user review.
+
+Media control preserves `audio::Player` compatibility: `set_volume(0..=1)` and
+`set_muted(bool)` affect bounded PCM samples before the desktop sink sees them;
+`volume()`/`muted()` return requested state. Nonfinite seek/volume values are
+ignored. Stop also cancels a pending sandbox probe/startup; owned child handles
+replace shared numeric PIDs. `PreviewDocument::frame(seconds, px, cancel)`
+provides bounded sandboxed video seek frames for an embedded preview. Playing
+original video through Qt/libav in the app process remains prohibited.
+
+`video::Player::start(path, px)` returns immediately and exposes `status`,
+`set_paused`, `toggle`, `seek`, `set_volume`, `volume`, `set_muted`, `muted`,
+and `stop`. Its status fields are `state` (the existing `audio::PlayState`),
+`pos`, `duration`, `frame: Option<Arc<RasterPage>>`, `frame_id`, `volume`,
+`muted`, `why`. A sandboxed ffmpeg emits 12-fps size-bounded PNGs; the worker
+keeps one latest frame with a monotonic id. The app publishes a provider URL,
+never an original-media URL, and uses the id to avoid re-decoding unchanged
+frames. Optional sound uses the existing PCM player and the same held input
+identity. Missing sound support leaves video available with a reason. Paused
+seeks render one new frame; stopping cancels probing, decoder reads and audio.
+
+Streaming audio/video helpers have no writable host output bind: their `/out`
+is an empty read-only private tmpfs. Their owned streaming spawn path enforces
+this independently of capture/output-tree monitoring. Both relays recheck the
+held source revision periodically, while paused, and before each PCM write or
+frame publication; a changed source stops playback and invalidates video output.
+Only active audio playback supplies the video clock. Ended/failed audio releases
+the video to monotonic timing, so unequal stream lengths still reach video end.
+A successful empty decode after a seek near/beyond the end triggers bounded
+look-behind retries (at most eight, with a shared 15-second deadline), retaining
+the last recovered frame. Recovery uses the first video stream's endpoint,
+relative to the input start, rather than a possibly much longer audio/container
+duration. The final retry starts at zero if that stream hint is absent or
+inaccurate; the same time/cancellation bounds still apply. The public duration
+and requested position remain on the full media timeline. Paused seeks into an
+audio-only tail retain the final video PNG and their requested position; seeks
+at or beyond duration reach Ended, and a later seek can restart playback.
+An empty decode at the start or malformed/incomplete PNG output remains an error.
 
 ## 6.10 Scoped content search (`:grep`)
 
@@ -626,7 +928,7 @@ explicitly scoped and cancellable, and neither ever starts on its own.
 2. **Binary files are skipped.** A file is treated as binary if its first
    8 KiB contain a NUL. Grepping a disk image finds nothing useful and costs
    everything.
-3. **Bounded per file and overall.** At most 8 MiB read per file, and the
+3. **Bounded per file and overall.** At most 8 MiB searched per file, and the
    search stops at 500 matching files; the result says so rather than
    pretending it finished.
 4. **Cancellable at any moment**, with the same token the name search uses,
@@ -636,6 +938,42 @@ explicitly scoped and cancellable, and neither ever starts on its own.
    operations on the results.
 6. **Matches are counted, not concatenated.** The result list shows the file
    and how many lines matched; Gust does not build a giant text buffer.
+
+### 6.10.1 Bounded content details (core)
+
+`grep::grep_with_report(scope, needle, cancel, on_hit)` streams captured
+`DetailedContentHit { hit: ContentHit, snippet: ContentSnippet }` and returns
+`ContentSearchReport { hits, state, stats }`. Existing ContentHit path/count/
+first_line fields and legacy entry points remain compatibility APIs. The new
+report is required for truthful coverage. APP projects count, 1-based first
+line and snippet directly from the captured hit, without reopening its path.
+
+`ContentSnippet { text, truncated }` comes from the first matching line in the
+same bounded read. Its text uses existing display sanitization and never
+exceeds 256 rendered UTF-8 bytes, including expanded tabs/replacement chars.
+Context near the first match is preferred for long lines; omitted context is
+explicit. Raw paths remain typed byte identities, never snippet/display labels.
+
+Valid UTF-8 in the searched prefix uses per-character simple lowercasing for
+substring matching. Invalid UTF-8 retains ASCII-insensitive byte matching.
+There is no normalization or full Unicode case folding: for example, sharp-s
+is not expanded to `ss`. Query input is at most 4096 bytes; empty and excessive
+queries return invalid_query with detail empty or too_long. Compiled matching
+state is reused across lines/files and checks cancellation cooperatively.
+
+Ceilings are 8 MiB searched per file, 64 MiB total source bytes, 100,000 visited
+entries and 500 hit-files (or the smaller requested result limit). One extra
+byte detects per-file truncation and counts toward the total source budget.
+Bounds and omissions never imply a complete search. Serialized search state is partial,
+limited (detail hits/entries/bytes), cancelled, or invalid_query (detail
+empty/too_long). Stats retain entries/read_bytes/read_errors/entry_errors,
+depth_pruned/device_pruned/hidden_pruned/symlink_pruned, binary_files,
+ascii_fallback_files and file_byte_limits; scope_unverified is always true.
+The original iterative absolute-path traversal is still unanchored: it always
+reports partial unless a more specific terminal state applies. This work does
+not establish safe recursive scope, filesystem admission or syscall deadlines.
+Remote callers still need explicit admission and isolation. The pure bounded
+buffer matcher can be used without traversal; its result discloses byte limits.
 
 ## 6.11 Accessibility
 
@@ -756,6 +1094,187 @@ and cannot hang on a network. Gust does not talk to UDisks to *enumerate* —
 only to mount and unmount, which are the operations that need privilege and
 a user's intent. Listing devices therefore works on a machine with no UDisks
 daemon at all; the actions are simply unavailable, and say so.
+
+`devices::parse_lsblk_checked(&str) -> Result<Vec<RawBlock>, LsblkParseError>`
+is the shared pure discovery parser. Errors are `InvalidJson`, `InvalidShape`
+or `Limit`, with fixed diagnostic text that never includes the input. The
+envelope requires a `blockdevices` array; every row and child requires nonempty
+string `name`, `path` and `type`. Optional `size` is a string (default empty),
+`rm`/`hotplug` are booleans (default false), and `fstype`/`label`/`mountpoint`/
+`pkname` are absent, null or strings. Empty optional strings retain legacy
+absence semantics; all other decoded strings are preserved exactly, including
+braces, quotes, backslashes, Unicode, tabs and newlines. Unknown fields are
+ignored. Children must be absent or an array of valid rows. Invalid children
+or fields fail the entire inventory, never a partial successful list.
+Envelope and row boundaries accept JSON objects only, including every child;
+positional array encodings are invalid. Decoded duplicate recognized keys fail.
+
+Preorder flattening preserves explicit parent names; filtering and encrypted
+child joins remain in `offerable_devices`. Bounds are 4 MiB JSON, 65,536 rows
+and 32 row levels; exceeding a bound returns `Limit`, never omitted rows.
+`parse_lsblk` remains a compatibility adapter that loses errors; fallible
+discovery callers use the checked API and propagate refusal before any changing
+action. Parsing performs no candidate I/O, location normalization or admission.
+
+### 6.13.3 Kernel instance evidence (R6-2; separate increment)
+
+This additive CORE/REMOTE/APP contract was agreed before implementation.
+Existing `Device`, `RawBlock`, checked/legacy parsers and
+`list_devices` remain compatible. A display row or a repeated path is not
+evidence that the same kernel device is still present.
+
+The exact additive public interface in `devices` is:
+
+```rust
+pub struct DeviceNumber { pub major: u32, pub minor: u32 }
+pub enum DeviceEvidenceOrigin { LsblkKernelSysfsV1 }
+pub enum DeviceEvidenceUnavailable {
+    MissingSourceInstance, MissingCleartextInstance, AmbiguousInstance,
+    AmbiguousRelationship, UnsupportedOrigin, UnverifiedLocator,
+}
+pub enum DeviceEvidence {
+    Available(DeviceBinding),
+    Unavailable(DeviceEvidenceUnavailable),
+}
+pub enum DeviceRevalidation {
+    Same(DeviceObservation), Changed, Unavailable(DeviceEvidenceUnavailable),
+}
+pub fn parse_lsblk_evidence_checked(
+    json: &str, origin: Option<DeviceEvidenceOrigin>,
+) -> Result<Vec<DeviceObservation>, LsblkParseError>;
+pub fn revalidate_device(
+    expected: &DeviceObservation, current: &[DeviceObservation],
+) -> DeviceRevalidation;
+pub fn bind_cleartext_after_unlock(
+    expected: &DeviceObservation, current: &[DeviceObservation], returned_locator: &str,
+) -> DeviceRevalidation;
+```
+
+`DeviceObservation`, `DeviceBinding`, `KernelBlockInstance` and
+`CleartextBinding` have private fields, are `Debug + Clone + PartialEq + Eq`,
+and expose only these read accessors:
+
+| Type | Accessor | Result |
+|---|---|---|
+| DeviceObservation | `device(&self)` | `&Device` |
+| DeviceObservation | `evidence(&self)` | `&DeviceEvidence` |
+| DeviceBinding | `source(&self)` | `KernelBlockInstance` |
+| DeviceBinding | `cleartext(&self)` | `Option<CleartextBinding>` |
+| DeviceBinding | `origin(&self)` | `DeviceEvidenceOrigin` |
+| KernelBlockInstance | `number(&self)` | `DeviceNumber` |
+| KernelBlockInstance | `disk_sequence(&self)` | `std::num::NonZeroU64` |
+| CleartextBinding | `instance(&self)` | `KernelBlockInstance` |
+| CleartextBinding | `parent(&self)` | `KernelBlockInstance` |
+
+The small value types and reason/origin enums are also `Copy`; kernel instances
+and device numbers implement `Hash`. These are worker values, without GUI JSON
+deserialization or public binding constructors. APP retains observations behind
+opaque epoch IDs instead of rebuilding them from display fields. The parser
+shares the checked map-only decoder and 4 MiB / 65,536 rows / 32 row-level bounds,
+validates the entire report before filtering, then returns offerable device rows.
+Missing evidence preserves a display row with typed `Unavailable`.
+
+The origin is `LsblkKernelSysfsV1`, supplied by the trusted capture caller,
+never asserted by a JSON field. REMOTE captures strict UTF-8 with its existing
+owned, bounded helper and the same cancellation token/remaining deadline:
+
+```text
+lsblk --json --tree --all --properties-by udev,none --output
+NAME,KNAME,PATH,PKNAME,SIZE,RM,HOTPLUG,TYPE,FSTYPE,LABEL,MOUNTPOINT,MAJ:MIN,DISK-SEQ
+```
+
+The column list is one argument. This profile reads kernel/sysfs relationships
+and uses udev-only filesystem properties, without falling back to block probing.
+Unsupported flags/columns, failed capture or malformed output never fall back
+to legacy discovery. The profile is grounded in [util-linux's source](https://github.com/util-linux/util-linux/blob/v2.41/misc-utils/lsblk.c)
+and [property-method contract](https://github.com/util-linux/util-linux/blob/v2.41/misc-utils/lsblk.8.adoc).
+The [kernel diskseq ABI](https://www.kernel.org/doc/html/next/admin-guide/abi-stable.html)
+provides the sequence value; it is not a filesystem-content identity.
+
+Under `LsblkKernelSysfsV1`, `type: "part"` is always unavailable as a source:
+`Unavailable(MissingSourceInstance)`, including a positive reported sequence.
+The display row and its parsed strings remain. util-linux can inherit the
+containing disk's `diskseq` when a partition lacks that attribute; Linux may
+remove/recreate the partition without replacing or incrementing that gendisk.
+Equal major/minor plus inherited sequence therefore cannot establish partition
+lifetime continuity between captures. This is a pre-capture replacement gap,
+not a contents-identity or post-check atomicity claim. See the versioned
+[provider fallback](https://github.com/util-linux/util-linux/blob/v2.41/lib/sysfs.c)
+and [partition lifecycle](https://github.com/torvalds/linux/blob/v6.18/block/partitions/core.c).
+No path, label, UUID, size, extent, stat, parent sequence or successful unlock
+substitutes for the unavailable continuity proof. A future supported partition
+mechanism needs its own justified contract; this origin grants none. Genuine
+whole-instance observations retain their existing sequence comparison and crypt
+edge rules. Missing child-instance proof remains `MissingCleartextInstance`.
+
+Available source evidence requires nonempty `kname`, canonical decimal
+`maj:min`, and a positive JSON unsigned-integer `disk-seq` from that profile.
+Missing/null/zero evidence is unavailable, never inferred from path, label,
+size, UUID or a neighboring row. Wrong field types or malformed numbers are
+`InvalidShape`. This includes a parser-reported numeric representation overflow
+in a known field (for example `disk-seq: 1e400` or numeric `kname: 1e400`), even
+though serde_json categorizes that range failure as syntax. Other reported JSON
+grammar/EOF failures remain `InvalidJson`; recursion/size bounds remain `Limit`.
+Classification follows the first reported failure, so a rejected known value
+may precede a later independent grammar fault. Unknown values are still skipped
+without numeric representation. No inheritance of absent sequence values is
+invented by CORE.
+Duplicate/conflicting instance or kernel-name observations make affected
+bindings unavailable; unrelated unambiguous devices may remain usable.
+Unavailable reasons are the enum above; diagnostics are fixed and contain no
+captured values. `None` origin means `UnsupportedOrigin`, never `Available`.
+Optional evidence keys still have exact types and duplicate-key refusal, including
+on unofferable rows. Legacy checked parsing continues to ignore those extra keys.
+The shared streaming map decoder grammar-skips genuinely unknown values using
+`IgnoredAny`, including out-of-range numeric grammar and nested metadata;
+legacy mode also treats the three kernel metadata keys as unknown. Evidence
+mode validates those keys' exact types and rejects decoded-key duplicates.
+There is no intermediate Value/Content map that buffers unknown values, no
+second JSON parser, and no weakening of object-only row/child boundaries,
+known-field duplicate/type refusal, exact strings, whole-report or byte/row/depth
+bounds. Invalid JSON grammar is still refused while skipping unknown values.
+
+Cleartext evidence requires exactly one captured `crypt` child, complete source
+and child instances, the explicit tree edge, and child `pkname` equal to the
+unique source `kname` in the same capture. Multiple candidates, missing evidence
+or conflicting parentage is unavailable. Names locate the observed edge;
+instance numbers/sequences provide its identity. `None` means no cleartext was
+observed in that complete supported capture, not a service-atomic absence proof.
+
+Pure `revalidate_device(expected, current_inventory)` returns
+`Same(fresh_observation)`, `Changed` or `Unavailable(reason)`. It finds the
+expected source by captured device number, refuses duplicate matches, then compares
+the positive sequence and the complete source/cleartext binding;
+it never admits a row by path/display equality. A positive differing instance
+or changed encrypted classification is `Changed`; missing/ambiguous proof is
+`Unavailable`. An unofferable or absent source is unavailable, without a path
+fallback. Changing any binding refuses
+the pending request. Actions/navigation use the fresh observation only.
+
+The intentional unlock transition is separate: `bind_cleartext_after_unlock` has
+the caller precondition of an actually successful accepted unlock of this own
+retained selection. It accepts only an available, encrypted, no-cleartext expected
+observation; an already-bound or unencrypted selection is `Changed`. It binds a
+newly observed cleartext child only when the retained source still matches, the relationship above is verified,
+and the returned cleartext locator exactly selects that captured child. That
+locator alone never supplies identity. Only exact equality with the child PATH
+from this capture is established; an alias, empty or differing returned locator
+is `Unavailable(UnverifiedLocator)`. No canonicalization, stat or synthesized
+`/dev/<kname>` alias is used. A missing new child is unavailable. `Same` returns
+the fresh observation with the new binding and locators. The new binding must
+itself be freshly revalidated before mount/navigation. No generic changed-target adoption exists.
+
+APP checks opaque selection/prompt epochs and reacquires fresh evidence after
+every GUI leave wait and immediately before each changing service request or
+navigation. After mount, APP also requires the fresh captured mount locator to
+exactly agree with the accepted service-returned locator before browsing; an
+unestablished alias refuses. REMOTE brackets capture/parse with remaining-budget
+checks and
+keeps the same token/deadline across the chain. Missing evidence disables the
+changing action; it does not hide a display row. No APP filesystem reads, second
+decoder, same-path stat substitute, automatic compensation or rollback is added.
+These are bounded observations, not atomic unplug-to-service immunity; a
+successful comparison does not freeze kernel topology or filesystem contents.
 
 ### What counts as a device worth showing
 
@@ -994,6 +1513,30 @@ redacted secret type and transported only on helper stdin, never argv, env,
 logs or files. Unsupported encryption modes fail explicitly. Multipart
 archives are outside this contract.
 
+### Archive writer date admission
+
+Creation validates every admitted member timestamp before creating staging or
+starting the writer/payload stream. `ArchiveError::UnsupportedTimestamp` carries
+the selected format, relative byte-path and exact source seconds/nanoseconds.
+No source date is clamped or discarded. Current supported ranges are inclusive:
+TAR+Zstd seconds `i64::MIN+1..=i64::MAX`, normalized nanoseconds; ZIP seconds
+`0..=2147483647`, normalized source nanoseconds with whole-second output; 7z
+seconds `0..=1833029933770`, with nanoseconds at the final second limited to
+`955161599` (100 ns output precision). The ZIP range is deliberately conservative
+across signed/unsigned 32-bit timestamp readers. TAR's minimum integer and
+negative 7z dates are excluded because the native path cannot preserve them.
+The helper applies the same bounds before each native header. Complete output
+timestamp comparison remains mandatory, including nanosecond precision.
+
+Creation defines filename encoding per format: full PAX uses binary headers
+to retain Unix byte names and link targets; ZIP retains its original byte names
+and sets UTF-8 flags from the filename alone (opaque names stay unflagged).
+Symlink target bytes are content and never determine ZIP's filename flag;
+7z requires UTF-8 names and link targets for its UTF-16 representation. Invalid
+7z encodings return `UnsupportedEncoding { format, member }` before staging or
+payload. The codec's private process initializes its character locale before
+native conversion; parent locale and parse-warning refusal remain unchanged.
+
 ### An owned new extraction folder
 
 `ArchiveRequest::ExtractIntoNew` carries the same fields as Extract, but its
@@ -1087,7 +1630,20 @@ phases leaves recoverable temporary names rather than a lost file.
 ## 6.17 Open with…
 
 Mockup B puts `o open with…` next to `enter open`. Enter uses the default
-handler; this is for the other times.
+handler (or the neighbouring-media viewer, §6.18.1); this is for the other
+times.
+
+### Content is not a program because a mount supplies executable bits
+
+Phone and non-Unix mounts can report ordinary files as executable (AFC
+reports iPhone photographs as `0700`). Recognized media, documents and
+archives open with the desktop handler regardless of those permission bits.
+They are not offered as programs by Run. Known script/launcher/program
+extensions still require deliberate Run, even without executable bits;
+unknown files with executable bits do too, as do `.js`/`.ts` sources that
+carry an executable bit (shebang scripts). Activation, recent files,
+multi-file opening and Run share this classification, using only the name
+and already available mode, without reading file contents on the UI thread.
 
 ### The list comes from the desktop database, not from a command's output
 
@@ -1163,6 +1719,25 @@ Enter on a mixed selection opens only the cursor row, as it always did.
 
 Executables are refused exactly as they are for a single file (§4). Nothing
 about selecting several files makes running one of them safer.
+
+### 6.18.1 Browsing neighbouring media
+
+Activating a regular image, audio or video file opens one `mpv` window with
+the visible media rows in their current display order, starting at the
+activated row. The playlist is a snapshot: filtering and hidden-file settings
+apply, and folders, programs and other documents are skipped. Left / Right
+select the previous / next file and stop at either end; Shift+Left / Right
+seek five seconds, Space pauses, Escape closes. Images stay up until the
+user navigates; completed audio/video stays open too.
+Finishing a clip does not pause playback of the next file.
+
+The model builds this snapshot from names and cached entry kinds only.
+On a worker, Gust streams a file-URI M3U playlist to mpv's stdin, avoiding
+argv size limits and preserving raw names, including newlines. Keyboard
+bindings apply to this player process only. Non-media, explicit Open with…,
+and multi-selection retain their desktop handlers. If mpv is absent, the
+activated file opens with its desktop handler. Launch errors return to the
+owning model; no system file associations are changed.
 
 ## 6.19 The clipboard other applications can see
 
@@ -1533,6 +2108,141 @@ and a private output directory — or the feature is unavailable. Parent
 validates helper output through a held descriptor: regular file, size bound,
 expected format, no symlink/FIFO.
 
+With `/usr` bound read-only, both archive and thumbnail sandboxes map `/lib`
+to `usr/lib` and `/lib64` to `usr/lib64`. Preserve the host's `lib64` alias:
+Arch and Ubuntu place the ELF interpreter differently, and redirecting both
+aliases to `usr/lib` prevents sandboxed executables from starting on Ubuntu.
+
+Video frame helpers have a 1 GiB address-space budget: FFmpeg's decoder and
+scaler threads reserve stacks that can exceed the default 512 MiB even for
+ordinary 1080p clips. This limits virtual address space, not resident memory.
+The CPU, wall-clock, process-count and output-size limits still apply.
+
+### 6.4.2 Owned remote helper calls
+
+Noninteractive helper stdin borrows the caller's bytes for the duration of the
+owned call instead of copying them into an internal queue. The caller retains
+responsibility for the source buffer's lifetime and any required wiping. Existing
+interactive response queues and cancellation/descendant ownership remain unchanged.
+
+Remote service calls run on workers. `helper::CallContext { cancel: &CancelToken,
+timeout: Duration }` gives each call one overall budget. `RemoteError` carries a
+typed code and an actionable message; cancellation never claims rollback or
+authorizes replay. Existing connection APIs remain bounded compatibility adapters.
+Owned subprocesses share eight admission slots, nonblocking capped stdin/stdout/
+stderr, readiness-based waits and process-group cleanup. A single reaper retains
+a slot until even a kernel-stuck child is reaped; no reader join can outlive the
+call deadline. Only owned children are signalled and mounts are never lazily
+detached on cancellation. SSH aliases remain verbatim during diagnostic probes.
+Malformed or missing rclone upload counters are unknown and block disconnect;
+backend receipts require a complete parsed response, never an empty failed parse.
+
+Owned helpers remove inherited TLS keylog settings. Reaper-start failure retains
+bounded ownership, and subsequent admissions also reap completed children.
+
+Successful SSHFS daemon startup explicitly hands off the accepted filesystem and
+its SSH transport; normal helper retirement must not signal those descendants.
+Only a successful starter exit with drained pipes permits this handoff. Failed,
+cancelled or timed-out startup retains bounded process-group cleanup. Ordinary
+one-shot helpers still terminate leftover descendants even after a successful exit.
+Host-key scans offer keys for trust only when every key has a fingerprint. Any
+fingerprint helper failure, cancellation or shared-budget exhaustion rejects the
+whole scan; no undisplayed key may remain in a successful trust offer.
+
+### Owned block-device helpers
+
+`remote::block::{mount,unlock,unmount,lock}` run only on a worker, using the
+existing bounded, cancellable owned helper runtime and `helper::CallContext`.
+They retain CORE's device argument builders and unlock parser. Mount returns a
+`PathBuf` preserving accepted UTF-8 bytes; unlock returns the cleartext device
+string. Neither checks candidate metadata, creates a mount directory, probes a device, or performs
+automatic compensation. APP retains kernel-discovery/selection checks and passes
+one cancellation token plus the remaining overall budget across unlock and mount.
+
+`BlockFailure { error: RemoteError, effect: BlockEffect }` distinguishes proven
+`NotStarted`, post-launch `Unknown`, and `Accepted` when the helper reports success
+but its location cannot be decoded safely. Cancellation or timeout after launch
+does not roll back a request already accepted by the device service. Callers must
+check current device state before retrying an uncertain operation. Raw helper
+diagnostics are not returned or logged. Secret bytes are borrowed only for stdin;
+the caller retains and wipes its buffer. Existing input/output and helper-admission
+bounds apply. Device-service CLI output uses English messages with an explicit
+UTF-8 locale and GLib charset overrides. Non-UTF-8 mount locations are unsupported
+by this text adapter and fail with `Protocol`/`Accepted`, rather than returning a
+converted or guessed path. Malformed replies never trigger
+path guesses or filesystem checks. Tests use private executable stand-ins, never
+the real device service, mounts or credentials.
+
+`block::list_devices(&CallContext) -> Result<Vec<gust_core::devices::Device>, BlockFailure>`
+is the worker-only bounded discovery adapter. It runs `lsblk` with CORE's existing
+column selection, requires UTF-8 JSON, and delegates device parsing/filtering to
+`devices::{parse_lsblk_checked,offerable_devices}`. Helper errors,
+invalid replies, cancellation and exhausted parsing budget are failures, never an
+empty-success fallback. A valid empty inventory remains successful. Discovery
+errors carry `NotStarted`: no device-changing request was made, even if the
+read-only discovery helper ran. Its diagnostics remain static and sanitized.
+APP passes the same token and remaining overall budget through discovery and
+subsequent mount/unlock/eject operations; a failed refresh must prevent them.
+A successful inventory requires JSON-correct decoding of every device object and
+its children through CORE's shared fallible parser. Braces and escapes inside
+labels or mount points are data. Invalid rows or children fail the entire refresh;
+validation followed by the legacy string scanner is insufficient for fresh state.
+All `LsblkParseError::{InvalidJson,InvalidShape,Limit}` failures map to static
+`Protocol`/`NotStarted`. CORE owns the 4 MiB/65536-row/32-level limits and decoded
+row/child shape policy; this adapter adds no second parser or lossy fallback.
+Positional array envelopes, rows and children are malformed inventory, including
+otherwise offerable or cleartext rows; they fail with `Protocol`/`NotStarted`.
+
+#### Kernel-instance capture adapter
+
+The worker-only adapter in `remote::block` is:
+
+```rust
+pub fn observe_devices(
+    ctx: &CallContext<'_>,
+) -> Result<Vec<gust_core::devices::DeviceObservation>, BlockFailure>;
+```
+
+It preserves `list_devices` and every existing action API. Display rows from the
+old list are not an evidence fallback. The adapter runs exactly this read-only
+capture through the owned helper runtime, with the entire column list as one
+argument and no `--bytes`:
+
+```text
+lsblk --json --tree --all --properties-by udev,none --output
+NAME,KNAME,PATH,PKNAME,SIZE,RM,HOTPLUG,TYPE,FSTYPE,LABEL,MOUNTPOINT,MAJ:MIN,DISK-SEQ
+```
+
+Strict UTF-8 output goes to CORE's shared
+`parse_lsblk_evidence_checked(&str, Option<DeviceEvidenceOrigin>)`, with
+`Some(DeviceEvidenceOrigin::LsblkKernelSysfsV1)` supplied by this exact trusted
+capture path, never a payload field. CORE owns decoding, bounds, private typed
+instance/binding fields and `Available`/`Unavailable` reasons. Unsupported
+profiles or failed captures refuse with a static `BlockFailure`/`NotStarted`;
+malformed inventories use `Protocol`/`NotStarted`, never an empty-success or
+weaker-discovery fallback. Missing evidence remains typed unavailable.
+Under this origin, partition rows remain `Unavailable(MissingSourceInstance)`
+even with a positive captured sequence, which can describe the containing disk.
+Nonzero capture status refuses as `Unsupported` with a static explanation of
+the required util-linux support/permissions; raw diagnostics are not exposed.
+
+The adapter checks the same cancellation token and remaining overall budget
+before/after capture and after bounded parsing. APP retains the original opaque
+shown-selection/prompt epoch and calls CORE's pure `revalidate_device` after a
+GUI leave wait and immediately before each changing request and navigation.
+`Same` supplies fresh locators only after source and expected cleartext instance
+and relationship match. Paths, labels, UUIDs and size cannot replace evidence.
+
+Only APP's own successful `block::unlock` receipt permits the separate
+`bind_cleartext_after_unlock` transition. It requires the same retained source,
+one proven child relationship and exact captured child PATH matching the service
+locator; unknown aliases are `UnverifiedLocator`, without stat, canonicalization
+or invented aliases. The new binding is revalidated before mount/navigation.
+APP wipes its borrowed secret immediately after unlock on every outcome. After
+mount, fresh inventory must also agree with the accepted returned mount locator
+before browsing. Existing `Unknown`/`Accepted` wording and absence of automatic
+compensation remain. These observations do not freeze hotplug, service state or
+filesystem contents, or promise atomicity between validation and an action.
 
 ## 7.2 Worker-owned job observers
 
@@ -1614,6 +2324,19 @@ A failed regular-file write or sync retains the public entry and reports its
 path as partial/current work; it never unlinks that mutable name. Fresh paired
 stats cannot distinguish Gust's failed bytes from a later same-inode edit.
 No successful creation receipt is returned for that uncertain result.
+
+Nested permission batches reconcile directory lineage only from the batch's
+recorded mode transitions and each verified applied inode. Preflight derives
+the expected current modes from Applied/Undone status, including older stored
+lineage, then retains complete inventory, identity and revision checks. Each
+successful mode step updates matching inode modes in the same batch's lineage;
+no current directory snapshot is adopted as new authority.
+
+A confirmed job with any completed pre-existing destination root requires an
+explicit barrier rather than a partial inverse that silently omits that root.
+Ownership inverse policy matches the forward guard: privileged regular files
+refuse during admission/preflight, before pending or effects; owned setgid
+directories remain eligible with exact identity, group and lineage checks.
 
 If a mode inverse explicitly restores readable/searchable permissions on an
 unreadable directory with recorded lineage, preflight checks its exact root
@@ -1700,6 +2423,27 @@ local roots before any candidate access and separately checks the shared,
 private, files and info paths before opening them. Snapshot checks do not
 promise atomic exclusion of concurrent mount changes or syscall deadlines.
 
+Trash selection compares shared mount IDs as well as devices: home preference
+is eligible only when source, root, files and info resolve to one visible local
+mount. An unsupported home mount is skipped before home I/O; unrelated admitted
+local-volume candidates remain usable. A candidate with a separately mounted
+root or child refuses before information publication.
+
+Existing owned legacy Trash directories with read/search access for others but
+no group/other write access remain discoverable without chmod. Listing reports
+a typed actionable repair-required error. Explicit worker-only
+`TrashLocation::repair_legacy_permissions(cancel)` captures no-follow held
+root/files/info descriptors and identities before tightening those same owned
+directories to 0700. It creates no directories, changes no data/Info bytes and
+never recursively repairs or cleans. Replaced, writable-by-others, foreign-owned
+or symlinked layouts refuse; errors after a permission effect carry partial
+location evidence. Checked compatibility listing preserves errors; the original
+Vec-only projection remains a lossy compatibility API and is not authoritative.
+
+Legacy permission repair has no generic inverse receipt. APP retains its forward
+marker and commits an explicit history barrier before invoking the repair; it
+never fabricates a creation or attribute receipt from a post-effect snapshot.
+
 Undo vault placement excludes each retained entry's effective current root,
 including a Trash folder restored by an Undone entry. Empty vaults remain
 retained outside those roots; completing a child Redo never deletes a vault
@@ -1768,3 +2512,72 @@ stops the walk before another removal. Retained paths are explicitly last-known
 uncertain location hints (`DeleteError::locations_uncertain`), not guarantees
 that a renamed private tree remains at that string. These checks do not claim atomic exclusion of every concurrent
 same-user mutation inside a newly created private namespace.
+
+## 12. Release qualification and shared test runners
+
+Release evidence distinguishes source checks, model seams, native desktop
+acceptance and an installed package. None substitutes for another. Historical
+desktop evidence is not qualification of a new binary, architecture or provider.
+
+- Each shared test invocation owns a private log and skip ledger. The summary
+  records whether tests actually ran, Cargo's exit status, runtime skips and
+  ignored tests. Required mode fails on skips, ignored tests or no observed
+  tests, even when a child command returns zero. App Rust tests use the same
+  accounting as library tests; Qt model scripts remain separately named seams.
+  Package unit scope explicitly filters the manual recursive-copy benchmark and
+  records that exclusion; it never enables ignored tests or counts a benchmark
+  as passed. Other ignored/skipped cases still fail required mode. Cancellation
+  stops the owned child process group before releasing its build lease.
+  The artifact builder uses that same boundary, including deferred cancellation
+  during process startup and descendants outliving their immediate parent.
+  Cancellation stays deferred throughout cleanup; an unestablished retirement
+  retains the lease rather than returning a timeout and releasing ownership.
+  Every immediate-child exit also establishes group retirement before returning
+  its status, including zero/nonzero exits and direct termination of that child.
+  A surviving descendant cannot outlive the caller's lease on a normal return.
+  Public failure details are bounded Rust error codes, locked crate identifiers,
+  counts and fixed categories; diagnostic prose/paths remain private. Hosted
+  library diagnostics may explicitly opt into at most 64 failed integration-test
+  identifiers matched exactly to committed public declarations and an owned-crate
+  allowlist. Unknown names/targets remain unreported and counted as unclassified.
+  Archive fixtures require bsdtar, bwrap and prlimit plus real user/mount namespace
+  admission. Refusal is fatal and there is no unsandboxed fallback. Hosted
+  Ubuntu runners grant `userns` to `/usr/bin/bwrap` alone (Arch has no such
+  AppArmor restriction); that admits the sandbox, never bypasses it.
+  Independent artifact staging requires successful SDK/app and sandbox
+  admission, and cannot turn a failed library gate into a pass.
+  The frozen SMB availability fixture requires a successful `gio --help` and
+  the installed SMB backend descriptor; their presence does not qualify a mount.
+- Native and theme gates require an explicitly dedicated disposable desktop,
+  their actual tools and the installed binary. They must not start on an
+  ordinary shared desktop. The desktop runner owns `/tmp/gust-qa.lock`; callers
+  must not wrap it in a second acquisition. A missing prerequisite is SKIP,
+  never PASS, and makes a required qualification fail.
+  The current UI runner creates a private headless labwc session; the wrapper
+  must not require or drive the host Hyprland session. A missing/nonempty QML
+  warning ledger fails acceptance. Labwc does not qualify Hyprland visual rules.
+- Package validation checks the staged/installed files, executable formats,
+  dynamic library resolution and dependency metadata. A source recipe or a
+  successful development-tree launch does not qualify an installed artifact.
+  The supported qualification floor is Qt 6.11.2. Native CI selects that exact
+  SDK for each architecture after the system-Qt portable seams. Build receipts
+  record the selected Qt version; staging rejects older/mixed Qt libraries and
+  requires the selected SDK's library root when testing an SDK build. This is
+  SDK staging evidence, separate from installed Arch dependency qualification.
+  The ops archive helper is a separate runtime executable, linked with
+  libarchive, built with `cargo build -p gust-ops --bin gust-archive-helper`;
+  installations using that contract must include it beside Gust in `/usr/bin`.
+- Source recipes identify a full revision, fetchable URL and verified SHA-256.
+  Artifact CI builds the verified extracted archive, then stages with the
+  reviewed recipe; a checkout alias cannot qualify that source pin. Build
+  provenance validates the canonical app-to-QML symlink and selected contents.
+  Preparing a recipe does not publish a release or package. Both advertised
+  Linux architectures need native compilation; desktop/provider qualification
+  is recorded separately for each architecture rather than inferred.
+- Raw logs, source receipts, screenshots and theme captures stay private and
+  outside Git/public CI artifacts. Public checks expose sanitized counts and
+  prerequisite categories only, never home paths, filenames or host identities.
+
+Ownership: release owns shared orchestration/packaging, app owns app-local test
+scripts and native model contracts, UI owns its feature-specific desktop checks.
+New runtime helpers/dependencies must be handed to release before qualification.
