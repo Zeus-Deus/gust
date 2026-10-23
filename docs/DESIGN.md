@@ -826,6 +826,22 @@ and [property-method contract](https://github.com/util-linux/util-linux/blob/v2.
 The [kernel diskseq ABI](https://www.kernel.org/doc/html/next/admin-guide/abi-stable.html)
 provides the sequence value; it is not a filesystem-content identity.
 
+Under `LsblkKernelSysfsV1`, `type: "part"` is always unavailable as a source:
+`Unavailable(MissingSourceInstance)`, including a positive reported sequence.
+The display row and its parsed strings remain. util-linux can inherit the
+containing disk's `diskseq` when a partition lacks that attribute; Linux may
+remove/recreate the partition without replacing or incrementing that gendisk.
+Equal major/minor plus inherited sequence therefore cannot establish partition
+lifetime continuity between captures. This is a pre-capture replacement gap,
+not a contents-identity or post-check atomicity claim. See the versioned
+[provider fallback](https://github.com/util-linux/util-linux/blob/v2.41/lib/sysfs.c)
+and [partition lifecycle](https://github.com/torvalds/linux/blob/v6.18/block/partitions/core.c).
+No path, label, UUID, size, extent, stat, parent sequence or successful unlock
+substitutes for the unavailable continuity proof. A future supported partition
+mechanism needs its own justified contract; this origin grants none. Genuine
+whole-instance observations retain their existing sequence comparison and crypt
+edge rules. Missing child-instance proof remains `MissingCleartextInstance`.
+
 Available source evidence requires nonempty `kname`, canonical decimal
 `maj:min`, and a positive JSON unsigned-integer `disk-seq` from that profile.
 Missing/null/zero evidence is unavailable, never inferred from path, label,
@@ -837,6 +853,14 @@ Unavailable reasons are the enum above; diagnostics are fixed and contain no
 captured values. `None` origin means `UnsupportedOrigin`, never `Available`.
 Optional evidence keys still have exact types and duplicate-key refusal, including
 on unofferable rows. Legacy checked parsing continues to ignore those extra keys.
+The shared streaming map decoder grammar-skips genuinely unknown values using
+`IgnoredAny`, including out-of-range numeric grammar and nested metadata;
+legacy mode also treats the three kernel metadata keys as unknown. Evidence
+mode validates those keys' exact types and rejects decoded-key duplicates.
+There is no intermediate Value/Content map that buffers unknown values, no
+second JSON parser, and no weakening of object-only row/child boundaries,
+known-field duplicate/type refusal, exact strings, whole-report or byte/row/depth
+bounds. Invalid JSON grammar is still refused while skipping unknown values.
 
 Cleartext evidence requires exactly one captured `crypt` child, complete source
 and child instances, the explicit tree edge, and child `pkname` equal to the
