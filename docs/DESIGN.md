@@ -2193,6 +2193,57 @@ row/child shape policy; this adapter adds no second parser or lossy fallback.
 Positional array envelopes, rows and children are malformed inventory, including
 otherwise offerable or cleartext rows; they fail with `Protocol`/`NotStarted`.
 
+#### Kernel-instance capture adapter
+
+The worker-only adapter in `remote::block` is:
+
+```rust
+pub fn observe_devices(
+    ctx: &CallContext<'_>,
+) -> Result<Vec<gust_core::devices::DeviceObservation>, BlockFailure>;
+```
+
+It preserves `list_devices` and every existing action API. Display rows from the
+old list are not an evidence fallback. The adapter runs exactly this read-only
+capture through the owned helper runtime, with the entire column list as one
+argument and no `--bytes`:
+
+```text
+lsblk --json --tree --all --properties-by udev,none --output
+NAME,KNAME,PATH,PKNAME,SIZE,RM,HOTPLUG,TYPE,FSTYPE,LABEL,MOUNTPOINT,MAJ:MIN,DISK-SEQ
+```
+
+Strict UTF-8 output goes to CORE's shared
+`parse_lsblk_evidence_checked(&str, Option<DeviceEvidenceOrigin>)`, with
+`Some(DeviceEvidenceOrigin::LsblkKernelSysfsV1)` supplied by this exact trusted
+capture path, never a payload field. CORE owns decoding, bounds, private typed
+instance/binding fields and `Available`/`Unavailable` reasons. Unsupported
+profiles or failed captures refuse with a static `BlockFailure`/`NotStarted`;
+malformed inventories use `Protocol`/`NotStarted`, never an empty-success or
+weaker-discovery fallback. Missing evidence remains typed unavailable.
+Under this origin, partition rows remain `Unavailable(MissingSourceInstance)`
+even with a positive captured sequence, which can describe the containing disk.
+Nonzero capture status refuses as `Unsupported` with a static explanation of
+the required util-linux support/permissions; raw diagnostics are not exposed.
+
+The adapter checks the same cancellation token and remaining overall budget
+before/after capture and after bounded parsing. APP retains the original opaque
+shown-selection/prompt epoch and calls CORE's pure `revalidate_device` after a
+GUI leave wait and immediately before each changing request and navigation.
+`Same` supplies fresh locators only after source and expected cleartext instance
+and relationship match. Paths, labels, UUIDs and size cannot replace evidence.
+
+Only APP's own successful `block::unlock` receipt permits the separate
+`bind_cleartext_after_unlock` transition. It requires the same retained source,
+one proven child relationship and exact captured child PATH matching the service
+locator; unknown aliases are `UnverifiedLocator`, without stat, canonicalization
+or invented aliases. The new binding is revalidated before mount/navigation.
+APP wipes its borrowed secret immediately after unlock on every outcome. After
+mount, fresh inventory must also agree with the accepted returned mount locator
+before browsing. Existing `Unknown`/`Accepted` wording and absence of automatic
+compensation remain. These observations do not freeze hotplug, service state or
+filesystem contents, or promise atomicity between validation and an action.
+
 ## 12. Release qualification and shared test runners
 
 Release evidence distinguishes source checks, model seams, native desktop
