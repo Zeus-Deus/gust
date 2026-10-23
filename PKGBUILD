@@ -67,6 +67,10 @@ check() {
 package() {
   cd "$pkgname-$pkgver"
   install -Dm755 "target/release/gust" "$pkgdir/usr/bin/gust"
+  # Archive listing and extraction run through this helper inside bwrap;
+  # without it Gust disables archives.
+  install -Dm755 "target/release/gust-archive-helper" \
+    "$pkgdir/usr/bin/gust-archive-helper"
   install -Dm644 "packaging/gust.desktop" \
     "$pkgdir/usr/share/applications/gust.desktop"
   install -Dm644 "LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"

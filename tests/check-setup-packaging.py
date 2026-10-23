@@ -119,6 +119,29 @@ class SetupPackagingTests(unittest.TestCase):
             with self.subTest(manifest=str(manifest.relative_to(ROOT))):
                 check_no_install_side_effects(manifest.read_text())
 
+    def test_archive_helper_is_built_and_installed(self):
+        # Archives refuse to run without the sandboxed helper next to gust.
+        for manifest in MANIFESTS:
+            with self.subTest(manifest=str(manifest.relative_to(ROOT))):
+                source = manifest.read_text().replace("\\\n", " ")
+                build = re.search(r"^build\(\)\s*\{(.*?)^\}", source,
+                                  re.MULTILINE | re.DOTALL).group(1)
+                cargo = [shlex.split(line) for line in build.splitlines()
+                         if line.strip().startswith("cargo build")]
+                self.assertTrue(cargo, "build() must run cargo build")
+                for tokens in cargo:
+                    # A whole-workspace build includes gust-ops' helper binary.
+                    selected = {"-p", "--package", "--bin", "--bins"} & set(tokens)
+                    self.assertTrue(not selected or "gust-archive-helper" in tokens,
+                                    "cargo build must include gust-archive-helper")
+                package = re.search(r"^package\(\)\s*\{(.*?)^\}", source,
+                                    re.MULTILINE | re.DOTALL).group(1)
+                installs = [shlex.split(line) for line in package.splitlines()
+                            if line.strip().startswith("install")]
+                self.assertIn(["install", "-Dm755",
+                               "target/release/gust-archive-helper",
+                               "$pkgdir/usr/bin/gust-archive-helper"], installs)
+
     def test_side_effect_guard_rejects_hooks_and_automatic_actions(self):
         baseline = MANIFESTS[0].read_text()
         mutations = (

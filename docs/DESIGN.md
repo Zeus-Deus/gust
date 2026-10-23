@@ -1279,52 +1279,62 @@ under Quick Look. The extraction *policy* has existed in `gust-ops` since
 early on with eleven tests behind it; what was missing was anything that
 called it.
 
-### Listing is not extracting
+### Complete execution and bounded preview
 
-Reading what is inside an archive must never write anything. Gust lists with
-`bsdtar -tv`, parses the result, and shows it — nothing is unpacked to find
-out what is in there. The listing is bounded like every other untrusted
-read: at most 2000 entries are parsed for display.
+`archive::io::list_preview(path, cancel)` returns `ArchivePreview { entries,
+truncated }`, with at most 2000 display entries. Compatibility `list(path)`
+returns only those entries. Neither result is extraction authority.
+`enumerate(path, policy, cancel)` returns byte-preserving `ArchiveMember`
+headers, reading every member or failing explicitly at a
+policy/resource limit. Extraction itself validates the complete member stream
+and reaches a successful end-of-archive before publication; no member is lost
+because its index exceeded the preview limit.
 
-### Extraction runs the policy, then stages
+Untrusted parsing runs only in `gust-archive-helper`, a separate native helper
+linked to libarchive, under bwrap + prlimit. Missing prerequisites or sandbox
+failure make archives unavailable; there is no unsandboxed fallback. The
+helper sees one held input descriptor mounted read-only, no network/home and
+no writable destination. It emits bounded structured headers and data chunks;
+the parent approves each member and writes only approved bytes. Human-readable
+listings are never filesystem authority. Header count, path/depth, aggregate
+metadata and actual expanded-byte limits are enforced during the stream, with
+a wall deadline and cancellation that kills the helper. Malformed, duplicate,
+ambiguous or incomplete streams fail without publication. Special files,
+privileged modes, traversal and escaping links are refused and reported.
+Regular files stay 0600 while streaming. Before syncing/publication, their
+held descriptor receives the member's nonprivileged rwx bits filtered by the
+process umask (read from procfs without changing the process-global umask;
+private fallback 0077). Executable bits survive for regular files/hardlinks.
 
-Every entry is vetted before a byte is written (`archive::vet_entries`):
+Staging is created exclusively, mode 0700, relative to a held destination
+handle. Its owner retains device/inode; cleanup refuses a replaced staging
+root and never infers ownership from a filename/PID. Publication traverses
+held directory handles with no symlink following and uses atomic no-replace
+rename. Occupied files keep both names. Any I/O failure or cancellation after
+publication starts reports the precise partial receipt, never success with
+missing entries. Receipts retain created paths/identities for recovery.
 
-| Rejected | Why |
-|---|---|
-| `../` or absolute paths | writes outside the destination |
-| FIFOs, devices, sockets | the plan's own fixture produced a FIFO |
-| setuid/setgid modes | a privileged binary from an untrusted archive |
-| links escaping the archive | same as path traversal, one step removed |
-| more than 10k entries or 2 GiB | a zip bomb is a denial of service |
+### Tracked archive workers
 
-What survives is extracted into a staging directory **inside the
-destination**, so committing it is a same-filesystem rename. A failure
-removes the staging directory: a half-extracted tree that looks like success
-is worse than an error.
+`archive::jobs::start(id, ArchiveRequest)` returns an `ArchiveHandle` with
+`snapshot`, `cancel`, `is_finished` and worker-only `wait`. `ArchiveProgress`
+holds `id`, `phase`, `entries_seen`, `files_done`, `bytes_done`, optional
+`bytes_total`, and an optional terminal `Result<ArchiveResult, ArchiveError>`.
+Phases are Planned, Reading, Extracting, Creating, Publishing, Confirmed,
+Cancelled and Failed. A result carries the ordinary journal `record` plus an
+optional extraction receipt. App callers must count admitted archive handles
+as active jobs for tab/window close and cancellation acknowledgement. Existing
+synchronous APIs stay available for worker callers; library support alone is
+not an assertion that frontend bindings are complete.
 
-**Rejections are shown, not silently dropped.** An archive that contained
-something Gust refused says so, names the entry and the reason, and extracts
-the rest. Silently skipping is how somebody later finds a file missing and
-has no idea why.
-
-### Compressing
-
-`tar -c --zstd` over the selection, into the current folder, through the
-same job machinery as a copy — so it is cancellable, it reports progress,
-and Escape stops it. The archive is written to a staging name and renamed
-into place only on success, exactly as a copy is: an interrupted compress
-leaves no half-written `.tar.zst` looking finished.
-
-Names are passed as arguments after `--`, never interpolated into a string,
-so a file called `--checkpoint-action=exec=sh` is a file name and nothing
-else.
-
-### What is deliberately not built
-
-Encrypted archives, multi-part archives, and writing formats other than
-`.tar.zst`. Reading covers whatever the installed bsdtar reads; a format it
-does not know fails with the reason rather than a guess.
+`ArchiveRequest::Extract` carries archive/destination/policy/password;
+`Create` carries directory, byte-preserving names, destination, format and
+password. The format enum reserves TarZstd, Zip and SevenZip; creation is
+unavailable until its separately verified worker implementation lands.
+Passwords are moved into a
+redacted secret type and transported only on helper stdin, never argv, env,
+logs or files. Unsupported encryption modes fail explicitly. Multipart
+archives are outside this contract.
 
 ## 6.16 Bulk rename
 
