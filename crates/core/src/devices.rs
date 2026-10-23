@@ -11,7 +11,13 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+mod evidence;
 mod lsblk;
+pub use evidence::{
+    bind_cleartext_after_unlock, parse_lsblk_evidence_checked, revalidate_device, CleartextBinding,
+    DeviceBinding, DeviceEvidence, DeviceEvidenceOrigin, DeviceEvidenceUnavailable, DeviceNumber,
+    DeviceObservation, DeviceRevalidation, KernelBlockInstance,
+};
 pub use lsblk::{
     parse_lsblk_checked, LsblkParseError, MAX_LSBLK_BYTES, MAX_LSBLK_DEPTH, MAX_LSBLK_ROWS,
 };

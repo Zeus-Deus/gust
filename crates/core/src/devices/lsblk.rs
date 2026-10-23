@@ -1,5 +1,5 @@
 use super::RawBlock;
-use serde::Deserialize;
+use serde::{de::DeserializeOwned, Deserialize};
 
 pub const MAX_LSBLK_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_LSBLK_ROWS: usize = 65_536;
@@ -45,11 +45,13 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for Object<T> {
 }
 
 #[derive(Deserialize)]
-struct Envelope {
-    blockdevices: Vec<Object<Node>>,
+#[serde(bound(deserialize = "M: Deserialize<'de>"))]
+struct Envelope<M> {
+    blockdevices: Vec<Object<Node<M>>>,
 }
 #[derive(Deserialize)]
-struct Node {
+#[serde(bound(deserialize = "M: Deserialize<'de>"))]
+struct Node<M> {
     name: String,
     path: String,
     #[serde(rename = "type")]
@@ -65,16 +67,36 @@ struct Node {
     mountpoint: Option<String>,
     pkname: Option<String>,
     #[serde(default)]
-    children: Vec<Object<Node>>,
+    children: Vec<Object<Node<M>>>,
+    #[serde(flatten)]
+    metadata: M,
+}
+
+#[derive(Deserialize, Default)]
+struct IgnoredMetadata {}
+
+pub(super) struct InventoryRow<M> {
+    pub block: RawBlock,
+    pub parent: Option<usize>,
+    pub metadata: M,
 }
 
 /// Parse the entire inventory or refuse it. Strings are decoded once by serde;
 /// filtering, filesystem admission and device actions remain caller concerns.
 pub fn parse_lsblk_checked(json: &str) -> Result<Vec<RawBlock>, LsblkParseError> {
+    Ok(parse_inventory::<IgnoredMetadata>(json)?
+        .into_iter()
+        .map(|row| row.block)
+        .collect())
+}
+
+pub(super) fn parse_inventory<M: DeserializeOwned>(
+    json: &str,
+) -> Result<Vec<InventoryRow<M>>, LsblkParseError> {
     if json.len() > MAX_LSBLK_BYTES {
         return Err(LsblkParseError::Limit);
     }
-    let Object(envelope): Object<Envelope> = serde_json::from_str(json).map_err(|error| {
+    let Object(envelope): Object<Envelope<M>> = serde_json::from_str(json).map_err(|error| {
         // Serde's recursion guard can fire before the flattened row-depth check.
         // Only its fixed category is exposed, never its input-bearing diagnostic.
         if error.to_string().starts_with("recursion limit exceeded") {
@@ -89,10 +111,10 @@ pub fn parse_lsblk_checked(json: &str) -> Result<Vec<RawBlock>, LsblkParseError>
         .blockdevices
         .into_iter()
         .rev()
-        .map(|Object(node)| (node, 1))
+        .map(|Object(node)| (node, 1, None))
         .collect();
     let mut out = Vec::new();
-    while let Some((node, depth)) = stack.pop() {
+    while let Some((node, depth, parent)) = stack.pop() {
         if out.len() == MAX_LSBLK_ROWS || depth > MAX_LSBLK_DEPTH {
             return Err(LsblkParseError::Limit);
         }
@@ -103,19 +125,23 @@ pub fn parse_lsblk_checked(json: &str) -> Result<Vec<RawBlock>, LsblkParseError>
             node.children
                 .into_iter()
                 .rev()
-                .map(|Object(child)| (child, depth + 1)),
+                .map(|Object(child)| (child, depth + 1, Some(out.len()))),
         );
-        out.push(RawBlock {
-            name: node.name,
-            path: node.path,
-            size: node.size,
-            removable: node.rm,
-            hotplug: node.hotplug,
-            kind: node.kind,
-            fstype: nonempty(node.fstype),
-            label: nonempty(node.label),
-            mount_point: nonempty(node.mountpoint),
-            parent: nonempty(node.pkname),
+        out.push(InventoryRow {
+            parent,
+            metadata: node.metadata,
+            block: RawBlock {
+                name: node.name,
+                path: node.path,
+                size: node.size,
+                removable: node.rm,
+                hotplug: node.hotplug,
+                kind: node.kind,
+                fstype: nonempty(node.fstype),
+                label: nonempty(node.label),
+                mount_point: nonempty(node.mountpoint),
+                parent: nonempty(node.pkname),
+            },
         });
     }
     Ok(out)
