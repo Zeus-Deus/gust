@@ -218,10 +218,9 @@ pub mod qobject {
         fn acknowledge_interrupted(self: &DirModel);
         #[qinvokable]
         fn toggle_hidden(self: Pin<&mut DirModel>);
-        /// QML calls this when a view that shows thumbnails becomes active.
-        /// The view lives in QML; the model does not duplicate that state.
+        /// QML reports whether the current view displays thumbnails.
         #[qinvokable]
-        fn request_thumbnails(self: Pin<&mut DirModel>);
+        fn request_thumbnails(self: Pin<&mut DirModel>, enabled: bool);
         /// Record an EXPLICIT view choice for the current location.
         #[qinvokable]
         fn remember_view(self: Pin<&mut DirModel>, view: &QString);
@@ -736,6 +735,18 @@ pub mod qobject {
         fn cancel_job(self: Pin<&mut DirModel>);
         #[qinvokable]
         fn job_running(self: &DirModel) -> bool;
+        /// Cancel was asked for and the worker has not stopped yet. It may be
+        /// waiting on a slow drive or a remote call that has not returned.
+        #[qinvokable]
+        fn job_stopping(self: &DirModel) -> bool;
+        /// Compress or extract work this tab started that is still running.
+        #[qinvokable]
+        fn archive_running(self: &DirModel) -> bool;
+        /// What this tab is still doing inside a connected place (`kind` is
+        /// "ssh", "tailnet" or "cloud"): "transfer", "stopping", "archive",
+        /// or "" for nothing. In memory only; never touches the place.
+        #[qinvokable]
+        fn work_on_place(self: &DirModel, kind: QString, name: QString) -> QString;
 
         // --- selection ---------------------------------------------------
         /// Toggle the row in the selection (Space, Ctrl+click).
@@ -1007,6 +1018,8 @@ pub struct DirModelRust {
     clipboard_read: crate::clipboard::ReadGate,
     /// The job currently running, if any. Only one at a time in M2.
     job: Option<gust_ops::jobs::JobHandle>,
+    /// Compress and extract work still running on its worker.
+    archive_work: crate::place_work::ArchiveWork,
     /// A copy/move waiting for the user to answer its name clashes.
     pending: Option<PendingTransfer>,
     /// Speed of the running job, sampled on each poll.
@@ -1038,6 +1051,8 @@ pub struct DirModelRust {
     thumbs: std::collections::HashMap<std::ffi::OsString, String>,
     /// Cancels the thumbnail pass when the location changes.
     thumb_cancel: CancelToken,
+    /// Repeated viewport reports must not restart an identical in-flight pass.
+    thumb_work: crate::thumbnails::Work,
     /// name -> total size of that sub-folder, filled in the background.
     dir_sizes: std::collections::HashMap<std::ffi::OsString, gust_core::dirsize::Sized>,
     /// Cancels the folder-size pass when the location changes.
@@ -1289,6 +1304,7 @@ impl DirModelRust {
             job_rate: gust_ops::rate::RateMeter::new(),
             job_clock: None,
             job: None,
+            archive_work: Default::default(),
             load_cancel: CancelToken::new(),
             watch: None,
             device_watches: Vec::new(),
@@ -1305,6 +1321,7 @@ impl DirModelRust {
             live_busy: false,
             thumbs: std::collections::HashMap::new(),
             thumb_cancel: CancelToken::new(),
+            thumb_work: crate::thumbnails::Work::default(),
             dir_sizes: std::collections::HashMap::new(),
             size_cancel: CancelToken::new(),
             drag_payload: Vec::new(),
@@ -1360,6 +1377,8 @@ impl DirModelRust {
     /// every entry, which is O(n²): a 100k directory spent minutes here and
     /// the window never finished loading. Index arithmetic keeps it linear.
     fn recompute_visible(&mut self) {
+        self.thumb_cancel.cancel();
+        self.thumb_work.invalidate();
         self.visible = visible_indices(&self.all, &self.filter.to_string(), self.show_hidden);
     }
 
@@ -1650,6 +1669,9 @@ impl qobject::DirModel {
         self.as_mut().rust_mut().load_cancel.cancel();
         let cancel = CancelToken::new();
         self.as_mut().rust_mut().load_cancel = cancel.clone();
+        self.as_mut().rust_mut().thumb_cancel.cancel();
+        self.as_mut().rust_mut().thumb_work.invalidate();
+        self.as_mut().rust_mut().thumbs.clear();
 
         // Leaving the watched folder ends its watch now, not when the next
         // listing settles: its changes no longer describe what is on screen.
@@ -1735,8 +1757,10 @@ impl qobject::DirModel {
                 if cancel.is_cancelled() {
                     return;
                 }
-                snap.sort = sort;
-                snap.sort_entries();
+                if snap.sort != sort {
+                    snap.sort = sort;
+                    snap.sort_entries();
+                }
 
                 if snap.sort_needs_metadata() {
                     // Size or date order needs every entry's details. Show
@@ -1749,7 +1773,6 @@ impl qobject::DirModel {
                     if cancel.is_cancelled() {
                         return;
                     }
-                    snap.sort_entries();
                     let _ = thread.queue(move |model| {
                         Self::apply_snapshot(model, snap, true);
                     });
@@ -1798,28 +1821,7 @@ impl qobject::DirModel {
         if admin_session() {
             return;
         }
-        if !self.as_ref().thumbs_wanted {
-            return;
-        }
-        if !gust_thumbs::sandbox::sandbox_available() {
-            // Say so once, rather than leaving the user to wonder why every
-            // tile is a glyph. Untrusted image bytes are only ever decoded
-            // inside the sandbox, so without it previews are genuinely
-            // unavailable — never "decode them here instead".
-            //
-            // Only for a folder that actually has something previewable,
-            // so browsing a folder of text files says nothing.
-            let has_previewable = {
-                let r = self.as_ref();
-                r.visible.iter().filter_map(|i| r.all.get(*i)).any(|e| {
-                    e.kind != EntryKind::Dir && gust_core::mime::thumbnail_mime(&e.name).is_some()
-                })
-            };
-            if has_previewable {
-                self.as_mut().set_notice(QString::from(
-                    "Previews need bubblewrap — install bwrap to enable them",
-                ));
-            }
+        if !self.as_ref().thumbs_wanted || !self.as_ref().settled {
             return;
         }
         let key = self.as_ref().key.clone();
@@ -1828,61 +1830,101 @@ impl qobject::DirModel {
             return;
         };
 
-        // Candidates: visible, thumbnailable, not a directory.
+        let (first, count) = self.as_ref().view_rows;
+        let window = gust_core::dirsize::rows_in_view(first, count, self.as_ref().visible.len());
+        let pass = (gen, window.start, window.end);
+        match self.as_mut().rust_mut().thumb_work.request(pass) {
+            crate::thumbnails::Admission::Unchanged => return,
+            crate::thumbnails::Admission::Pending => {
+                self.as_mut().rust_mut().thumb_cancel.cancel();
+                return;
+            }
+            crate::thumbnails::Admission::Start => {}
+        }
+
+        // Only the viewport and its prefetch margin, with on-screen rows
+        // first. A late photo must not wait for the first 400 files.
         let want: Vec<(std::ffi::OsString, &'static str)> = {
             let r = self.as_ref();
-            r.visible
+            let first = (first.max(0) as usize).clamp(window.start, window.end);
+            r.visible[first..window.end]
                 .iter()
+                .chain(r.visible[window.start..first].iter())
                 .filter_map(|i| r.all.get(*i))
                 .filter(|e| e.kind != EntryKind::Dir)
+                .filter(|e| !r.thumbs.contains_key(&e.name))
                 .filter_map(|e| {
                     gust_core::mime::thumbnail_mime(&e.name).map(|m| (e.name.clone(), m))
                 })
                 .collect()
         };
-        let mut want = want;
+        self.as_mut().rust_mut().thumb_cancel.cancel();
         if want.is_empty() {
+            self.as_mut().rust_mut().thumb_work.finish();
             return;
         }
-        // Bounded: a folder with 50k images must not queue 50k renders.
-        want.truncate(400);
 
-        self.as_mut().rust_mut().thumb_cancel.cancel();
         let cancel = CancelToken::new();
         self.as_mut().rust_mut().thumb_cancel = cancel.clone();
 
         let Some(thread) = self.as_ref().qt_thread_handle() else {
+            self.as_mut().rust_mut().thumb_work.finish();
+            self.as_mut().rust_mut().thumb_work.invalidate();
             return;
         };
 
-        std::thread::Builder::new()
+        let spawned = std::thread::Builder::new()
             .name("gust-thumbs".into())
             .spawn(move || {
-                for (name, mime) in want {
-                    if cancel.is_cancelled() {
+                let render = || {
+                    if !gust_thumbs::sandbox::sandbox_available() {
+                        let _ = thread.queue(move |mut model| {
+                            if model.as_ref().generation == gen && !cancel.is_cancelled() {
+                                model.as_mut().set_notice(QString::from(
+                                    "Previews need bubblewrap — install bwrap to enable them",
+                                ));
+                            }
+                        });
                         return;
                     }
-                    let src = dir.join(&name);
-                    let Ok(path) = gust_thumbs::render::thumbnail(
-                        &src,
-                        mime,
-                        gust_thumbs::cache::ThumbSize::Normal,
-                    ) else {
-                        // A file we cannot preview keeps its placeholder.
-                        // Never a fallback that decodes it in this process.
-                        continue;
-                    };
-                    if cancel.is_cancelled() {
-                        return;
+                    for (name, mime) in want {
+                        if cancel.is_cancelled() {
+                            return;
+                        }
+                        let src = dir.join(&name);
+                        let Ok(path) = gust_thumbs::render::thumbnail(
+                            &src,
+                            mime,
+                            gust_thumbs::cache::ThumbSize::Normal,
+                        ) else {
+                            // A file we cannot preview keeps its placeholder.
+                            // Never a fallback that decodes it in this process.
+                            continue;
+                        };
+                        if cancel.is_cancelled() {
+                            return;
+                        }
+                        let shown = path.to_string_lossy().into_owned();
+                        let n = name.clone();
+                        let publish_cancel = cancel.clone();
+                        let _ = thread.queue(move |model| {
+                            if !publish_cancel.is_cancelled() {
+                                Self::publish_thumbnail(model, gen, n, shown);
+                            }
+                        });
                     }
-                    let shown = path.to_string_lossy().into_owned();
-                    let n = name.clone();
-                    let _ = thread.queue(move |model| {
-                        Self::publish_thumbnail(model, gen, n, shown);
-                    });
-                }
-            })
-            .ok();
+                };
+                render();
+                let _ = thread.queue(move |mut model| {
+                    if model.as_mut().rust_mut().thumb_work.finish() {
+                        model.as_mut().start_thumbnails();
+                    }
+                });
+            });
+        if spawned.is_err() {
+            self.as_mut().rust_mut().thumb_work.finish();
+            self.as_mut().rust_mut().thumb_work.invalidate();
+        }
     }
 
     /// A JSON string literal. An alias is arbitrary text from a user's
@@ -3182,10 +3224,12 @@ impl qobject::DirModel {
         };
         let gen = self.as_ref().generation;
         let args = gust_ops::archive::io::compress_args(&dir, &staging, &names);
+        let claim = self.as_ref().archive_work.claim(vec![dir.clone()]);
 
         std::thread::Builder::new()
             .name("gust-compress".into())
             .spawn(move || {
+                let _claim = claim;
                 let out = std::process::Command::new("bsdtar")
                     .args(&args)
                     .stdin(std::process::Stdio::null())
@@ -3250,10 +3294,15 @@ impl qobject::DirModel {
             return QString::default();
         };
         let gen = self.as_ref().generation;
+        let claim = self
+            .as_ref()
+            .archive_work
+            .claim(vec![archive.clone(), dir.clone()]);
 
         std::thread::Builder::new()
             .name("gust-extract".into())
             .spawn(move || {
+                let _claim = claim;
                 let policy = gust_ops::archive::ExtractPolicy::default();
                 let (message, refusals) =
                     match gust_ops::archive::io::extract(&archive, &dir, &policy) {
@@ -4923,15 +4972,15 @@ impl qobject::DirModel {
         QString::default()
     }
 
-    /// QML: a thumbnail-showing view became active.
-    ///
-    /// Safe to call repeatedly — an already-cached folder finishes almost
-    /// instantly, and a pass already running is cancelled and restarted
-    /// rather than duplicated.
-    fn request_thumbnails(mut self: Pin<&mut Self>) {
-        self.as_mut().rust_mut().thumbs_wanted = true;
-        if self.as_ref().settled {
+    /// QML owns whether this view displays thumbnails. A finishing helper
+    /// remains counted after cancellation, so scrolling cannot multiply it.
+    fn request_thumbnails(mut self: Pin<&mut Self>, enabled: bool) {
+        self.as_mut().rust_mut().thumbs_wanted = enabled;
+        if enabled {
             self.as_mut().start_thumbnails();
+        } else {
+            self.as_mut().rust_mut().thumb_cancel.cancel();
+            self.as_mut().rust_mut().thumb_work.stop();
         }
     }
 
@@ -5079,9 +5128,7 @@ impl qobject::DirModel {
     ) {
         let mut snap = list_names(&key, gen, &cancel, |_| {});
         snap.sort = sort;
-        snap.sort_entries();
         fill_metadata(&mut snap, &cancel);
-        snap.sort_entries();
         Self::apply_snapshot(self.as_mut(), snap, true);
     }
 
@@ -5262,8 +5309,10 @@ impl qobject::DirModel {
             .name("gust-live".into())
             .spawn(move || {
                 let mut snap = list_names(&key, gen, &cancel, |_| {});
-                snap.sort = sort;
-                snap.sort_entries();
+                if snap.sort != sort {
+                    snap.sort = sort;
+                    snap.sort_entries();
+                }
                 if !cancel.is_cancelled() {
                     if snap.sort_needs_metadata() {
                         fill_metadata(&mut snap, &cancel);
@@ -5305,6 +5354,11 @@ impl qobject::DirModel {
         if cancel.is_cancelled() || snap.generation != self.as_ref().generation {
             return;
         }
+        // The watch observed a filesystem change. Revalidate cached images
+        // on the worker, including replacements that kept the same name.
+        self.as_mut().rust_mut().thumb_cancel.cancel();
+        self.as_mut().rust_mut().thumb_work.invalidate();
+        self.as_mut().rust_mut().thumbs.clear();
         let snap_complete = snap.complete.clone();
         // A sub-folder whose own timestamp moved had something added,
         // removed or renamed inside it: its cached size is stale. (A file
@@ -5513,6 +5567,7 @@ impl qobject::DirModel {
         // Rows that scrolled into view get their folder sizes now.
         if self.as_ref().settled {
             self.as_mut().start_dir_sizes();
+            self.as_mut().start_thumbnails();
         }
         let n = self.as_ref().visible.len();
         if n == 0 || count <= 0 {
@@ -5857,6 +5912,7 @@ impl qobject::DirModel {
         self.as_mut().refresh_selection_flags();
         self.as_mut().set_count(n);
         self.as_mut().set_status(QString::from(&count_items(n)));
+        self.as_mut().start_thumbnails();
     }
 
     fn set_sort(self: Pin<&mut Self>, field: &QString) {
@@ -5906,6 +5962,7 @@ impl qobject::DirModel {
         }
         self.as_mut().rust_mut().recompute_visible();
         unsafe { self.as_mut().end_reset_model() };
+        self.as_mut().start_thumbnails();
     }
 
     fn set_filter_text(mut self: Pin<&mut Self>, text: &QString) {
@@ -5939,6 +5996,7 @@ impl qobject::DirModel {
             format!("{n} of {} match \"{}\"", self.as_ref().all.len(), t)
         };
         self.as_mut().set_status(QString::from(&status));
+        self.as_mut().start_thumbnails();
     }
 
     fn type_ahead(mut self: Pin<&mut Self>, prefix: &QString) -> i32 {
@@ -7730,6 +7788,44 @@ impl qobject::DirModel {
         self.job.is_some()
     }
 
+    fn job_stopping(&self) -> bool {
+        self.job
+            .as_ref()
+            .is_some_and(|j| j.cancel_requested() && !j.is_finished())
+    }
+
+    fn archive_running(&self) -> bool {
+        self.archive_work.is_running()
+    }
+
+    fn work_on_place(&self, kind: QString, name: QString) -> QString {
+        let name = name.to_string();
+        // Each of these is a path computed from the runtime directory; none
+        // of them looks at the mount itself.
+        let mount = match kind.to_string().as_str() {
+            "ssh" => gust_remote::mount::mount_point_for(&name),
+            "tailnet" => gust_remote::tailscale::mount_point(&name),
+            "cloud" => Self::cloud_mount_point(&name),
+            _ => None,
+        };
+        let Some(mount) = mount else {
+            return QString::default();
+        };
+        if let Some(job) = self.job.as_ref() {
+            if crate::place_work::touches(&crate::place_work::job_paths(job), &mount) {
+                return QString::from(if self.job_stopping() {
+                    "stopping"
+                } else {
+                    "transfer"
+                });
+            }
+        }
+        if self.archive_work.touches(&mount) {
+            return QString::from("archive");
+        }
+        QString::default()
+    }
+
     // --- selection --------------------------------------------------------
 
     /// The entries the user can currently see, in display order.
@@ -7921,9 +8017,15 @@ impl qobject::DirModel {
     }
 
     fn sel_summary(&self) -> QString {
+        // Empty and single selections display no byte total. Avoid walking
+        // a huge folder for the common case on every cursor update.
+        if self.selection.len() <= 1 {
+            return QString::from(&self.selection.summary(0));
+        }
         let chosen: Vec<&Entry> = self
-            .visible_entries()
-            .into_iter()
+            .visible
+            .iter()
+            .filter_map(|&i| self.all.get(i))
             .filter(|e| self.selection.contains(&e.name))
             .collect();
         // A total over rows whose sizes were never read would be a wrong

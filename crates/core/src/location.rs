@@ -237,6 +237,13 @@ mod same_place_tests {
 /// U+202E can otherwise make `evil.txt.exe` render as `evil.exe.txt`).
 /// This changes only the *display* string — never the filesystem bytes.
 pub fn escape_for_display(s: &OsStr) -> String {
+    let bytes = s.as_bytes();
+    // Ordinary ASCII names need neither UTF-8 recovery nor per-character
+    // escaping. Keep the slow path for controls, bidi marks and arbitrary OS
+    // bytes so only display text changes, never a filename's identity.
+    if bytes.iter().all(|b| matches!(b, b' '..=b'~')) {
+        return String::from_utf8_lossy(bytes).into_owned();
+    }
     let lossy = String::from_utf8_lossy(s.as_bytes());
     let mut out = String::with_capacity(lossy.len());
     for c in lossy.chars() {
@@ -492,6 +499,24 @@ mod tests {
     fn display_escapes_newline_in_filename() {
         let name = OsString::from("two\nlines");
         assert_eq!(escape_for_display(&name), "two<U+000A>lines");
+    }
+
+    #[test]
+    fn display_fast_path_preserves_ascii_and_escape_boundaries() {
+        let printable: Vec<u8> = (b' '..=b'~').collect();
+        assert_eq!(
+            escape_for_display(OsStr::from_bytes(&printable)),
+            String::from_utf8(printable).unwrap()
+        );
+        assert_eq!(escape_for_display(OsStr::new("")), "");
+        assert_eq!(
+            escape_for_display(OsStr::from_bytes(b"\x1f \x7e\x7f\xff")),
+            "<U+001F> ~<U+007F>\u{fffd}"
+        );
+        assert_eq!(
+            escape_for_display(OsStr::new("caf\u{e9}\u{80}\u{2067}")),
+            "caf\u{e9}<U+0080><U+2067>"
+        );
     }
 
     #[test]

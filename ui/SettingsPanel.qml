@@ -132,7 +132,7 @@ Item {
             Item { width: 1; height: Tokens.spaceSm }
 
             Repeater {
-                model: root.rows
+                model: root.open ? root.rows : []
                 delegate: Rectangle {
                     id: rowItem
                     required property var modelData

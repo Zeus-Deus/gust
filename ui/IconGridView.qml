@@ -80,12 +80,13 @@ FocusScope {
 
     // Rows on screen, so details are read for what is visible (RowsView).
     function reportRows() {
-        if (!root.model || grid.count === 0) return
+        if (!root.visible || !root.model || grid.count === 0) return
         const first = Math.max(0, Math.floor((grid.contentY - grid.originY) / grid.cellHeight) * root.columns())
         const perScreen = root.columns() * (Math.ceil(grid.height / grid.cellHeight) + 1)
         root.model.want_rows(first, perScreen)
     }
     Timer { id: gridReport; interval: 40; onTriggered: root.reportRows() }
+    onVisibleChanged: if (visible) gridReport.restart()
 
     Rectangle {
         anchors.fill: parent
@@ -105,10 +106,10 @@ FocusScope {
             objectName: "iconGrid"
             anchors.fill: parent
             anchors.margins: Tokens.spaceLg
-            model: root.model
+            model: root.visible ? root.model : null
             clip: true
             focus: true
-            currentIndex: (root.model ? root.model.cursor : 0)
+            currentIndex: model ? root.model.cursor : -1
             highlightMoveDuration: 0
             // Recycle delegates so a huge folder cannot create one
             // QQuickItem per entry (see RowsView).
@@ -119,6 +120,9 @@ FocusScope {
             WheelScroll { view: grid }
             onContentYChanged: gridReport.restart()
             onHeightChanged: gridReport.restart()
+            onWidthChanged: gridReport.restart()
+            onCellWidthChanged: gridReport.restart()
+            onCellHeightChanged: gridReport.restart()
             onCountChanged: gridReport.restart()
             onCurrentIndexChanged: gridReport.restart()
 
@@ -203,7 +207,9 @@ FocusScope {
                             source: thumbUrl
                             visible: status === Image.Ready
                             asynchronous: true
-                            cache: true
+                            // Live replacements reuse this file URL. Reload
+                            // the validated PNG instead of old decoded pixels.
+                            cache: false
                             fillMode: Image.PreserveAspectFit
                             // Bound the decode: a helper is capped at 256px,
                             // but sourceSize makes that explicit and stops a

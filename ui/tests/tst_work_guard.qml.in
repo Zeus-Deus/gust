@@ -1,0 +1,288 @@
+import QtQuick
+import QtTest
+
+// Exact Main.qml close, tab-close and disconnect guards (inserted by
+// crates/app/tests/work_guard_regressions.py) against synthetic models.
+// A model's work is plain properties here; the real DirModel answers the
+// same questions from its job handle and archive claims.
+TestCase {
+    name: "WorkGuard"
+
+    component FakeModel: QtObject {
+        property bool running: false
+        property bool stopping: false
+        property bool archive: false
+        property string place: ""
+        property int cancels: 0
+        function job_running() { return running }
+        function archive_running() { return archive }
+        // Cancel is a REQUEST: the worker keeps running until the test says
+        // its remote call returned.
+        function cancel_job() { cancels += 1; if (running) stopping = true }
+        function work_on_place(kind, name) {
+            if (name !== place) return ""
+            if (running) return stopping ? "stopping" : "transfer"
+            return archive ? "archive" : ""
+        }
+    }
+
+    FakeModel { id: modelA }
+    FakeModel { id: modelB }
+    FakeModel { id: modelC }
+
+    Item {
+        id: win
+        property bool closing: false
+        property bool closeNow: false
+        property int quitCalls: 0
+        property var job: null
+        property string alertText: ""
+        property int activeTab: 0
+        property int activePane: 0
+        property int paneCount: 1
+        property var paneTab: [0, -1]
+        property var tabViews: []
+        property int pendingCloseTab: -1
+        property string pendingCloudOff: ""
+        property int pendingTrashRow: -1
+        property var models: [modelA, modelB, modelC]
+        property var dumps: []
+        function qaDump(tag) { dumps = dumps.concat([tag]) }
+        function focusList() {}
+        function activateTab(i) {}
+        function refreshPaneTabCount() {}
+        function closePane(p) {}
+        function paneTabs(p) {
+            const out = []
+            for (let i = 0; i < tabList.count; i++) if (tabList.get(i).pane === p) out.push(i)
+            return out
+        }
+        function tabModelAt(i) { return tabs.objectAt(i) }
+        function handleClosing(close) {
+@CLOSING_HANDLER@
+        }
+        function confirmAccepted() {
+@CONFIRM_ACCEPTED@
+        }
+        function confirmRejected() {
+@CONFIRM_REJECTED@
+        }
+@FUNCTIONS@
+    }
+
+    ListModel { id: tabList }
+    QtObject {
+        id: tabs
+        function objectAt(i) {
+            return i >= 0 && i < tabList.count ? win.models[tabList.get(i).slot] : null
+        }
+    }
+    QtObject { id: hints; property string message: "" }
+    QtObject {
+        id: connectPanel
+        property bool open: false
+        property string title: ""
+        property string body: ""
+        function showFeedback(t, b, failed) { title = t; body = b; open = true }
+    }
+    QtObject {
+        id: confirm
+        property string purpose: "trash"
+        property string title: ""
+        property string body: ""
+        property string confirmText: ""
+        property bool dangerous: false
+        property int opens: 0
+        function open(t, b, c, danger) { title = t; body = b; confirmText = c; dangerous = danger; opens += 1 }
+    }
+@TIMERS@
+
+    function init() {
+        for (const m of win.models) {
+            m.running = false; m.stopping = false; m.archive = false; m.place = ""; m.cancels = 0
+        }
+        closeAfterCancel.stop(); closeAfterCancel.ticks = 0
+        closeTabAfterCancel.stop(); closeTabAfterCancel.models = []
+        tabList.clear()
+        for (let i = 0; i < 3; i++) tabList.append({slot: i, pane: 0})
+        win.tabViews = ["rows", "rows", "rows"]
+        win.activeTab = 0
+        win.closing = false; win.closeNow = false; win.quitCalls = 0
+        win.alertText = ""; win.dumps = []
+        confirm.purpose = "trash"; confirm.opens = 0
+        connectPanel.open = false
+        hints.message = ""
+    }
+
+    // Nothing may promise what happens to the unfinished item: a remote
+    // place may keep temporary files on purpose, and cleanup can fail.
+    function verifyNoCleanupPromise(text) {
+        verify(!/discard|remov|clean/i.test(text), text)
+    }
+
+    function tickWindow(n) { for (let i = 0; i < n; i++) closeAfterCancel.triggered() }
+    function tickTabs(n) { for (let i = 0; i < n; i++) closeTabAfterCancel.triggered() }
+
+    function test_window_waits_for_an_actual_stop_however_long_it_takes() {
+        modelB.running = true
+        const close = {accepted: true}
+        win.handleClosing(close)
+        compare(close.accepted, false)
+        compare(confirm.purpose, "close")
+        verify(confirm.dangerous)
+        verify(confirm.body.indexOf("asks it to stop") >= 0, confirm.body)
+        verify(confirm.body.indexOf("temporary files") >= 0, confirm.body)
+        verifyNoCleanupPromise(confirm.body)
+        win.confirmAccepted()
+        compare(modelB.cancels, 1)
+        verify(modelB.stopping, "cancel is only a request")
+        // Far past the old three-second fallback: still waiting.
+        tickWindow(200)
+        compare(win.quitCalls, 0, "the window must not quit while the worker is still stopping")
+        verify(hints.message.indexOf("Still stopping") >= 0)
+        modelB.running = false
+        tickWindow(1)
+        compare(win.quitCalls, 1)
+    }
+
+    function test_a_second_close_while_stopping_asks_before_abandoning() {
+        modelA.running = true
+        win.handleClosing({accepted: true})
+        win.confirmAccepted()
+        const again = {accepted: true}
+        win.handleClosing(again)
+        compare(again.accepted, false, "a second close must not skip the wait silently")
+        compare(confirm.purpose, "closewait")
+        verify(confirm.dangerous)
+        verify(confirm.body.indexOf("temporary files") >= 0)
+        verify(confirm.body.indexOf("Check the destination") >= 0)
+        verifyNoCleanupPromise(confirm.body)
+        // A finished move has already removed its originals, and a stuck
+        // process may outlive the window: neither may be promised away.
+        verify(confirm.body.indexOf("source") < 0, confirm.body)
+        verify(confirm.body.indexOf("interrupted") < 0, confirm.body)
+        win.confirmRejected()
+        compare(win.quitCalls, 0)
+        tickWindow(50)
+        compare(win.quitCalls, 0)
+
+        win.handleClosing({accepted: true})
+        compare(confirm.purpose, "closewait")
+        win.confirmAccepted()
+        compare(win.quitCalls, 1, "closing without waiting is the user's explicit choice")
+        verify(win.closeNow)
+        const last = {accepted: true}
+        win.handleClosing(last)
+        compare(last.accepted, true)
+    }
+
+    function test_archive_work_holds_the_window_without_a_fake_cancel() {
+        modelC.archive = true
+        const close = {accepted: true}
+        win.handleClosing(close)
+        compare(close.accepted, false)
+        compare(confirm.title, "Archive work is still running")
+        compare(confirm.confirmText, "Close when finished")
+        win.confirmAccepted()
+        compare(modelC.cancels, 0)
+        tickWindow(100)
+        compare(win.quitCalls, 0)
+        modelC.archive = false
+        tickWindow(1)
+        compare(win.quitCalls, 1)
+    }
+
+    function test_nothing_running_closes_at_once() {
+        const close = {accepted: true}
+        win.handleClosing(close)
+        compare(close.accepted, true)
+        compare(confirm.opens, 0)
+    }
+
+    function test_tab_stays_until_its_transfer_has_stopped() {
+        modelB.running = true
+        win.closeTab(1)
+        compare(confirm.purpose, "closetab")
+        verify(confirm.body.indexOf("asks it to stop") >= 0, confirm.body)
+        verifyNoCleanupPromise(confirm.body)
+        compare(tabList.count, 3)
+        win.confirmAccepted()
+        compare(modelB.cancels, 1)
+        tickTabs(200)
+        compare(tabList.count, 3, "the tab owns the job; removing it early drops a stop in flight")
+
+        // Asking again neither re-asks nor skips the wait.
+        const opens = confirm.opens
+        win.closeTab(1)
+        compare(confirm.opens, opens)
+        compare(tabList.count, 3)
+        verify(hints.message.indexOf("Still stopping") >= 0)
+
+        // Another tab closing meanwhile shifts indexes; the right tab goes.
+        win.closeTab(0)
+        compare(tabList.count, 2)
+        compare(win.tabModelAt(0), modelB)
+
+        modelB.running = false
+        tickTabs(1)
+        compare(tabList.count, 1)
+        compare(win.tabModelAt(0), modelC)
+        verify(!closeTabAfterCancel.running)
+    }
+
+    function test_tab_with_archive_work_waits_without_a_fake_cancel() {
+        modelC.archive = true
+        win.closeTab(2)
+        compare(confirm.purpose, "closetab")
+        compare(confirm.confirmText, "Close when finished")
+        verify(!confirm.dangerous)
+        win.confirmAccepted()
+        compare(modelC.cancels, 0, "archive work has no cancel to call")
+        tickTabs(100)
+        compare(tabList.count, 3)
+        // The worker unwinds (finished, failed or panicked: its claim drops).
+        modelC.archive = false
+        tickTabs(1)
+        compare(tabList.count, 2)
+        verify(!closeTabAfterCancel.running)
+    }
+
+    function test_a_transfer_still_planning_holds_close_like_a_running_one() {
+        // Planning is part of the job: DirModel reports job_running from
+        // admission, before the first byte moves.
+        modelA.running = true
+        modelA.place = "nas"
+        const close = {accepted: true}
+        win.handleClosing(close)
+        compare(close.accepted, false)
+        compare(confirm.purpose, "close")
+        verify(win.placeWorkBlocker("ssh", "nas").indexOf("still running") >= 0)
+        win.confirmRejected()
+        compare(modelA.cancels, 0, "Cancel in the dialog keeps the transfer")
+        compare(win.quitCalls, 0)
+    }
+
+    function test_disconnect_is_refused_while_work_uses_the_place() {
+        modelC.running = true
+        modelC.place = "nas"
+        verify(win.placeWorkBlocker("ssh", "nas").indexOf("still running") >= 0)
+        compare(win.placeWorkBlocker("ssh", "other"), "")
+
+        modelC.cancel_job()
+        modelA.archive = true
+        modelA.place = "nas"
+        const why = win.placeWorkBlocker("ssh", "nas")
+        verify(why.indexOf("still stopping") >= 0, "a stop in flight is not a stopped transfer: " + why)
+
+        connectPanel.open = true
+        verify(win.refuseBusyDisconnect("ssh", "nas"))
+        compare(win.alertText, why)
+        compare(connectPanel.body, why)
+
+        modelC.running = false
+        verify(win.placeWorkBlocker("ssh", "nas").indexOf("Archive work") === 0)
+        modelA.archive = false
+        compare(win.placeWorkBlocker("ssh", "nas"), "")
+        verify(!win.refuseBusyDisconnect("ssh", "nas"))
+    }
+}

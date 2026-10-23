@@ -69,19 +69,23 @@ Window {
     // Snapshot of the running job, or null. Read by the drawer and QA.
     property var job: null
 
-    // Set once the user has agreed to abandon a transfer, so the second
-    // close attempt is not questioned again.
+    // Set once the user has agreed to stop the transfers and close. The
+    // window then waits for them to actually stop; "stop requested" is not
+    // "stopped" while a slow drive or remote call has not returned.
     property bool closing: false
+    // Set only when the user chose to close without waiting for that stop.
+    property bool closeNow: false
 
     // A window close must not silently abandon pending transfers (plan §2).
     //
-    // This handler covers a close the toolkit tells us about. It is NOT
-    // sufficient on its own: Hyprland's `closewindow` was verified not to
-    // reach onClosing on Qt 6.11/Wayland — a bare Qt Quick window behaves
-    // the same, so it is a platform gap, not Gust's. The durable protection
-    // is that a copy stages under a private name and is renamed atomically,
-    // and that a listing sweeps staging files left by dead processes, so a
-    // killed transfer can never publish a partial file or leave debris.
+    // This handler covers a close the toolkit tells us about. A graceful
+    // compositor close (an xdg_toplevel close, e.g. Hyprland 0.56's
+    // `hl.dsp.window.close` on Qt 6.12) does reach it; an older pairing
+    // (Qt 6.11) was seen not to. A forced kill never does. So it is not
+    // the only protection: a copy stages under a private name and is
+    // renamed atomically, so a killed transfer never publishes a partial
+    // file. Its temporary files can remain, and a remote place may keep
+    // them on purpose.
     /// Every tab whose transfer is still running — not just the one on
     /// screen. A copy started in another tab is just as much the user's.
     function runningJobModels() {
@@ -93,29 +97,74 @@ Window {
         return out
     }
 
+    /// Every tab still holding files open: a transfer (running or still
+    /// stopping) or archive work. Archive work cannot be stopped part-way.
+    function busyModels() {
+        const out = []
+        for (let i = 0; i < tabList.count; i++) {
+            const m = tabs.objectAt(i)
+            if (m && (m.job_running() || m.archive_running())) out.push(m)
+        }
+        return out
+    }
+
     onClosing: (close) => {
-        if (win.closing)
+        if (win.closeNow)
             return
-        const running = win.runningJobModels()
-        if (running.length === 0)
+        const busy = win.busyModels()
+        if (busy.length === 0)
             return
         close.accepted = false
+        if (win.closing) {
+            // Stop was already asked for and something has not finished:
+            // usually a remote call that has not come back yet. Closing
+            // anyway is the user's call, so ask rather than wait silently
+            // or quit behind their back.
+            confirm.purpose = "closewait"
+            confirm.open(qsTr("Still stopping"),
+                qsTr("Gust is waiting for the drive or connection to answer before the stop is complete. "
+                     + "The window closes by itself once it has stopped; Cancel keeps waiting.\n\n"
+                     + "If you close now, items already finished stay as they are. The one in progress is not finished, "
+                     + "and temporary files from it may stay at the destination. "
+                     + "Compressing or extracting may be left incomplete. Check the destination before running it again."),
+                qsTr("Close without waiting"),
+                true)
+            win.qaDump("close-still-stopping")
+            return
+        }
+        const running = busy.filter(m => m.job_running())
         confirm.purpose = "close"
+        if (running.length === 0) {
+            confirm.open(qsTr("Archive work is still running"),
+                qsTr("Gust cannot stop compressing or extracting part-way. "
+                     + "The window closes once it has finished."),
+                qsTr("Close when finished"),
+                false)
+            win.qaDump("close-blocked")
+            return
+        }
         const detail = running.length > 1
             ? qsTr("%1 transfers are running in different tabs. ").arg(running.length)
             : (win.job && win.job.message && running[0] === dirModel) ? win.job.message + ". "
             : qsTr("A transfer is running in another tab. ")
+        const archive = busy.length > running.length
+            ? qsTr(" Archive work cannot be stopped part-way; the window also waits for it.") : ""
         confirm.open(
             running.length > 1 ? qsTr("Transfers are still running") : qsTr("A transfer is still running"),
-            detail + qsTr("Closing now stops it. Files already copied are kept; "
-                          + "the one in progress is discarded."),
+            detail + qsTr("Closing asks it to stop. Items already finished stay as they are; the one in progress "
+                          + "is not finished, and temporary files from it may remain. "
+                          + "The window closes once the transfer has stopped.")
+                   + archive,
             qsTr("Stop and close"),
             true)
         win.qaDump("close-blocked")
     }
 
-    // Give the worker a moment to notice the cancel and remove its staging
-    // file before the process exits, so a close leaves no debris.
+    // Close only once every worker has actually stopped. A
+    // stop can wait on a remote call for as long as the connection takes to
+    // answer, so there is no deadline here: quitting at one would drop the
+    // work while it still holds files open. The user can still choose to
+    // close without waiting (onClosing above).
     Timer {
         id: closeAfterCancel
         interval: 150
@@ -123,10 +172,14 @@ Window {
         property int ticks: 0
         onTriggered: {
             ticks += 1
-            if (win.runningJobModels().length === 0 || ticks > 20) {
+            if (win.busyModels().length === 0) {
                 stop()
+                win.closeNow = true
                 Qt.quit()
+                return
             }
+            if (ticks === 8)
+                hints.message = qsTr("Still stopping — the window closes by itself once everything has stopped")
         }
     }
 
@@ -735,7 +788,7 @@ Window {
         if (connectPanel.completeFeedback(op, name, message)) {
             win.connectionOwner = null
             if (op === "setup-install") {
-                connectPanel.feedbackTitle = message === "" ? qsTr("Support is ready") : qsTr("Setup did not finish")
+                connectPanel.feedbackTitle = message === "" ? qsTr("Connection support is installed") : qsTr("Setup did not finish")
                 if (message === "") connectPanel.feedbackBody = name === "apple"
                     ? qsTr("Reconnect your device, unlock it and tap Trust if asked. Then choose it under Devices. Nothing was opened automatically.")
                     : qsTr("Choose your computer, cloud storage or device again to connect. Nothing was connected automatically.")
@@ -807,10 +860,45 @@ Window {
         if (error !== "") { win.alertText = error; win.finishPlaceFeedback("tailnet-connect", t.name, error, t.model) }
     }
     property string pendingTailnetUser: ""
+    /// Why `name` cannot be disconnected yet, or "" when nothing in any tab
+    /// is still using it. A transfer that was asked to stop still holds the
+    /// place until its worker has stopped: unmounting under a remote call
+    /// that has not returned turns a clean stop into a failure.
+    function placeWorkBlocker(kind, name) {
+        // A stopping transfer is named first: it is the one the user may
+        // already be waiting on.
+        const rank = ["", "archive", "transfer", "stopping"]
+        let found = ""
+        for (let i = 0; i < tabList.count; i++) {
+            const m = tabs.objectAt(i)
+            const w = m ? m.work_on_place(kind, name) : ""
+            if (rank.indexOf(w) > rank.indexOf(found)) found = w
+        }
+        if (found === "stopping")
+            return qsTr("A transfer using %1 is still stopping: it is waiting for %1 to answer. "
+                        + "Disconnect once it has stopped.").arg(name)
+        if (found === "transfer")
+            return qsTr("A transfer using %1 is still running. Let it finish or cancel it, then disconnect.").arg(name)
+        if (found === "archive")
+            return qsTr("Archive work using %1 is still running. Disconnect once it has finished.").arg(name)
+        return ""
+    }
+    /// Refuse a disconnect while work still uses the place, saying so where
+    /// the user asked for it.
+    function refuseBusyDisconnect(kind, name) {
+        const why = win.placeWorkBlocker(kind, name)
+        if (why === "") return false
+        if (connectPanel.open)
+            connectPanel.showFeedback(qsTr("Not disconnected yet"), why, false)
+        win.alertText = why
+        win.qaDump("disconnect-refused-busy")
+        return true
+    }
     function disconnectPlace(kind, name) {
         if (kind === "ssh") win.runAction("remote-off:" + name)
         else if (kind === "cloud") win.runAction("cloud-off:" + name)
         else {
+            if (win.refuseBusyDisconnect("tailnet", name)) return
             const e = dirModel.tailnet_disconnect(name)
             if (e !== "") win.alertText = e
         }
@@ -1123,15 +1211,29 @@ Window {
             return
         }
         const m = tabModelAt(i)
-        if (m && m.job_running()) {
-            // A running job belongs to the tab that started it. Closing it
-            // asks first, exactly as closing the window does.
+        if (m && closeTabAfterCancel.models.indexOf(m) >= 0) {
+            // Already asked and confirmed: the tab is waiting for its work to
+            // stop, and a second request must not ask again or skip the wait.
+            hints.message = qsTr("Still stopping — this tab closes once its work has stopped")
+            win.qaDump("tab-close-waiting")
+            return
+        }
+        if (m && (m.job_running() || m.archive_running())) {
+            // Work belongs to the tab that started it. Closing it asks
+            // first, exactly as closing the window does.
             win.pendingCloseTab = i
             confirm.purpose = "closetab"
-            confirm.open(qsTr("A transfer is still running"),
-                         qsTr("Closing this tab stops it. Files already copied "
-                              + "are kept; the one in progress is discarded."),
-                         qsTr("Stop and close"), true)
+            if (m.job_running())
+                confirm.open(qsTr("A transfer is still running"),
+                             qsTr("Closing this tab asks it to stop. Items already finished stay as they are; "
+                                  + "the one in progress is not finished, and temporary files from it may remain. "
+                                  + "The tab closes once the transfer has stopped."),
+                             qsTr("Stop and close"), true)
+            else
+                confirm.open(qsTr("Archive work is still running"),
+                             qsTr("Gust cannot stop compressing or extracting part-way. "
+                                  + "The tab closes once it has finished."),
+                             qsTr("Close when finished"), false)
             win.qaDump("tab-close-blocked")
             return
         }
@@ -1220,8 +1322,7 @@ Window {
         sessionSaveTimer.restart()
         // Only Grid shows thumbnails. Asking for them anywhere else would
         // spend a sandbox launch per file for something nobody can see.
-        if (m === "grid")
-            dirModel.request_thumbnails()
+        dirModel.request_thumbnails(m === "grid")
         focusList()
         qaDump("view")
     }
@@ -1239,8 +1340,7 @@ Window {
             // switcher says one view while the pane shows another.
             if (win.activeTab >= 0) win.tabViews[win.activeTab] = want
             win.refreshPanes()
-            if (want === "grid")
-                dirModel.request_thumbnails()
+            dirModel.request_thumbnails(want === "grid")
             qaDump("view")
         }
     }
@@ -1699,6 +1799,7 @@ Window {
         }
         else if (a.startsWith("cloud-off:")) {
             const cname2 = a.substring(10)
+            if (win.refuseBusyDisconnect("cloud", cname2)) return
             // Never force on the first try: unfinished uploads must be
             // reported, not silently discarded (DESIGN §6.8).
             // The answer ("ASK:" or a failure) arrives in placeDone.
@@ -1724,6 +1825,7 @@ Window {
         }
         else if (a.startsWith("remote-off:")) {
             const alias2 = a.substring(11)
+            if (win.refuseBusyDisconnect("ssh", alias2)) return
             const err2 = dirModel.remote_disconnect(alias2)
             if (err2 !== "") win.alertText = err2
         }
@@ -3477,6 +3579,8 @@ Window {
                 const cn = win.pendingCloudOff
                 win.pendingCloudOff = ""
                 if (cn === "") return
+                // A transfer may have started while the question was open.
+                if (win.refuseBusyDisconnect("cloud", cn)) return
                 const e = dirModel.cloud_disconnect(cn, true)
                 if (e !== "") win.alertText = e
                 return
@@ -3486,23 +3590,33 @@ Window {
                 win.pendingCloseTab = -1
                 if (i < 0) return
                 const m = win.tabModelAt(i)
-                if (m) m.cancel_job()
-                // Give the worker a moment to notice, then close the tab —
-                // the same courtesy the window close already extends.
-                closeTabAfterCancel.target = i
-                closeTabAfterCancel.ticks = 0
-                closeTabAfterCancel.start()
+                if (!m) return
+                // Archive work has no cancel; it is only waited for.
+                if (m.job_running()) m.cancel_job()
+                // The tab stays, showing "Stopping", until its worker has
+                // actually stopped — the same wait the window close makes.
+                closeTabAfterCancel.wait(m)
                 win.qaDump("tab-close-confirmed")
                 return
             }
             if (confirm.purpose === "close") {
                 // The user chose to abandon the transfers. Cancel every one
-                // so each worker stops and removes its staging file, then
-                // close once they have actually stopped.
+                // and close once each worker has actually stopped; whatever
+                // cleanup it manages is its own business, not promised here.
                 win.runningJobModels().forEach(m => m.cancel_job())
                 win.closing = true
                 win.qaDump("close-confirmed")
                 closeAfterCancel.start()
+                return
+            }
+            if (confirm.purpose === "closewait") {
+                // The user chose not to wait for a stop that has not
+                // finished. Their decision, made with the consequence shown.
+                confirm.purpose = "trash"
+                closeAfterCancel.stop()
+                win.closeNow = true
+                win.qaDump("close-without-waiting")
+                Qt.quit()
                 return
             }
             if (win.pendingTrashRow < 0) return
@@ -3559,6 +3673,13 @@ Window {
                 confirm.purpose = "trash"
                 hints.message = qsTr("Transfer continues")
                 win.qaDump("close-cancelled")
+                win.focusList()
+                return
+            }
+            if (confirm.purpose === "closewait") {
+                confirm.purpose = "trash"
+                hints.message = qsTr("Still stopping — the window closes by itself once everything has stopped")
+                win.qaDump("close-keep-waiting")
                 win.focusList()
                 return
             }
@@ -3834,29 +3955,30 @@ Window {
         qaWriter.write(qaStatePath, JSON.stringify(payload, null, 2))
     }
 
-    // A cancelled job needs a moment to stop and clean up its staging file
-    // before its tab disappears, or the debris outlives the tab that made it.
+    // A cancelled job must stop and clean up its staging file before its
+    // tab disappears: the tab's model owns the job, so removing it early
+    // would drop the work while a slow drive or remote call still holds
+    // files open. No deadline — the stop takes as long as the call does.
+    // Tracked by model, not index, because tabs can open and close while
+    // this waits.
     Timer {
         id: closeTabAfterCancel
         interval: 150
         repeat: true
-        property int ticks: 0
-        property int target: -1
+        property var models: []
+        function wait(m) {
+            if (models.indexOf(m) < 0) models = models.concat([m])
+            start()
+        }
         onTriggered: {
-            ticks += 1
-            const m = win.tabModelAt(target)
-            if (!m || !m.job_running() || ticks > 20) {
-                stop()
-                if (target >= 0 && tabList.count > 1) {
-                    tabList.remove(target)
-                    win.tabViews.splice(target, 1)
-                    if (win.activeTab >= tabList.count)
-                        win.activeTab = tabList.count - 1
-                    win.activateTab(win.activeTab)
+            const done = models.filter(m => !m.job_running() && !m.archive_running())
+            models = models.filter(m => done.indexOf(m) < 0)
+            if (models.length === 0) stop()
+            // Off the waiting list first, so closeTab removes it for real.
+            for (const m of done) {
+                for (let i = 0; i < tabList.count; i++) {
+                    if (win.tabModelAt(i) === m) { win.closeTab(i); break }
                 }
-                target = -1
-                win.refreshPaneTabCount()
-        win.qaDump("tab-close")
             }
         }
     }

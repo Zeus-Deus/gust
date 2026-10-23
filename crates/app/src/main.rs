@@ -5,7 +5,9 @@ mod cli;
 mod clipboard;
 mod fm1;
 mod folder_sizes;
+mod place_work;
 mod portal;
+mod thumbnails;
 
 use cxx_qt_lib::{QGuiApplication, QQmlApplicationEngine, QString, QUrl};
 use std::ffi::{OsStr, OsString};

@@ -162,21 +162,37 @@ pub(crate) fn publish_noreplace(
     })
 }
 
-/// Build a staging name that cannot collide with a user file.
+/// Give each operation its own stage; O_EXCL still refuses any old occupant.
 fn staging_name(final_name: &OsStr) -> OsString {
-    let mut s = OsString::from(".gust-staging-");
-    s.push(format!("{}-", std::process::id()));
-    s.push(final_name);
-    s
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    loop {
+        let sequence = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        #[cfg(test)]
+        let sequence = publication_tests::NEXT_STAGE_SEQUENCE
+            .with(|v| v.take())
+            .unwrap_or(sequence);
+        let candidate = OsString::from(format!(".gust-staging-{}-{sequence}", std::process::id()));
+        if candidate != final_name {
+            return candidate;
+        }
+    }
 }
 
 /// Remove a staging file after a failure and drop its claim — but only if
 /// the file is really gone. On a remote whose connection just died the
 /// unlink fails too; releasing the claim then would leave bytes on the
 /// server that no later sweep could prove were ours. Keeping it lets the
-/// next visit, with the server back, clean up.
+/// next visit retain the evidence if remote ownership remains uncertain.
 fn discard_staged(dst_dir: &DirHandle, stage: &OsStr, claim: &Option<PathBuf>, written: u64) {
-    let gone = match rustix::fs::unlinkat(dst_dir.as_fd(), stage, rustix::fs::AtFlags::empty()) {
+    #[cfg(test)]
+    let injected = publication_tests::DISCARD_ERROR.with(|v| v.take());
+    #[cfg(not(test))]
+    let injected: Option<rustix::io::Errno> = None;
+    let result = match injected {
+        Some(e) => Err(e),
+        None => rustix::fs::unlinkat(dst_dir.as_fd(), stage, rustix::fs::AtFlags::empty()),
+    };
+    let gone = match result {
         Ok(()) => true,
         Err(rustix::io::Errno::NOENT) => true,
         Err(_) => false,
@@ -193,7 +209,7 @@ fn discard_staged(dst_dir: &DirHandle, stage: &OsStr, claim: &Option<PathBuf>, w
 /// Copy one regular file into `dst_dir` under `dst_name`.
 ///
 /// Staged under a private name with restrictive permissions from creation,
-/// then atomically renamed into place. A partial copy never appears at the
+/// then atomically published. A partial copy never appears at the
 /// destination name.
 pub fn copy_regular_file(
     src_dir: &DirHandle,
@@ -245,7 +261,82 @@ pub(crate) struct Staged {
     stage: OsString,
     staged_abs: PathBuf,
     claim: Option<PathBuf>,
+    publication: RegularPublication,
+    cancel: CancelToken,
+    identity: FileIdentity,
     pub(crate) written: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum RegularPublication {
+    Rename,
+    Link,
+}
+
+/// SSHFS does not implement directory fsync: client success cannot prove
+/// durability of the newly linked name before a move deletes its source.
+pub(crate) fn require_move_durability(dst_dir: &DirHandle) -> OpResult<()> {
+    let fstype = dst_dir.fstype();
+    require_move_durability_on(fstype.as_deref())
+}
+
+pub(crate) fn require_move_durability_on(fstype: Option<&str>) -> OpResult<()> {
+    if matches!(fstype, None | Some("" | "fuse.sshfs")) {
+        return Err(OpError::Refused(
+            "This place cannot confirm the safety needed to remove the original. Try Copy instead; the original was kept.".into(),
+        ));
+    }
+    Ok(())
+}
+
+impl RegularPublication {
+    fn for_directory(dir: &DirHandle) -> Self {
+        #[cfg(test)]
+        if publication_tests::USE_LINK.with(|v| v.get()) {
+            return Self::Link;
+        }
+        match dir.fstype().as_deref() {
+            Some("fuse.sshfs") => Self::Link,
+            _ => Self::Rename,
+        }
+    }
+
+    /// Test the real operation on an empty private alias, before payload I/O.
+    /// This is per upload, not a capability cache or a probe of the final name.
+    fn prepare(self, dir: &DirHandle, stage: &OsStr, final_name: &OsStr) -> OpResult<()> {
+        if matches!(self, Self::Rename) {
+            return Ok(());
+        }
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let alias = loop {
+            let sequence = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            #[cfg(test)]
+            let sequence = publication_tests::NEXT_PROBE_SEQUENCE
+                .with(|v| v.take())
+                .unwrap_or(sequence);
+            let candidate = OsString::from(format!(
+                ".gust-staging-{}-probe-{sequence}",
+                std::process::id()
+            ));
+            if candidate != final_name {
+                break candidate;
+            }
+        };
+        let path = dir.path().join(&alias);
+        let claim = crate::staging::claim(&path).map_err(OpError::Recovery)?;
+        // An ambiguous link reply might already have created the alias. Keep
+        // its unconfirmed claim; neither a sweep nor this attempt may guess.
+        crate::anchor::link_noreplace(dir, stage, &alias).map_err(|_| {
+            OpError::Io(io::Error::other(
+                "This place could not confirm it can safely add this file before transfer. No file contents were copied. Reconnect or choose a different destination."))
+        })?;
+        if let Err(e) = crate::staging::confirm_at(&claim, &path, dir, &alias) {
+            return Err(OpError::Recovery(e));
+        }
+        rustix::fs::unlinkat(dir.as_fd(), &alias, rustix::fs::AtFlags::empty())?;
+        crate::staging::release(&claim);
+        Ok(())
+    }
 }
 
 impl Staged {
@@ -254,6 +345,43 @@ impl Staged {
     pub(crate) fn commit(self, dst_dir: &DirHandle, dst_name: &OsStr) -> OpResult<u64> {
         #[cfg(test)]
         publication_tests::before_publication();
+        let current = dst_dir.stat_child(&self.stage)?;
+        if classify(&current) != FileClass::Regular
+            || !self.identity.matches(&FileIdentity::from_stat(&current))
+        {
+            // Do not unlink an object that replaced our stage. Its claim
+            // remains as evidence, never authority over this replacement.
+            return Err(OpError::Refused(
+                "staged file changed before publication; source and recovery claim kept".into(),
+            ));
+        }
+        if self.cancel.checkpoint() {
+            self.discard(dst_dir);
+            return Err(OpError::Cancelled);
+        }
+        if matches!(self.publication, RegularPublication::Link) {
+            if let Err(e) = crate::anchor::link_noreplace(dst_dir, &self.stage, dst_name) {
+                // SFTP v3 may map occupied names to a generic failure. A
+                // failed reply never proves that publication did not happen.
+                // Retain the stage/claim and source; do not retry the request.
+                if let Some(c) = &self.claim {
+                    crate::staging::mark_unremoved(c, self.written);
+                }
+                return Err(if e.kind() == io::ErrorKind::AlreadyExists {
+                    OpError::Conflict(PathBuf::from(dst_name))
+                } else {
+                    OpError::Io(io::Error::other(
+                        "The copy was not confirmed. A complete file may already be there. The original and recovery record were kept. Check the destination before trying again."))
+                });
+            }
+            #[cfg(test)]
+            publication_tests::after_link();
+            // link(2) success is the publication receipt. Alias cleanup is
+            // independent: failing it must not erase success or lose a claim.
+            let written = self.written;
+            self.discard(dst_dir);
+            return Ok(written);
+        }
         if let Err(e) = publish_noreplace(dst_dir, &self.stage, dst_dir, dst_name) {
             // Even the final rename can fail (a full directory, a vanished
             // parent). The staging file is ours; do not abandon it.
@@ -269,7 +397,17 @@ impl Staged {
 
     /// Remove the staged file (a batch that will not be committed).
     pub(crate) fn discard(self, dst_dir: &DirHandle) {
-        discard_staged(dst_dir, &self.stage, &self.claim, self.written);
+        let current = dst_dir
+            .stat_child(&self.stage)
+            .map(|s| FileIdentity::from_stat(&s));
+        if matches!(current, Ok(current) if self.identity.matches(&current) && self.identity.mode == current.mode)
+        {
+            discard_staged(dst_dir, &self.stage, &self.claim, self.written);
+        } else if let Some(c) = &self.claim {
+            // A replaced or unreachable alias is not ours to unlink. Keep
+            // its evidence, including after confirmed final publication.
+            crate::staging::mark_unremoved(c, self.written);
+        }
     }
 }
 
@@ -294,6 +432,9 @@ pub(crate) fn stage_regular_file(
     on_bytes: &mut dyn FnMut(u64),
     durable: bool,
 ) -> OpResult<Option<Staged>> {
+    if cancel.checkpoint() {
+        return Err(OpError::Cancelled);
+    }
     let st = src_dir.stat_child(src_name)?;
     match classify(&st) {
         FileClass::Regular => {}
@@ -328,11 +469,22 @@ pub(crate) fn stage_regular_file(
         OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         Mode::empty(),
     )?;
+    let source_identity = FileIdentity::from_stat(&st);
+    let st = rustix::fs::fstat(&src)?;
+    if classify(&st) != FileClass::Regular
+        || !source_identity.matches(&FileIdentity::from_stat(&st))
+    {
+        return Err(OpError::Refused(
+            "source changed before copying; nothing was published".into(),
+        ));
+    }
+    let expected_len = u64::try_from(st.st_size)
+        .map_err(|_| OpError::Refused("source reported an invalid file size".into()))?;
 
     let stage = staging_name(dst_name);
     // Record ownership BEFORE the file exists. A staging file with no claim is
     // never reclaimed by the sweep, so the claim must be durable first.
-    let staged_abs = PathBuf::from(dst_dir.display()).join(&stage);
+    let staged_abs = dst_dir.path().join(&stage);
     // Registered as in flight BEFORE the claim exists and for exactly as
     // long as the file is held (until `Staged` is committed or discarded),
     // so no sweep — not even one in this process — can take a copy that is
@@ -369,11 +521,18 @@ pub(crate) fn stage_regular_file(
     if let Some(c) = &claim {
         // Bind the claim to the object actually created (device + inode), so
         // reclaiming can prove it is the same file and not a replacement.
-        if let Err(e) = crate::staging::confirm(c, &staged_abs) {
+        if let Err(e) = crate::staging::confirm_file(c, &staged_abs, &dst) {
             drop(dst);
             discard_staged(dst_dir, &stage, &claim, 0);
             return Err(OpError::Recovery(e));
         }
+    }
+
+    let publication = RegularPublication::for_directory(dst_dir);
+    if let Err(e) = publication.prepare(dst_dir, &stage, dst_name) {
+        drop(dst);
+        discard_staged(dst_dir, &stage, &claim, 0);
+        return Err(e);
     }
 
     let mut written = 0u64;
@@ -388,13 +547,33 @@ pub(crate) fn stage_regular_file(
             if cancel.checkpoint() {
                 return Err(OpError::Cancelled);
             }
-            let n = rustix::io::read(&src, &mut buf)?;
+            // A disconnected FUSE source can report EOF without changing
+            // its stat identity. Exercise that exact case without mutating
+            // the source in the regression tests.
+            #[cfg(test)]
+            let early_eof = tests::EARLY_EOF_AFTER
+                .with(|limit| limit.get().is_some_and(|after| written >= after));
+            #[cfg(not(test))]
+            let early_eof = false;
+            let n = if early_eof {
+                0
+            } else {
+                rustix::io::read(&src, &mut buf)?
+            };
             if n == 0 {
                 break;
             }
             let mut off = 0;
             while off < n {
-                let w = rustix::io::write(&dst, &buf[off..n])?;
+                if cancel.checkpoint() {
+                    return Err(OpError::Cancelled);
+                }
+                #[cfg(test)]
+                let end =
+                    n.min(off.saturating_add(publication_tests::WRITE_LIMIT.with(|v| v.get())));
+                #[cfg(not(test))]
+                let end = n;
+                let w = rustix::io::write(&dst, &buf[off..end])?;
                 if w == 0 {
                     return Err(OpError::Io(io::Error::new(
                         io::ErrorKind::WriteZero,
@@ -403,6 +582,8 @@ pub(crate) fn stage_regular_file(
                 }
                 off += w;
                 written += w as u64;
+                #[cfg(test)]
+                publication_tests::after_write();
             }
             if written - reported >= REPORT_EVERY {
                 reported = written;
@@ -410,33 +591,59 @@ pub(crate) fn stage_regular_file(
             }
         }
 
+        if written != expected_len {
+            return Err(OpError::Refused(format!(
+                "The source changed or stopped responding: expected {expected_len} bytes but received {written}. Nothing was published and the source was not removed. Reconnect if needed and try again."
+            )));
+        }
+        if !source_identity.matches(&FileIdentity::from_stat(&rustix::fs::fstat(&src)?)) {
+            return Err(OpError::Refused(
+                "source changed during copying; nothing was published and the source was not removed"
+                    .into(),
+            ));
+        }
+
         // Preserve mode (minus setuid/setgid — never applied blindly).
+        if cancel.checkpoint() {
+            return Err(OpError::Cancelled);
+        }
         let safe_mode = st.st_mode & 0o7777 & !0o6000;
         rustix::fs::fchmod(&dst, Mode::from_bits_truncate(safe_mode))?;
         // Colour tags travel with the copy (DESIGN §6.25), onto the staged
         // file, so they are there the moment it has its name.
+        if cancel.checkpoint() {
+            return Err(OpError::Cancelled);
+        }
         crate::tags::carry(&src, &dst);
         // Durability before the destination name exists. fsync can itself
         // fail on a full filesystem, which is exactly when the staging file
         // must not be left behind. A batch defers this to one syncfs.
         if durable {
+            if cancel.checkpoint() {
+                return Err(OpError::Cancelled);
+            }
             rustix::fs::fsync(&dst)?;
         }
         Ok(())
     })();
 
+    let identity = rustix::fs::fstat(&dst).map(|s| FileIdentity::from_stat(&s));
     drop(dst);
 
     if let Err(e) = copy_result {
         discard_staged(dst_dir, &stage, &claim, written);
         return Err(e);
     }
+    let identity = identity?;
     // From here `Staged` owns the in-flight mark.
     active.0 = None;
     Ok(Some(Staged {
         stage,
         staged_abs,
         claim,
+        publication,
+        cancel: cancel.clone(),
+        identity,
         written,
     }))
 }
@@ -480,7 +687,7 @@ pub(crate) fn copy_symlink_with_policy(
     }
     let target = rustix::fs::readlinkat(src_dir.as_fd(), src_name, Vec::new())?;
     let stage = staging_name(dst_name);
-    let staged_abs = PathBuf::from(dst_dir.display()).join(&stage);
+    let staged_abs = dst_dir.path().join(&stage);
     let claim = Some(crate::staging::claim(&staged_abs).map_err(OpError::Recovery)?);
     if let Err(e) = rustix::fs::symlinkat(target.as_c_str(), dst_dir.as_fd(), &stage) {
         if let Some(c) = &claim {
@@ -489,7 +696,7 @@ pub(crate) fn copy_symlink_with_policy(
         return Err(e.into());
     }
     if let Some(c) = &claim {
-        if let Err(e) = crate::staging::confirm(c, &staged_abs) {
+        if let Err(e) = crate::staging::confirm_at(c, &staged_abs, dst_dir, &stage) {
             discard_staged(dst_dir, &stage, &claim, 0);
             return Err(OpError::Recovery(e));
         }
@@ -513,6 +720,7 @@ pub fn move_same_fs(
     dst_dir: &DirHandle,
     dst_name: &OsStr,
 ) -> OpResult<()> {
+    require_move_durability(dst_dir)?;
     publish_noreplace(src_dir, src_name, dst_dir, dst_name)
 }
 
@@ -529,8 +737,23 @@ pub fn move_cross_fs(
     policy: ConflictPolicy,
     cancel: &CancelToken,
 ) -> OpResult<()> {
+    require_move_durability(dst_dir)?;
     let before = FileIdentity::from_stat(&src_dir.stat_child(src_name)?);
-    copy_regular_file(src_dir, src_name, dst_dir, dst_name, policy, cancel)?;
+    let Some(staged) = stage_regular_file(
+        src_dir,
+        src_name,
+        dst_dir,
+        dst_name,
+        policy,
+        cancel,
+        &mut |_| {},
+        true,
+    )?
+    else {
+        // Skip has no publication receipt, including for an empty source.
+        return Ok(());
+    };
+    staged.commit(dst_dir, dst_name)?;
 
     // Re-verify the source is byte-identical to what we copied.
     let after = FileIdentity::from_stat(&src_dir.stat_child(src_name)?);
@@ -539,8 +762,18 @@ pub fn move_cross_fs(
             "source changed during move; destination written, source kept".into(),
         ));
     }
+    // The copy receipt remains valid if cancellation arrives after commit;
+    // retain the source instead of admitting another destructive step.
+    let cancelled_after_copy =
+        || OpError::Refused("destination was published; move cancelled and source kept".into());
+    if cancel.checkpoint() {
+        return Err(cancelled_after_copy());
+    }
     // Durability of the destination directory entry before unlinking.
     rustix::fs::fsync(dst_dir.as_fd())?;
+    if cancel.checkpoint() {
+        return Err(cancelled_after_copy());
+    }
     rustix::fs::unlinkat(src_dir.as_fd(), src_name, rustix::fs::AtFlags::empty())?;
     Ok(())
 }
@@ -628,6 +861,115 @@ pub(crate) mod publication_tests;
 mod tests {
     use super::*;
     use std::fs;
+
+    thread_local! {
+        pub(super) static EARLY_EOF_AFTER: std::cell::Cell<Option<u64>> = const {
+            std::cell::Cell::new(None)
+        };
+    }
+
+    struct EarlyEof;
+    impl EarlyEof {
+        fn after(bytes: u64) -> Self {
+            EARLY_EOF_AFTER.with(|limit| limit.set(Some(bytes)));
+            Self
+        }
+    }
+    impl Drop for EarlyEof {
+        fn drop(&mut self) {
+            EARLY_EOF_AFTER.with(|limit| limit.set(None));
+        }
+    }
+
+    #[test]
+    fn early_eof_copy_never_publishes_or_confirms() {
+        let d = tmp("early-eof-copy");
+        let source = d.join("source.bin");
+        let dest = d.join("dest");
+        fs::create_dir(&dest).unwrap();
+        let original = vec![73; 4 * 1024 * 1024];
+        fs::write(&source, &original).unwrap();
+        let before = FileIdentity::of_path(&source).unwrap();
+        let mut job = plan_job(
+            "early-eof",
+            JobKind::Copy,
+            std::slice::from_ref(&source),
+            &dest,
+            ConflictPolicy::Ask,
+        );
+        let _fault = EarlyEof::after(256 * 1024);
+        let result = run_copy_job(&mut job, &CancelToken::new());
+        assert!(matches!(result, Err(OpError::Refused(_))), "{result:?}");
+        assert_eq!(job.state, JobState::Failed);
+        assert!(job.entries.iter().all(|entry| !entry.done));
+        assert_eq!(fs::read(&source).unwrap(), original);
+        assert!(before.matches(&FileIdentity::of_path(&source).unwrap()));
+        assert_eq!(fs::read_dir(&dest).unwrap().count(), 0);
+        assert!(!crate::staging::load_all()
+            .iter()
+            .any(|claim| claim.path.parent() == Some(dest.as_path())));
+        fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn early_eof_cross_fs_move_keeps_the_unchanged_source() {
+        let d = tmp("early-eof-move");
+        let source = d.join("source.bin");
+        let dest = d.join("dest");
+        fs::create_dir(&dest).unwrap();
+        let original = vec![91; 4 * 1024 * 1024];
+        fs::write(&source, &original).unwrap();
+        let before = FileIdentity::of_path(&source).unwrap();
+        let (sd, sn) = handles(&d, "source.bin");
+        let (dd, dn) = handles(&dest, "source.bin");
+        let _fault = EarlyEof::after(256 * 1024);
+        let result = move_cross_fs(&sd, &sn, &dd, &dn, ConflictPolicy::Ask, &CancelToken::new());
+        assert!(matches!(result, Err(OpError::Refused(_))), "{result:?}");
+        assert_eq!(fs::read(&source).unwrap(), original);
+        assert!(before.matches(&FileIdentity::of_path(&source).unwrap()));
+        assert_eq!(fs::read_dir(&dest).unwrap().count(), 0);
+        assert!(!crate::staging::load_all()
+            .iter()
+            .any(|claim| claim.path.parent() == Some(dest.as_path())));
+        fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn source_changed_during_copy_is_not_published() {
+        use std::io::Write;
+        let d = tmp("changed-copy");
+        let source = d.join("source.bin");
+        let dest = d.join("dest");
+        fs::create_dir(&dest).unwrap();
+        let mut original = vec![61; 4 * 1024 * 1024];
+        fs::write(&source, &original).unwrap();
+        let (sd, sn) = handles(&d, "source.bin");
+        let (dd, dn) = handles(&dest, "source.bin");
+        let mut changed = false;
+        let result = copy_regular_file_with(
+            &sd,
+            &sn,
+            &dd,
+            &dn,
+            ConflictPolicy::Ask,
+            &CancelToken::new(),
+            &mut |_| {
+                if !changed {
+                    changed = true;
+                    let mut file = fs::OpenOptions::new().write(true).open(&source).unwrap();
+                    file.write_all(&[17]).unwrap();
+                    file.set_modified(std::time::SystemTime::UNIX_EPOCH)
+                        .unwrap();
+                }
+            },
+        );
+        assert!(changed);
+        assert!(matches!(result, Err(OpError::Refused(_))), "{result:?}");
+        original[0] = 17;
+        assert_eq!(fs::read(&source).unwrap(), original);
+        assert_eq!(fs::read_dir(&dest).unwrap().count(), 0);
+        fs::remove_dir_all(&d).unwrap();
+    }
 
     fn tmp(tag: &str) -> PathBuf {
         let p = std::env::temp_dir().join(format!("gust-ops-{tag}-{}", std::process::id()));
@@ -939,14 +1281,10 @@ mod tests {
 
 /// Remove staging files left behind by a process that died mid-copy.
 ///
-/// A copy stages under `.gust-staging-<pid>-<name>` and renames it into place
-/// atomically, so a crash can never publish a partial file — but it can leave
-/// the staging file behind. Nothing else will ever clean it up, so a folder
-/// that survived a crash would accumulate hidden debris forever.
-///
-/// Only files whose owning PID is no longer alive are removed. A staging file
-/// belonging to a RUNNING process is another copy in flight, and taking it
-/// would corrupt that copy.
+/// Stages have unique per-operation names. Only abandoned, validated local
+/// claims with exact object identity authorize cleanup. Network, unconfirmed,
+/// legacy and uncertain records/files remain for inspection; no sweep touches
+/// the final publication name or an active operation's stage.
 pub fn sweep_stale_staging(dir: &Path) -> usize {
     let mut removed = 0usize;
 
@@ -961,8 +1299,8 @@ pub fn sweep_stale_staging(dir: &Path) -> usize {
         }
         // A copy in flight right now — in another process or in this one —
         // is never touched. A claim this process holds for a copy that has
-        // already failed is debris: that is how a remote that dropped
-        // mid-copy gets cleaned up once it is back.
+        // already failed is abandoned, but remote ownership still cannot
+        // be inferred from the name, size, time or synthetic inode.
         if !crate::staging::is_abandoned(&c) {
             continue;
         }
@@ -997,26 +1335,16 @@ pub fn sweep_stale_staging(dir: &Path) -> usize {
 pub fn prune_dead_claims() -> usize {
     let mut pruned = 0usize;
     for c in crate::staging::load_all() {
-        if !crate::staging::is_abandoned(&c) {
+        if !crate::staging::is_abandoned(&c) || c.net || c.dev == 0 || c.ino == 0 {
             continue;
         }
-        if c.path.symlink_metadata().is_ok() {
-            continue; // still describes a real file; keep it
+        // An inaccessible mount, an unmounted remote, or an unconfirmed
+        // request is not evidence that its staging object does not exist.
+        if !matches!(c.path.symlink_metadata(), Err(e) if e.kind() == io::ErrorKind::NotFound) {
+            continue;
         }
-        // Reconstruct this claim's own file name and drop it.
-        for e in std::fs::read_dir(crate::staging::claims_dir())
-            .into_iter()
-            .flatten()
-            .flatten()
-        {
-            let Ok(text) = std::fs::read_to_string(e.path()) else {
-                continue;
-            };
-            if text.contains(&format!("path={}", c.path.display()))
-                && std::fs::remove_file(e.path()).is_ok()
-            {
-                pruned += 1;
-            }
+        if std::fs::remove_file(&c.claim_file).is_ok() {
+            pruned += 1;
         }
     }
     pruned
@@ -1059,22 +1387,8 @@ mod sweep_tests {
         fs::write(&debris, b"partial").unwrap();
         let claim = crate::staging::claim(&debris).unwrap();
         crate::staging::confirm(&claim, &debris).unwrap();
-        // Rewrite the claim so it belongs to a process that cannot be running.
-        {
-            use std::os::unix::fs::MetadataExt;
-            let md = debris.symlink_metadata().unwrap();
-            fs::write(
-                &claim,
-                format!(
-                    "path={}\nboot={}\npid=999999\ndev={}\nino={}\n",
-                    debris.display(),
-                    crate::staging::boot_id(),
-                    md.dev(),
-                    md.ino()
-                ),
-            )
-            .unwrap();
-        }
+        // Retain a complete current-format claim, but make its owner absent.
+        crate::staging::fault::rewrite_claim(&claim, |c| c.pid = 999999);
         fs::write(d.join("real.txt"), b"keep me").unwrap();
 
         assert_eq!(sweep_stale_staging(&d), 1);
@@ -1088,7 +1402,7 @@ mod sweep_tests {
     }
 
     #[test]
-    fn stranded_debris_on_a_network_place_is_recognised_after_a_reconnect() {
+    fn uncertain_network_debris_is_retained_after_a_reconnect() {
         // Found live: after the SFTP server came back, sshfs numbered the
         // same file inode 2 instead of 5, so a dev+inode check could never
         // match and 232 MB stayed on the server for good.
@@ -1103,17 +1417,12 @@ mod sweep_tests {
         let claim = crate::staging::claim(&debris).unwrap();
         let md = debris.symlink_metadata().unwrap();
         let write_claim = |net: u8, written: u64, ino: u64| {
-            fs::write(
-                &claim,
-                format!(
-                    "path={}\nboot={}\npid=999999\ndev={}\nino={ino}\nsince={}\nnet={net}\nwritten={written}\n",
-                    debris.display(),
-                    crate::staging::boot_id(),
-                    md.dev(),
-                    md.mtime()
-                ),
-            )
-            .unwrap();
+            crate::staging::fault::rewrite_claim(&claim, |c| {
+                c.pid = 999999;
+                c.net = net == 1;
+                c.written = written;
+                c.ino = ino;
+            });
         };
         // The inode changed, on a LOCAL disk: never removed on weaker proof.
         write_claim(0, 4096, md.ino() + 1000);
@@ -1126,11 +1435,19 @@ mod sweep_tests {
         // somebody else wrote to it. Not ours.
         write_claim(1, 1024, md.ino() + 1000);
         assert_eq!(sweep_stale_staging(&d), 0, "larger than what Gust wrote");
-        // A network place, and the file holds no more than Gust wrote (live:
-        // 218 365 952 written, 217 149 440 arrived before the link died).
+        // A replacement can satisfy the old size/time heuristic. Keep it
+        // and the claim: retained debris is not proven ownership cleanup.
         write_claim(1, 8192, md.ino() + 1000);
-        assert_eq!(sweep_stale_staging(&d), 1);
-        assert!(!debris.exists());
+        assert_eq!(
+            sweep_stale_staging(&d),
+            0,
+            "size/time are not ownership proof"
+        );
+        assert!(debris.exists());
+        // Even a reused synthetic inode cannot prove this is our object.
+        write_claim(1, 8192, md.ino());
+        assert_eq!(sweep_stale_staging(&d), 0);
+        assert!(crate::staging::load_all().iter().any(|c| c.path == debris));
         fs::remove_dir_all(&d).ok();
     }
 

@@ -307,3 +307,89 @@ fn a_journal_that_cannot_be_written_stops_the_job_before_any_byte() {
         assert!(!record.offers_undo());
     }
 }
+
+thread_local! {
+    // Admission-only evidence seam; filesystem mutations and the worker stay real.
+    pub(super) static DEST_FSTYPE: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+}
+
+fn assert_move_refused_without_effects(
+    f: &Fixture,
+    policy: ConflictPolicy,
+    evidence: &'static str,
+) {
+    crate::staging::fault::state_home(&f.root.join("state"));
+    let source = FileIdentity::of_path(&f.source).unwrap();
+    let destination = FileIdentity::of_path(&f.destination).unwrap();
+    let journal = crate::journal::Journal::new(f.root.join("journal"));
+    DEST_FSTYPE.with(|v| v.set(Some(evidence)));
+    let (progress, record) = f.run_with(
+        JobKind::Move,
+        policy,
+        Some(crate::journal::Journal::new(journal.path())),
+    );
+    assert_eq!(progress.state, JobState::Failed);
+    assert_eq!(record.state, JobState::Failed);
+    assert_eq!(journal.load().last().unwrap().state, JobState::Failed);
+    assert!(progress.message.contains("Try Copy"));
+    assert_eq!(progress.bytes_done, 0);
+    assert_eq!(progress.entries_done, 0);
+    assert!(record.entries.is_empty());
+    assert!(record.removed_empty_dirs.is_empty());
+    assert!(source.matches(&FileIdentity::of_path(&f.source).unwrap()));
+    assert!(destination.matches(&FileIdentity::of_path(&f.destination).unwrap()));
+    assert!(!f.trash.files.exists() || fs::read_dir(&f.trash.files).unwrap().next().is_none());
+    assert!(!f.trash.info.exists() || fs::read_dir(&f.trash.info).unwrap().next().is_none());
+    assert!(crate::staging::load_all().is_empty());
+    assert_eq!(fs::read_dir(f.root.join("dest")).unwrap().count(), 1);
+}
+
+#[test]
+fn publication_move_replace_refuses_before_trashing_for_sshfs_or_unknown_evidence() {
+    for evidence in ["fuse.sshfs", ""] {
+        let f = Fixture::new(
+            &format!("move-admission-replace-{evidence}"),
+            FileClass::Regular,
+        );
+        fs::write(&f.destination, b"BYSTANDER").unwrap();
+        assert_move_refused_without_effects(&f, ConflictPolicy::Replace, evidence);
+        assert_eq!(fs::read(&f.source).unwrap(), b"SOURCE");
+        assert_eq!(fs::read(&f.destination).unwrap(), b"BYSTANDER");
+    }
+}
+
+#[test]
+fn publication_move_empty_merge_refuses_before_removing_source_directories() {
+    for evidence in ["fuse.sshfs", ""] {
+        let f = Fixture::new(
+            &format!("move-admission-merge-{evidence}"),
+            FileClass::Directory,
+        );
+        fs::remove_file(f.source.join("child")).unwrap();
+        fs::create_dir(f.source.join("empty")).unwrap();
+        fs::create_dir(&f.destination).unwrap();
+        fs::create_dir(f.destination.join("empty")).unwrap();
+        assert_move_refused_without_effects(&f, ConflictPolicy::Merge, evidence);
+        assert!(f.source.join("empty").is_dir());
+        assert!(f.destination.join("empty").is_dir());
+    }
+}
+
+#[test]
+fn publication_copy_is_not_admitted_as_a_durable_move() {
+    let f = Fixture::new("copy-admission-control", FileClass::Regular);
+    DEST_FSTYPE.with(|v| v.set(Some("fuse.sshfs")));
+    let (progress, _) = f.run(JobKind::Copy, ConflictPolicy::Ask);
+    assert_eq!(progress.state, JobState::Confirmed);
+    assert_eq!(fs::read(&f.source).unwrap(), b"SOURCE");
+    assert_eq!(fs::read(&f.destination).unwrap(), b"SOURCE");
+}
+
+#[test]
+fn publication_known_local_move_still_uses_its_real_durability_path() {
+    let f = Fixture::new("move-admission-local", FileClass::Regular);
+    let (progress, _) = f.run(JobKind::Move, ConflictPolicy::Ask);
+    assert_eq!(progress.state, JobState::Confirmed);
+    assert!(!f.source.exists());
+    assert_eq!(fs::read(&f.destination).unwrap(), b"SOURCE");
+}

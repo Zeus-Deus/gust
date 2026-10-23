@@ -392,6 +392,7 @@ pub fn move_tree_opts(
 ) -> OpResult<()> {
     let (sd, sn) = resolve_parent(src_root)?;
     let (dd, dn) = resolve_parent(dst_root)?;
+    crate::engine::require_move_durability(&dd)?;
 
     // Refuse to move a directory into itself: the rename would succeed on some
     // filesystems and produce an unreachable subtree.
@@ -735,7 +736,7 @@ mod tests {
     fn a_batch_that_fails_keeps_what_finished_and_names_nothing_partial() {
         let d = tmp("batchfail");
         fs::create_dir_all(d.join("src")).unwrap();
-        for i in 0..10 {
+        for i in 0..(BATCH_FILES + 10) {
             fs::write(d.join(format!("src/f{i}")), b"x").unwrap();
         }
         // f5 is already taken at the destination: Ask stops the copy there.
@@ -758,12 +759,12 @@ mod tests {
             .map(|e| e.file_name())
             .collect();
         plan_files.sort();
-        // Stop part-way with a cancel after five files.
+        // Let one batch commit, then cancel while the next is still staged.
         let tok = CancelToken::new();
         let mut seen = 0usize;
         let mut cb = |done: usize, _t: usize, _b: u64, _tb: u64| {
             seen = done;
-            if done >= 5 {
+            if done >= BATCH_FILES + 5 {
                 tok.cancel();
             }
         };
@@ -785,7 +786,11 @@ mod tests {
             names.iter().all(|n| !n.starts_with(".gust-staging-")),
             "{names:?}"
         );
-        assert!(names.len() >= 4, "finished files were kept: {names:?}");
+        assert_eq!(
+            names.len(),
+            BATCH_FILES,
+            "only the confirmed batch was kept: {names:?}"
+        );
         for n in &names {
             assert_eq!(
                 fs::read(d.join("dst").join(n)).unwrap(),

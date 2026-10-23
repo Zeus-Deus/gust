@@ -143,13 +143,21 @@ planned → running → committing → (remote-pending) → confirmed
 
 ## 6. Operation safety (crates/ops)
 
-- Copy into a private staging name, fsync per policy, then atomic rename into
-  place. Restrictive permissions from creation — not chmod at the end.
+- Copy into a private staging name, fsync per policy, then publish atomically
+  without replacing an occupied destination. Restrictive permissions from
+  creation — not chmod at the end.
 - Recursive traversal is anchored to **held directory descriptors**
   (`openat`/`unlinkat` with `AT_` flags). A final-component `O_NOFOLLOW` is
   insufficient: an intermediate directory can be swapped mid-walk.
 - Cross-device move = copy, verify, commit, then unlink **only** the source
   that was verified unchanged (dev+ino+mtime+size).
+- A regular-file copy must receive exactly the size recorded from its held
+  source descriptor, and that descriptor's identity/version must still match
+  after reading. A zero-byte read alone is not proof of complete delivery:
+  an interrupted SSHFS read can return early EOF while the source's size and
+  identity remain unchanged. A short or changed read fails before publication,
+  keeps the source, and cleans up or retains the staging claim for recovery.
+  It must never confirm a copy or authorize a move's source removal.
 - Special files (FIFO, socket, device, symlink) are classified and handled by
   explicit policy, never copied blindly.
 
@@ -409,11 +417,73 @@ connections close the panel; closing it manually does not cancel an attempt or
 allow its later failure to steal focus. SSH, Tailscale, cloud setup and network
 shares use the same feedback surface without retaining credentials.
 
-**SSHFS upload limitation:** if a mount does not support atomic no-replace
-rename, Gust refuses publication rather than risk replacing another file.
-Browsing and downloading can still work; the local source is retained after
-this refusal. Connecting successfully does not imply upload support. Gust
-never substitutes an overwrite-capable rename or replays the refused operation.
+**SSHFS regular-file publication:** SSHFS rejects no-replace rename flags.
+For a completed staged regular file only, Gust instead uses `linkat` without
+following the source symlink. SSHFS forwards this to the advertised OpenSSH
+`hardlink@openssh.com` extension, whose operation is server-side `link(2)`:
+creating an occupied file, directory or symlink name fails atomically. This is
+publication of a completed copy, never an atomic-move substitute.
+
+Before reading payload bytes, each upload probes the actual empty stage with
+an operation-owned, claimed private alias and removes that alias. It never
+probes the public final name or records a global/durable capability. A failed
+probe refuses that attempt before transfer; an unavailable/ambiguous answer
+remains unknown. The real link request still must succeed after the held-source
+length/version checks and destination fsync. Only its confirmed success
+confirms the copy; it does not prove server crash durability of the new name.
+Failure to remove the staging alias after a successful link keeps the claim and does
+not turn published data into a failed copy. A failed/ambiguous final link keeps
+the stage and claim, reports that publication was not confirmed, and never
+replays the request or removes the source. A complete destination may already
+exist when the reply was lost; recovery never infers success from name/size.
+
+SSHFS has no directory-fsync callback, and without the server fsync extension
+file fsync only flushes pending writes. A client fsync result is therefore
+not proof of server crash durability. Moves into SSHFS are refused before
+transfer, with an explicit offer to copy instead; no source is removed based
+on a link receipt alone. This includes the recursive move path.
+
+This path supports regular files only. Source renames/moves, directory
+publication and symlink publication retain no-replace rename requirements;
+there is no ordinary-rename or check-then-rename fallback. Connecting
+successfully does not imply upload support for every file type or backend.
+Unknown mount types retain the existing copy rename path without asserted
+support. Missing or empty mount evidence refuses move admission before
+conflict preservation or merge effects. Safety classification matches the
+held descriptor's bounded `/proc/self/fdinfo` mount ID to the bounded decoded
+mountinfo inventory. A renamed/replaced lexical path cannot downgrade a held
+SSHFS mount to local. Missing/detached/ambiguous mount evidence remains Unknown.
+Claims take identity and network classification from the actual created/opened
+object descriptor, not a re-resolved pathname. Lossless lexical paths remain
+only as recovery locations; new claim records encode path bytes so
+non-UTF-8 names and newlines cannot redirect ownership or inject fields.
+Each operation gets a unique stage and exclusively creates its initial
+claim. Stage and probe names exclude the requested final name before any
+claim or filesystem effect, even when that name resembles private staging.
+Version 2 requires every recognized field exactly once and canonical
+hex path bytes. Updates fsync a separate private record before atomic local
+replacement. Interrupted updates leave a complete prior or new record.
+Legacy, unknown-version, malformed, duplicate/extra-field and truncated
+records confer no sweep/prune authority and remain for inspection. This is
+a conservative compatibility limit: old debris is retained, not migrated
+by guessing its identity. A fresh explicit retry never reuses or releases
+an earlier operation's unresolved claim.
+Cancellation is checked between short writes, before metadata/fsync, and at
+the final publication boundary. Once publication succeeds its receipt is
+preserved even if cancellation arrives during the syscall or alias cleanup.
+Checkpoints cannot interrupt an already blocked filesystem call.
+
+Network staging claims are retained for inspection rather than automatically
+swept: SSHFS inode numbers are synthetic and may change or be reused after
+reconnection. Name, size, mtime, or even a matching synthetic inode cannot
+prove ownership across that boundary. Recovery never removes the final name;
+retained remote debris is distinct from proven local ownership cleanup.
+Unconfirmed claims and network claims are not pruned merely because a path
+is missing or inaccessible; an unmounted location is not proof of absence.
+
+Protocol basis: [OpenSSH hardlink extension](https://github.com/openssh/openssh-portable/blob/master/PROTOCOL)
+and [SSHFS link/fsync implementation](https://github.com/libfuse/sshfs/blob/master/sshfs.c).
+These establish runtime publication semantics, not a server-power-loss guarantee.
 
 ### 6.4.3 File-send services
 
@@ -527,6 +597,18 @@ Nothing is shared between tabs except the window itself.
 - **A running job belongs to the tab that started it.** Closing that tab
   asks first, exactly as closing the window does; the transfer is never
   silently abandoned.
+- **A stop that was asked for is not a stop that happened.** After a confirmed
+  tab or window close, Gust cancels the job and then waits, with no deadline,
+  until the worker has stopped. The read or write in flight
+  must return first, and on a remote place that is as long as the connection
+  takes to answer. If the user asks to close the window again while it waits,
+  Gust offers **Close without waiting** and says what that may leave behind.
+  No close, stop or restart message promises that temporary files were
+  removed: a remote place may keep them on purpose and cleanup can fail, so
+  the user is told to check the destination before running anything again.
+  Compress and extract work cannot be cancelled part-way, so it holds a close
+  in the same way. A place cannot be disconnected while a transfer or archive
+  work in any tab still uses it, including a transfer that is still stopping.
 - Tab order is the order they were opened. A new tab opens beside the
   active one, not at the end, so "open in new tab" lands where the eye is.
 
@@ -2092,6 +2174,57 @@ thread. Queueing after QObject destruction returns `Err` and is handled — no
 `unwrap`, no panic. `is_destroyed()` followed by queue is **not** atomic and is
 not used as a lifetime guarantee.
 
+### 9.1 Performance boundaries
+
+Directory sorting must preserve byte-safe identity and the existing order while
+avoiding repeated display conversion or allocation inside comparisons. Deferred
+metadata remains cancellable and limited to the requested rows.
+Monotonic name listings avoid expanded sort keys; reverse fast paths must be
+strict so equal rows retain their existing order.
+Inactive directory views do not instantiate row delegates. Returning to a view
+reattaches its model and follows the current cursor; closed static panels defer
+their repeated controls until opened.
+Expanded natural-sort keys have a bounded scratch-memory budget; unusually
+large or digit-heavy listings fall back to the existing comparator.
+
+Thumbnail work is bounded and cancellable between helpers. Repeated requests
+reuse valid cached results; cache admission still checks source freshness and
+validates helper output under the existing sandbox rules. Optimizations must
+not decode untrusted source contents on the UI thread or bypass the sandbox.
+Grid requests cover the viewport and its prefetch margin, with on-screen rows
+first, rather than a fixed prefix of the directory. Navigation and live changes
+cancel the previous pass; queued results also check cancellation before publish.
+An unchanged viewport does not restart its pass. Live changes invalidate the
+in-memory paths so replacement files are revalidated on a worker.
+Each model admits only one active thumbnail worker, including a helper still
+finishing after cancellation. New requests retain the newest pending viewport
+and resume when that worker exits. Changes to visible ordering or membership
+invalidate the remembered pass even when row bounds stay the same.
+QML explicitly disables thumbnail requests outside Grid; the finishing worker
+remains counted until it exits, and no replacement pass starts in that view.
+Only a visible view reports viewport rows, and becoming visible reports its
+current bounds again. Every previewable row in those bounds is eligible; a
+fixed prefix limit must not strand tiles on large or zoomed-out viewports.
+Grid image items reload updated cached files instead of retaining stale Qt
+decoded-image cache entries after live replacement.
+
+Cached thumbnails carry `Gust::SourceVersion` alongside `Thumb::MTime`: device,
+inode, length, nanosecond mtime and ctime identify the rendered source version.
+Cache metadata reads are bounded and use a held regular-file descriptor without
+following symlinks. A source changed during rendering is refused. Legacy cache
+entries without this version tag regenerate once inside the sandbox. This
+metadata is display-cache freshness evidence, never operation or trust authority.
+
+Independent local discovery sources may run concurrently on workers. Discovery
+never connects to a remote device; explicit connection, cancellation, host trust,
+and truthful failure reporting retain their existing contracts. No performance
+cache may turn stale connection or trust evidence into authority.
+
+Performance claims compare release builds on identical fixtures and state,
+record repeated measurements, and distinguish local fixture results from live
+network latency. A subsystem improvement is not a claim of uniform whole-app
+speedup.
+
 ## 10. Theme tokens
 
 Read `~/.local/state/omarchy/current/theme/colors.toml` and `shell.toml`
@@ -2192,6 +2325,463 @@ All `LsblkParseError::{InvalidJson,InvalidShape,Limit}` failures map to static
 row/child shape policy; this adapter adds no second parser or lossy fallback.
 Positional array envelopes, rows and children are malformed inventory, including
 otherwise offerable or cleartext rows; they fail with `Protocol`/`NotStarted`.
+
+#### Kernel-instance capture adapter
+
+The worker-only adapter in `remote::block` is:
+
+```rust
+pub fn observe_devices(
+    ctx: &CallContext<'_>,
+) -> Result<Vec<gust_core::devices::DeviceObservation>, BlockFailure>;
+```
+
+It preserves `list_devices` and every existing action API. Display rows from the
+old list are not an evidence fallback. The adapter runs exactly this read-only
+capture through the owned helper runtime, with the entire column list as one
+argument and no `--bytes`:
+
+```text
+lsblk --json --tree --all --properties-by udev,none --output
+NAME,KNAME,PATH,PKNAME,SIZE,RM,HOTPLUG,TYPE,FSTYPE,LABEL,MOUNTPOINT,MAJ:MIN,DISK-SEQ
+```
+
+Strict UTF-8 output goes to CORE's shared
+`parse_lsblk_evidence_checked(&str, Option<DeviceEvidenceOrigin>)`, with
+`Some(DeviceEvidenceOrigin::LsblkKernelSysfsV1)` supplied by this exact trusted
+capture path, never a payload field. CORE owns decoding, bounds, private typed
+instance/binding fields and `Available`/`Unavailable` reasons. Unsupported
+profiles or failed captures refuse with a static `BlockFailure`/`NotStarted`;
+malformed inventories use `Protocol`/`NotStarted`, never an empty-success or
+weaker-discovery fallback. Missing evidence remains typed unavailable.
+Under this origin, partition rows remain `Unavailable(MissingSourceInstance)`
+even with a positive captured sequence, which can describe the containing disk.
+Nonzero capture status refuses as `Unsupported` with a static explanation of
+the required util-linux support/permissions; raw diagnostics are not exposed.
+
+The adapter checks the same cancellation token and remaining overall budget
+before/after capture and after bounded parsing. APP retains the original opaque
+shown-selection/prompt epoch and calls CORE's pure `revalidate_device` after a
+GUI leave wait and immediately before each changing request and navigation.
+`Same` supplies fresh locators only after source and expected cleartext instance
+and relationship match. Paths, labels, UUIDs and size cannot replace evidence.
+
+Only APP's own successful `block::unlock` receipt permits the separate
+`bind_cleartext_after_unlock` transition. It requires the same retained source,
+one proven child relationship and exact captured child PATH matching the service
+locator; unknown aliases are `UnverifiedLocator`, without stat, canonicalization
+or invented aliases. The new binding is revalidated before mount/navigation.
+APP wipes its borrowed secret immediately after unlock on every outcome. After
+mount, fresh inventory must also agree with the accepted returned mount locator
+before browsing. Existing `Unknown`/`Accepted` wording and absence of automatic
+compensation remain. These observations do not freeze hotplug, service state or
+filesystem contents, or promise atomicity between validation and an action.
+
+## 7.2 Worker-owned job observers
+
+Cloneable `jobs::JobObserver` and `archive::jobs::ArchiveObserver` retain only
+memory snapshots and cancellation tokens. Observers never join or cancel on
+drop. The original handle remains worker-owned; its existing APIs stay intact.
+Job observers also expose pause/resume/is_paused/cancel_requested/record for
+existing progress controls. APP can hold a history admission lock and job
+handle on a worker until the terminal receipt, while GUI code polls an
+observer. Cancellation is acknowledged only by a terminal worker snapshot.
+
+## 7.3 Persistent typed recovery
+
+`history::History::open(path)` opens a private, byte-preserving durable store
+under an exclusive nonblocking lock. Open/drop around each serialized worker
+command, including admission through receipt; another Gust process can acquire
+the store between commands. A GUI poll must never open it. `entries()` returns
+loaded HistoryEntry { id, label, kind, status, created_unix }. Typed receipt
+methods record confirmed jobs, created files, RenameMade, links, modes, owners
+and tags. Rename receipts retain a complete inventory from before mutation;
+recording must not adopt later descendants as operation-owned work.
+
+`undo/redo(cancel)` returns a typed entry or refusal; `undo_many/redo_many`
+returns completed entries and the first refusal without consuming its cursor.
+Created objects move intact into private same-volume vaults; redo returns the
+same objects, never rereads changed originals. New actions retire redo offers
+but never implicitly delete preserved vault bytes. Every inverse uses held
+parents, full descendant identities, no-follow traversal and no-replace moves.
+An unreadable, changed, newly occupied, unsupported or cancelled inverse
+preserves work. Overlapping rename batches and cross-volume inverses refuse
+until a safe explicit protocol is available; legacy recovery remains available.
+
+Durable intent precedes inverse effects. Restart with a pending intent fences
+history behind an Interrupted entry; no automatic replay or guessed cleanup.
+Irreversible/untracked mutations admit an explicit barrier. Unknown historical
+jobs are not silently imported. Parent directory mtime changes from validated
+tracked inverses may refresh older ancestor receipts only after exact inventory,
+all inode identities and every non-directory identity still match. Untracked
+new work prevents this refresh and blocks the older inverse.
+
+Admission keeps the original receipt's root identity as authority; a later
+inventory only verifies it. Inventories are compared by relative byte-path
+keys, including root-last extraction receipts. Directory attribute entries
+retain complete lineage before refreshing directory revisions after tracked
+child inverses. Attribute aliases for one inode and identical transition are
+coalesced; disagreeing transitions refuse before inverse effects.
+
+An inverse source-name race is checked against the held destination parent.
+A mismatching moved object is restored with identity checks and no-replace;
+an occupied recovery name yields `HistoryError::Partial { from, at, cause }`
+and preserves both objects and the durable pending fence. This does not
+exclude every concurrent writer after verification. Owned unreadable modes
+use metadata-only descriptors and descriptor-relative metadata syscalls,
+without temporarily granting read access; their metadata is synced through
+the held filesystem. Unsupported kernel operations refuse explicitly.
+
+
+### Owned new-folder and link receipts
+
+`create::new_folder_recorded(dir,name)` returns FolderCreated with the created
+root's held identity while it is empty, after syncing the directory and parent.
+`History::record_folders(label, receipts)` admits only those exact still-empty
+objects; later children are new work, never adopted as created descendants.
+Forward link creation resolves its parent without following symlinks and
+returns the existing LinkMade identity/target receipt. Bulk path-pair outcomes
+remain an explicit history barrier until pre-mutation receipts are available.
+
+Creation receipts originate before public-name readback. Regular files retain
+the descriptor returned by exclusive creation through write/sync and receipt
+capture. Folder/link creation captures identity in an exclusive mode-0700
+private namespace, then publishes with no-replace and checks the public entry
+against that original identity. A replacement or new child at readback refuses
+the receipt and preserves later work. Cleanup never recursively removes a
+folder produced by this path. This bounds the demonstrated public-name race;
+it does not promise exclusion of all concurrent same-user writers inside the
+private namespace or after final verification.
+
+A failed regular-file write or sync retains the public entry and reports its
+path as partial/current work; it never unlinks that mutable name. Fresh paired
+stats cannot distinguish Gust's failed bytes from a later same-inode edit.
+No successful creation receipt is returned for that uncertain result.
+
+Nested permission batches reconcile directory lineage only from the batch's
+recorded mode transitions and each verified applied inode. Preflight derives
+the expected current modes from Applied/Undone status, including older stored
+lineage, then retains complete inventory, identity and revision checks. Each
+successful mode step updates matching inode modes in the same batch's lineage;
+no current directory snapshot is adopted as new authority.
+
+A confirmed job with any completed pre-existing destination root requires an
+explicit barrier rather than a partial inverse that silently omits that root.
+Ownership inverse policy matches the forward guard: privileged regular files
+refuse during admission/preflight, before pending or effects; owned setgid
+directories remain eligible with exact identity, group and lineage checks.
+
+If a mode inverse explicitly restores readable/searchable permissions on an
+unreadable directory with recorded lineage, preflight checks its exact root
+and attribute but defers traversal. Durable pending intent precedes the actual
+requested mode change, then complete inventory validation is mandatory before
+completion. On validation failure, restore the prior mode only while root
+identity/revision and the just-written mode still match; report Partial and
+retain the pending fence. Other traversal errors remain refusals. No permission
+change is performed solely to admit a forward history receipt.
+
+### Job worker startup failure
+
+Existing jobs::start/start_with/start_resolved/start_journalled signatures stay
+compatible. If the inner OS thread cannot be created, the returned handle and
+its observers are immediately terminal Failed, with a matching Failed memory
+record and typed `start_error()->Option<JobStartError>`. This case proves the
+worker closure never ran; no mutation or journal publication is fabricated.
+There is no producer to wait for, so wait returns that failure immediately.
+A successfully created worker retains its real join/cleanup ownership and no
+start error; cancellation/timeouts never stand in for its terminal completion.
+APP may use the typed failure as no-effect evidence while holding/reconciling
+its own forward marker. No filesystem I/O is added to GUI observer polling.
+
+## 7.4 Same-volume Trash and restoration receipts
+
+Read-only `trash::locations(home)` discovers existing validated home and volume
+Trash directories, including both safe shared-sticky `.Trash/uid` and private
+`.Trash-uid` locations. `select_location(path,home)` chooses without creating
+anything. Only admitted `TrashLocation::trash_path(path,cancel)` creates owned
+private storage. Home Trash remains preferred on its filesystem; cross-volume
+copy/delete and permanent-delete fallbacks are never substituted. Layout and
+relative volume restore paths follow the freedesktop Trash specification.
+
+`TrashLocation { trash, topdir }` provides list, trash_path, receipt_named and
+restore. TrashReceipt retains the byte slot, location, exact data/info
+identities and full subtree; APP holds it behind an opaque ID. QML does not
+supply a restore destination. The exclusive private .trashinfo record is
+synced before the no-replace move; data and parent directories are synced
+before success. Info records bind original bytes to the admitted root identity.
+Restoration verifies both records and data, uses no-follow parents and atomic
+no-replace, then moves the exact info record into an exclusive private recovery vault
+after data is durable. No public-name info unlink is performed.
+Changed records, replaced slots, unreadable descendants, new work and occupied
+restore paths refuse with both data and receipt preserved. A crash or late I/O
+error retains enough durable information for inspection; no guessed deletion
+or automatic replay occurs. Legacy free APIs remain compatible.
+
+The backend lists existing locations without mkdir and bounds mount/list/info
+metadata. Unsupported atomic no-replace support stays a refusal. Discovery and
+all Trash I/O run on workers; stalled filesystem syscalls have no asserted
+cancellation deadline. Permanent deletion retains its separate confirmation.
+
+
+Trash receipts expose display projections but privately bind the canonical
+location, byte slot, original path, data/info identities, parent directory
+identities and complete inventory. Mutated projections refuse. Volume paths
+are relative to their bound mount root; home paths are absolute. Bounded proc
+mount parsing uses CORE's shared byte decoder; automatic discovery skips
+network/FUSE/unknown types before touching candidates. Explicit selection also
+refuses these types, with no remote probe or permanent-delete fallback.
+
+`TrashLocation::restore` retains the original information inode in a private
+recovery vault. Worker-only `TrashReceipt::restore_history_supported(cancel)`
+preflights known missing parents without effects. Its RestoredReceipt exposes
+`history_supported()`; recreation
+of missing original parents remains compatible but requires a caller barrier,
+as those parent creations have no inverse receipt. A durable private intent
+precedes parent creation/data movement and remains for inspection. I/O errors
+once intent or metadata has been published carry downcastable `TrashPartial`
+locations; callers never infer no effect from generic Err. Pending artifacts
+are never automatically replayed or recursively removed.
+
+`History::record_trash(label, receipts)` and `record_restored(label, receipts)`
+admit only exact receipt inventories, information bytes and private bindings.
+Trash Undo restores data before retaining info; Redo restores info before data.
+Restoration Undo restores info before data; Redo restores data before retaining
+info. Every internal step uses existing durable pending intent and no-replace
+identity checks. Info inodes survive Undo/Redo, and new descendants, replaced
+parents, records or occupied names refuse. APP still owns forward markers and
+capacity/barrier reservation before effects and holds History through admission.
+
+
+`TrashReceipt::inventory_len()` and `retained_bytes()` are memory-only cache
+accounting. The charge includes all owned path/slot capacities, info capacity
+and a conservative per-tree-node allowance; it is not an allocator/RSS reading.
+APP bounds the aggregate cache and reports limits instead of retaining an
+unbounded set of individually bounded receipts.
+
+
+Trash path admission and discovery consume CORE MountInfo::resolve and
+visible_mounts from one bounded kernel mountinfo snapshot. The shared parent-ID
+projection handles stacked mounts and covered descendants; no flat/first/last
+fallback or independent Trash topology parser remains. A malformed, limited
+or ambiguous inventory refuses explicitly. Unrelated path resolution may
+remain available outside an ambiguous subtree. Discovery establishes visible
+local roots before any candidate access and separately checks the shared,
+private, files and info paths before opening them. Snapshot checks do not
+promise atomic exclusion of concurrent mount changes or syscall deadlines.
+
+Trash selection compares shared mount IDs as well as devices: home preference
+is eligible only when source, root, files and info resolve to one visible local
+mount. An unsupported home mount is skipped before home I/O; unrelated admitted
+local-volume candidates remain usable. A candidate with a separately mounted
+root or child refuses before information publication.
+
+Existing owned legacy Trash directories with read/search access for others but
+no group/other write access remain discoverable without chmod. Listing reports
+a typed actionable repair-required error. Explicit worker-only
+`TrashLocation::repair_legacy_permissions(cancel)` captures no-follow held
+root/files/info descriptors and identities before tightening those same owned
+directories to 0700. It creates no directories, changes no data/Info bytes and
+never recursively repairs or cleans. Replaced, writable-by-others, foreign-owned
+or symlinked layouts refuse; errors after a permission effect carry partial
+location evidence. Checked compatibility listing preserves errors; the original
+Vec-only projection remains a lossy compatibility API and is not authoritative.
+
+Legacy permission repair has no generic inverse receipt. APP retains its forward
+marker and commits an explicit history barrier before invoking the repair; it
+never fabricates a creation or attribute receipt from a post-effect snapshot.
+
+Undo vault placement excludes each retained entry's effective current root,
+including a Trash folder restored by an Undone entry. Empty vaults remain
+retained outside those roots; completing a child Redo never deletes a vault
+or relaxes the ancestor's complete inventory.
+
+Restore retains an initially existing target parent through its mutation and
+checks that the public parent path still names it before moving data. A parent
+renamed or replaced after initial admission refuses with retained intent,
+including receipts acquired while that parent was absent. Only the initially
+missing-parent branch may create parents; its terminal receipt always requires
+the existing caller history barrier.
+
+Validated directory lineage and native Trash information remain coherent via
+private, bounded revision certificates. A typed Trash history record binds the
+canonical data/info directories, exact Info identity/bytes and its data step.
+Before returning refreshed data to Trash, durable inverse pending precedes an
+exclusive certificate containing that already-admitted complete inventory.
+The original Info inode and bytes are never rewritten. Native listing and
+receipt acquisition accept an otherwise stale root revision only when this
+certificate, exact Info and the complete current inventory all match, including
+every descendant revision and mode. Untracked edits do not gain authority.
+Certificates use no-replace publication and remain retained; collisions,
+unreadable records and metadata limits refuse, with pending/evidence preserved.
+
+## 7.5 Cancellable permanent deletion
+
+The existing permanent-delete API remains compatible. Additive
+`permanent::delete_permanently_with_cancel(folder,target,cancel)` returns
+confirmed Removed counts or DeleteError with typed refusal/cancellation,
+partial counts and retained locations. `delete_permanently_with_progress`
+also accepts the confirmation packet's optional RecordedIdentity and a worker
+callback receiving phase/total/removed counts; APP supplies that identity.
+The existing explicit irreversible confirmation and durable pre-effect history
+barrier remain mandatory. These calls never create an Undo receipt.
+
+A complete bounded, same-volume, no-follow inventory precedes effects. An
+exclusive private staging directory holds a synced intent before a no-replace
+claim of the admitted root. Pre/post inventories refuse changed sources; a
+wrong claimed object is returned only while unchanged and the original name
+is free. Deletion walks held descriptors inside that private namespace and
+checks cancellation before each unlink. New work and traversal/resource/I/O
+errors refuse instead of being silently counted as success. Only actual
+successful unlinks increment progress. Partial data and intent remain retained
+for inspection on cancellation/error; no uncertain public-name cleanup or
+automatic replay occurs. Unsupported no-replace is a refusal, and blocking
+filesystem calls still have no cancellation deadline. Retained metadata does
+not imply recoverability of bytes already permanently removed.
+Descriptor-relative statx mount IDs are required throughout admission and
+walking; crossing a mount (including same-device bind mounts) or unavailable
+mount-ID support refuses. This is traversal containment, not filesystem-type
+classification or an atomic-no-replace capability probe.
+
+Final deletion transfers each admitted entry with no-replace into a newly
+created exclusive private cell before unlinking it. Replacing the old final
+name through a retained source-parent descriptor does not replace that cell
+entry. The moved entry
+must still match its admitted identity (or the held directory after Gust's own
+child removals); a wrong claim is retained and refuses, never unlinked. Cell
+intent is synced before the claim, and resource admission budgets all cell
+metadata before effects. Cells and intents remain retained, including on
+successful completion; they are not recursively cleaned or replayed.
+
+Before further effects and terminal success, deletion rechecks the staging
+binding and every held root/ancestor binding. Persistent namespace relocation
+stops the walk before another removal. Retained paths are explicitly last-known
+uncertain location hints (`DeleteError::locations_uncertain`), not guarantees
+that a renamed private tree remains at that string. These checks do not claim atomic exclusion of every concurrent
+same-user mutation inside a newly created private namespace.
+
+## 7.6 Confirmed Empty Trash
+
+`trash::prepare_empty(locations, cancel)` runs on a worker over the complete
+explicit location scope from checked mount discovery, never visible/cache rows.
+It returns an opaque plan with memory-only summary/cache accounting. Aggregate
+metadata is bounded at 32 MiB and 200,000 entries; limits refuse the whole plan,
+never return a confirmed prefix. Duplicate or overlapping locations refuse.
+Every files/info entry is enumerated; eligible pairs retain complete original
+receipts and no-follow same-mount inventories. Unpaired entries and any root
+containing reserved Gust recovery names are retained and counted, not swept.
+A paired item that cannot be completely admitted refuses preparation. Original
+restore-parent paths are not opened just to permanently discard Trash data.
+
+The caller retains the plan behind an opaque ID and obtains an explicit
+irreversible confirmation of its item/descendant counts and retained evidence.
+`plan.confirm_irreversible()` consumes that exact plan into execution authority.
+`confirmed.execute(history, cancel, progress)` revalidates the complete plan,
+persists a history barrier before staging, then publishes private durable
+intents before claiming each exact Info/data pair with no-replace. APP retains
+its forward marker and owns the History lock and worker through completion.
+No confirmation is inferred from paths, a stale model, or a timeout.
+
+Data deletion consumes the already-confirmed complete inventory, using the
+corrected permanent worker's private final-entry claims and ancestry guards.
+It never resnapshots new contents into deletion authority. Exact Info inodes and
+intents remain in private recovery storage; no evidence or history vault is
+recursively removed. Progress counts real data removals and fully completed
+items, excluding metadata retention. Cancellation/error may retain claims even
+with zero removed counts; locations are last-known uncertain hints. New or
+changed work refuses; final success describes only the confirmed eligible scope
+and explicitly reports retained entries. Retained entries count untouched
+root-level recovery objects and files/info directory entries; a protected pair
+counts twice. Outcome information_retained counts exact claimed Info records,
+including incomplete items. Recovery metadata deliberately remains after success.
+No Undo, automatic replay/cleanup, blocking-filesystem deadline, or real-user
+Trash exercise is implied.
+
+Empty Trash uses mount-aware inventories for receipt admission, confirmation
+revalidation and both sides of every Info/data claim. The expected descriptor
+mount ID is checked before opening each child directory, then the opened
+handle is checked again before enumeration. A descendant mount or unavailable
+mount identity refuses before traversing its contents, including a same-device
+bind mount or one introduced after confirmation. The unchecked restoration
+inventory is not a preflight for this operation. Native information and lineage
+certificates retain exact binding/bytes; mount-aware acquisition also guards
+those metadata reads. Checks remain bounded revalidation, not atomic exclusion
+of mount changes or a deadline for kernel calls.
+
+The deletion worker also receives a fallible owned outer-authority checkpoint.
+It verifies the admitted Trash, run and pair bindings before further destructive
+effects and terminal completion. Keeping the inner pair or stage intact under
+replacement outer directories cannot preserve authority. A persistent outer
+binding loss stops the worker with exact partial counts, retained Info/intents
+and uncertain location hints; progress callbacks cannot stand in for this check.
+
+## 12. Release qualification and shared test runners
+
+Release evidence distinguishes source checks, model seams, native desktop
+acceptance and an installed package. None substitutes for another. Historical
+desktop evidence is not qualification of a new binary, architecture or provider.
+
+- Each shared test invocation owns a private log and skip ledger. The summary
+  records whether tests actually ran, Cargo's exit status, runtime skips and
+  ignored tests. Required mode fails on skips, ignored tests or no observed
+  tests, even when a child command returns zero. App Rust tests use the same
+  accounting as library tests; Qt model scripts remain separately named seams.
+  Package unit scope explicitly filters the manual recursive-copy benchmark and
+  records that exclusion; it never enables ignored tests or counts a benchmark
+  as passed. Other ignored/skipped cases still fail required mode. Cancellation
+  stops the owned child process group before releasing its build lease.
+  The artifact builder uses that same boundary, including deferred cancellation
+  during process startup and descendants outliving their immediate parent.
+  Cancellation stays deferred throughout cleanup; an unestablished retirement
+  retains the lease rather than returning a timeout and releasing ownership.
+  Every immediate-child exit also establishes group retirement before returning
+  its status, including zero/nonzero exits and direct termination of that child.
+  A surviving descendant cannot outlive the caller's lease on a normal return.
+  Public failure details are bounded Rust error codes, locked crate identifiers,
+  counts and fixed categories; diagnostic prose/paths remain private. Hosted
+  library diagnostics may explicitly opt into at most 64 failed integration-test
+  identifiers matched exactly to committed public declarations and an owned-crate
+  allowlist. Unknown names/targets remain unreported and counted as unclassified.
+  Archive fixtures require bsdtar, bwrap and prlimit plus real user/mount namespace
+  admission. Refusal is fatal and there is no unsandboxed fallback. Hosted
+  Ubuntu runners grant `userns` to `/usr/bin/bwrap` alone (Arch has no such
+  AppArmor restriction); that admits the sandbox, never bypasses it.
+  Independent artifact staging requires successful SDK/app and sandbox
+  admission, and cannot turn a failed library gate into a pass.
+  The frozen SMB availability fixture requires a successful `gio --help` and
+  the installed SMB backend descriptor; their presence does not qualify a mount.
+- Native and theme gates require an explicitly dedicated disposable desktop,
+  their actual tools and the installed binary. They must not start on an
+  ordinary shared desktop. The desktop runner owns `/tmp/gust-qa.lock`; callers
+  must not wrap it in a second acquisition. A missing prerequisite is SKIP,
+  never PASS, and makes a required qualification fail.
+  The current UI runner creates a private headless labwc session; the wrapper
+  must not require or drive the host Hyprland session. A missing/nonempty QML
+  warning ledger fails acceptance. Labwc does not qualify Hyprland visual rules.
+- Package validation checks the staged/installed files, executable formats,
+  dynamic library resolution and dependency metadata. A source recipe or a
+  successful development-tree launch does not qualify an installed artifact.
+  The supported qualification floor is Qt 6.11.2. Native CI selects that exact
+  SDK for each architecture after the system-Qt portable seams. Build receipts
+  record the selected Qt version; staging rejects older/mixed Qt libraries and
+  requires the selected SDK's library root when testing an SDK build. This is
+  SDK staging evidence, separate from installed Arch dependency qualification.
+  The ops archive helper is a separate runtime executable, linked with
+  libarchive, built with `cargo build -p gust-ops --bin gust-archive-helper`;
+  installations using that contract must include it beside Gust in `/usr/bin`.
+- Source recipes identify a full revision, fetchable URL and verified SHA-256.
+  Artifact CI builds the verified extracted archive, then stages with the
+  reviewed recipe; a checkout alias cannot qualify that source pin. Build
+  provenance validates the canonical app-to-QML symlink and selected contents.
+  Preparing a recipe does not publish a release or package. Both advertised
+  Linux architectures need native compilation; desktop/provider qualification
+  is recorded separately for each architecture rather than inferred.
+- Raw logs, source receipts, screenshots and theme captures stay private and
+  outside Git/public CI artifacts. Public checks expose sanitized counts and
+  prerequisite categories only, never home paths, filenames or host identities.
+
+Ownership: release owns shared orchestration/packaging, app owns app-local test
+scripts and native model contracts, UI owns its feature-specific desktop checks.
+New runtime helpers/dependencies must be handed to release before qualification.
 
 ### 6.4.3 Transfer cancellation and ownership
 

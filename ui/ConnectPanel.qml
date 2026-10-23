@@ -39,13 +39,13 @@ Item {
         return titles[key] || qsTr("Set up connection support")
     }
     readonly property string statusTitle: root.feedbackTitle || (root.checkingSupport ? qsTr("Checking connection support…")
-        : root.missingSupport ? root.supportTitle : root.supportReady ? qsTr("Support is ready") : "")
+        : root.missingSupport ? root.supportTitle : root.supportReady ? qsTr("Connection support is installed") : "")
     readonly property string statusBody: root.feedbackTitle ? root.feedbackBody : root.checkingSupport
         ? qsTr("Checking installed helpers. Nothing opens automatically. Choose Check again if this takes longer than expected.") : root.missingSupport
         ? (root.requirement.installable
            ? qsTr("Gust needs %1. Choose Install support and approve the system prompt. Nothing connects automatically.").arg(root.requirement.packages.join(", "))
            : qsTr("This installation is missing %1. Install Gust with its device and network support using your system package manager, then choose Check again.").arg(root.requirement.packages.join(", ")))
-        : root.supportReady ? qsTr("Choose your device or connection again to open it.") : ""
+        : root.supportReady ? qsTr("Choose your device or connection again. Signing in is checked when Gust connects.") : ""
     function showSupport(key) {
         root.show()
         if (!root.busy) {

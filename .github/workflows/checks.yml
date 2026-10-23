@@ -1,0 +1,156 @@
+name: Source and artifact checks
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: source-checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contracts:
+    name: Runner and packaging contracts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Required source checks
+        run: python3 tests/release-gates.py --gate static --required --output "$RUNNER_TEMP/gust-contracts"
+      - name: Shell syntax
+        run: bash -n PKGBUILD tests/run-tests.sh tests/make-fixture.sh
+      - name: Verify declared remote source archive
+        run: python3 packaging/check-source.py --output "$RUNNER_TEMP/gust-source"
+
+  native-build:
+    name: Native build and staged artifact (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x86_64
+            qt-host: linux
+            qt-arch: linux_gcc_64
+            qt-dir: gcc_64
+            python-arch: x64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+            qt-host: linux_arm64
+            qt-arch: linux_gcc_arm64
+            qt-dir: gcc_arm64
+            python-arch: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_TERM_COLOR: never
+      QT_QPA_PLATFORM: offscreen
+      QT_QUICK_BACKEND: software
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Build and model prerequisites (ephemeral runner)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends just openssl pkg-config python3-venv libdbus-1-dev libclang-dev libarchive-dev libarchive-tools bubblewrap util-linux libglib2.0-dev libglib2.0-bin gvfs-backends libgl1-mesa-dev libxkbcommon-dev libxcb-cursor0 libxkbcommon-x11-0 qt6-base-dev qt6-declarative-dev qt6-declarative-dev-tools qml6-module-qttest qml6-module-qtquick qml6-module-qtquick-window qml6-module-qtquick-shapes qml6-module-qtqml qml6-module-qtqml-models qml6-module-qtqml-workerscript
+          rustup toolchain install stable --profile minimal --component rustfmt
+          rustup default stable
+      - name: Rust formatting
+        run: |
+          cargo fmt --all -- --check
+          just --list >/dev/null
+          ./tests/lint-qml.sh
+          ./tests/lint-strings.sh
+      # These harnesses explicitly use Ubuntu's qmltestrunner. Run them before
+      # selecting the SDK so its libraries/imports cannot mix with system Qt.
+      - name: Required portable model seams (system Qt)
+        run: python3 tests/release-gates.py --gate model-seams --required --output "$RUNNER_TEMP/gust-model-seams"
+      # Older Python can misclassify the official ARM Qt tools 7z as ZIP:
+      # https://github.com/miurahr/aqtinstall/issues/1042
+      - name: Select pinned SDK installer Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.14.0'
+          architecture: ${{ matrix.python-arch }}
+          check-latest: false
+      - name: Select pinned public Qt SDK (no account, no host installation)
+        working-directory: ${{ runner.temp }}
+        env:
+          SDK_ROOT: ${{ runner.temp }}/gust-qt/6.11.2/${{ matrix.qt-dir }}
+        run: |
+          python3 -m venv "$RUNNER_TEMP/qt-installer"
+          if "$RUNNER_TEMP/qt-installer/bin/pip" install 'aqtinstall==3.3.0' 'py7zr==1.1.0' >"$RUNNER_TEMP/qt-installer.log" 2>&1; then
+            :
+          else
+            code=$?
+            python3 "$GITHUB_WORKSPACE/packaging/qt-contract.py" --diagnose-installer "$RUNNER_TEMP/qt-installer.log" --phase bootstrap --exit-code "$code"
+            exit "$code"
+          fi
+          printf '[aqt]\nprint_stacktrace_on_error = true\n' >"$RUNNER_TEMP/qt-installer.ini"
+          if "$RUNNER_TEMP/qt-installer/bin/aqt" --config "$RUNNER_TEMP/qt-installer.ini" install-qt '${{ matrix.qt-host }}' desktop 6.11.2 '${{ matrix.qt-arch }}' --outputdir "$RUNNER_TEMP/gust-qt" --archives qtbase qtdeclarative qtsvg qttools qtwayland icu --modules qtshadertools >>"$RUNNER_TEMP/qt-installer.log" 2>&1; then
+            :
+          else
+            code=$?
+            python3 "$GITHUB_WORKSPACE/packaging/qt-contract.py" --diagnose-installer "$RUNNER_TEMP/qt-installer.log" --phase sdk --exit-code "$code"
+            exit "$code"
+          fi
+          echo "QMAKE=$SDK_ROOT/bin/qmake" >>"$GITHUB_ENV"
+          echo "GUST_EXPECT_QT_ROOT=$SDK_ROOT" >>"$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$SDK_ROOT/lib" >>"$GITHUB_ENV"
+          echo "QT_PLUGIN_PATH=$SDK_ROOT/plugins" >>"$GITHUB_ENV"
+          echo "QML_IMPORT_PATH=$SDK_ROOT/qml" >>"$GITHUB_ENV"
+      - name: Validate selected Qt SDK
+        run: python3 packaging/qt-contract.py
+      - name: Required app tests (selected SDK)
+        id: app-tests
+        run: python3 tests/release-gates.py --gate app --required --output "$RUNNER_TEMP/gust-app"
+      # Ubuntu's AppArmor denies unprivileged user namespaces; Arch, the release
+      # target, does not. Grant `userns` to the system bwrap alone so the real
+      # sandbox can start. Nothing is unsandboxed and refusal below stays fatal.
+      - name: Allow user namespaces for the system bwrap only (ephemeral runner)
+        run: |
+          printf '%s\n' 'abi <abi/4.0>,' 'include <tunables/global>' \
+            'profile bwrap /usr/bin/bwrap flags=(unconfined) {' '  userns,' '}' |
+            sudo tee /etc/apparmor.d/gust-ci-bwrap >/dev/null
+          sudo apparmor_parser -r /etc/apparmor.d/gust-ci-bwrap
+      - name: Required archive namespace admission
+        id: archive-admission
+        run: |
+          for tool in /usr/bin/bwrap /usr/bin/prlimit /usr/bin/bsdtar; do
+            if [[ ! -x "$tool" ]]; then
+              echo "{\"archive_namespace_admission\":\"FAIL\",\"missing_tool\":\"${tool##*/}\"}"
+              exit 1
+            fi
+          done
+          if timeout 10 /usr/bin/bwrap --unshare-all --die-with-parent --ro-bind / / --proc /proc --dev /dev -- /usr/bin/true >"$RUNNER_TEMP/archive-sandbox.log" 2>&1; then
+            echo '{"archive_namespace_admission":"PASS"}'
+          else
+            code=$?
+            permission_refused=false
+            if grep -Eq 'Operation not permitted|Permission denied|No permissions to create' "$RUNNER_TEMP/archive-sandbox.log"; then
+              permission_refused=true
+            fi
+            echo "{\"archive_namespace_admission\":\"FAIL\",\"exit_code\":$code,\"permission_refusal_marker\":$permission_refused,\"host_namespace_policy_qualification\":\"pending\"}"
+            exit "$code"
+          fi
+      - name: Library observation (unprovisioned fixtures are reported as skips)
+        if: ${{ !cancelled() && steps.app-tests.outcome == 'success' }}
+        env:
+          GUST_PUBLIC_TEST_IDS: '1'
+          GUST_ARCHIVE_HELPER: ${{ github.workspace }}/target/debug/gust-archive-helper
+        run: ./tests/run-tests.sh
+      - name: Verify declared archive, build it and validate staged files and linking
+        if: ${{ !cancelled() && steps.app-tests.outcome == 'success' && steps.archive-admission.outcome == 'success' }}
+        run: python3 packaging/check-source.py --build --architecture "${{ matrix.arch }}" --output "$RUNNER_TEMP/gust-source-package"
+      # No artifact upload: raw test logs, source receipts and native/theme
+      # evidence remain private. Hosted checks do not qualify a desktop,
+      # physical device, remote account or installed Arch dependency closure.

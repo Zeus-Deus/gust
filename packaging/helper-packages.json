@@ -1,0 +1,16 @@
+{
+  "required": {
+    "bsdtar": "libarchive", "bwrap": "bubblewrap", "curl": "curl", "openssl": "openssl",
+    "ffmpeg": "ffmpeg", "ffprobe": "ffmpeg", "ffmpegthumbnailer": "ffmpegthumbnailer",
+    "fusermount3": "fuse3", "gio": "glib2", "ls": "coreutils", "true": "coreutils", "timeout": "coreutils",
+    "lsblk": "util-linux", "prlimit": "util-linux", "magick": "imagemagick",
+    "mpv": "mpv", "pdftoppm": "poppler", "pdfinfo": "poppler", "pw-play": "pipewire-audio",
+    "rclone": "rclone", "ssh": "openssh", "ssh-keygen": "openssh", "ssh-keyscan": "openssh",
+    "sshfs": "sshfs", "tar": "tar", "zstd": "zstd", "udisksctl": "udisks2",
+    "wl-copy": "wl-clipboard", "wl-paste": "wl-clipboard", "xdg-mime": "xdg-utils",
+    "xdg-open": "xdg-utils", "xdg-terminal-exec": "xdg-terminal-exec", "zoxide": "zoxide",
+    "pkexec": "polkit", "/usr/lib/gvfsd-dav": "gvfs-dnssd"
+  },
+  "optional": {"tailscale": "tailscale", "dcraw_emu": "libraw", "exiftool": "perl-image-exiftool", "libreoffice": "libreoffice-fresh"},
+  "session": {"hyprctl": "Hyprland desktop integration", "systemctl": "user session activation"}
+}
