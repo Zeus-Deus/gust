@@ -97,6 +97,63 @@ pub fn list_devices(ctx: &CallContext<'_>) -> Result<Vec<devices::Device>, Block
     list_devices_using(OsStr::new("lsblk"), ctx)
 }
 
+fn evidence_failure(code: ErrorCode) -> BlockFailure {
+    let mut failure = discovery_failure(code);
+    if code == ErrorCode::Unsupported {
+        failure.error.message = "Device instance checks are unavailable with the required lsblk profile. Check util-linux support and device permissions, then refresh.".into();
+    }
+    failure
+}
+
+fn observe_devices_using(
+    mut command: Command,
+    ctx: &CallContext<'_>,
+) -> Result<Vec<devices::DeviceObservation>, BlockFailure> {
+    let started = Instant::now();
+    let remaining = || -> Result<CallContext<'_>, BlockFailure> {
+        let context = CallContext {
+            cancel: ctx.cancel,
+            timeout: ctx.timeout.saturating_sub(started.elapsed()),
+        };
+        context.check().map_err(|e| evidence_failure(e.code))?;
+        Ok(context)
+    };
+    command
+        .args([
+            "--json",
+            "--tree",
+            "--all",
+            "--properties-by",
+            "udev,none",
+            "--output",
+            "NAME,KNAME,PATH,PKNAME,SIZE,RM,HOTPLUG,TYPE,FSTYPE,LABEL,MOUNTPOINT,MAJ:MIN,DISK-SEQ",
+        ])
+        .env("LC_ALL", "C");
+    let output = helper::run(command, &[], &remaining()?).map_err(|e| evidence_failure(e.code))?;
+    remaining()?;
+    if !output.status.success() {
+        return Err(evidence_failure(ErrorCode::Unsupported));
+    }
+    let text =
+        std::str::from_utf8(&output.stdout).map_err(|_| evidence_failure(ErrorCode::Protocol))?;
+    let observations = devices::parse_lsblk_evidence_checked(
+        text,
+        Some(devices::DeviceEvidenceOrigin::LsblkKernelSysfsV1),
+    )
+    .map_err(|_| evidence_failure(ErrorCode::Protocol))?;
+    remaining()?;
+    Ok(observations)
+}
+
+/// Capture typed kernel-instance evidence on a worker, within the chain budget.
+/// Missing evidence stays unavailable; unsupported capture never falls back to
+/// display-only discovery. Revalidation and action authority belong to callers.
+pub fn observe_devices(
+    ctx: &CallContext<'_>,
+) -> Result<Vec<devices::DeviceObservation>, BlockFailure> {
+    observe_devices_using(Command::new("lsblk"), ctx)
+}
+
 #[derive(Clone, Copy)]
 enum Action {
     Mount,
@@ -331,6 +388,9 @@ mod tests {
         fn program(&self) -> &OsStr {
             self.helper.as_os_str()
         }
+        fn command(&self) -> Command {
+            Command::new(self.program())
+        }
     }
     impl Drop for Fixture {
         fn drop(&mut self) {
@@ -342,6 +402,328 @@ mod tests {
             cancel,
             timeout: Duration::from_secs(3),
         }
+    }
+
+    fn evidence_source() -> serde_json::Value {
+        serde_json::json!({
+            "name":"fixture1", "kname":"fixture1", "path":"/dev/fixture1",
+            "type":"disk", "rm":true, "fstype":"ext4", "maj:min":"8:0", "disk-seq":41
+        })
+    }
+
+    fn evidence_encrypted(child: bool) -> serde_json::Value {
+        let mut source = evidence_source();
+        source["fstype"] = serde_json::json!("crypto_LUKS");
+        if child {
+            source["children"] = serde_json::json!([{
+                "name":"clear", "kname":"dm-fixture", "path":"/dev/mapper/clear",
+                "type":"crypt", "pkname":"fixture1", "fstype":"ext4",
+                "maj:min":"253:7", "disk-seq":81, "mountpoint":"/synthetic/café\n{A}"
+            }]);
+        }
+        source
+    }
+
+    fn evidence_fixture(reply: &serde_json::Value) -> Fixture {
+        Fixture::new(&format!(
+            "import os,sys\nassert os.environ['LC_ALL']=='C'\nassert sys.argv[1:]==['--json','--tree','--all','--properties-by','udev,none','--output','NAME,KNAME,PATH,PKNAME,SIZE,RM,HOTPLUG,TYPE,FSTYPE,LABEL,MOUNTPOINT,MAJ:MIN,DISK-SEQ']\nassert sys.stdin.buffer.read()==b''\nprint({:?})",
+            reply.to_string()
+        ))
+    }
+
+    fn capture_evidence(rows: serde_json::Value) -> Vec<devices::DeviceObservation> {
+        let fixture = evidence_fixture(&serde_json::json!({"blockdevices":rows}));
+        let cancel = CancelToken::new();
+        observe_devices_using(fixture.command(), &context(&cancel)).unwrap()
+    }
+
+    #[test]
+    fn evidence_profile_preserves_whole_device_and_crypt_instances_without_path_io() {
+        let observations = capture_evidence(serde_json::json!([evidence_encrypted(true)]));
+        assert_eq!(observations.len(), 1);
+        let observation = &observations[0];
+        let devices::DeviceEvidence::Available(binding) = observation.evidence() else {
+            panic!("complete captured instances must be available");
+        };
+        assert_eq!(
+            binding.origin(),
+            devices::DeviceEvidenceOrigin::LsblkKernelSysfsV1
+        );
+        assert_eq!(
+            binding.source().number(),
+            devices::DeviceNumber { major: 8, minor: 0 }
+        );
+        assert_eq!(binding.source().disk_sequence().get(), 41);
+        let child = binding.cleartext().unwrap();
+        assert_eq!(
+            child.instance().number(),
+            devices::DeviceNumber {
+                major: 253,
+                minor: 7
+            }
+        );
+        assert_eq!(child.instance().disk_sequence().get(), 81);
+        assert_eq!(child.parent(), binding.source());
+        assert_eq!(observation.device().mount_target(), "/dev/mapper/clear");
+        assert_eq!(
+            observation.device().mount_point,
+            Some(PathBuf::from("/synthetic/café\n{A}"))
+        );
+        assert!(capture_evidence(serde_json::json!([])).is_empty());
+    }
+
+    #[test]
+    fn evidence_positive_partition_sequence_cannot_authorize_or_bind_cleartext() {
+        let mut partition = evidence_encrypted(false);
+        partition["type"] = serde_json::json!("part");
+        partition["maj:min"] = serde_json::json!("8:1");
+        let retained = capture_evidence(serde_json::json!([partition.clone()])).remove(0);
+        let expected = devices::DeviceEvidenceUnavailable::MissingSourceInstance;
+        assert_eq!(
+            retained.evidence(),
+            &devices::DeviceEvidence::Unavailable(expected)
+        );
+        partition["children"] = evidence_encrypted(true)["children"].clone();
+        let current = capture_evidence(serde_json::json!([partition]));
+        assert_eq!(
+            current[0].evidence(),
+            &devices::DeviceEvidence::Unavailable(expected)
+        );
+        assert_eq!(
+            devices::revalidate_device(&retained, &current),
+            devices::DeviceRevalidation::Unavailable(expected)
+        );
+        assert_eq!(
+            devices::bind_cleartext_after_unlock(&retained, &current, "/dev/mapper/clear"),
+            devices::DeviceRevalidation::Unavailable(expected)
+        );
+    }
+
+    #[test]
+    fn evidence_capture_skips_truly_unknown_metadata_without_numeric_decoding() {
+        let json = r#"{"blockdevices":[{"name":"fixture1","kname":"fixture1","path":"/dev/fixture1","type":"disk","rm":true,"fstype":"ext4","maj:min":"8:0","disk-seq":41,"unknown":1e400}]}"#;
+        let fixture = Fixture::new(&format!("print({json:?})"));
+        let cancel = CancelToken::new();
+        let listed = observe_devices_using(fixture.command(), &context(&cancel)).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].device().path, "/dev/fixture1");
+        assert!(matches!(
+            listed[0].evidence(),
+            devices::DeviceEvidence::Available(_)
+        ));
+    }
+
+    #[test]
+    fn evidence_numeric_representation_errors_stay_static_protocol_failures() {
+        let cancel = CancelToken::new();
+        for (field, raw) in [
+            ("disk-seq", "1e400"),
+            ("disk-seq", "-1e400"),
+            ("kname", "1e400"),
+            ("maj:min", "1e400"),
+            ("disk-seq", "1e+"),
+        ] {
+            // Even an excluded invalid row refuses the complete capture instead
+            // of authorizing the valid row that preceded it.
+            let json = format!(
+                r#"{{"blockdevices":[{},{{"name":"invalid","path":"/dev/invalid","type":"disk","{field}":{raw}}}]}}"#,
+                evidence_source()
+            );
+            let fixture = Fixture::new(&format!("print({json:?})"));
+            let failure = observe_devices_using(fixture.command(), &context(&cancel)).unwrap_err();
+            assert_eq!(failure, evidence_failure(ErrorCode::Protocol));
+        }
+    }
+
+    #[test]
+    fn evidence_missing_and_ambiguous_instances_stay_typed_unavailable() {
+        use devices::DeviceEvidenceUnavailable::*;
+        for (field, value) in [
+            ("kname", serde_json::Value::Null),
+            ("maj:min", serde_json::Value::Null),
+            ("disk-seq", serde_json::Value::Null),
+            ("disk-seq", serde_json::json!(0)),
+        ] {
+            let mut source = evidence_source();
+            source[field] = value;
+            source["origin"] = serde_json::json!("LsblkKernelSysfsV1");
+            let listed = capture_evidence(serde_json::json!([source]));
+            assert_eq!(listed.len(), 1);
+            assert_eq!(
+                listed[0].evidence(),
+                &devices::DeviceEvidence::Unavailable(MissingSourceInstance)
+            );
+        }
+        let mut missing_child = evidence_encrypted(true);
+        missing_child["children"][0]["disk-seq"] = serde_json::Value::Null;
+        assert_eq!(
+            capture_evidence(serde_json::json!([missing_child]))[0].evidence(),
+            &devices::DeviceEvidence::Unavailable(MissingCleartextInstance)
+        );
+        let duplicate = evidence_source();
+        assert_eq!(
+            capture_evidence(serde_json::json!([duplicate.clone(), duplicate]))[0].evidence(),
+            &devices::DeviceEvidence::Unavailable(AmbiguousInstance)
+        );
+        let mut wrong_parent = evidence_encrypted(true);
+        wrong_parent["children"][0]["pkname"] = serde_json::json!("other");
+        assert_eq!(
+            capture_evidence(serde_json::json!([wrong_parent]))[0].evidence(),
+            &devices::DeviceEvidence::Unavailable(AmbiguousRelationship)
+        );
+        // A disk's sequence must not substitute for its partition's missing one.
+        let mut disk = evidence_source();
+        disk["name"] = serde_json::json!("disk");
+        disk["kname"] = serde_json::json!("disk");
+        disk["type"] = serde_json::json!("disk");
+        disk["path"] = serde_json::json!("/dev/disk");
+        disk["rm"] = serde_json::json!(false);
+        disk["maj:min"] = serde_json::json!("8:16");
+        let mut partition = evidence_source();
+        partition["type"] = serde_json::json!("part");
+        partition["maj:min"] = serde_json::json!("8:1");
+        partition["disk-seq"] = serde_json::Value::Null;
+        disk["children"] = serde_json::json!([partition]);
+        assert_eq!(
+            capture_evidence(serde_json::json!([disk]))[0].evidence(),
+            &devices::DeviceEvidence::Unavailable(MissingSourceInstance)
+        );
+    }
+
+    #[test]
+    fn evidence_recapture_rejects_path_reuse_and_requires_explicit_unlock_transition() {
+        let mut locked = capture_evidence(serde_json::json!([evidence_encrypted(false)]));
+        let retained = locked.remove(0);
+        let fresh = capture_evidence(serde_json::json!([evidence_encrypted(true)]));
+        assert_eq!(
+            devices::revalidate_device(&retained, &fresh),
+            devices::DeviceRevalidation::Changed
+        );
+        let devices::DeviceRevalidation::Same(bound) =
+            devices::bind_cleartext_after_unlock(&retained, &fresh, "/dev/mapper/clear")
+        else {
+            panic!("explicit own-successful-unlock control must bind captured child");
+        };
+        assert!(matches!(
+            devices::revalidate_device(&bound, &fresh),
+            devices::DeviceRevalidation::Same(_)
+        ));
+        assert_eq!(
+            devices::bind_cleartext_after_unlock(&retained, &fresh, "/dev/dm-fixture"),
+            devices::DeviceRevalidation::Unavailable(
+                devices::DeviceEvidenceUnavailable::UnverifiedLocator
+            )
+        );
+        for child in [false, true] {
+            let mut replaced = evidence_encrypted(true);
+            if child {
+                replaced["children"][0]["disk-seq"] = serde_json::json!(82);
+            } else {
+                replaced["disk-seq"] = serde_json::json!(42);
+            }
+            let current = capture_evidence(serde_json::json!([replaced]));
+            assert_eq!(
+                devices::revalidate_device(&bound, &current),
+                devices::DeviceRevalidation::Changed
+            );
+        }
+    }
+
+    #[test]
+    fn evidence_malformed_or_oversized_capture_refuses_the_whole_inventory() {
+        let cancel = CancelToken::new();
+        let mut invalid_number = evidence_source();
+        invalid_number["maj:min"] = serde_json::json!("08:1");
+        let mut invalid_sequence = evidence_source();
+        invalid_sequence["disk-seq"] = serde_json::json!("41");
+        for reply in [
+            serde_json::json!([[]]),
+            serde_json::json!({"blockdevices":[evidence_source(), invalid_number]}),
+            serde_json::json!({"blockdevices":[invalid_sequence]}),
+        ] {
+            let fixture = evidence_fixture(&reply);
+            let failure = observe_devices_using(fixture.command(), &context(&cancel)).unwrap_err();
+            assert_eq!(failure, evidence_failure(ErrorCode::Protocol));
+        }
+        for body in [
+            "import sys\nsys.stdout.buffer.write(b'\\xff')",
+            "import sys\nsys.stdout.buffer.write(b' '*(4*1024*1024)+b'{\"blockdevices\":[]}')",
+            "import sys\nsys.stdout.buffer.write(b'x'*(9*1024*1024))",
+        ] {
+            let fixture = Fixture::new(body);
+            assert_eq!(
+                observe_devices_using(fixture.command(), &context(&cancel)).unwrap_err(),
+                evidence_failure(ErrorCode::Protocol)
+            );
+        }
+    }
+
+    #[test]
+    fn evidence_unsupported_profile_never_falls_back_or_exposes_diagnostics() {
+        let fixture = Fixture::new("import pathlib,sys\np=pathlib.Path(__file__).with_name('calls')\np.write_text(p.read_text()+'1' if p.exists() else '1')\nprint('{\"blockdevices\":[]}')\nsys.stderr.write('synthetic-private-diagnostic')\nsys.exit(1)");
+        let cancel = CancelToken::new();
+        let failure = observe_devices_using(fixture.command(), &context(&cancel)).unwrap_err();
+        assert_eq!(failure, evidence_failure(ErrorCode::Unsupported));
+        assert!(failure.error.message.contains("util-linux"));
+        assert!(!format!("{failure:?}").contains("synthetic-private-diagnostic"));
+        assert_eq!(
+            std::fs::read_to_string(fixture.root.join("calls")).unwrap(),
+            "1"
+        );
+        assert_eq!(
+            observe_devices_using(
+                Command::new(fixture.root.join("missing")),
+                &context(&cancel)
+            )
+            .unwrap_err(),
+            evidence_failure(ErrorCode::MissingHelper)
+        );
+    }
+
+    #[test]
+    fn evidence_capture_honors_preflight_active_cancel_and_shared_deadline() {
+        let fixture = Fixture::new("import pathlib,time\npathlib.Path(__file__).with_name('started').touch()\ntime.sleep(30)");
+        let cancel = CancelToken::new();
+        let zero = CallContext {
+            cancel: &cancel,
+            timeout: Duration::ZERO,
+        };
+        assert_eq!(
+            observe_devices_using(fixture.command(), &zero).unwrap_err(),
+            evidence_failure(ErrorCode::Timeout)
+        );
+        cancel.cancel();
+        assert_eq!(
+            observe_devices_using(fixture.command(), &context(&cancel)).unwrap_err(),
+            evidence_failure(ErrorCode::Cancelled)
+        );
+        assert!(!fixture.root.join("started").exists());
+        let cancel = CancelToken::new();
+        let short = CallContext {
+            cancel: &cancel,
+            timeout: Duration::from_millis(150),
+        };
+        let start = Instant::now();
+        assert_eq!(
+            observe_devices_using(fixture.command(), &short).unwrap_err(),
+            evidence_failure(ErrorCode::Timeout)
+        );
+        assert!(start.elapsed() < Duration::from_secs(2));
+        let fixture = Fixture::new("import pathlib,time\npathlib.Path(__file__).with_name('started').touch()\ntime.sleep(30)");
+        let token = Arc::new(CancelToken::new());
+        let stop = Arc::clone(&token);
+        let marker = fixture.root.join("started");
+        let worker = std::thread::spawn(move || {
+            let start = Instant::now();
+            while !marker.exists() && start.elapsed() < Duration::from_secs(2) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert!(marker.exists());
+            stop.cancel();
+        });
+        let failure = observe_devices_using(fixture.command(), &context(&token)).unwrap_err();
+        worker.join().unwrap();
+        assert_eq!(failure, evidence_failure(ErrorCode::Cancelled));
     }
 
     #[test]
