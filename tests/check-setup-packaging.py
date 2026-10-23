@@ -22,7 +22,7 @@ REQUIRED = {
 FEATURES = {
     "wl-clipboard", "xdg-terminal-exec", "xdg-utils", "zoxide", "bubblewrap",
     "util-linux", "imagemagick", "ffmpegthumbnailer", "ffmpeg",
-    "pipewire-audio", "poppler", "libarchive", "udisks2", "xdg-desktop-portal",
+    "pipewire-audio", "poppler", "mpv", "libarchive", "udisks2", "xdg-desktop-portal",
 }
 # Tailscale is a network service with its own account; Gust lists its
 # devices when the user already runs it and never installs it for them.
