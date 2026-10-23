@@ -1872,6 +1872,11 @@ to `usr/lib` and `/lib64` to `usr/lib64`. Preserve the host's `lib64` alias:
 Arch and Ubuntu place the ELF interpreter differently, and redirecting both
 aliases to `usr/lib` prevents sandboxed executables from starting on Ubuntu.
 
+Video frame helpers have a 1 GiB address-space budget: FFmpeg's decoder and
+scaler threads reserve stacks that can exceed the default 512 MiB even for
+ordinary 1080p clips. This limits virtual address space, not resident memory.
+The CPU, wall-clock, process-count and output-size limits still apply.
+
 ### 6.4.2 Owned remote helper calls
 
 Remote service calls run on workers. `helper::CallContext { cancel: &CancelToken,
