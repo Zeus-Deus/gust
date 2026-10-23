@@ -177,11 +177,14 @@ pub(super) fn parse_inventory<M: MetadataFields>(
         return Err(LsblkParseError::Limit);
     }
     let Object(envelope): Object<Envelope<M>> = serde_json::from_str(json).map_err(|error| {
-        // Serde's recursion guard can fire before the flattened row-depth check.
-        // Only its fixed category is exposed, never its input-bearing diagnostic.
-        if error.to_string().starts_with("recursion limit exceeded") {
+        // Serde categorizes numeric representation overflow as syntax even for
+        // valid JSON tokens. Unknown values use IgnoredAny; overflow while
+        // decoding a known field is a shape error. Match only fixed diagnostic
+        // categories, never expose the input-bearing parser diagnostic.
+        let diagnostic = error.to_string();
+        if diagnostic.starts_with("recursion limit exceeded") {
             LsblkParseError::Limit
-        } else if error.is_data() {
+        } else if error.is_data() || diagnostic.starts_with("number out of range") {
             LsblkParseError::InvalidShape
         } else {
             LsblkParseError::InvalidJson
