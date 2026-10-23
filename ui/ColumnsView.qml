@@ -48,7 +48,7 @@ FocusScope {
 
     // Rows on screen, so details are read for what is visible (RowsView).
     function reportRows() {
-        if (!root.model || list.count === 0) return
+        if (!root.visible || !root.model || list.count === 0) return
         // Arithmetic, not indexAt(): at the very bottom indexAt() can miss
         // and answer -1, which read as "row 0" and fetched nothing.
         const first = Math.max(0, Math.floor((list.contentY - list.originY) / Tokens.rowHeight))
@@ -75,7 +75,10 @@ FocusScope {
         function onLocationChanged() { sideTimer.restart() }
         function onCountChanged() { sideTimer.restart() }
     }
-    onVisibleChanged: if (visible) sideTimer.restart()
+    onVisibleChanged: if (visible) {
+        sideTimer.restart()
+        colsReport.restart()
+    }
     onModelChanged: sideTimer.restart()
 
     /// How far the list is scrolled, in pixels (qa).
@@ -221,10 +224,10 @@ FocusScope {
                     id: list
                     objectName: "columnsList"
                     anchors.fill: parent
-                    model: root.model
+                    model: root.visible ? root.model : null
                     clip: true
                     focus: true
-                    currentIndex: root.model ? root.model.cursor : 0
+                    currentIndex: model ? root.model.cursor : -1
                     highlightMoveDuration: 0
                     boundsBehavior: Flickable.StopAtBounds
                     keyNavigationEnabled: false

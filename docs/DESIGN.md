@@ -2092,6 +2092,57 @@ thread. Queueing after QObject destruction returns `Err` and is handled — no
 `unwrap`, no panic. `is_destroyed()` followed by queue is **not** atomic and is
 not used as a lifetime guarantee.
 
+### 9.1 Performance boundaries
+
+Directory sorting must preserve byte-safe identity and the existing order while
+avoiding repeated display conversion or allocation inside comparisons. Deferred
+metadata remains cancellable and limited to the requested rows.
+Monotonic name listings avoid expanded sort keys; reverse fast paths must be
+strict so equal rows retain their existing order.
+Inactive directory views do not instantiate row delegates. Returning to a view
+reattaches its model and follows the current cursor; closed static panels defer
+their repeated controls until opened.
+Expanded natural-sort keys have a bounded scratch-memory budget; unusually
+large or digit-heavy listings fall back to the existing comparator.
+
+Thumbnail work is bounded and cancellable between helpers. Repeated requests
+reuse valid cached results; cache admission still checks source freshness and
+validates helper output under the existing sandbox rules. Optimizations must
+not decode untrusted source contents on the UI thread or bypass the sandbox.
+Grid requests cover the viewport and its prefetch margin, with on-screen rows
+first, rather than a fixed prefix of the directory. Navigation and live changes
+cancel the previous pass; queued results also check cancellation before publish.
+An unchanged viewport does not restart its pass. Live changes invalidate the
+in-memory paths so replacement files are revalidated on a worker.
+Each model admits only one active thumbnail worker, including a helper still
+finishing after cancellation. New requests retain the newest pending viewport
+and resume when that worker exits. Changes to visible ordering or membership
+invalidate the remembered pass even when row bounds stay the same.
+QML explicitly disables thumbnail requests outside Grid; the finishing worker
+remains counted until it exits, and no replacement pass starts in that view.
+Only a visible view reports viewport rows, and becoming visible reports its
+current bounds again. Every previewable row in those bounds is eligible; a
+fixed prefix limit must not strand tiles on large or zoomed-out viewports.
+Grid image items reload updated cached files instead of retaining stale Qt
+decoded-image cache entries after live replacement.
+
+Cached thumbnails carry `Gust::SourceVersion` alongside `Thumb::MTime`: device,
+inode, length, nanosecond mtime and ctime identify the rendered source version.
+Cache metadata reads are bounded and use a held regular-file descriptor without
+following symlinks. A source changed during rendering is refused. Legacy cache
+entries without this version tag regenerate once inside the sandbox. This
+metadata is display-cache freshness evidence, never operation or trust authority.
+
+Independent local discovery sources may run concurrently on workers. Discovery
+never connects to a remote device; explicit connection, cancellation, host trust,
+and truthful failure reporting retain their existing contracts. No performance
+cache may turn stale connection or trust evidence into authority.
+
+Performance claims compare release builds on identical fixtures and state,
+record repeated measurements, and distinguish local fixture results from live
+network latency. A subsystem improvement is not a claim of uniform whole-app
+speedup.
+
 ## 10. Theme tokens
 
 Read `~/.local/state/omarchy/current/theme/colors.toml` and `shell.toml`
