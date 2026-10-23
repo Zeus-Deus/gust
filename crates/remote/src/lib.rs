@@ -8,8 +8,10 @@
 
 pub mod capabilities;
 pub mod cloud;
+mod command;
 pub mod computers;
 pub mod disconnect;
+pub mod helper;
 pub mod mount;
 pub mod phones;
 pub mod setup;

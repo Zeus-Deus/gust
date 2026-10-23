@@ -1876,3 +1876,29 @@ Video frame helpers have a 1 GiB address-space budget: FFmpeg's decoder and
 scaler threads reserve stacks that can exceed the default 512 MiB even for
 ordinary 1080p clips. This limits virtual address space, not resident memory.
 The CPU, wall-clock, process-count and output-size limits still apply.
+
+### 6.4.2 Owned remote helper calls
+
+Remote service calls run on workers. `helper::CallContext { cancel: &CancelToken,
+timeout: Duration }` gives each call one overall budget. `RemoteError` carries a
+typed code and an actionable message; cancellation never claims rollback or
+authorizes replay. Existing connection APIs remain bounded compatibility adapters.
+Owned subprocesses share eight admission slots, nonblocking capped stdin/stdout/
+stderr, readiness-based waits and process-group cleanup. A single reaper retains
+a slot until even a kernel-stuck child is reaped; no reader join can outlive the
+call deadline. Only owned children are signalled and mounts are never lazily
+detached on cancellation. SSH aliases remain verbatim during diagnostic probes.
+Malformed or missing rclone upload counters are unknown and block disconnect;
+backend receipts require a complete parsed response, never an empty failed parse.
+
+Owned helpers remove inherited TLS keylog settings. Reaper-start failure retains
+bounded ownership, and subsequent admissions also reap completed children.
+
+Successful SSHFS daemon startup explicitly hands off the accepted filesystem and
+its SSH transport; normal helper retirement must not signal those descendants.
+Only a successful starter exit with drained pipes permits this handoff. Failed,
+cancelled or timed-out startup retains bounded process-group cleanup. Ordinary
+one-shot helpers still terminate leftover descendants even after a successful exit.
+Host-key scans offer keys for trust only when every key has a fingerprint. Any
+fingerprint helper failure, cancellation or shared-budget exhaustion rejects the
+whole scan; no undisplayed key may remain in a successful trust offer.

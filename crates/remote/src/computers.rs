@@ -472,79 +472,18 @@ fn lookup_output(
     command: &mut std::process::Command,
     timeout: std::time::Duration,
 ) -> std::io::Result<Vec<u8>> {
-    use std::io::{Error, ErrorKind, Read};
-    use std::os::fd::OwnedFd;
-    use std::os::unix::net::UnixStream;
-    use std::process::Stdio;
-    use std::time::{Duration, Instant};
-    let timeout = timeout.min(Duration::from_secs(5));
-    if timeout.is_zero() {
-        return Err(Error::new(
-            ErrorKind::TimedOut,
-            "SSH host-key lookup timed out",
-        ));
+    use std::io::Error;
+    let output = crate::command::capture_stdout(
+        command,
+        timeout.min(std::time::Duration::from_secs(5)),
+        1024 * 1024,
+        None,
+    )?;
+    if output.status.success() || (output.status.code() == Some(1) && output.stdout.is_empty()) {
+        Ok(output.stdout)
+    } else {
+        Err(Error::other("SSH host-key lookup failed"))
     }
-    // A nonblocking local socket avoids a pipe-reader thread whose join could
-    // hang forever if an unexpected descendant retains the output descriptor.
-    let (mut reader, writer) = UnixStream::pair()?;
-    reader.set_nonblocking(true)?;
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(OwnedFd::from(writer)))
-        .stderr(Stdio::null());
-    let start = Instant::now();
-    let mut child = command.spawn()?;
-    // Do not retain Command's extra stdout descriptor in the parent.
-    command.stdout(Stdio::null());
-    let result = (|| {
-        let mut output = Vec::new();
-        let mut status = None;
-        let mut eof = false;
-        loop {
-            if start.elapsed() >= timeout {
-                return Err(Error::new(
-                    ErrorKind::TimedOut,
-                    "SSH host-key lookup timed out",
-                ));
-            }
-            let mut buffer = [0; 8192];
-            match reader.read(&mut buffer) {
-                Ok(0) => eof = true,
-                Ok(count) => {
-                    if output.len() + count > 1024 * 1024 {
-                        return Err(Error::new(
-                            ErrorKind::InvalidData,
-                            "SSH host-key output exceeded limit",
-                        ));
-                    }
-                    output.extend_from_slice(&buffer[..count]);
-                    // Drain promptly but recheck the deadline on every read.
-                    continue;
-                }
-                Err(error) if error.kind() == ErrorKind::WouldBlock => {}
-                Err(error) if error.kind() == ErrorKind::Interrupted => continue,
-                Err(error) => return Err(error),
-            }
-            if status.is_none() {
-                status = child.try_wait()?;
-            }
-            if let Some(status) = status.filter(|_| eof) {
-                return if status.success() || (status.code() == Some(1) && output.is_empty()) {
-                    Ok(output)
-                } else {
-                    Err(Error::other("SSH host-key lookup failed"))
-                };
-            }
-            std::thread::sleep(
-                Duration::from_millis(5).min(timeout.saturating_sub(start.elapsed())),
-            );
-        }
-    })();
-    if result.is_err() {
-        let _ = child.kill();
-        gust_core::stall::reap_in_background(child);
-    }
-    result
 }
 
 fn parse_trusted_keys(text: &str) -> Vec<TrustedHostKey> {
