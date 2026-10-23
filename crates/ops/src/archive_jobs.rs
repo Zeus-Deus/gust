@@ -126,7 +126,7 @@ fn start_inner(
     let shared = progress.clone();
     let token = cancel.clone();
     let worker = std::thread::Builder::new().name("gust-archive".into()).spawn(move || {
-        let mut planned = Job::new(id.clone(), JobKind::Extract);
+        let mut planned = Job::new(id.clone(), if matches!(&request, ArchiveRequest::Create { .. }) { JobKind::Compress } else { JobKind::Extract });
         match &request {
             ArchiveRequest::Extract { archive, destination, .. } | ArchiveRequest::ExtractIntoNew { archive, destination, .. } => { planned.planned = vec![archive.clone()]; planned.dest_dir = Some(destination.clone()); }
             ArchiveRequest::Create { directory, names, destination, .. } => { planned.planned = names.iter().map(|n| directory.join(n)).collect(); planned.dest_dir = destination.parent().map(Path::to_path_buf); }
@@ -149,7 +149,14 @@ fn start_inner(
                     let record = extraction_record(id.clone(), &archive, &destination, &extracted);
                     Ok(ArchiveResult { record, extracted: Some(extracted) })
                 }
-                ArchiveRequest::Create { .. } => Err(ArchiveError::Unsupported("archive creation format".into())),
+                ArchiveRequest::Create { directory, names, destination, format, password } => {
+                    let created = super::create::create_recorded(super::create::CreateInput { directory: &directory, names: &names, destination: &destination, format, password: password.as_ref() }, &token, &mut report, &mut observer)?;
+                    let mut record = extraction_record(id.clone(), &directory, &destination, &created);
+                    record.kind = JobKind::Compress;
+                    record.dest_dir = destination.parent().map(Path::to_path_buf);
+                    record.planned = names.iter().map(|n| directory.join(n)).collect();
+                    Ok(ArchiveResult { record, extracted: None })
+                },
             }
         }));
         let panicked = execution.is_err();
@@ -161,8 +168,9 @@ fn start_inner(
                     extraction_record(id, planned.planned.first().map(PathBuf::as_path).unwrap_or(Path::new("/")),
                         planned.dest_dir.as_deref().unwrap_or(Path::new("/")), receipt)
                 } else {
-                    observer.journal.as_ref().and_then(|journal| journal.load().into_iter().rfind(|job| job.id == planned.id)).unwrap_or(planned)
+                    observer.journal.as_ref().and_then(|journal| journal.load().into_iter().rfind(|job| job.id == planned.id)).unwrap_or_else(|| planned.clone())
                 };
+                record.kind = planned.kind;
                 record.state = if panicked { JobState::Committing } else if cancelled(error) { JobState::Cancelled } else { JobState::Failed };
                 record
             }
@@ -172,6 +180,7 @@ fn start_inner(
                 let cause = journal_error(error);
                 result = match result {
                     Ok(ArchiveResult { extracted: Some(receipt), .. }) if !receipt.published.is_empty() => Err(ArchiveError::Partial { receipt, cause: Box::new(cause) }),
+                    Ok(ArchiveResult { record, extracted: None }) if !record.subtree_identities.is_empty() => Err(ArchiveError::Partial { receipt: Extracted { files: record.entries.len(), published: record.subtree_identities, ..Default::default() }, cause: Box::new(cause) }),
                     Err(ArchiveError::Partial { receipt, .. }) => Err(ArchiveError::Partial { receipt, cause: Box::new(cause) }),
                     _ => Err(cause),
                 };

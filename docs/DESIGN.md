@@ -826,6 +826,94 @@ string state into following lines or windows; character literals remain strings.
 Trailing decimal points remain numeric before an exponent or suffix, including
 hexadecimal exponent forms; annotation does not validate literal semantics.
 
+### 6.9.4 Rich preview backend contract
+
+`gust_thumbs::preview` extends the existing sandbox helper contract, independently
+of the viewport thumbnail worker/cache. All calls below run on workers. The app
+owns cancellation and generation/entry identity checks before publishing results.
+No original image, font, document or media stream goes to an in-process decoder.
+
+- `capability(PreviewKind)` returns exact missing system tools. Installed tools
+  are prerequisites, not proof that a particular codec or sandbox works.
+- `inspect(path, kind, &CancelToken) -> Result<PreviewDocument, PreviewError>`
+  holds a no-follow/nonblocking regular input descriptor, refuses inputs over
+  512 MiB (16 GiB for streamed audio/video) and owns a private mode-0700 scratch
+  directory. `info()` reports page
+  count, bounded display metadata and dependency/format notes. A document holds
+  its input descriptor until drop; changes to that object are refused.
+- `PreviewDocument::page(page, px, cancel)` accepts 1-based pages (at most
+  10,000) and 1..=2048 pixels. `RasterPage` contains bounded PNG bytes and
+  header dimensions. A consumer can request successive visible pages for
+  continuous scrolling; no whole-document rasterization or eager page queue.
+- ImageMagick renders images and font specimens; RAW uses `dcraw_emu` half-size
+  conversion followed by ImageMagick. Optional `exiftool` supplies an allowlist
+  of camera/exposure/dimension tags, excluding GPS and serial numbers. Missing
+  EXIF tooling is a note and does not prevent image rendering.
+- Poppler supplies PDF page counts and pages. LibreOffice supplies bounded
+  Office/HTML-to-PDF conversion in an isolated disposable profile with macro
+  security set to its highest level, without network access, user configuration
+  or adjacent files. HTML is
+  static document rendering; scripts, navigation and external resources are
+  not an interactive browser. Supported Office types depend on the installed
+  import filters; focused fixtures cover RTF and DOCX, not every Office format.
+  Font samples use fixed specimen text only.
+- Helpers run under bwrap+prlimit or fail closed. Source paths preserve OS bytes.
+  Parent-enforced wall/output limits and cancellation cover startup, pipe reads
+  and rendering; helper groups are owned, killed and reaped. Output is opened
+  no-follow/nonblocking, bounded and checked before returning. Errors distinguish
+  cancellation, unavailable tools, invalid request, source change, limits,
+  helper failure and rejected output. Raw helper stderr is never a UI/log payload.
+  Rich helper scratch tmpfs is capped at 64 MiB; the output tree is monitored
+  through held directory descriptors (128 MiB / 4096 entries / depth 12), in
+  addition to per-file prlimit and parent read caps. Conversion PDF output is
+  capped at 64 MiB. Rich rendering has a 20-second CPU / 30-second wall budget
+  and 1 GiB address-space cap (3 GiB for LibreOffice startup); core dumps are
+  disabled. Source descriptors are passed via child-only inherited owned
+  clones, separate from stdin. Availability never implies every camera/codec works.
+- Core owns long-text/JSON/CSV/TSV/TOML windows and compare parsers (§6.9.2). The app
+  consumes those APIs alongside helper-backed documents, without duplicating
+  parsers in the thumbnail crate.
+
+These APIs are backend support, not evidence that UI widgets are integrated or
+visually qualified. Actual interaction changes stay local pending user review.
+
+Media control preserves `audio::Player` compatibility: `set_volume(0..=1)` and
+`set_muted(bool)` affect bounded PCM samples before the desktop sink sees them;
+`volume()`/`muted()` return requested state. Nonfinite seek/volume values are
+ignored. Stop also cancels a pending sandbox probe/startup; owned child handles
+replace shared numeric PIDs. `PreviewDocument::frame(seconds, px, cancel)`
+provides bounded sandboxed video seek frames for an embedded preview. Playing
+original video through Qt/libav in the app process remains prohibited.
+
+`video::Player::start(path, px)` returns immediately and exposes `status`,
+`set_paused`, `toggle`, `seek`, `set_volume`, `volume`, `set_muted`, `muted`,
+and `stop`. Its status fields are `state` (the existing `audio::PlayState`),
+`pos`, `duration`, `frame: Option<Arc<RasterPage>>`, `frame_id`, `volume`,
+`muted`, `why`. A sandboxed ffmpeg emits 12-fps size-bounded PNGs; the worker
+keeps one latest frame with a monotonic id. The app publishes a provider URL,
+never an original-media URL, and uses the id to avoid re-decoding unchanged
+frames. Optional sound uses the existing PCM player and the same held input
+identity. Missing sound support leaves video available with a reason. Paused
+seeks render one new frame; stopping cancels probing, decoder reads and audio.
+
+Streaming audio/video helpers have no writable host output bind: their `/out`
+is an empty read-only private tmpfs. Their owned streaming spawn path enforces
+this independently of capture/output-tree monitoring. Both relays recheck the
+held source revision periodically, while paused, and before each PCM write or
+frame publication; a changed source stops playback and invalidates video output.
+Only active audio playback supplies the video clock. Ended/failed audio releases
+the video to monotonic timing, so unequal stream lengths still reach video end.
+A successful empty decode after a seek near/beyond the end triggers bounded
+look-behind retries (at most eight, with a shared 15-second deadline), retaining
+the last recovered frame. Recovery uses the first video stream's endpoint,
+relative to the input start, rather than a possibly much longer audio/container
+duration. The final retry starts at zero if that stream hint is absent or
+inaccurate; the same time/cancellation bounds still apply. The public duration
+and requested position remain on the full media timeline. Paused seeks into an
+audio-only tail retain the final video PNG and their requested position; seeks
+at or beyond duration reach Ended, and a later seek can restart playback.
+An empty decode at the start or malformed/incomplete PNG output remains an error.
+
 ## 6.10 Scoped content search (`:grep`)
 
 `:find` matches names; `:grep` matches *contents* (plan §2, §4). Both are
@@ -1404,12 +1492,50 @@ not an assertion that frontend bindings are complete.
 
 `ArchiveRequest::Extract` carries archive/destination/policy/password;
 `Create` carries directory, byte-preserving names, destination, format and
-password. The format enum reserves TarZstd, Zip and SevenZip; creation is
-unavailable until its separately verified worker implementation lands.
+password. Creation supports TarZstd, Zip and SevenZip through the sandbox helper. ZIP
+password creation uses AES-256; password creation for the other formats is
+explicitly unsupported by the current writer. Sources are enumerated through
+held no-follow descriptors, bounded to 200,000 entries/32 MiB metadata/16 GiB
+input, and revalidated before publication. Captured mtime/nanoseconds travel
+with each member; TAR preserves nanoseconds, ZIP Unix seconds, and 7z 100 ns
+precision. Missing times are not invented. Cancellation/deadline is checked
+after the durable intent and publication callback, immediately before rename.
+Regular files must supply exactly their admitted size and unchanged identity; links are stored, never followed.
+The parent streams bounded frames; the helper sees no source path or writable
+location except an exclusively owned output file and a private 256 MiB
+tmpfs spool (required by the 7z writer). Spool exhaustion fails closed.
+A completed writer is closed, its complete inventory checked, and the output fsynced before one
+journaled atomic no-replace publication. Cancellation never deletes sources.
+The ordinary result record has JobKind::Compress and the created file identity;
+extracted is None. A partial publication error retains its precise receipt.
 Passwords are moved into a
 redacted secret type and transported only on helper stdin, never argv, env,
 logs or files. Unsupported encryption modes fail explicitly. Multipart
 archives are outside this contract.
+
+### Archive writer date admission
+
+Creation validates every admitted member timestamp before creating staging or
+starting the writer/payload stream. `ArchiveError::UnsupportedTimestamp` carries
+the selected format, relative byte-path and exact source seconds/nanoseconds.
+No source date is clamped or discarded. Current supported ranges are inclusive:
+TAR+Zstd seconds `i64::MIN+1..=i64::MAX`, normalized nanoseconds; ZIP seconds
+`0..=2147483647`, normalized source nanoseconds with whole-second output; 7z
+seconds `0..=1833029933770`, with nanoseconds at the final second limited to
+`955161599` (100 ns output precision). The ZIP range is deliberately conservative
+across signed/unsigned 32-bit timestamp readers. TAR's minimum integer and
+negative 7z dates are excluded because the native path cannot preserve them.
+The helper applies the same bounds before each native header. Complete output
+timestamp comparison remains mandatory, including nanosecond precision.
+
+Creation defines filename encoding per format: full PAX uses binary headers
+to retain Unix byte names and link targets; ZIP retains its original byte names
+and sets UTF-8 flags from the filename alone (opaque names stay unflagged).
+Symlink target bytes are content and never determine ZIP's filename flag;
+7z requires UTF-8 names and link targets for its UTF-16 representation. Invalid
+7z encodings return `UnsupportedEncoding { format, member }` before staging or
+payload. The codec's private process initializes its character locale before
+native conversion; parent locale and parse-warning refusal remain unchanged.
 
 ### An owned new extraction folder
 
@@ -2022,6 +2148,50 @@ one-shot helpers still terminate leftover descendants even after a successful ex
 Host-key scans offer keys for trust only when every key has a fingerprint. Any
 fingerprint helper failure, cancellation or shared-budget exhaustion rejects the
 whole scan; no undisplayed key may remain in a successful trust offer.
+
+### Owned block-device helpers
+
+`remote::block::{mount,unlock,unmount,lock}` run only on a worker, using the
+existing bounded, cancellable owned helper runtime and `helper::CallContext`.
+They retain CORE's device argument builders and unlock parser. Mount returns a
+`PathBuf` preserving accepted UTF-8 bytes; unlock returns the cleartext device
+string. Neither checks candidate metadata, creates a mount directory, probes a device, or performs
+automatic compensation. APP retains kernel-discovery/selection checks and passes
+one cancellation token plus the remaining overall budget across unlock and mount.
+
+`BlockFailure { error: RemoteError, effect: BlockEffect }` distinguishes proven
+`NotStarted`, post-launch `Unknown`, and `Accepted` when the helper reports success
+but its location cannot be decoded safely. Cancellation or timeout after launch
+does not roll back a request already accepted by the device service. Callers must
+check current device state before retrying an uncertain operation. Raw helper
+diagnostics are not returned or logged. Secret bytes are borrowed only for stdin;
+the caller retains and wipes its buffer. Existing input/output and helper-admission
+bounds apply. Device-service CLI output uses English messages with an explicit
+UTF-8 locale and GLib charset overrides. Non-UTF-8 mount locations are unsupported
+by this text adapter and fail with `Protocol`/`Accepted`, rather than returning a
+converted or guessed path. Malformed replies never trigger
+path guesses or filesystem checks. Tests use private executable stand-ins, never
+the real device service, mounts or credentials.
+
+`block::list_devices(&CallContext) -> Result<Vec<gust_core::devices::Device>, BlockFailure>`
+is the worker-only bounded discovery adapter. It runs `lsblk` with CORE's existing
+column selection, requires UTF-8 JSON, and delegates device parsing/filtering to
+`devices::{parse_lsblk_checked,offerable_devices}`. Helper errors,
+invalid replies, cancellation and exhausted parsing budget are failures, never an
+empty-success fallback. A valid empty inventory remains successful. Discovery
+errors carry `NotStarted`: no device-changing request was made, even if the
+read-only discovery helper ran. Its diagnostics remain static and sanitized.
+APP passes the same token and remaining overall budget through discovery and
+subsequent mount/unlock/eject operations; a failed refresh must prevent them.
+A successful inventory requires JSON-correct decoding of every device object and
+its children through CORE's shared fallible parser. Braces and escapes inside
+labels or mount points are data. Invalid rows or children fail the entire refresh;
+validation followed by the legacy string scanner is insufficient for fresh state.
+All `LsblkParseError::{InvalidJson,InvalidShape,Limit}` failures map to static
+`Protocol`/`NotStarted`. CORE owns the 4 MiB/65536-row/32-level limits and decoded
+row/child shape policy; this adapter adds no second parser or lossy fallback.
+Positional array envelopes, rows and children are malformed inventory, including
+otherwise offerable or cleartext rows; they fail with `Protocol`/`NotStarted`.
 
 ## 12. Release qualification and shared test runners
 
