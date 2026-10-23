@@ -1015,7 +1015,8 @@ reports iPhone photographs as `0700`). Recognized media, documents and
 archives open with the desktop handler regardless of those permission bits.
 They are not offered as programs by Run. Known script/launcher/program
 extensions still require deliberate Run, even without executable bits;
-unknown files with executable bits do too. Activation, recent files,
+unknown files with executable bits do too, as do `.js`/`.ts` sources that
+carry an executable bit (shebang scripts). Activation, recent files,
 multi-file opening and Run share this classification, using only the name
 and already available mode, without reading file contents on the UI thread.
 

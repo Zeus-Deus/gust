@@ -334,6 +334,19 @@ mod tests {
     }
 
     #[test]
+    fn executable_js_and_ts_scripts_are_guarded_and_runnable() {
+        for name in ["build.js", "tool.ts"] {
+            let path = Path::new("/work/bin").join(name);
+            assert!(is_runnable(&path, Some(0o100755)), "{name}");
+            let argv = run_argv(&path, 0o100755, true).expect(name);
+            assert_eq!(argv.last().map(String::as_str), path.to_str());
+        }
+        // Phone media with the same synthetic bits still opens normally.
+        let photo = Path::new("/phone/DCIM/IMG_0001.JPG");
+        assert!(!is_runnable(photo, Some(0o100755)));
+    }
+
+    #[test]
     fn script_extensions_count_as_runnable_even_without_the_bit() {
         // A script that arrived over the network may not be +x yet; opening
         // it must still not hand it to an interpreter.

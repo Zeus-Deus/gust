@@ -62,6 +62,11 @@ pub fn needs_trusted_launch(name: &OsStr, mode: Option<u32>) -> bool {
     ) {
         return true;
     }
+    // JS/TS sources are text, but with an executable bit they are shebang
+    // scripts, not content.
+    if matches!(ext.as_slice(), b"js" | b"ts") {
+        return mode.is_some_and(is_executable_mode);
+    }
     match category_for_name(name) {
         Category::Executable => true,
         Category::Other => mode.is_some_and(is_executable_mode),
@@ -158,6 +163,25 @@ mod tests {
             Some(0o700)
         ));
         assert!(needs_trusted_launch(OsStr::new("program"), Some(0o700)));
+    }
+
+    #[test]
+    fn executable_js_and_ts_scripts_require_deliberate_run() {
+        for name in ["build.js", "tool.TS"] {
+            for mode in [Some(0o700), Some(0o755)] {
+                assert!(
+                    needs_trusted_launch(OsStr::new(name), mode),
+                    "{name} {mode:?}"
+                );
+            }
+            // Without +x they are source files and open in an editor.
+            for mode in [None, Some(0o644)] {
+                assert!(
+                    !needs_trusted_launch(OsStr::new(name), mode),
+                    "{name} {mode:?}"
+                );
+            }
+        }
     }
 
     #[test]
