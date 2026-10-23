@@ -372,6 +372,7 @@ dependencies = [
  "gust-core",
  "gust-ops",
  "gust-testkit",
+ "rustix",
  "serde",
  "serde_json",
 ]

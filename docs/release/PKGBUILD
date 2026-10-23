@@ -32,7 +32,9 @@ depends=(
   'wl-clipboard' 'xdg-utils' 'xdg-terminal-exec' 'zoxide'
   # Sandboxed thumbnails and Quick Look previews.
   'bubblewrap' 'util-linux' 'imagemagick' 'ffmpegthumbnailer' 'ffmpeg'
-  'pipewire-audio' 'poppler' 'mpv'
+  'pipewire-audio' 'poppler'
+  # Browse neighbouring images, audio and video in one player.
+  'mpv'
   # Archives, USB drives and discs, Open/Save dialogs for other apps.
   'libarchive' 'tar' 'zstd' 'udisks2' 'xdg-desktop-portal'
   'shared-mime-info' 'curl' 'openssl' 'coreutils'
@@ -72,6 +74,8 @@ check() {
 package() {
   cd "$pkgname-$_commit"
   install -Dm755 "target/release/gust" "$pkgdir/usr/bin/gust"
+  # Archive listing and extraction run through this helper inside bwrap;
+  # without it Gust disables archives. Older pinned snapshots predate it.
   if [[ -f "crates/ops/src/bin/gust-archive-helper.rs" ]]; then
     install -Dm755 "target/release/gust-archive-helper" "$pkgdir/usr/bin/gust-archive-helper"
   fi

@@ -174,6 +174,26 @@ sys.exit(1)
             with self.subTest(manifest=str(manifest.relative_to(ROOT))):
                 check_no_install_side_effects(manifest.read_text())
 
+    def test_archive_helper_is_built_and_installed(self):
+        # Archives refuse to run without the sandboxed helper next to gust.
+        for manifest in MANIFESTS:
+            with self.subTest(manifest=str(manifest.relative_to(ROOT))):
+                source = manifest.read_text().replace("\\\n", " ")
+                build = re.search(r"^build\(\)\s*\{(.*?)^\}", source,
+                                  re.MULTILINE | re.DOTALL).group(1)
+                # The owned builder adds the helper whenever its source exists.
+                self.assertIn("python3 packaging/build-artifact.py",
+                              [line.strip() for line in build.splitlines()])
+                builder = (ROOT / "packaging/build-artifact.py").read_text()
+                self.assertIn('"-p", "gust-ops", "--bin", "gust-archive-helper"', builder)
+                package = re.search(r"^package\(\)\s*\{(.*?)^\}", source,
+                                    re.MULTILINE | re.DOTALL).group(1)
+                installs = [shlex.split(line) for line in package.splitlines()
+                            if line.strip().startswith("install")]
+                self.assertIn(["install", "-Dm755",
+                               "target/release/gust-archive-helper",
+                               "$pkgdir/usr/bin/gust-archive-helper"], installs)
+
     def test_side_effect_guard_rejects_hooks_and_automatic_actions(self):
         baseline = MANIFESTS[0].read_text()
         mutations = (

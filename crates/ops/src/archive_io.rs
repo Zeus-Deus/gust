@@ -226,17 +226,6 @@ fn parse_mode(s: &str) -> u32 {
     mode
 }
 
-/// Where the sandbox's `/lib64` points, inside the read-only `/usr` bind.
-/// x86_64 binaries load `/lib64/ld-linux-x86-64.so.2`: Arch keeps it in
-/// `/usr/lib` (with `/usr/lib64 -> lib`), Debian/Ubuntu in `/usr/lib64`.
-fn lib64_target() -> &'static str {
-    if Path::new("/usr/lib64").is_dir() {
-        "usr/lib64"
-    } else {
-        "usr/lib"
-    }
-}
-
 /// Compatibility command builder. `false` now refuses the unsandboxed path.
 /// Production parsing uses the structured helper, never this human listing.
 pub fn list_command(path: &Path, sandbox: bool) -> std::io::Result<Command> {
@@ -263,7 +252,7 @@ pub fn list_command(path: &Path, sandbox: bool) -> std::io::Result<Command> {
         "usr/lib",
         "/lib",
         "--symlink",
-        lib64_target(),
+        "usr/lib64",
         "/lib64",
         "--symlink",
         "usr/bin",
@@ -568,7 +557,7 @@ impl Reader {
                 "usr/lib",
                 "/lib",
                 "--symlink",
-                lib64_target(),
+                "usr/lib64",
                 "/lib64",
                 "--proc",
                 "/proc",
@@ -695,9 +684,20 @@ impl Reader {
                     return Err(protocol_error());
                 }
                 // A successfully terminated stream cannot carry trailing frames.
+                // The sandbox may still hold the write end briefly after bwrap
+                // exits, so wait for EOF instead of treating WouldBlock as an error.
                 let mut byte = [0];
-                if self.output.read(&mut byte)? != 0 {
-                    return Err(protocol_error());
+                loop {
+                    self.check(cancel)?;
+                    match self.output.read(&mut byte) {
+                        Ok(0) => break,
+                        Ok(_) => return Err(protocol_error()),
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(Duration::from_millis(5))
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                        Err(e) => return Err(e.into()),
+                    }
                 }
                 let now =
                     crate::anchor::FileIdentity::from_stat(&rustix::fs::fstat(&self.archive)?);

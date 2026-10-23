@@ -123,6 +123,10 @@ def summarize(log, ledger, cargo_exit, required):
 
 
 def main(argv):
+    # Cargo is always locked below; a caller's own --locked (as in ci.yml)
+    # would be rejected as a repeated flag. Test-binary args stay untouched.
+    boundary = argv.index("--") if "--" in argv else len(argv)
+    argv = [arg for index, arg in enumerate(argv) if index >= boundary or arg != "--locked"]
     package_unit = "--package-unit" in argv
     if package_unit:
         argv.remove("--package-unit")

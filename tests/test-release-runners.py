@@ -101,6 +101,14 @@ sys.exit(23 if os.environ.get('CASE') in ('failure', 'diagnostic', 'build-script
         self.assertTrue(any("gust-app" in argv for argv in captures))
         self.assertTrue(any("--workspace" in argv for argv in captures))
 
+    def test_caller_locked_flag_is_not_repeated(self):
+        result, _ = self.run_case("pass", "--locked", "--", "--locked")
+        self.assertEqual(result.returncode, 0)
+        argv = json.loads(next(self.root.glob("capture-*")).read_text())["argv"]
+        boundary = argv.index("--")
+        self.assertEqual(argv[:boundary].count("--locked"), 1)
+        self.assertEqual(argv[boundary:], ["--", "--locked"])
+
     def test_concurrent_runs_have_private_distinct_ledgers(self):
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
             results = list(pool.map(self.run_case, ("skip", "pass")))

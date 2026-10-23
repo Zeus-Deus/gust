@@ -1,0 +1,136 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Check
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      # Keep a successful check for docs-only PRs, including when Check is
+      # required by branch protection. Unknown bases run the full checks.
+      - name: Check for code changes
+        id: changes
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          if [[ -n "$BASE_SHA" ]] && git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null &&
+             git diff --quiet "$BASE_SHA" HEAD -- . \
+               ':(glob,exclude)**/*.md' ':(exclude)docs/screens'; then
+            echo "code=false" >> "$GITHUB_OUTPUT"
+            echo "Documentation only; build and tests skipped." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "code=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Rust
+        if: steps.changes.outputs.code == 'true'
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+
+      - name: Check formatting
+        if: steps.changes.outputs.code == 'true'
+        run: cargo fmt --all -- --check
+
+      - name: Restore build dependency downloads
+        id: apt-cache
+        if: steps.changes.outputs.code == 'true'
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ${{ runner.temp }}/gust-apt-cache/*.deb
+          key: ubuntu-26.04-apt-${{ hashFiles('.github/workflows/ci.yml') }}
+
+      - name: Install build dependencies
+        if: steps.changes.outputs.code == 'true'
+        run: |
+          # The default Azure mirror throttled downloads in the hosted run.
+          printf 'https://archive.ubuntu.com/ubuntu/\tpriority:1\nhttps://security.ubuntu.com/ubuntu/\tpriority:2\n' \
+            | sudo tee /etc/apt/apt-mirrors.txt > /dev/null
+          mkdir -p "$RUNNER_TEMP/gust-apt-cache"
+          sudo apt-get update -qq
+          sudo apt-get -o Dir::Cache::archives="$RUNNER_TEMP/gust-apt-cache" \
+            install -y --no-install-recommends \
+            bubblewrap gvfs-backends just libarchive-dev libarchive-tools \
+            libdbus-1-dev libglib2.0-bin libwayland-dev util-linux \
+            qt6-base-dev qt6-declarative-dev qt6-declarative-dev-tools
+          test -x /usr/lib/qt6/bin/qmllint
+          bsdtar --version
+          gio --help > /dev/null
+          test -f /usr/share/gvfs/mounts/smb.mount
+          qmake6 -query QT_VERSION
+
+      # Save after installation so a later compile failure still warms the cache.
+      - name: Cache build dependency downloads
+        if: steps.changes.outputs.code == 'true' && steps.apt-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ${{ runner.temp }}/gust-apt-cache/*.deb
+          key: ${{ steps.apt-cache.outputs.cache-primary-key }}
+
+      - name: Restore Rust build cache
+        if: steps.changes.outputs.code == 'true'
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: ubuntu-26.04-qt6
+          cache-on-failure: "true"
+          cache-bin: "false"
+
+      - name: Lint
+        if: steps.changes.outputs.code == 'true'
+        run: just lint
+
+      - name: Library tests
+        id: tests
+        if: steps.changes.outputs.code == 'true'
+        run: ./tests/run-tests.sh --locked
+
+      - name: Build Qt application
+        if: steps.changes.outputs.code == 'true'
+        run: cargo build --workspace --locked
+
+      - name: Report test coverage
+        if: ${{ always() && steps.changes.outputs.code == 'true' }}
+        env:
+          TEST_OUTCOME: ${{ steps.tests.outcome }}
+        run: |
+          {
+            echo '### Library test coverage'
+            if [[ "$TEST_OUTCOME" == 'skipped' ]]; then
+              echo 'Library tests did not run; see the failed step above.'
+            elif [[ -s target/test-skips.log ]]; then
+              echo 'Fixture-dependent cases skipped by this hosted runner:'
+              echo '```text'
+              sort -u target/test-skips.log
+              echo '```'
+            elif [[ -f target/test-run.log ]]; then
+              echo 'No fixture skips recorded; see the Library tests step for the result.'
+            else
+              echo 'Library tests did not run; see the failed step above.'
+            fi
+            echo 'Desktop QA, theme screenshots, live remote fixtures and performance gates remain separate pre-merge checks.'
+          } >> "$GITHUB_STEP_SUMMARY"
