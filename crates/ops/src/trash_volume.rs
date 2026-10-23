@@ -165,6 +165,10 @@ fn remap(
         })
         .collect()
 }
+#[cfg(test)]
+thread_local! {
+    static INFO_READ_PROBE: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
 fn open_info(dir: &DirHandle, name: &OsStr) -> io::Result<(File, FileIdentity, Vec<u8>)> {
     open_info_with_mount(dir, name, None)
 }
@@ -1070,7 +1074,6 @@ fn verify_at_with_mount(
 type MoveHook = Box<dyn FnOnce()>;
 #[cfg(test)]
 thread_local! {
-    static INFO_READ_PROBE: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
     static AFTER_MOVE:std::cell::RefCell<Option<MoveHook>>=const { std::cell::RefCell::new(None) };
     static BEFORE_MOVE:std::cell::RefCell<Option<MoveHook>>=const { std::cell::RefCell::new(None) };
     static BEFORE_RESTORE_PARENT:std::cell::RefCell<Option<MoveHook>>=const { std::cell::RefCell::new(None) };
