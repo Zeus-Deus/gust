@@ -3,14 +3,21 @@ import com.gust.app
 
 // Shown once after a crash: what was interrupted, where, how far it got.
 // The durable journal knows this; without a surface the user would find a
-// half-copied folder weeks later and not know why. Partial staging files
-// are already swept, so the only question left is what did arrive — hence
-// "Open destination". Dismiss records that the user has seen it.
+// half-copied folder weeks later and not know why. It does NOT know whether
+// leftovers were cleaned up: a remote place that could not be reached keeps
+// its temporary files on purpose, and an item may have been completed just
+// before the crash. So the notice says what may be there and sends the user
+// to look ("Open destination") before running anything again; nothing is
+// retried for them. Dismiss records that the user has seen it.
 Rectangle {
     id: root
 
     // [{ id, text, dest }] from DirModel.interrupted_jobs().
     property var items: []
+    /// What to do next. No claim about cleanup: the journal records what
+    /// was attempted, not what is left at the destination.
+    readonly property string guidance: qsTr("It may have left temporary files, and some items may already be complete "
+                                            + "at the destination. Check the destination before running it again.")
     readonly property bool shown: items.length > 0
 
     signal openDestination(string path)
@@ -100,12 +107,17 @@ Rectangle {
 
         Item {
             width: col.width
-            height: Tokens.controlHeight
+            height: Math.max(Tokens.controlHeight, guidanceText.implicitHeight)
             Text {
+                id: guidanceText
+                objectName: "interruptedGuidance"
                 textFormat: Text.PlainText
                 anchors.left: parent.left
+                anchors.right: dismissButton.left
+                anchors.rightMargin: Tokens.spaceLg
                 anchors.verticalCenter: parent.verticalCenter
-                text: qsTr("Partial files were cleaned up. Check what arrived, then run it again.")
+                wrapMode: Text.Wrap
+                text: root.guidance
                 // The instruction is what the user acts on: primary text,
                 // not secondary grey (4.5:1 on every theme, not 3:1).
                 color: Tokens.foreground
@@ -113,6 +125,7 @@ Rectangle {
                 font.pixelSize: Tokens.fontSmall
             }
             Rectangle {
+                id: dismissButton
                 anchors.right: parent.right
                 anchors.verticalCenter: parent.verticalCenter
                 width: dismissLabel.implicitWidth + Tokens.spaceLg * 2

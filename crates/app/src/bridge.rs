@@ -735,6 +735,18 @@ pub mod qobject {
         fn cancel_job(self: Pin<&mut DirModel>);
         #[qinvokable]
         fn job_running(self: &DirModel) -> bool;
+        /// Cancel was asked for and the worker has not stopped yet. It may be
+        /// waiting on a slow drive or a remote call that has not returned.
+        #[qinvokable]
+        fn job_stopping(self: &DirModel) -> bool;
+        /// Compress or extract work this tab started that is still running.
+        #[qinvokable]
+        fn archive_running(self: &DirModel) -> bool;
+        /// What this tab is still doing inside a connected place (`kind` is
+        /// "ssh", "tailnet" or "cloud"): "transfer", "stopping", "archive",
+        /// or "" for nothing. In memory only; never touches the place.
+        #[qinvokable]
+        fn work_on_place(self: &DirModel, kind: QString, name: QString) -> QString;
 
         // --- selection ---------------------------------------------------
         /// Toggle the row in the selection (Space, Ctrl+click).
@@ -1006,6 +1018,8 @@ pub struct DirModelRust {
     clipboard_read: crate::clipboard::ReadGate,
     /// The job currently running, if any. Only one at a time in M2.
     job: Option<gust_ops::jobs::JobHandle>,
+    /// Compress and extract work still running on its worker.
+    archive_work: crate::place_work::ArchiveWork,
     /// A copy/move waiting for the user to answer its name clashes.
     pending: Option<PendingTransfer>,
     /// Speed of the running job, sampled on each poll.
@@ -1290,6 +1304,7 @@ impl DirModelRust {
             job_rate: gust_ops::rate::RateMeter::new(),
             job_clock: None,
             job: None,
+            archive_work: Default::default(),
             load_cancel: CancelToken::new(),
             watch: None,
             device_watches: Vec::new(),
@@ -3209,10 +3224,12 @@ impl qobject::DirModel {
         };
         let gen = self.as_ref().generation;
         let args = gust_ops::archive::io::compress_args(&dir, &staging, &names);
+        let claim = self.as_ref().archive_work.claim(vec![dir.clone()]);
 
         std::thread::Builder::new()
             .name("gust-compress".into())
             .spawn(move || {
+                let _claim = claim;
                 let out = std::process::Command::new("bsdtar")
                     .args(&args)
                     .stdin(std::process::Stdio::null())
@@ -3277,10 +3294,15 @@ impl qobject::DirModel {
             return QString::default();
         };
         let gen = self.as_ref().generation;
+        let claim = self
+            .as_ref()
+            .archive_work
+            .claim(vec![archive.clone(), dir.clone()]);
 
         std::thread::Builder::new()
             .name("gust-extract".into())
             .spawn(move || {
+                let _claim = claim;
                 let policy = gust_ops::archive::ExtractPolicy::default();
                 let (message, refusals) =
                     match gust_ops::archive::io::extract(&archive, &dir, &policy) {
@@ -7764,6 +7786,44 @@ impl qobject::DirModel {
 
     fn job_running(&self) -> bool {
         self.job.is_some()
+    }
+
+    fn job_stopping(&self) -> bool {
+        self.job
+            .as_ref()
+            .is_some_and(|j| j.cancel_requested() && !j.is_finished())
+    }
+
+    fn archive_running(&self) -> bool {
+        self.archive_work.is_running()
+    }
+
+    fn work_on_place(&self, kind: QString, name: QString) -> QString {
+        let name = name.to_string();
+        // Each of these is a path computed from the runtime directory; none
+        // of them looks at the mount itself.
+        let mount = match kind.to_string().as_str() {
+            "ssh" => gust_remote::mount::mount_point_for(&name),
+            "tailnet" => gust_remote::tailscale::mount_point(&name),
+            "cloud" => Self::cloud_mount_point(&name),
+            _ => None,
+        };
+        let Some(mount) = mount else {
+            return QString::default();
+        };
+        if let Some(job) = self.job.as_ref() {
+            if crate::place_work::touches(&crate::place_work::job_paths(job), &mount) {
+                return QString::from(if self.job_stopping() {
+                    "stopping"
+                } else {
+                    "transfer"
+                });
+            }
+        }
+        if self.archive_work.touches(&mount) {
+            return QString::from("archive");
+        }
+        QString::default()
     }
 
     // --- selection --------------------------------------------------------

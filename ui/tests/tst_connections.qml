@@ -24,8 +24,9 @@ TestCase {
         panel.places = {setup: [{key: "apple", packages: ["gvfs-afc"], installable: true}]}
         verify(panel.statusBody.indexOf("gvfs-afc") >= 0, "Disclose packages when the snapshot arrives")
         panel.places = {setup: [{key: "apple", packages: [], installable: true}]}
-        compare(panel.statusTitle, "Support is ready")
+        compare(panel.statusTitle, "Connection support is installed")
         compare(actionSpy.count, 0)
+        verify(panel.statusBody.indexOf("Signing in is checked") >= 0, "Installed helpers are not a resolved sign-in")
         compare(connectSpy.count, 0, "Readiness is not permission to connect")
     }
     function test_a_new_connect_view_does_not_retain_old_phone_setup_context() {
