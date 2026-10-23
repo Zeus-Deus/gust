@@ -236,6 +236,68 @@ crawl (plan §2, §4).
 - Searching does not change the folder being browsed. Leaving the results
   returns to where the user was.
 
+### 6.3.1 Reusable filename/tag sessions
+
+`search::SearchSession` is worker-owned. Construction and `set_query` do no
+I/O. `advance(entry_budget, cancel, on_hit)` resumes a bounded walk and streams
+hits; `snapshot()` returns its currently ranked hits and explicit state.
+`SearchReport` carries query generation, visited/cached counts, exclusions,
+bounded issue details and total issue count. Running, Complete, Partial
+(I/O omissions), Cancelled, Limited (named bounds) and Failed are distinct.
+Depth counts root children as level one; depth zero admits no entries. Hidden
+directories are pruned unless requested. Symlinks are returned but never
+descended. Device boundaries, depth and generated-tree pruning are counted
+and disclosed. Generated-tree pruning is configurable. Known generated names
+are pruned before attempting to open their contents; cache markers are checked
+only after secure child admission and must have the standard signature.
+Nonlocal providers are refused by this local walker. Network/FUSE local roots
+require `SearchOptions::allow_remote` for
+this explicit root after the caller's stall guard. Reaching the configured
+depth is reported as Limited(Depth), with a pruned-directory count.
+
+`SearchOptions` bounds visited entries, cached candidates/path bytes and
+retained issues independently of matching results. Reaching a bound never
+reports Complete. Query changes replay cached candidates and then resume the
+same traversal, including after a result limit. Candidate/visit bounds need an
+explicit new session with revised bounds. `refresh()` rechecks cached paths
+and tags. Query-only errors reset on replay while traversal omissions remain.
+`invalidate()` restarts after directory watch changes. No persistent
+global index or implicit Home crawl is created. Each replay uses fresh no-follow
+metadata/xattrs, so removed/replaced paths and external tag edits are not
+treated as durable cached authority.
+
+Enumeration, candidate metadata, tag reads and cache markers share descriptor
+anchoring. A session retains its root descriptor and caches each candidate's
+parent device/inode. Replay resolves parents beneath that root with kernel
+no-symlink resolution, verifies the parent identity and rejects a changed root
+or parent as an explicit issue. Candidate metadata and tags come from a held
+object; cache markers are opened relative to the admitted child directory.
+No candidate/cache-marker read follows a reconstructed user pathname. Device
+restriction is enforced during resolution, before touching a crossed mount;
+cross-device descent requires both scope widening and explicit remote admission.
+Unsupported secure resolution fails explicitly. Stamps fence a read, not later
+operation authority; filesystem changes after verification remain possible.
+
+`SearchSession::project_hits(cancel)` returns `SearchProjection { report,
+entries }` from row data captured during descriptor-anchored evaluation. It
+performs no new filesystem calls. `SearchEntry` contains byte `path` and
+`relative_path`, `EntryKind`, existing `entry::Metadata`, a `SearchSourceStamp`
+(generation/device/inode/size/nanosecond mtime+ctime), and optional `tag_error`.
+Consumers create rows from relative_path/kind/metadata; they never call
+`symlink_metadata` or `fill_metadata` on search-hit paths. Symlink target state
+remains unknown; retrieval does not probe a target. A zero tag mask with
+`tag_error` means unavailable, and the projection report includes that issue.
+Filename matching itself does not require successful tag decoration. Existing
+`SearchHit { path, score }` and report APIs remain compatible. Captured stamps
+are snapshots, not authorization for a later filesystem operation.
+
+`SearchQuery::parse` accepts filename terms and conjunctive `tag:Red` or
+`tag:"word tag"` terms; invalid/empty tag syntax is an error. Colour names
+match ASCII case-insensitively; unknown word tags match exactly after trimming.
+`tags::read_raw` remains compatible; retrieval errors are retained in reports,
+not silently interpreted as untagged. Legacy `find_by_name` is a Vec-returning
+adapter; new bridge code must consume the explicit report/session API.
+
 ## 6.4 Remote places
 
 A remote place is a *suggestion* until the user connects it. Nothing in Gust

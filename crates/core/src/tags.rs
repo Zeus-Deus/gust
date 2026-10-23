@@ -19,6 +19,19 @@ pub const NAMES: [&str; 7] = ["Red", "Orange", "Yellow", "Green", "Blue", "Purpl
 /// cannot make Gust allocate without bound). Real tag lists are tiny.
 pub const MAX_VALUE: usize = 4096;
 
+/// Colours are interoperable across spelling case; word tags retain identity.
+pub fn contains_tag(names: &[String], query: &str) -> bool {
+    let query = query.trim();
+    let colour = NAMES.iter().any(|name| name.eq_ignore_ascii_case(query));
+    names.iter().any(|name| {
+        if colour {
+            name.trim().eq_ignore_ascii_case(query)
+        } else {
+            name.trim() == query
+        }
+    })
+}
+
 /// Split a stored value into names: trimmed, empties dropped.
 pub fn parse(raw: &[u8]) -> Vec<String> {
     raw.split(|b| *b == b',')

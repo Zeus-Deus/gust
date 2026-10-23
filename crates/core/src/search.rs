@@ -12,6 +12,9 @@ use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 
+mod session;
+pub use session::*;
+
 /// Subsequence match, case-insensitive on ASCII: "dwn" matches "Downloads".
 pub fn fuzzy_matches(needle: &str, haystack: &OsStr) -> bool {
     if needle.is_empty() {
@@ -37,13 +40,17 @@ pub fn match_score(needle: &str, haystack: &OsStr) -> Option<u32> {
     if needle.is_empty() {
         return Some(0);
     }
-    let hl = String::from_utf8_lossy(haystack.as_bytes()).to_ascii_lowercase();
-    let nl = needle.to_ascii_lowercase();
-    if hl.starts_with(&nl) {
-        return Some(0);
-    }
-    if let Some(p) = hl.find(&nl) {
-        return Some(1 + p as u32);
+    let hl = haystack.as_bytes();
+    let nl = needle.as_bytes();
+    if let Some(p) = hl
+        .windows(nl.len())
+        .position(|part| part.eq_ignore_ascii_case(nl))
+    {
+        return Some(if p == 0 {
+            0
+        } else {
+            1 + u32::try_from(p).unwrap_or(u32::MAX - 1)
+        });
     }
     if fuzzy_matches(needle, haystack) {
         return Some(1000);
@@ -203,92 +210,40 @@ pub struct SearchHit {
     pub score: u32,
 }
 
-/// A folder full of generated files nobody searches for by name: build
-/// output and caches. Searching "bench" in a project otherwise returns
-/// hundreds of compiler objects before the user's own files. A cache marks
-/// itself with `CACHEDIR.TAG` (the Cache Directory Tagging spec, which Cargo,
-/// pip and many others follow); `node_modules` is the one big exception.
-/// Only descent is skipped: a name match on the folder itself still shows.
-fn is_generated_tree(dir: &std::path::Path, name: &OsStr) -> bool {
-    if name == "node_modules" || name == "__pycache__" {
-        return true;
-    }
-    std::fs::symlink_metadata(dir.join("CACHEDIR.TAG")).is_ok_and(|m| m.is_file())
-}
-
-/// Filename find within an explicit scope. Cancellable and bounded.
+/// Filename find compatibility adapter. New consumers should use a session
+/// or `find_with_report` to distinguish limits, errors and cancellation.
 pub fn find_by_name(
     scope: &SearchScope,
     needle: &str,
     cancel: &CancelToken,
-    mut on_hit: impl FnMut(&SearchHit),
+    on_hit: impl FnMut(&SearchHit),
 ) -> Vec<SearchHit> {
-    let mut hits: Vec<(SearchHit, usize)> = Vec::new();
-    let Some(root) = scope.root.as_path() else {
-        return Vec::new();
-    };
-    let root_dev = std::fs::metadata(root).ok().map(|m| {
-        use std::os::unix::fs::MetadataExt;
-        m.dev()
-    });
+    find_with_report(
+        scope,
+        SearchQuery::filename(needle),
+        SearchOptions::default(),
+        cancel,
+        on_hit,
+    )
+    .hits
+}
 
-    let mut stack: Vec<(PathBuf, usize)> = vec![(root.to_path_buf(), 0)];
-    while let Some((dir, depth)) = stack.pop() {
-        if cancel.is_cancelled() || hits.len() >= scope.max_results {
-            break;
-        }
-        let Ok(rd) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for item in rd.flatten() {
-            if cancel.is_cancelled() || hits.len() >= scope.max_results {
-                break;
-            }
-            let name = item.file_name();
-            if !scope.include_hidden && name.as_bytes().first() == Some(&b'.') {
-                continue;
-            }
-            let Ok(ft) = item.file_type() else { continue };
-            if let Some(score) = match_score(needle, &name) {
-                let hit = SearchHit {
-                    path: item.path(),
-                    score,
-                };
-                on_hit(&hit);
-                hits.push((hit, depth));
-            }
-            // Descend only into real directories — never follow a symlink,
-            // which is how a "search here" becomes an infinite loop or a
-            // silent crawl into a network mount.
-            if ft.is_dir()
-                && scope.recursive
-                && depth + 1 < scope.max_depth
-                && !is_generated_tree(&item.path(), &name)
-            {
-                if scope.stay_on_device {
-                    use std::os::unix::fs::MetadataExt;
-                    let same = std::fs::metadata(item.path())
-                        .ok()
-                        .map(|m| Some(m.dev()) == root_dev)
-                        .unwrap_or(false);
-                    if !same {
-                        continue;
-                    }
-                }
-                stack.push((item.path(), depth + 1));
-            }
+/// One explicit bounded search with truthful terminal state and streamed hits.
+pub fn find_with_report(
+    scope: &SearchScope,
+    query: SearchQuery,
+    options: SearchOptions,
+    cancel: &CancelToken,
+    mut on_hit: impl FnMut(&SearchHit),
+) -> SearchReport {
+    let mut session = SearchSession::new(scope.clone(), options);
+    session.set_query(query);
+    loop {
+        let report = session.advance(256, cancel, &mut on_hit);
+        if report.state != SearchState::Running {
+            return report;
         }
     }
-    // Best match first; among equals the one nearer the folder being
-    // browsed (what the user most likely meant), then by name so the order
-    // does not depend on the order the disk returned entries in.
-    hits.sort_by(|(a, da), (b, db)| {
-        a.score
-            .cmp(&b.score)
-            .then(da.cmp(db))
-            .then_with(|| a.path.cmp(&b.path))
-    });
-    hits.into_iter().map(|(h, _)| h).collect()
 }
 
 #[cfg(test)]
