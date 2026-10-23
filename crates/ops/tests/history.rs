@@ -12,13 +12,16 @@ use std::{
 struct Fixture(PathBuf);
 impl Fixture {
     fn new() -> Self {
+        // Parallel tests can read the same nanosecond; the counter keeps them apart.
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let p = std::env::temp_dir().join(format!(
-            "gust-history-{}-{}",
+            "gust-history-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         std::fs::create_dir_all(p.join("work")).unwrap();
         Self(p)
@@ -219,6 +222,335 @@ fn permissions_tags_and_links_have_typed_reversible_receipts() {
     assert!(!link.link.exists());
     h.redo(&CancelToken::new()).unwrap();
     assert_eq!(std::fs::read_link(&link.link).unwrap(), c.path);
+}
+#[test]
+fn nested_permission_batch_undo_reopen_redo_keeps_verified_descendant_modes() {
+    for child_first in [false, true] {
+        for directory in [false, true] {
+            let f = Fixture::new();
+            let parent = f.0.join("work/tree");
+            std::fs::create_dir(&parent).unwrap();
+            let child = parent.join("child");
+            if directory {
+                std::fs::create_dir(&child).unwrap();
+                std::fs::write(child.join("file"), b"keep").unwrap();
+            } else {
+                std::fs::write(&child, b"keep").unwrap();
+            }
+            for path in [&parent, &child] {
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            let paths = if child_first {
+                vec![child.clone(), parent.clone()]
+            } else {
+                vec![parent.clone(), child.clone()]
+            };
+            let changed = attrs::set_modes(&paths, attrs::ModeSpec::Exact(0o700));
+            assert!(changed.failed.is_empty());
+            assert_eq!(changed.changed.len(), 2);
+            let mut history = f.open();
+            history
+                .record_modes("Nested modes", &changed.changed)
+                .unwrap();
+            history.undo(&CancelToken::new()).unwrap();
+            for path in [&parent, &child] {
+                assert_eq!(
+                    std::fs::metadata(path).unwrap().permissions().mode() & 0o7777,
+                    0o755
+                );
+            }
+            drop(history);
+            let mut history = f.open();
+            history
+                .redo(&CancelToken::new())
+                .expect("verified nested mode batch must redo");
+            for path in [&parent, &child] {
+                assert_eq!(
+                    std::fs::metadata(path).unwrap().permissions().mode() & 0o7777,
+                    0o700
+                );
+            }
+            history.undo(&CancelToken::new()).unwrap();
+            history.redo(&CancelToken::new()).unwrap();
+        }
+    }
+}
+#[test]
+fn old_nested_mode_lineage_repairs_only_recorded_modes_before_full_preflight() {
+    for changed in [false, true] {
+        let f = Fixture::new();
+        let parent = f.0.join("work/tree");
+        std::fs::create_dir(&parent).unwrap();
+        let child = parent.join("child");
+        std::fs::write(&child, b"keep").unwrap();
+        for path in [&parent, &child] {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let changes = attrs::set_modes(
+            &[parent.clone(), child.clone()],
+            attrs::ModeSpec::Exact(0o700),
+        );
+        assert_eq!(changes.changed.len(), 2);
+        let mut history = f.open();
+        history
+            .record_modes("Nested modes", &changes.changed)
+            .unwrap();
+        history.undo(&CancelToken::new()).unwrap();
+        drop(history);
+        let mut store: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(f.store()).unwrap()).unwrap();
+        let mut stale = 0;
+        for step in store["records"][0]["steps"].as_array_mut().unwrap() {
+            if let Some(lineage) = step
+                .get_mut("Attr")
+                .and_then(|step| step.get_mut("lineage"))
+                .and_then(serde_json::Value::as_array_mut)
+            {
+                for node in lineage {
+                    if node["relative"] == serde_json::json!(b"child".to_vec()) {
+                        node["mode"] = serde_json::json!(0o100700);
+                        stale += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(stale, 1);
+        std::fs::write(f.store(), serde_json::to_vec(&store).unwrap()).unwrap();
+        if changed {
+            std::fs::write(&child, b"new user work").unwrap();
+        }
+        let mut history = f.open();
+        let result = history.redo(&CancelToken::new());
+        if changed {
+            assert!(matches!(result, Err(HistoryError::Changed(_))));
+            assert_eq!(history.entries()[0].status, HistoryStatus::Undone);
+            assert_eq!(std::fs::read(&child).unwrap(), b"new user work");
+            assert_eq!(
+                std::fs::metadata(&parent).unwrap().permissions().mode() & 0o7777,
+                0o755
+            );
+            history.record_barrier("Untracked changed data").unwrap();
+        } else {
+            result.unwrap();
+            assert_eq!(
+                std::fs::metadata(&child).unwrap().permissions().mode() & 0o7777,
+                0o700
+            );
+        }
+    }
+}
+#[test]
+fn nested_mode_batch_tracks_all_hardlink_aliases_without_adopting_new_work() {
+    let f = Fixture::new();
+    let parent = f.0.join("work/tree");
+    std::fs::create_dir(&parent).unwrap();
+    let child = parent.join("child");
+    let alias = parent.join("alias");
+    std::fs::write(&child, b"keep").unwrap();
+    std::fs::hard_link(&child, &alias).unwrap();
+    for p in [&parent, &child] {
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let changes = attrs::set_modes(
+        &[parent.clone(), child.clone()],
+        attrs::ModeSpec::Exact(0o700),
+    );
+    let mut history = f.open();
+    history
+        .record_modes("Aliased nested modes", &changes.changed)
+        .unwrap();
+    history.undo(&CancelToken::new()).unwrap();
+    drop(history);
+    let mut history = f.open();
+    history.redo(&CancelToken::new()).unwrap();
+    assert_eq!(
+        std::fs::metadata(alias).unwrap().permissions().mode() & 0o7777,
+        0o700
+    );
+    std::fs::write(parent.join("new"), b"later work").unwrap();
+    assert!(history.undo(&CancelToken::new()).is_err());
+    assert_eq!(std::fs::read(parent.join("new")).unwrap(), b"later work");
+}
+#[test]
+fn completed_merged_and_new_destinations_never_admit_a_partial_inverse() {
+    use gust_ops::{
+        jobs::{self, Request},
+        journal::ConflictPolicy,
+    };
+    let f = Fixture::new();
+    let mut history = f.open();
+    let older = f.create(OsStr::new("older"));
+    history
+        .record_created("Older", std::slice::from_ref(&older))
+        .unwrap();
+    history.undo(&CancelToken::new()).unwrap();
+    let before = history.entries();
+    let source = f.0.join("source");
+    let destination = f.0.join("destination");
+    std::fs::create_dir_all(source.join("tree")).unwrap();
+    std::fs::create_dir_all(destination.join("tree")).unwrap();
+    std::fs::write(source.join("tree/copied"), b"copied child").unwrap();
+    std::fs::write(source.join("separate"), b"copied file").unwrap();
+    std::fs::write(destination.join("tree/kept"), b"existing work").unwrap();
+    let mut job = jobs::start(
+        "mixed-copy",
+        Request::Copy {
+            sources: vec![source.join("tree"), source.join("separate")],
+            dest_dir: destination.clone(),
+        },
+        ConflictPolicy::Replace,
+    );
+    assert_eq!(job.wait().state, JobState::Confirmed);
+    let record = job.record();
+    assert_eq!(record.entries.iter().filter(|entry| entry.done).count(), 2);
+    assert!(record
+        .preexisting_at_dest
+        .contains(&destination.join("tree")));
+    let result = history.record_job("Mixed copy", &record);
+    assert!(
+        matches!(result, Err(HistoryError::Unsupported(_))),
+        "whole mixed job must refuse, not offer a partial inverse: {result:?}"
+    );
+    assert_eq!(history.entries(), before);
+    drop(history);
+    let mut history = f.open();
+    assert_eq!(history.entries(), before);
+    history.redo(&CancelToken::new()).unwrap();
+    assert_eq!(std::fs::read(older.path).unwrap(), b"original");
+    assert_eq!(
+        std::fs::read(destination.join("tree/copied")).unwrap(),
+        b"copied child"
+    );
+    assert_eq!(
+        std::fs::read(destination.join("tree/kept")).unwrap(),
+        b"existing work"
+    );
+    assert_eq!(
+        std::fs::read(destination.join("separate")).unwrap(),
+        b"copied file"
+    );
+}
+fn other_group() -> Option<u32> {
+    rustix::process::getgroups()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|gid| gid.as_raw())
+        .find(|gid| *gid != rustix::process::getegid().as_raw())
+}
+#[test]
+fn setgid_directory_owner_undo_reopen_redo_does_not_fence_history() {
+    use std::os::unix::fs::MetadataExt;
+    let Some(other) = other_group() else {
+        gust_testkit::skip!(
+            "GROUPS",
+            "setgid ownership fixture needs a second eligible group"
+        );
+    };
+    let f = Fixture::new();
+    let directory = f.0.join("work/tree");
+    std::fs::create_dir(&directory).unwrap();
+    std::fs::write(directory.join("file"), b"keep").unwrap();
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o2755)).unwrap();
+    let old = std::fs::metadata(&directory).unwrap().gid();
+    let changed = attrs::set_owners(
+        std::slice::from_ref(&directory),
+        attrs::OwnerSpec {
+            uid: None,
+            gid: Some(other),
+        },
+    );
+    assert!(changed.failed.is_empty(), "{changed:?}");
+    assert_eq!(changed.changed.len(), 1);
+    assert_eq!(
+        std::fs::metadata(&directory).unwrap().permissions().mode() & 0o7777,
+        0o2755
+    );
+    let mut history = f.open();
+    history
+        .record_owners("Directory group", &changed.changed)
+        .unwrap();
+    history
+        .undo(&CancelToken::new())
+        .expect("forward-supported setgid directory owner must undo");
+    assert_eq!(std::fs::metadata(&directory).unwrap().gid(), old);
+    drop(history);
+    let mut history = f.open();
+    history.redo(&CancelToken::new()).unwrap();
+    assert_eq!(std::fs::metadata(&directory).unwrap().gid(), other);
+    assert_eq!(
+        std::fs::metadata(&directory).unwrap().permissions().mode() & 0o7777,
+        0o2755
+    );
+    assert_eq!(std::fs::read(directory.join("file")).unwrap(), b"keep");
+    history.undo(&CancelToken::new()).unwrap();
+    assert!(!history
+        .entries()
+        .iter()
+        .any(|entry| entry.status == HistoryStatus::Interrupted));
+}
+#[test]
+fn privileged_regular_owner_inverse_refuses_before_pending() {
+    let Some(other) = other_group() else {
+        gust_testkit::skip!("GROUPS", "ownership fixture needs a second eligible group");
+    };
+    let f = Fixture::new();
+    let file = f.create(OsStr::new("file"));
+    let changed = attrs::set_owners(
+        std::slice::from_ref(&file.path),
+        attrs::OwnerSpec {
+            uid: None,
+            gid: Some(other),
+        },
+    );
+    assert_eq!(changed.changed.len(), 1);
+    let mut history = f.open();
+    history
+        .record_owners("File group", &changed.changed)
+        .unwrap();
+    std::fs::set_permissions(&file.path, std::fs::Permissions::from_mode(0o2755)).unwrap();
+    assert!(matches!(
+        history.undo(&CancelToken::new()),
+        Err(HistoryError::Unsupported(_))
+    ));
+    drop(history);
+    let mut history = f.open();
+    assert!(!history
+        .entries()
+        .iter()
+        .any(|entry| entry.status == HistoryStatus::Interrupted));
+    history
+        .record_barrier("Explicit unsupported owner inverse")
+        .unwrap();
+}
+#[test]
+fn privileged_regular_owner_admission_refuses_without_recording_or_effects() {
+    let Some(other) = other_group() else {
+        gust_testkit::skip!("GROUPS", "ownership fixture needs a second eligible group");
+    };
+    let f = Fixture::new();
+    let file = f.create(OsStr::new("file"));
+    let changes = attrs::set_owners(
+        std::slice::from_ref(&file.path),
+        attrs::OwnerSpec {
+            uid: None,
+            gid: Some(other),
+        },
+    );
+    assert_eq!(changes.changed.len(), 1);
+    std::fs::set_permissions(&file.path, std::fs::Permissions::from_mode(0o2755)).unwrap();
+    let mut history = f.open();
+    assert!(matches!(
+        history.record_owners("Unsupported file group", &changes.changed),
+        Err(HistoryError::Unsupported(_))
+    ));
+    assert!(history.entries().is_empty());
+    assert_eq!(
+        std::fs::metadata(file.path).unwrap().permissions().mode() & 0o7777,
+        0o2755
+    );
+    history
+        .record_barrier("Untracked privileged owner state")
+        .unwrap();
 }
 #[test]
 fn cancel_and_barriers_stop_a_batch_without_skipping_earlier_steps() {

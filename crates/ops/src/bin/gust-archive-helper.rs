@@ -6,6 +6,7 @@ use std::io::{Read, Write};
 
 #[link(name = "archive")]
 unsafe extern "C" {
+    fn setlocale(category: c_int, locale: *const c_char) -> *mut c_char;
     fn archive_read_new() -> *mut c_void;
     fn archive_read_support_filter_all(a: *mut c_void) -> c_int;
     fn archive_read_support_format_all(a: *mut c_void) -> c_int;
@@ -198,6 +199,12 @@ fn run() -> Result<(), ()> {
 }
 
 fn main() {
+    // Linux LC_CTYPE=0. This isolated, single-threaded codec owns its locale;
+    // LC_ALL in the environment alone does not initialize native conversion.
+    // SAFETY: called before processing input, with a static terminated string.
+    if unsafe { setlocale(0, c"C.UTF-8".as_ptr()).is_null() } {
+        std::process::exit(2);
+    }
     if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--create")) {
         if write_archive().is_err() {
             let _ = protocol::write_message(
@@ -272,6 +279,9 @@ fn write_archive() -> Result<(), ()> {
                 if archive_write_set_format_pax(archive.0) != 0 {
                     return Err(());
                 }
+                if archive_write_set_options(archive.0, c"pax:hdrcharset=BINARY".as_ptr()) != 0 {
+                    return Err(());
+                }
                 archive_write_add_filter_zstd(archive.0)
             }
             WriteFormat::Zip => archive_write_set_format_zip(archive.0),
@@ -300,6 +310,24 @@ fn write_archive() -> Result<(), ()> {
             let frame: WriteFrame = protocol::read_message(&mut input).map_err(|_| ())?;
             match frame {
                 WriteFrame::Header(member) if remaining.is_none() => {
+                    let name_utf8 = std::str::from_utf8(&member.name).is_ok();
+                    let utf8 = name_utf8
+                        && member
+                            .link
+                            .as_ref()
+                            .is_none_or(|target| std::str::from_utf8(target).is_ok());
+                    if matches!(request.format, WriteFormat::SevenZip) && !utf8 {
+                        return Err(());
+                    }
+                    if matches!(request.format, WriteFormat::Zip) {
+                        // ZIP has a per-member UTF-8 flag. Opaque Unix names
+                        // must retain their bytes without claiming UTF-8.
+                        // Symlink content does not determine filename flags.
+                        let locale = if name_utf8 { c"C.UTF-8" } else { c"C" };
+                        if setlocale(0, locale.as_ptr()).is_null() {
+                            return Err(());
+                        }
+                    }
                     seen += 1;
                     metadata = metadata.saturating_add(
                         member.name.len() + member.link.as_ref().map_or(0, Vec::len) + 128,
@@ -321,7 +349,7 @@ fn write_archive() -> Result<(), ()> {
                     archive_entry_set_mode(entry.0, member.mode & !0o6000);
                     archive_entry_set_size(entry.0, member.size as i64);
                     if let Some((seconds, nanoseconds)) = member.mtime {
-                        if nanoseconds >= 1_000_000_000 {
+                        if !request.format.supports_timestamp(seconds, nanoseconds) {
                             return Err(());
                         }
                         archive_entry_set_mtime(entry.0, seconds, nanoseconds.into());

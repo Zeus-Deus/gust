@@ -751,3 +751,145 @@ fn receipt_cache_charge_counts_private_inventory_and_never_accesses_disk() {
     assert_eq!(r.inventory_len(), 11);
     assert_eq!(r.retained_bytes(), bytes);
 }
+
+#[test]
+fn legacy_upgrade_is_explicit_private_and_preserves_original_data_and_info() {
+    let f = Fixture::new();
+    let location = f.location();
+    for dir in [
+        location.trash.root(),
+        &location.trash.files,
+        &location.trash.info,
+    ] {
+        fs::create_dir_all(dir).unwrap();
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let old = f.0.join("work/legacy");
+    fs::write(location.trash.files.join("legacy"), b"old data").unwrap();
+    let bytes = format!(
+        "[Trash Info]\nPath={}\nDeletionDate=2026-01-01T12:00:00\n",
+        old.display()
+    )
+    .into_bytes();
+    let info = location.trash.info.join("legacy.trashinfo");
+    fs::write(&info, &bytes).unwrap();
+    let data_id = FileIdentity::of_path(&location.trash.files.join("legacy")).unwrap();
+    let info_id = FileIdentity::of_path(&info).unwrap();
+    let source = f.file();
+    let selection_error = trash::select_location(&source, &location.trash).unwrap_err();
+    assert!(selection_error
+        .get_ref()
+        .unwrap()
+        .downcast_ref::<trash::LegacyTrashNeedsRepair>()
+        .is_some());
+    let error = trash::list_checked(&location.trash).unwrap_err();
+    assert!(error
+        .get_ref()
+        .unwrap()
+        .downcast_ref::<trash::LegacyTrashNeedsRepair>()
+        .is_some());
+    for dir in [
+        location.trash.root(),
+        &location.trash.files,
+        &location.trash.info,
+    ] {
+        assert_eq!(
+            fs::metadata(dir).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+    }
+    location.repair_legacy_permissions(&cancel()).unwrap();
+    for dir in [
+        location.trash.root(),
+        &location.trash.files,
+        &location.trash.info,
+    ] {
+        assert_eq!(
+            fs::metadata(dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+    }
+    assert_eq!(trash::list_checked(&location.trash).unwrap().len(), 1);
+    assert_eq!(
+        FileIdentity::of_path(&location.trash.files.join("legacy")).unwrap(),
+        data_id
+    );
+    assert_eq!(FileIdentity::of_path(&info).unwrap(), info_id);
+    assert_eq!(fs::read(&info).unwrap(), bytes);
+    let receipt = location
+        .receipt_named(OsStr::new("legacy"), &cancel())
+        .unwrap();
+    location.restore(&receipt, &cancel()).unwrap();
+    assert_eq!(fs::read(&old).unwrap(), b"old data");
+    location.repair_legacy_permissions(&cancel()).unwrap();
+    let file = f.file();
+    location.trash_path(&file, &cancel()).unwrap();
+}
+#[test]
+fn legacy_repair_refuses_writable_and_symlinked_layouts_without_changing_them() {
+    for unsafe_link in [false, true] {
+        let f = Fixture::new();
+        let location = f.location();
+        fs::create_dir_all(&location.trash.info).unwrap();
+        fs::set_permissions(location.trash.root(), fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(&location.trash.info, fs::Permissions::from_mode(0o755)).unwrap();
+        if unsafe_link {
+            let outside = f.0.join("outside");
+            fs::create_dir(&outside).unwrap();
+            fs::set_permissions(&outside, fs::Permissions::from_mode(0o755)).unwrap();
+            symlink(&outside, &location.trash.files).unwrap();
+        } else {
+            fs::create_dir(&location.trash.files).unwrap();
+            fs::set_permissions(&location.trash.files, fs::Permissions::from_mode(0o777)).unwrap();
+        }
+        assert!(location.repair_legacy_permissions(&cancel()).is_err());
+        assert_eq!(
+            fs::metadata(location.trash.root())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o755
+        );
+        assert_eq!(
+            fs::metadata(&location.trash.info)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o755
+        );
+    }
+}
+
+#[test]
+fn cancelled_legacy_repair_has_no_permission_effects() {
+    let f = Fixture::new();
+    let location = f.location();
+    for dir in [
+        location.trash.root(),
+        &location.trash.files,
+        &location.trash.info,
+    ] {
+        fs::create_dir_all(dir).unwrap();
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let cancel = cancel();
+    cancel.cancel();
+    let error = location.repair_legacy_permissions(&cancel).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::Interrupted);
+    assert!(error
+        .get_ref()
+        .and_then(|error| error.downcast_ref::<trash::TrashPartial>())
+        .is_none());
+    for dir in [
+        location.trash.root(),
+        &location.trash.files,
+        &location.trash.info,
+    ] {
+        assert_eq!(
+            fs::metadata(dir).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+    }
+}

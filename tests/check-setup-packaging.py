@@ -6,8 +6,13 @@ Only Python's standard library is needed; no device or network access occurs.
 """
 
 from pathlib import Path
+import json
+import os
 import re
 import shlex
+import subprocess
+import sys
+import tempfile
 import unittest
 
 
@@ -15,18 +20,19 @@ ROOT = Path(__file__).resolve().parents[1]
 MANIFESTS = (ROOT / "PKGBUILD", ROOT / "docs/release/PKGBUILD")
 REQUIRED = {
     "openssh", "sshfs", "fuse3", "rclone", "gvfs", "gvfs-afc",
-    "gvfs-smb", "gvfs-nfs", "gvfs-mtp", "gvfs-gphoto2", "usbmuxd", "polkit",
+    "gvfs-smb", "gvfs-nfs", "gvfs-mtp", "gvfs-gphoto2", "gvfs-dnssd", "usbmuxd", "polkit",
 }
-# Every other program Gust calls ships with it, so a fresh install has
-# clipboard, thumbnails, previews, archives, drives and Open with working.
+# Baseline feature helpers are required; optional richer codecs/converters
+# remain explicit capability prerequisites rather than implied qualification.
 FEATURES = {
     "wl-clipboard", "xdg-terminal-exec", "xdg-utils", "zoxide", "bubblewrap",
     "util-linux", "imagemagick", "ffmpegthumbnailer", "ffmpeg",
     "pipewire-audio", "poppler", "libarchive", "udisks2", "xdg-desktop-portal",
+    "tar", "zstd", "shared-mime-info", "curl", "openssl", "mpv", "glib2",
 }
 # Tailscale is a network service with its own account; Gust lists its
 # devices when the user already runs it and never installs it for them.
-USER_CHOSEN = {"tailscale"}
+USER_CHOSEN = {"tailscale", "libraw", "perl-image-exiftool", "libreoffice-fresh"}
 
 
 def shell_array(source: str, name: str) -> list[str]:
@@ -67,6 +73,12 @@ def check_no_install_side_effects(source: str) -> None:
     if not match:
         raise AssertionError("missing package function")
     for line in match.group(1).splitlines():
+        # One fixed compatibility condition allows older source snapshots.
+        # It cannot evaluate arbitrary input or execute another command.
+        if line.strip() in {
+            'if [[ -f "crates/ops/src/bin/gust-archive-helper.rs" ]]; then', 'fi'
+        }:
+            continue
         tokens = shlex.split(line)
         if not tokens:
             continue
@@ -83,6 +95,49 @@ def check_no_install_side_effects(source: str) -> None:
 
 
 class SetupPackagingTests(unittest.TestCase):
+    def test_release_recipe_is_an_exact_copy_of_canonical_recipe(self):
+        self.assertEqual(MANIFESTS[0].read_bytes(), MANIFESTS[1].read_bytes())
+
+    def test_source_is_pinned_to_real_repository_and_checksum(self):
+        source = MANIFESTS[0].read_text()
+        self.assertRegex(source, r"(?m)^_commit=[0-9a-f]{40}$")
+        self.assertIn('url="https://github.com/Zeus-Deus/gust"', source)
+        self.assertIn('https://codeload.github.com/Zeus-Deus/gust/tar.gz/$_commit', source)
+        self.assertRegex(source, r"(?m)^sha256sums=\('[0-9a-f]{64}'\)$")
+        self.assertNotIn("<owner>", source)
+
+    def test_qt_qualification_floor_is_declared_in_both_recipes(self):
+        for manifest in MANIFESTS:
+            dependencies = shell_array(manifest.read_text(), "depends")
+            self.assertIn("qt6-base>=6.11.2", dependencies)
+            self.assertIn("qt6-declarative>=6.11.2", dependencies)
+
+    def test_installed_dependency_gate_invokes_versioned_constraints(self):
+        with tempfile.TemporaryDirectory(prefix="gust-dependency-test-") as temporary:
+            root = Path(temporary)
+            pacman = root / "pacman"
+            pacman.write_text("""#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+Path(os.environ['CAPTURE']).write_text(json.dumps(sys.argv[1:]))
+# Simulate an installed version failing the declared requirement. No runtime
+# helper fixtures, especially absolute helper paths, are created or executed.
+sys.exit(1)
+""")
+            pacman.chmod(0o755)
+            capture = root / "arguments"
+            result = subprocess.run([sys.executable, str(ROOT / "packaging/check-dependencies.py"),
+                "--installed"], env=dict(os.environ, PATH=str(root) + os.pathsep + os.environ["PATH"],
+                CAPTURE=str(capture)), capture_output=True, text=True, timeout=15)
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(json.loads(result.stdout)["status"], "fail")
+            invoked = json.loads(capture.read_text())
+            self.assertEqual(invoked[0], "-T")
+            self.assertIn("qt6-base>=6.11.2", invoked)
+            self.assertIn("qt6-declarative>=6.11.2", invoked)
+            self.assertIn("glib2>=2.66", invoked)
+            self.assertNotIn(str(root), result.stdout + result.stderr)
+
     def test_connection_helpers_are_required_in_both_manifests(self):
         for manifest in MANIFESTS:
             with self.subTest(manifest=str(manifest.relative_to(ROOT))):
@@ -97,7 +152,7 @@ class SetupPackagingTests(unittest.TestCase):
                 self.assertFalse(FEATURES - required,
                                  f"missing feature helpers: {sorted(FEATURES - required)}")
 
-    def test_only_user_chosen_services_stay_optional(self):
+    def test_optional_tools_are_explicit_capabilities(self):
         for manifest in MANIFESTS:
             with self.subTest(manifest=str(manifest.relative_to(ROOT))):
                 optional = package_names(shell_array(manifest.read_text(), "optdepends"))
@@ -119,15 +174,35 @@ class SetupPackagingTests(unittest.TestCase):
             with self.subTest(manifest=str(manifest.relative_to(ROOT))):
                 check_no_install_side_effects(manifest.read_text())
 
+    def test_archive_helper_is_built_and_installed(self):
+        # Archives refuse to run without the sandboxed helper next to gust.
+        for manifest in MANIFESTS:
+            with self.subTest(manifest=str(manifest.relative_to(ROOT))):
+                source = manifest.read_text().replace("\\\n", " ")
+                build = re.search(r"^build\(\)\s*\{(.*?)^\}", source,
+                                  re.MULTILINE | re.DOTALL).group(1)
+                # The owned builder adds the helper whenever its source exists.
+                self.assertIn("python3 packaging/build-artifact.py",
+                              [line.strip() for line in build.splitlines()])
+                builder = (ROOT / "packaging/build-artifact.py").read_text()
+                self.assertIn('"-p", "gust-ops", "--bin", "gust-archive-helper"', builder)
+                package = re.search(r"^package\(\)\s*\{(.*?)^\}", source,
+                                    re.MULTILINE | re.DOTALL).group(1)
+                installs = [shlex.split(line) for line in package.splitlines()
+                            if line.strip().startswith("install")]
+                self.assertIn(["install", "-Dm755",
+                               "target/release/gust-archive-helper",
+                               "$pkgdir/usr/bin/gust-archive-helper"], installs)
+
     def test_side_effect_guard_rejects_hooks_and_automatic_actions(self):
         baseline = MANIFESTS[0].read_text()
         mutations = (
             baseline + "\ninstall=gust.install\n",
             baseline + "\npost_install() { true; }\n",
-            baseline.replace('  cd "$pkgname-$pkgver"', '  systemctl enable usbmuxd', 1),
-            baseline.replace('  cd "$pkgname-$pkgver"', '  gust --default on', 1),
-            baseline.replace('  cd "$pkgname-$pkgver"', '  gio mount afc://phone', 1),
-            baseline.replace('  cd "$pkgname-$pkgver"', '  idevicepair pair', 1),
+            baseline.replace('  cd "$pkgname-$_commit"', '  systemctl enable usbmuxd', 1),
+            baseline.replace('  cd "$pkgname-$_commit"', '  gust --default on', 1),
+            baseline.replace('  cd "$pkgname-$_commit"', '  gio mount afc://phone', 1),
+            baseline.replace('  cd "$pkgname-$_commit"', '  idevicepair pair', 1),
             baseline.replace('"$pkgdir/usr/bin/gust"', '"/usr/bin/gust"'),
         )
         for index, mutation in enumerate(mutations):

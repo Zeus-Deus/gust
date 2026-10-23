@@ -14,7 +14,8 @@ mod volume;
 pub(crate) use volume::lineage::Binding as TrashLineageBinding;
 pub(crate) use volume::{authenticated_info, verify_info_original};
 pub use volume::{
-    locations, select_location, RestoredReceipt, TrashLocation, TrashPartial, TrashReceipt,
+    locations, select_location, LegacyTrashNeedsRepair, RestoredReceipt, TrashLocation,
+    TrashPartial, TrashReceipt,
 };
 
 use crate::anchor::resolve_parent;
@@ -190,12 +191,15 @@ pub struct TrashEntry {
 /// Existing restorable records, newest first. Compatibility callers retain
 /// their Vec result; typed location callers can inspect enumeration errors.
 pub fn list(trash: &TrashDir) -> Vec<TrashEntry> {
+    list_checked(trash).unwrap_or_default()
+}
+/// Checked compatibility listing: layout and enumeration errors stay visible.
+pub fn list_checked(trash: &TrashDir) -> io::Result<Vec<TrashEntry>> {
     TrashLocation {
         trash: trash.clone(),
         topdir: None,
     }
     .list()
-    .unwrap_or_default()
 }
 
 pub fn restore_named(trash: &TrashDir, name: &std::ffi::OsStr) -> io::Result<()> {

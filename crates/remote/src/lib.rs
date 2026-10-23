@@ -6,12 +6,16 @@
 //! - host-key verification is never disabled
 //! - no secret in argv, env, logs or config files
 
+pub mod block;
 pub mod capabilities;
 pub mod cloud;
+mod command;
 pub mod computers;
 pub mod disconnect;
+pub mod helper;
 pub mod mount;
 pub mod phones;
+pub mod send;
 pub mod setup;
 pub mod shares;
 pub mod ssh_config;
