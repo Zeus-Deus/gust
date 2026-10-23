@@ -15,6 +15,12 @@
 //! - counts what it removed, so the UI can say something true afterwards.
 
 use std::path::{Component, Path, PathBuf};
+#[path = "permanent_worker.rs"]
+mod worker;
+pub use worker::{
+    delete_permanently_with_cancel, delete_permanently_with_progress, DeleteError, DeleteFailure,
+    DeletePhase, DeleteProgress,
+};
 
 /// Why a permanent delete was refused. Each is a sentence a person can act on.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -2468,6 +2468,51 @@ every descendant revision and mode. Untracked edits do not gain authority.
 Certificates use no-replace publication and remain retained; collisions,
 unreadable records and metadata limits refuse, with pending/evidence preserved.
 
+## 7.5 Cancellable permanent deletion
+
+The existing permanent-delete API remains compatible. Additive
+`permanent::delete_permanently_with_cancel(folder,target,cancel)` returns
+confirmed Removed counts or DeleteError with typed refusal/cancellation,
+partial counts and retained locations. `delete_permanently_with_progress`
+also accepts the confirmation packet's optional RecordedIdentity and a worker
+callback receiving phase/total/removed counts; APP supplies that identity.
+The existing explicit irreversible confirmation and durable pre-effect history
+barrier remain mandatory. These calls never create an Undo receipt.
+
+A complete bounded, same-volume, no-follow inventory precedes effects. An
+exclusive private staging directory holds a synced intent before a no-replace
+claim of the admitted root. Pre/post inventories refuse changed sources; a
+wrong claimed object is returned only while unchanged and the original name
+is free. Deletion walks held descriptors inside that private namespace and
+checks cancellation before each unlink. New work and traversal/resource/I/O
+errors refuse instead of being silently counted as success. Only actual
+successful unlinks increment progress. Partial data and intent remain retained
+for inspection on cancellation/error; no uncertain public-name cleanup or
+automatic replay occurs. Unsupported no-replace is a refusal, and blocking
+filesystem calls still have no cancellation deadline. Retained metadata does
+not imply recoverability of bytes already permanently removed.
+Descriptor-relative statx mount IDs are required throughout admission and
+walking; crossing a mount (including same-device bind mounts) or unavailable
+mount-ID support refuses. This is traversal containment, not filesystem-type
+classification or an atomic-no-replace capability probe.
+
+Final deletion transfers each admitted entry with no-replace into a newly
+created exclusive private cell before unlinking it. Replacing the old final
+name through a retained source-parent descriptor does not replace that cell
+entry. The moved entry
+must still match its admitted identity (or the held directory after Gust's own
+child removals); a wrong claim is retained and refuses, never unlinked. Cell
+intent is synced before the claim, and resource admission budgets all cell
+metadata before effects. Cells and intents remain retained, including on
+successful completion; they are not recursively cleaned or replayed.
+
+Before further effects and terminal success, deletion rechecks the staging
+binding and every held root/ancestor binding. Persistent namespace relocation
+stops the walk before another removal. Retained paths are explicitly last-known
+uncertain location hints (`DeleteError::locations_uncertain`), not guarantees
+that a renamed private tree remains at that string. These checks do not claim atomic exclusion of every concurrent
+same-user mutation inside a newly created private namespace.
+
 ## 12. Release qualification and shared test runners
 
 Release evidence distinguishes source checks, model seams, native desktop
