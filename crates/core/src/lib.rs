@@ -36,6 +36,7 @@ pub mod session;
 pub mod settings;
 pub mod sorts;
 pub mod stall;
+pub mod structured;
 pub mod tags;
 pub mod theme;
 pub mod views;
