@@ -2295,3 +2295,72 @@ completion. On validation failure, restore the prior mode only while root
 identity/revision and the just-written mode still match; report Partial and
 retain the pending fence. Other traversal errors remain refusals. No permission
 change is performed solely to admit a forward history receipt.
+
+## 12. Release qualification and shared test runners
+
+Release evidence distinguishes source checks, model seams, native desktop
+acceptance and an installed package. None substitutes for another. Historical
+desktop evidence is not qualification of a new binary, architecture or provider.
+
+- Each shared test invocation owns a private log and skip ledger. The summary
+  records whether tests actually ran, Cargo's exit status, runtime skips and
+  ignored tests. Required mode fails on skips, ignored tests or no observed
+  tests, even when a child command returns zero. App Rust tests use the same
+  accounting as library tests; Qt model scripts remain separately named seams.
+  Package unit scope explicitly filters the manual recursive-copy benchmark and
+  records that exclusion; it never enables ignored tests or counts a benchmark
+  as passed. Other ignored/skipped cases still fail required mode. Cancellation
+  stops the owned child process group before releasing its build lease.
+  The artifact builder uses that same boundary, including deferred cancellation
+  during process startup and descendants outliving their immediate parent.
+  Cancellation stays deferred throughout cleanup; an unestablished retirement
+  retains the lease rather than returning a timeout and releasing ownership.
+  Every immediate-child exit also establishes group retirement before returning
+  its status, including zero/nonzero exits and direct termination of that child.
+  A surviving descendant cannot outlive the caller's lease on a normal return.
+  Public failure details are bounded Rust error codes, locked crate identifiers,
+  counts and fixed categories; diagnostic prose/paths remain private. Hosted
+  library diagnostics may explicitly opt into at most 64 failed integration-test
+  identifiers matched exactly to committed public declarations and an owned-crate
+  allowlist. Unknown names/targets remain unreported and counted as unclassified.
+  Archive fixtures require bsdtar, bwrap and prlimit plus real user/mount namespace
+  admission. Refusal is fatal and there is no unsandboxed fallback. Hosted
+  Ubuntu runners grant `userns` to `/usr/bin/bwrap` alone (Arch has no such
+  AppArmor restriction); that admits the sandbox, never bypasses it.
+  Independent artifact staging requires successful SDK/app and sandbox
+  admission, and cannot turn a failed library gate into a pass.
+  The frozen SMB availability fixture requires a successful `gio --help` and
+  the installed SMB backend descriptor; their presence does not qualify a mount.
+- Native and theme gates require an explicitly dedicated disposable desktop,
+  their actual tools and the installed binary. They must not start on an
+  ordinary shared desktop. The desktop runner owns `/tmp/gust-qa.lock`; callers
+  must not wrap it in a second acquisition. A missing prerequisite is SKIP,
+  never PASS, and makes a required qualification fail.
+  The current UI runner creates a private headless labwc session; the wrapper
+  must not require or drive the host Hyprland session. A missing/nonempty QML
+  warning ledger fails acceptance. Labwc does not qualify Hyprland visual rules.
+- Package validation checks the staged/installed files, executable formats,
+  dynamic library resolution and dependency metadata. A source recipe or a
+  successful development-tree launch does not qualify an installed artifact.
+  The supported qualification floor is Qt 6.11.2. Native CI selects that exact
+  SDK for each architecture after the system-Qt portable seams. Build receipts
+  record the selected Qt version; staging rejects older/mixed Qt libraries and
+  requires the selected SDK's library root when testing an SDK build. This is
+  SDK staging evidence, separate from installed Arch dependency qualification.
+  The ops archive helper is a separate runtime executable, linked with
+  libarchive, built with `cargo build -p gust-ops --bin gust-archive-helper`;
+  installations using that contract must include it beside Gust in `/usr/bin`.
+- Source recipes identify a full revision, fetchable URL and verified SHA-256.
+  Artifact CI builds the verified extracted archive, then stages with the
+  reviewed recipe; a checkout alias cannot qualify that source pin. Build
+  provenance validates the canonical app-to-QML symlink and selected contents.
+  Preparing a recipe does not publish a release or package. Both advertised
+  Linux architectures need native compilation; desktop/provider qualification
+  is recorded separately for each architecture rather than inferred.
+- Raw logs, source receipts, screenshots and theme captures stay private and
+  outside Git/public CI artifacts. Public checks expose sanitized counts and
+  prerequisite categories only, never home paths, filenames or host identities.
+
+Ownership: release owns shared orchestration/packaging, app owns app-local test
+scripts and native model contracts, UI owns its feature-specific desktop checks.
+New runtime helpers/dependencies must be handed to release before qualification.
