@@ -846,7 +846,14 @@ Available source evidence requires nonempty `kname`, canonical decimal
 `maj:min`, and a positive JSON unsigned-integer `disk-seq` from that profile.
 Missing/null/zero evidence is unavailable, never inferred from path, label,
 size, UUID or a neighboring row. Wrong field types or malformed numbers are
-`InvalidShape`. No inheritance of absent sequence values is invented by CORE.
+`InvalidShape`. This includes a parser-reported numeric representation overflow
+in a known field (for example `disk-seq: 1e400` or numeric `kname: 1e400`), even
+though serde_json categorizes that range failure as syntax. Other reported JSON
+grammar/EOF failures remain `InvalidJson`; recursion/size bounds remain `Limit`.
+Classification follows the first reported failure, so a rejected known value
+may precede a later independent grammar fault. Unknown values are still skipped
+without numeric representation. No inheritance of absent sequence values is
+invented by CORE.
 Duplicate/conflicting instance or kernel-name observations make affected
 bindings unavailable; unrelated unambiguous devices may remain usable.
 Unavailable reasons are the enum above; diagnostics are fixed and contain no
