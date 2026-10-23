@@ -388,6 +388,24 @@ fn run(
         })
         .and_then(|d| gust_core::stall::fstype_for(&d))
         .unwrap_or_default();
+    #[cfg(test)]
+    let dest_fstype = publication_tests::DEST_FSTYPE
+        .with(|v| v.take().map(str::to_owned))
+        .unwrap_or(dest_fstype);
+    if matches!(req, Request::Move { .. }) {
+        let evidence = (!dest_fstype.is_empty()).then_some(dest_fstype.as_str());
+        if let Err(e) = crate::engine::require_move_durability_on(evidence) {
+            if let Err(e) = set_rec(&|r| r.state = crate::journal::JobState::Failed) {
+                lost(e);
+                return;
+            }
+            set(&progress, |p| {
+                p.state = JobState::Failed;
+                p.message = e.to_string();
+            });
+            return;
+        }
+    }
     let fat_names = crate::fat::is_fat(&dest_fstype);
     let mut fat_check = crate::fat::Preflight::default();
 

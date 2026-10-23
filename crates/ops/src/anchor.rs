@@ -17,6 +17,7 @@ use std::path::{Component, Path};
 #[derive(Debug)]
 pub struct DirHandle {
     fd: OwnedFd,
+    path: std::path::PathBuf,
     /// Kept for diagnostics only — never re-resolved for I/O.
     display: String,
 }
@@ -30,6 +31,12 @@ impl DirHandle {
         &self.display
     }
 
+    /// Lossless lexical path for mount evidence and recovery records only.
+    /// Filesystem mutations continue to use the held descriptor.
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+
     /// Open the root `/` as the walk anchor.
     pub fn open_root() -> io::Result<Self> {
         let fd = rustix::fs::open(
@@ -39,6 +46,7 @@ impl DirHandle {
         )?;
         Ok(DirHandle {
             fd,
+            path: "/".into(),
             display: "/".to_string(),
         })
     }
@@ -53,6 +61,7 @@ impl DirHandle {
         )?;
         Ok(DirHandle {
             fd,
+            path: self.path.join(name),
             display: format!(
                 "{}/{}",
                 self.display.trim_end_matches('/'),
@@ -117,7 +126,7 @@ pub fn rename_noreplace(
         Ok(()) => Ok(()),
         Err(Errno::INVAL) | Err(Errno::NOSYS) | Err(Errno::OPNOTSUPP) => Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            "This location cannot publish without replacing another item. Use a destination with atomic no-replace rename support; this item was not moved.",
+            "This place cannot safely add this item without risking another item. The original was kept. Choose a different destination.",
         )),
         Err(e) => Err(e.into()),
     }
@@ -129,6 +138,38 @@ pub fn rename_noreplace_paths(from: &Path, to: &Path) -> io::Result<()> {
     let (fd, fname) = resolve_parent(from)?;
     let (td, tname) = resolve_parent(to)?;
     rename_noreplace(&fd, &fname, &td, &tname)
+}
+
+/// Publish a completed regular-file stage by adding a name atomically.
+/// Unlike a move, success leaves the staging alias for separate cleanup.
+/// Empty flags deliberately do not follow a substituted source symlink.
+pub(crate) fn link_noreplace(
+    dir: &DirHandle,
+    stage: &OsStr,
+    destination: &OsStr,
+) -> io::Result<()> {
+    #[cfg(test)]
+    if let Some(e) = LINK_ERROR.with(|v| v.take()) {
+        return Err(e.into());
+    }
+    rustix::fs::linkat(
+        dir.as_fd(),
+        stage,
+        dir.as_fd(),
+        destination,
+        rustix::fs::AtFlags::empty(),
+    )?;
+    #[cfg(test)]
+    if let Some(e) = LINK_REPLY_ERROR.with(|v| v.take()) {
+        return Err(e.into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static LINK_ERROR: std::cell::Cell<Option<rustix::io::Errno>> = const { std::cell::Cell::new(None) };
+    pub(crate) static LINK_REPLY_ERROR: std::cell::Cell<Option<rustix::io::Errno>> = const { std::cell::Cell::new(None) };
 }
 
 /// Walk an absolute path component-by-component, holding a descriptor at each
@@ -332,5 +373,22 @@ mod tests {
         assert!(!before.matches(&after));
         assert_ne!(before.mode & 0o170000, after.mode & 0o170000);
         fs::remove_dir_all(&d).ok();
+    }
+}
+
+#[cfg(test)]
+mod byte_path_tests {
+    use super::*;
+    use std::os::unix::ffi::OsStringExt;
+
+    #[test]
+    fn mount_evidence_path_preserves_bytes_hidden_by_diagnostic_labels() {
+        let root = std::env::temp_dir().join(format!("gust-anchor-bytes-{}", std::process::id()));
+        let parent = root.join(std::ffi::OsString::from_vec(b"place-\xff".to_vec()));
+        std::fs::create_dir_all(&parent).unwrap();
+        let (dir, _) = resolve_parent(&parent.join("final")).unwrap();
+        assert_eq!(dir.path(), parent);
+        assert_ne!(dir.path().as_os_str(), OsStr::new(dir.display()));
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

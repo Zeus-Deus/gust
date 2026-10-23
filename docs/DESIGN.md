@@ -143,8 +143,9 @@ planned → running → committing → (remote-pending) → confirmed
 
 ## 6. Operation safety (crates/ops)
 
-- Copy into a private staging name, fsync per policy, then atomic rename into
-  place. Restrictive permissions from creation — not chmod at the end.
+- Copy into a private staging name, fsync per policy, then publish atomically
+  without replacing an occupied destination. Restrictive permissions from
+  creation — not chmod at the end.
 - Recursive traversal is anchored to **held directory descriptors**
   (`openat`/`unlinkat` with `AT_` flags). A final-component `O_NOFOLLOW` is
   insufficient: an intermediate directory can be swapped mid-walk.
@@ -416,11 +417,66 @@ connections close the panel; closing it manually does not cancel an attempt or
 allow its later failure to steal focus. SSH, Tailscale, cloud setup and network
 shares use the same feedback surface without retaining credentials.
 
-**SSHFS upload limitation:** if a mount does not support atomic no-replace
-rename, Gust refuses publication rather than risk replacing another file.
-Browsing and downloading can still work; the local source is retained after
-this refusal. Connecting successfully does not imply upload support. Gust
-never substitutes an overwrite-capable rename or replays the refused operation.
+**SSHFS regular-file publication:** SSHFS rejects no-replace rename flags.
+For a completed staged regular file only, Gust instead uses `linkat` without
+following the source symlink. SSHFS forwards this to the advertised OpenSSH
+`hardlink@openssh.com` extension, whose operation is server-side `link(2)`:
+creating an occupied file, directory or symlink name fails atomically. This is
+publication of a completed copy, never an atomic-move substitute.
+
+Before reading payload bytes, each upload probes the actual empty stage with
+an operation-owned, claimed private alias and removes that alias. It never
+probes the public final name or records a global/durable capability. A failed
+probe refuses that attempt before transfer; an unavailable/ambiguous answer
+remains unknown. The real link request still must succeed after the held-source
+length/version checks and destination fsync. Only its confirmed success
+confirms the copy; it does not prove server crash durability of the new name.
+Failure to remove the staging alias after a successful link keeps the claim and does
+not turn published data into a failed copy. A failed/ambiguous final link keeps
+the stage and claim, reports that publication was not confirmed, and never
+replays the request or removes the source. A complete destination may already
+exist when the reply was lost; recovery never infers success from name/size.
+
+SSHFS has no directory-fsync callback, and without the server fsync extension
+file fsync only flushes pending writes. A client fsync result is therefore
+not proof of server crash durability. Moves into SSHFS are refused before
+transfer, with an explicit offer to copy instead; no source is removed based
+on a link receipt alone. This includes the recursive move path.
+
+This path supports regular files only. Source renames/moves, directory
+publication and symlink publication retain no-replace rename requirements;
+there is no ordinary-rename or check-then-rename fallback. Connecting
+successfully does not imply upload support for every file type or backend.
+Unknown mount types retain the existing copy rename path without asserted
+support. Missing or empty mount evidence refuses move admission before
+conflict preservation or merge effects. The engine retains lossless path
+bytes for decoded mount lookup; new claim records encode path bytes so
+non-UTF-8 names and newlines cannot redirect ownership or inject fields.
+Each operation gets a unique stage and exclusively creates its initial
+claim. Version 2 requires every recognized field exactly once and canonical
+hex path bytes. Updates fsync a separate private record before atomic local
+replacement. Interrupted updates leave a complete prior or new record.
+Legacy, unknown-version, malformed, duplicate/extra-field and truncated
+records confer no sweep/prune authority and remain for inspection. This is
+a conservative compatibility limit: old debris is retained, not migrated
+by guessing its identity. A fresh explicit retry never reuses or releases
+an earlier operation's unresolved claim.
+Cancellation is checked between short writes, before metadata/fsync, and at
+the final publication boundary. Once publication succeeds its receipt is
+preserved even if cancellation arrives during the syscall or alias cleanup.
+Checkpoints cannot interrupt an already blocked filesystem call.
+
+Network staging claims are retained for inspection rather than automatically
+swept: SSHFS inode numbers are synthetic and may change or be reused after
+reconnection. Name, size, mtime, or even a matching synthetic inode cannot
+prove ownership across that boundary. Recovery never removes the final name;
+retained remote debris is distinct from proven local ownership cleanup.
+Unconfirmed claims and network claims are not pruned merely because a path
+is missing or inaccessible; an unmounted location is not proof of absence.
+
+Protocol basis: [OpenSSH hardlink extension](https://github.com/openssh/openssh-portable/blob/master/PROTOCOL)
+and [SSHFS link/fsync implementation](https://github.com/libfuse/sshfs/blob/master/sshfs.c).
+These establish runtime publication semantics, not a server-power-loss guarantee.
 
 ### 6.4.3 File-send services
 

@@ -15,6 +15,32 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+fn encode_path(path: &Path) -> String {
+    path.as_os_str()
+        .as_encoded_bytes()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+fn decode_path(hex: &str) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStringExt;
+    let bytes = hex.as_bytes();
+    if !bytes.len().is_multiple_of(2) {
+        return None;
+    }
+    let decoded: Option<Vec<u8>> = bytes
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| {
+            let pair = std::str::from_utf8(pair).ok()?;
+            u8::from_str_radix(pair, 16).ok()
+        })
+        .collect();
+    Some(std::ffi::OsString::from_vec(decoded?).into())
+}
+
 /// One staging file this process created and has not yet committed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StagingClaim {
@@ -34,7 +60,7 @@ pub struct StagingClaim {
     pub since: i64,
     /// Created on a network filesystem, where inode numbers are per mount.
     pub net: bool,
-    /// Bytes written before a failure left the file stranded; 0 otherwise.
+    /// Bytes written before alias cleanup failed; diagnostic, not ownership proof.
     pub written: u64,
 }
 
@@ -94,27 +120,105 @@ pub fn claim(path: &Path) -> std::io::Result<PathBuf> {
         let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(0o700));
     }
     let cf = claim_file_for(path);
+    let c = StagingClaim {
+        path: path.to_path_buf(),
+        dev: 0,
+        ino: 0,
+        boot_id: boot_id(),
+        pid: std::process::id(),
+        claim_file: cf.clone(),
+        since: 0,
+        net: true,
+        written: 0,
+    };
+    use std::os::unix::fs::OpenOptionsExt;
     let mut f = fs::OpenOptions::new()
-        .create(true)
+        .create_new(true)
         .write(true)
-        .truncate(true)
+        .mode(0o600)
         .open(&cf)?;
-    #[cfg(unix)]
+    write_record(&mut f, &c)?;
+    fs::File::open(&dir)?.sync_all()?;
+    Ok(cf)
+}
+
+fn write_claim(c: &StagingClaim) -> std::io::Result<()> {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    // Updates replace only a validated claim owned by this operation. A
+    // separate synced record keeps the previous complete record on failure.
+    let mut previous = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
+        .open(&c.claim_file)?;
+    let before = previous.metadata()?;
+    let mut old = String::new();
+    previous.read_to_string(&mut old)?;
+    let prior = decode_claim(&old, c.claim_file.clone());
+    if !before.is_file()
+        || !prior.is_some_and(|p| p.path == c.path && p.pid == c.pid && p.boot_id == c.boot_id)
     {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = f.set_permissions(fs::Permissions::from_mode(0o600));
+        return Err(std::io::Error::other(
+            "staging claim changed; record retained",
+        ));
     }
-    // dev/ino are filled in by `confirm` once the file exists; the path and
-    // provenance are what must be durable before creation.
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let sequence = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let temporary = c
+        .claim_file
+        .with_extension(format!("{}-{sequence}.tmp", std::process::id()));
+    let mut f = fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o600)
+        .open(&temporary)?;
+    let result = (|| {
+        write_record(&mut f, c)?;
+        #[cfg(test)]
+        if fault::UPDATE.with(|v| v.get()) {
+            return Err(std::io::Error::other("interrupted claim update"));
+        }
+        use std::os::unix::fs::MetadataExt;
+        let current = fs::symlink_metadata(&c.claim_file)?;
+        if !current.is_file()
+            || before.dev() != current.dev()
+            || before.ino() != current.ino()
+            || before.mtime() != current.mtime()
+            || before.mtime_nsec() != current.mtime_nsec()
+            || before.len() != current.len()
+        {
+            return Err(std::io::Error::other(
+                "staging claim changed; record retained",
+            ));
+        }
+        // This rename updates a private local record, never a public file.
+        fs::rename(&temporary, &c.claim_file)?;
+        #[cfg(test)]
+        if fault::UPDATE_AFTER.with(|v| v.get()) {
+            return Err(std::io::Error::other("interrupted after claim update"));
+        }
+        fs::File::open(c.claim_file.parent().unwrap())?.sync_all()
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+fn write_record(f: &mut fs::File, c: &StagingClaim) -> std::io::Result<()> {
     writeln!(
         f,
-        "path={}\nboot={}\npid={}\ndev=0\nino=0",
-        path.display(),
-        boot_id(),
-        std::process::id()
+        "version=2\npath_hex={}\nboot={}\npid={}\ndev={}\nino={}\nsince={}\nnet={}\nwritten={}",
+        encode_path(&c.path),
+        c.boot_id,
+        c.pid,
+        c.dev,
+        c.ino,
+        c.since,
+        u8::from(c.net),
+        c.written
     )?;
-    f.sync_all()?;
-    Ok(cf)
+    f.sync_all()
 }
 
 /// Complete a claim with the identity of the file actually created.
@@ -125,61 +229,40 @@ pub fn confirm(claim_path: &Path, staged: &Path) -> std::io::Result<()> {
         return Err(std::io::Error::from_raw_os_error(28));
     }
     let md = staged.symlink_metadata()?;
-    let mut f = fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(claim_path)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = f.set_permissions(fs::Permissions::from_mode(0o600));
-    }
-    // A network filesystem (sshfs without use_ino, SMB, rclone) numbers
-    // inodes per mount, so after a reconnect dev+ino can never match. Say
-    // so now, while the mount is known to be good.
-    let net = gust_core::stall::fstype_for(staged).is_some_and(|t| gust_core::stall::can_stall(&t));
-    writeln!(
-        f,
-        "path={}\nboot={}\npid={}\ndev={}\nino={}\nsince={}\nnet={}",
-        staged.display(),
-        boot_id(),
-        std::process::id(),
-        md.dev(),
-        md.ino(),
-        md.mtime(),
-        u8::from(net)
-    )?;
-    f.sync_all()?;
-    Ok(())
+    // Missing mount evidence is not proof of a stable local inode namespace.
+    let net = gust_core::stall::fstype_for(staged).is_none_or(|t| gust_core::stall::can_stall(&t));
+    write_claim(&StagingClaim {
+        path: staged.to_path_buf(),
+        dev: md.dev(),
+        ino: md.ino(),
+        boot_id: boot_id(),
+        pid: std::process::id(),
+        claim_file: claim_path.to_path_buf(),
+        since: md.mtime(),
+        net,
+        written: 0,
+    })
 }
 
-/// A copy failed and its staging file could not be removed (the place it
-/// was on stopped answering). Record how many bytes Gust had written, so a
-/// later sweep can recognise the file on a network place whose inode
-/// numbers changed with the reconnect.
+/// Keep the amount written as diagnostic evidence, never as ownership proof.
 pub fn mark_unremoved(claim_path: &Path, written: u64) {
-    if let Ok(mut f) = fs::OpenOptions::new().append(true).open(claim_path) {
-        let _ = writeln!(f, "written={written}");
-        let _ = f.sync_all();
-    }
+    let Ok(text) = fs::read_to_string(claim_path) else {
+        return;
+    };
+    let Some(mut c) = decode_claim(&text, claim_path.to_path_buf()) else {
+        return;
+    };
+    c.written = written;
+    let _ = write_claim(&c);
 }
 
-/// Is `md` (what is at a claim's path now) the file this claim describes?
-///
-/// Normally dev+inode. On a network place, where inode numbers do not
-/// survive a remount, a weaker but still specific proof is accepted — only
-/// for a copy that failed with the file stranded: a regular file at the
-/// exact staging path (a name containing the owner's process id), no
-/// larger than what Gust wrote — the last writes may have died in flight,
-/// but a larger file means somebody else wrote to it — and not older than
-/// the claim.
+/// Is `md` the object a recovery sweep can prove this claim owns?
+/// Network inode numbers can change or be reused after reconnection. Neither
+/// a matching synthetic inode nor path/size/time proves remote ownership.
+/// Retain these claims and their debris rather than deleting a replacement.
 pub fn describes(c: &StagingClaim, md: &fs::Metadata) -> bool {
     use std::os::unix::fs::MetadataExt;
-    if c.dev != 0 && c.ino != 0 && md.dev() == c.dev && md.ino() == c.ino {
-        return true;
-    }
-    c.net && c.written > 0 && md.is_file() && md.len() <= c.written && md.mtime() >= c.since
+    !c.net && c.dev != 0 && c.ino != 0 && md.dev() == c.dev && md.ino() == c.ino
 }
 
 /// Drop a claim once the staging file has been committed or removed.
@@ -187,8 +270,61 @@ pub fn release(claim_path: &Path) {
     let _ = fs::remove_file(claim_path);
 }
 
-/// Read every claim on disk.
+/// Decode only complete version-2 records. Legacy or uncertain records stay
+/// on disk, but confer no deletion authority. No field is defaulted, repeated,
+/// or silently ignored; a torn write cannot turn into a different claim.
+fn decode_claim(text: &str, claim_file: PathBuf) -> Option<StagingClaim> {
+    const KEYS: [&str; 9] = [
+        "version", "path_hex", "boot", "pid", "dev", "ino", "since", "net", "written",
+    ];
+    if !text.ends_with('\n') {
+        return None;
+    }
+    let mut fields = std::collections::BTreeMap::new();
+    for line in text.lines() {
+        let (key, value) = line.split_once('=')?;
+        if !KEYS.contains(&key) || fields.insert(key, value).is_some() {
+            return None;
+        }
+    }
+    if fields.len() != KEYS.len() || fields["version"] != "2" {
+        return None;
+    }
+    let path = decode_path(fields["path_hex"])?;
+    if !path.is_absolute()
+        || encode_path(&path) != fields["path_hex"]
+        || path.as_os_str().as_encoded_bytes().contains(&0)
+        || path
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return None;
+    }
+    let net = match fields["net"] {
+        "0" => false,
+        "1" => true,
+        _ => return None,
+    };
+    let pid = fields["pid"].parse().ok()?;
+    if pid == 0 || fields["boot"].is_empty() {
+        return None;
+    }
+    Some(StagingClaim {
+        path,
+        dev: fields["dev"].parse().ok()?,
+        ino: fields["ino"].parse().ok()?,
+        boot_id: fields["boot"].to_owned(),
+        pid,
+        claim_file,
+        since: fields["since"].parse().ok()?,
+        net,
+        written: fields["written"].parse().ok()?,
+    })
+}
+
+/// Read validated claims only; uncertain records are retained without action.
 pub fn load_all() -> Vec<StagingClaim> {
+    use std::io::Read;
     let mut out = Vec::new();
     let Ok(rd) = fs::read_dir(claims_dir()) else {
         return out;
@@ -197,42 +333,23 @@ pub fn load_all() -> Vec<StagingClaim> {
         if e.path().extension().and_then(|s| s.to_str()) != Some("claim") {
             continue;
         }
-        let Ok(text) = fs::read_to_string(e.path()) else {
+        let Ok(fd) = rustix::fs::open(
+            e.path(),
+            rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+        ) else {
             continue;
         };
-        let mut path = None;
-        let mut boot = String::new();
-        let mut pid = 0u32;
-        let mut dev = 0u64;
-        let mut ino = 0u64;
-        let mut since = 0i64;
-        let mut net = false;
-        let mut written = 0u64;
-        for line in text.lines() {
-            match line.split_once('=') {
-                Some(("since", v)) => since = v.parse().unwrap_or(0),
-                Some(("net", v)) => net = v == "1",
-                Some(("written", v)) => written = v.parse().unwrap_or(0),
-                Some(("path", v)) => path = Some(PathBuf::from(v)),
-                Some(("boot", v)) => boot = v.to_string(),
-                Some(("pid", v)) => pid = v.parse().unwrap_or(0),
-                Some(("dev", v)) => dev = v.parse().unwrap_or(0),
-                Some(("ino", v)) => ino = v.parse().unwrap_or(0),
-                _ => {}
-            }
+        let mut file = fs::File::from(fd);
+        if !file.metadata().is_ok_and(|m| m.is_file()) {
+            continue;
         }
-        if let Some(p) = path {
-            out.push(StagingClaim {
-                path: p,
-                dev,
-                ino,
-                boot_id: boot,
-                pid,
-                claim_file: e.path(),
-                since,
-                net,
-                written,
-            });
+        let mut text = String::new();
+        if file.read_to_string(&mut text).is_err() {
+            continue;
+        }
+        if let Some(c) = decode_claim(&text, e.path()) {
+            out.push(c);
         }
     }
     out
@@ -290,6 +407,8 @@ pub(crate) mod fault {
     thread_local! {
         pub(crate) static CLAIM: Cell<bool> = const { Cell::new(false) };
         pub(crate) static CONFIRM: Cell<bool> = const { Cell::new(false) };
+        pub(crate) static UPDATE: Cell<bool> = const { Cell::new(false) };
+        pub(crate) static UPDATE_AFTER: Cell<bool> = const { Cell::new(false) };
         pub(crate) static DIR: std::cell::RefCell<Option<std::path::PathBuf>> =
             const { std::cell::RefCell::new(None) };
     }
@@ -298,6 +417,17 @@ pub(crate) mod fault {
     /// XDG_STATE_HOME would put it).
     pub(crate) fn state_home(state: &std::path::Path) {
         DIR.with(|d| *d.borrow_mut() = Some(state.to_path_buf()));
+    }
+
+    pub(crate) fn rewrite_claim(
+        path: &std::path::Path,
+        edit: impl FnOnce(&mut super::StagingClaim),
+    ) {
+        let text = std::fs::read_to_string(path).unwrap();
+        let mut claim = super::decode_claim(&text, path.to_path_buf()).unwrap();
+        edit(&mut claim);
+        let mut f = std::fs::File::create(path).unwrap();
+        super::write_record(&mut f, &claim).unwrap();
     }
 }
 
@@ -387,5 +517,204 @@ mod tests {
         };
         assert!(owner_is_live(&c));
         fs::remove_dir_all(&d).ok();
+    }
+}
+
+#[cfg(test)]
+mod byte_path_tests {
+    use super::*;
+    use std::os::unix::ffi::OsStringExt;
+
+    #[test]
+    fn claims_round_trip_non_utf8_and_newline_paths_without_field_injection() {
+        let root = std::env::temp_dir().join(format!("gust-byte-claims-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        fault::state_home(&root.join("state"));
+        let path = root.join(std::ffi::OsString::from_vec(
+            b"stage-\xff\nnet=1\npid=0".to_vec(),
+        ));
+        let claim = claim(&path).unwrap();
+        fs::write(&path, b"complete").unwrap();
+        confirm(&claim, &path).unwrap();
+        let records = load_all();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].path, path);
+        assert_eq!(records[0].pid, std::process::id());
+        assert!(!records[0].net);
+        assert!(describes(&records[0], &path.symlink_metadata().unwrap()));
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod record_validation_tests {
+    use super::*;
+    use std::os::unix::ffi::OsStringExt;
+
+    fn root(tag: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!(
+            "gust-claim-validation-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        fs::create_dir(&p).unwrap();
+        fault::state_home(&p.join("state"));
+        p
+    }
+
+    #[test]
+    fn legacy_malformed_duplicate_and_torn_records_never_authorize_cleanup() {
+        let root = root("invalid");
+        let path = root.join("stage");
+        let other = root.join("bystander");
+        fs::write(&path, b"owned bytes").unwrap();
+        fs::write(&other, b"BYSTANDER").unwrap();
+        let cf = claim(&path).unwrap();
+        confirm(&cf, &path).unwrap();
+        let valid = fs::read_to_string(&cf).unwrap();
+        let encoded = encode_path(&path);
+        let legacy = valid.replace("version=2\n", "").replace(
+            &format!("path_hex={encoded}"),
+            &format!("path={}", path.display()),
+        );
+        let cases = [
+            legacy,
+            valid.replace("version=2", "version=1"),
+            valid.replace(&format!("path_hex={encoded}"), "path_hex=zz"),
+            valid.replace(&format!("path_hex={encoded}"), "path_hex=2"),
+            valid.trim_end().to_owned(),
+            format!("{valid}net=0\n"),
+            format!("{valid}path_hex={}\n", encode_path(&other)),
+            format!("{valid}path={}\n", other.display()),
+            format!("{valid}extra=unrecognized\n"),
+            valid.replace("net=0", "net=unknown"),
+            valid.replace("written=0\n", ""),
+            valid.replace("written=0", "written=invalid"),
+        ];
+        for text in cases {
+            fs::write(&cf, &text).unwrap();
+            assert!(load_all().is_empty());
+            assert_eq!(crate::engine::sweep_stale_staging(&root), 0);
+            assert_eq!(crate::engine::prune_dead_claims(), 0);
+            mark_unremoved(&cf, 8);
+            assert_eq!(
+                fs::read_to_string(&cf).unwrap(),
+                text,
+                "an invalid claim must not be repaired into authority"
+            );
+            assert_eq!(fs::read(&path).unwrap(), b"owned bytes");
+            assert_eq!(fs::read(&other).unwrap(), b"BYSTANDER");
+        }
+        // An exact complete current record retains ordinary local cleanup.
+        fs::write(&cf, valid).unwrap();
+        assert_eq!(crate::engine::sweep_stale_staging(&root), 1);
+        assert!(!cf.exists());
+        assert_eq!(fs::read(other).unwrap(), b"BYSTANDER");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn equal_lossy_path_labels_cannot_redirect_a_claim_to_another_file() {
+        let root = root("collision");
+        let path = root.join(std::ffi::OsString::from_vec(b"stage-\xff".to_vec()));
+        let other = root.join(std::ffi::OsString::from_vec(b"stage-\xfe".to_vec()));
+        assert_eq!(path.to_string_lossy(), other.to_string_lossy());
+        assert_ne!(path, other);
+        fs::write(&path, b"owned bytes").unwrap();
+        fs::write(&other, b"BYSTANDER").unwrap();
+        let cf = claim(&path).unwrap();
+        confirm(&cf, &path).unwrap();
+        assert_eq!(load_all()[0].path, path);
+        assert_eq!(crate::engine::sweep_stale_staging(&root), 1);
+        assert!(!path.exists());
+        assert_eq!(fs::read(other).unwrap(), b"BYSTANDER");
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod exclusive_update_tests {
+    use super::*;
+
+    fn root(tag: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!(
+            "gust-claim-update-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        fs::create_dir(&p).unwrap();
+        fault::state_home(&p.join("state"));
+        fs::create_dir_all(claims_dir()).unwrap();
+        p
+    }
+
+    #[test]
+    fn initial_claim_never_replaces_an_existing_record_or_symlink() {
+        let root = root("exclusive");
+        let path = root.join("stage");
+        let cf = claim_file_for(&path);
+        fs::write(&cf, b"existing unresolved record").unwrap();
+        assert!(claim(&path).is_err());
+        assert_eq!(fs::read(&cf).unwrap(), b"existing unresolved record");
+        fs::remove_file(&cf).unwrap();
+        let other = root.join("bystander");
+        fs::write(&other, b"BYSTANDER").unwrap();
+        std::os::unix::fs::symlink(&other, &cf).unwrap();
+        assert!(claim(&path).is_err());
+        fs::write(&path, b"complete").unwrap();
+        assert!(confirm(&cf, &path).is_err());
+        assert_eq!(fs::read_link(cf).unwrap(), other);
+        assert_eq!(fs::read(other).unwrap(), b"BYSTANDER");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn interrupted_updates_leave_complete_prior_or_new_record() {
+        let root = root("interrupt");
+        let path = root.join("stage");
+        let cf = claim(&path).unwrap();
+        let before = fs::read(&cf).unwrap();
+        fs::write(&path, b"complete").unwrap();
+        fault::UPDATE.with(|v| v.set(true));
+        let interrupted = confirm(&cf, &path);
+        fault::UPDATE.with(|v| v.set(false));
+        assert!(interrupted.is_err());
+        assert_eq!(fs::read(&cf).unwrap(), before);
+        assert_eq!(load_all()[0].dev, 0);
+        assert_eq!(crate::engine::sweep_stale_staging(&root), 0);
+        fault::UPDATE_AFTER.with(|v| v.set(true));
+        let interrupted = confirm(&cf, &path);
+        fault::UPDATE_AFTER.with(|v| v.set(false));
+        assert!(interrupted.is_err());
+        let after = fs::read(&cf).unwrap();
+        assert_ne!(before, after);
+        assert!(describes(&load_all()[0], &path.symlink_metadata().unwrap()));
+        assert_eq!(fs::read(&path).unwrap(), b"complete");
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod symlink_record_tests {
+    use super::*;
+
+    #[test]
+    fn a_symlink_to_a_valid_claim_confers_no_cleanup_authority() {
+        let root = std::env::temp_dir().join(format!("gust-linked-claim-{}", std::process::id()));
+        fs::create_dir(&root).unwrap();
+        fault::state_home(&root.join("state"));
+        let stage = root.join("stage");
+        fs::write(&stage, b"complete").unwrap();
+        let cf = claim(&stage).unwrap();
+        confirm(&cf, &stage).unwrap();
+        let saved = root.join("saved-record");
+        fs::rename(&cf, &saved).unwrap();
+        std::os::unix::fs::symlink(&saved, &cf).unwrap();
+        assert!(load_all().is_empty());
+        assert_eq!(crate::engine::sweep_stale_staging(&root), 0);
+        assert_eq!(crate::engine::prune_dead_claims(), 0);
+        assert_eq!(fs::read(&stage).unwrap(), b"complete");
+        assert_eq!(fs::read_link(cf).unwrap(), saved);
+        fs::remove_dir_all(root).unwrap();
     }
 }
