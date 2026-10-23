@@ -431,6 +431,88 @@ mod tests {
     }
 
     #[test]
+    fn discovery_refuses_positional_envelopes_rows_and_recursive_children() {
+        let object = serde_json::json!({
+            "name":"fixture", "path":"/dev/fixture", "type":"part", "size":"4G",
+            "rm":true, "hotplug":false, "fstype":"ext4", "label":"Synthetic",
+            "mountpoint":"/synthetic/mounted"
+        });
+        // Complete positional structs, rather than empty arrays that also fail
+        // because required fields are missing in the typed representation.
+        let row = serde_json::json!([
+            "fixture",
+            "/dev/fixture",
+            "part",
+            "4G",
+            true,
+            false,
+            "ext4",
+            "Synthetic",
+            "/synthetic/mounted",
+            null,
+            []
+        ]);
+        let mut with_child = object.clone();
+        with_child["children"] = serde_json::json!([row.clone()]);
+        let mut encrypted = object.clone();
+        encrypted["fstype"] = serde_json::json!("crypto_LUKS");
+        encrypted["children"] = serde_json::json!([[
+            "dm-fixture",
+            "/dev/dm-fixture",
+            "crypt",
+            "4G",
+            false,
+            false,
+            "ext4",
+            "Synthetic",
+            "/synthetic/mounted",
+            "fixture",
+            []
+        ]]);
+        let cancel = CancelToken::new();
+        for reply in [
+            serde_json::json!([[]]),
+            serde_json::json!([[object]]),
+            serde_json::json!({"blockdevices":[row]}),
+            serde_json::json!({"blockdevices":[with_child]}),
+            serde_json::json!({"blockdevices":[encrypted]}),
+        ] {
+            let fixture = Fixture::new(&format!("print({:?})", reply.to_string()));
+            let e = list_devices_using(fixture.program(), &context(&cancel)).unwrap_err();
+            assert_eq!(e.error.code, ErrorCode::Protocol);
+            assert_eq!(e.effect, BlockEffect::NotStarted);
+            assert_eq!(e, discovery_failure(ErrorCode::Protocol));
+        }
+    }
+
+    #[test]
+    fn discovery_keeps_valid_object_cleartext_and_empty_controls() {
+        let cancel = CancelToken::new();
+        let reply = serde_json::json!({"blockdevices":[{
+            "name":"fixture", "path":"/dev/fixture", "type":"part", "rm":true,
+            "fstype":"crypto_LUKS", "label":"Synthetic{A}", "children":[{
+                "name":"dm-fixture", "path":"/dev/dm-fixture", "type":"crypt",
+                "pkname":"fixture", "fstype":"ext4", "mountpoint":"/synthetic/café\n{A}"
+            }]
+        }]});
+        let fixture = Fixture::new(&format!("print({:?})", reply.to_string()));
+        let listed = list_devices_using(fixture.program(), &context(&cancel)).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].path, "/dev/fixture");
+        assert_eq!(listed[0].cleartext.as_deref(), Some("/dev/dm-fixture"));
+        assert_eq!(listed[0].label.as_deref(), Some("Synthetic{A}"));
+        assert_eq!(
+            listed[0].mount_point,
+            Some(PathBuf::from("/synthetic/café\n{A}"))
+        );
+        assert!(listed[0].is_mounted());
+        let fixture = Fixture::new("print('{\"blockdevices\":[]}')");
+        assert!(list_devices_using(fixture.program(), &context(&cancel))
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
     fn discovery_refuses_parser_limits_instead_of_returning_an_empty_inventory() {
         // Valid JSON below the helper's output bound, above CORE's parse bound.
         let fixture = Fixture::new(

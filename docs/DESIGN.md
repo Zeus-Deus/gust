@@ -1546,3 +1546,5 @@ validation followed by the legacy string scanner is insufficient for fresh state
 All `LsblkParseError::{InvalidJson,InvalidShape,Limit}` failures map to static
 `Protocol`/`NotStarted`. CORE owns the 4 MiB/65536-row/32-level limits and decoded
 row/child shape policy; this adapter adds no second parser or lossy fallback.
+Positional array envelopes, rows and children are malformed inventory, including
+otherwise offerable or cleartext rows; they fail with `Protocol`/`NotStarted`.
