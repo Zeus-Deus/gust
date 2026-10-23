@@ -15,6 +15,7 @@ pub mod disconnect;
 pub mod helper;
 pub mod mount;
 pub mod phones;
+pub mod send;
 pub mod setup;
 pub mod shares;
 pub mod ssh_config;
