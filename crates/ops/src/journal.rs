@@ -17,6 +17,7 @@ pub enum JobKind {
     Rename,
     NewFolder,
     Extract,
+    Compress,
 }
 
 impl JobKind {
@@ -31,7 +32,8 @@ impl JobKind {
             | JobKind::Trash
             | JobKind::Rename
             | JobKind::NewFolder
-            | JobKind::Extract => true,
+            | JobKind::Extract
+            | JobKind::Compress => true,
             JobKind::DeletePermanent => false,
         }
     }
@@ -547,6 +549,7 @@ impl Interrupted {
             JobKind::Move => "Moving",
             JobKind::Trash => "Moving to Trash",
             JobKind::Extract => "Extracting",
+            JobKind::Compress => "Compressing",
             JobKind::Rename => "Renaming",
             JobKind::NewFolder => "Creating",
             JobKind::DeletePermanent => "Deleting",
