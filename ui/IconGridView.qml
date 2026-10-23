@@ -200,22 +200,11 @@ FocusScope {
                         // asynchronous: true keeps even the cached PNG's
                         // decode off the UI thread, so scrolling a folder of
                         // large images cannot stutter the window.
-                        Image {
+                        GridThumbnail {
                             id: thumb
-                            anchors.fill: parent
-                            anchors.margins: Tokens.borderWidth
+                            anchors.centerIn: parent
+                            inset: Tokens.borderWidth
                             source: thumbUrl
-                            visible: status === Image.Ready
-                            asynchronous: true
-                            // Live replacements reuse this file URL. Reload
-                            // the validated PNG instead of old decoded pixels.
-                            cache: false
-                            fillMode: Image.PreserveAspectFit
-                            // Bound the decode: a helper is capped at 256px,
-                            // but sourceSize makes that explicit and stops a
-                            // surprising file from allocating a huge texture.
-                            sourceSize.width: 256
-                            sourceSize.height: 256
                         }
 
                         // Read-only, no access, mount point, link: square

@@ -15,6 +15,44 @@ requested size. Source version checks include device, inode, length, and
 nanosecond modification/change times; old cache entries regenerate once.
 Decoding remains inside the existing sandbox.
 
+## Grid PNG display memory
+
+Grid decodes are bounded to the normal cache's 128-pixel box. A separate image
+item fits the displayed rectangle without enlarging the decoded PNG. On Qt
+6.12, the previous `PreserveAspectFit` decode policy loaded a 128×96 PNG as
+341×256 for a 256-pixel requested box. The new item retains 128×96 pixels and
+fits its displayed geometry, including zoom and non-square previews.
+
+Five alternating release pairs on the same 2,000-JPEG fixture and real
+2536×1390 desktop viewport measured median total process PSS **384.6 →
+271.2 MiB (29.5% lower)**. Every run generated the same 363 cache files.
+These observations use fresh application/thumbnail caches and warm OS caches;
+PSS was sampled ten seconds after compositor mapping and excludes GPU memory.
+This longer window lets both variants finish their original prefetch work.
+
+A separate diagnostic pair observed 310 loaded image items: **27,061,760 →
+3,809,280 decoded pixels**, with all 220 visible thumbnails ready in both
+variants. First full-grid frames were sampled at approximately 3.6 seconds
+after QML load in each; this is not evidence of faster visible completion.
+Ten-second image CPU totals were 9.02 → 8.74 seconds, with overlapping ranges;
+no general CPU-speed improvement is claimed. Small-folder mapping was
+388 → 389 ms and PSS 175.4 → 175.8 MiB; its CPU median increased from
+1.05 → 1.11 seconds with overlapping ranges. 100k mapping was 384 → 357 ms
+and PSS 187.2 → 188.2 MiB. Shared-host timings describe this fixture/machine,
+not a uniform whole-application gain.
+
+The shipped image component is tested with landscape, portrait, panorama,
+tall, oversized and recycled PNGs, resize/zoom without redecoding, and 1×/2×
+display scales. Real-window checks cover full-grid rendering, zoom, reaching
+photo 2000, live replacement pixels, and cancellation on leaving Grid or the
+folder. Sandboxing, worker scheduling, freshness validation and the thumbnail
+cache policy are unchanged.
+
+```sh
+python3 tests/grid-thumbnail.py
+QT_SCALE_FACTOR=2 python3 tests/grid-thumbnail.py
+```
+
 ## Prior release measurements
 
 These observations come from paired synthetic-fixture comparisons of the
