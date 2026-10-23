@@ -32,6 +32,8 @@ depends=(
   # Sandboxed thumbnails and Quick Look previews.
   'bubblewrap' 'util-linux' 'imagemagick' 'ffmpegthumbnailer' 'ffmpeg'
   'pipewire-audio' 'poppler'
+  # Browse neighbouring images, audio and video in one player.
+  'mpv'
   # Archives, USB drives and discs, Open/Save dialogs for other apps.
   'libarchive' 'udisks2' 'xdg-desktop-portal'
 )

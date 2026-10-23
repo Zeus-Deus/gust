@@ -9,6 +9,41 @@ just qa            # 3. desktop interaction on a real compositor
 just theme-matrix  # 4. every installed Omarchy theme renders
 ```
 
+## Fast GitHub Actions checks
+
+`.github/workflows/ci.yml` runs on pull requests, pushes to `master`, and
+manual dispatch. Its `Check` job runs formatting, `just lint`, the library
+test runner, and a debug build of the complete Rust/Qt application on Ubuntu
+26.04 with Qt 6.10, which supports the Qt Quick features Gust already uses.
+Dependencies are locked to `Cargo.lock` for compilation and tests.
+
+One job shares build outputs between lint, tests and the app build. Cargo
+downloads and compiled dependencies are cached across runs; debug symbols
+and incremental compilation are disabled to reduce cache size. Downloaded
+Ubuntu packages are cached too, and installation uses the HTTPS Ubuntu
+mirror after the default Azure mirror took over ten minutes in a hosted run.
+The package cache is saved immediately after installation, even if later
+checks fail; changes to the workflow invalidate it. New commits
+cancel outdated runs for the same PR or branch. Branch pushes outside
+`master` do not duplicate the PR run, and there is no platform matrix or
+release build in this fast check. The job has a 15-minute timeout, including
+cold builds; a cached run should be measured before assigning a time budget.
+
+Changes limited to Markdown and `docs/screens/` skip setup and compilation
+while still completing `Check`, so it can be required by branch protection.
+If the two-commit checkout cannot resolve the comparison base (for example,
+a multi-commit push to `master`), checks run conservatively. Manual dispatch
+always runs the full check. Packaging files under `docs/release/` still
+trigger checks.
+
+Hosted CI has no Omarchy compositor or live remote fixtures. Missing fixture
+cases remain explicit skips in the test log and workflow summary, rather
+than being counted as passes. A green `Check` covers only the fast checks;
+real-desktop QA, the theme matrix, benchmarks, and the fixture-required
+release tests remain separate gates before landing or releasing. Run
+`just test-required` with the fixtures and desktop session available, plus
+`just qa-release`, `just theme-matrix`, and `just bench` against the candidate.
+
 ## Safety: the tests never touch your files
 
 Every desktop test runs with:

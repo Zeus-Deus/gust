@@ -69,7 +69,8 @@ and polkit. Every other program Gust calls ships with it too: clipboard
 (wl-clipboard), Open with (xdg-utils), terminal and folder jump
 (xdg-terminal-exec, zoxide), sandboxed thumbnails and previews (bubblewrap,
 util-linux, ImageMagick, ffmpegthumbnailer, FFmpeg, PipeWire, Poppler),
-archives (libarchive), USB drives (udisks2) and Open/Save dialogs
+browsing neighbouring media (mpv), archives (libarchive), USB drives (udisks2)
+and Open/Save dialogs
 (xdg-desktop-portal). Installing the package is all a user needs to do. Only
 Tailscale stays optional: it is a network service with its own account, and
 Gust lists its devices when you already run it. A source build that lacks a

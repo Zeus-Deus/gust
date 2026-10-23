@@ -22,6 +22,19 @@ LocationKey  = provider_id + ":" + opaque_location_bytes
 location bytes. Metadata and thumbnail results carry `EntryId` + `generation`
 and are dropped if either no longer matches.
 
+### 1.1 Byte tokens at the UI boundary
+
+`location::PathToken` validates the existing `local:<hex OS bytes>` encoding
+as an absolute, NUL-free local path. `ChildNameToken` encodes one nonempty
+child component as `name:<hex OS bytes>` and rejects `/`, NUL, `.` and `..`.
+Both expose fallible parsing, byte-preserving resolution and an ASCII token.
+They perform no filesystem I/O. They identify a path, not authority to operate
+on an unchanged inode; operation admission still checks identity separately.
+The bridge publishes tokens alongside escaped labels and activates by token.
+Labels can collide (newline versus literal `<U+000A>`, or invalid UTF-8 versus
+replacement characters), so reverse lookup by display text is forbidden.
+Existing `LocationKey` serialization remains compatible.
+
 ## 2. Capabilities
 
 ```rust
@@ -222,6 +235,68 @@ crawl (plan §2, §4).
   remote place unless that place has been enabled for it.
 - Searching does not change the folder being browsed. Leaving the results
   returns to where the user was.
+
+### 6.3.1 Reusable filename/tag sessions
+
+`search::SearchSession` is worker-owned. Construction and `set_query` do no
+I/O. `advance(entry_budget, cancel, on_hit)` resumes a bounded walk and streams
+hits; `snapshot()` returns its currently ranked hits and explicit state.
+`SearchReport` carries query generation, visited/cached counts, exclusions,
+bounded issue details and total issue count. Running, Complete, Partial
+(I/O omissions), Cancelled, Limited (named bounds) and Failed are distinct.
+Depth counts root children as level one; depth zero admits no entries. Hidden
+directories are pruned unless requested. Symlinks are returned but never
+descended. Device boundaries, depth and generated-tree pruning are counted
+and disclosed. Generated-tree pruning is configurable. Known generated names
+are pruned before attempting to open their contents; cache markers are checked
+only after secure child admission and must have the standard signature.
+Nonlocal providers are refused by this local walker. Network/FUSE local roots
+require `SearchOptions::allow_remote` for
+this explicit root after the caller's stall guard. Reaching the configured
+depth is reported as Limited(Depth), with a pruned-directory count.
+
+`SearchOptions` bounds visited entries, cached candidates/path bytes and
+retained issues independently of matching results. Reaching a bound never
+reports Complete. Query changes replay cached candidates and then resume the
+same traversal, including after a result limit. Candidate/visit bounds need an
+explicit new session with revised bounds. `refresh()` rechecks cached paths
+and tags. Query-only errors reset on replay while traversal omissions remain.
+`invalidate()` restarts after directory watch changes. No persistent
+global index or implicit Home crawl is created. Each replay uses fresh no-follow
+metadata/xattrs, so removed/replaced paths and external tag edits are not
+treated as durable cached authority.
+
+Enumeration, candidate metadata, tag reads and cache markers share descriptor
+anchoring. A session retains its root descriptor and caches each candidate's
+parent device/inode. Replay resolves parents beneath that root with kernel
+no-symlink resolution, verifies the parent identity and rejects a changed root
+or parent as an explicit issue. Candidate metadata and tags come from a held
+object; cache markers are opened relative to the admitted child directory.
+No candidate/cache-marker read follows a reconstructed user pathname. Device
+restriction is enforced during resolution, before touching a crossed mount;
+cross-device descent requires both scope widening and explicit remote admission.
+Unsupported secure resolution fails explicitly. Stamps fence a read, not later
+operation authority; filesystem changes after verification remain possible.
+
+`SearchSession::project_hits(cancel)` returns `SearchProjection { report,
+entries }` from row data captured during descriptor-anchored evaluation. It
+performs no new filesystem calls. `SearchEntry` contains byte `path` and
+`relative_path`, `EntryKind`, existing `entry::Metadata`, a `SearchSourceStamp`
+(generation/device/inode/size/nanosecond mtime+ctime), and optional `tag_error`.
+Consumers create rows from relative_path/kind/metadata; they never call
+`symlink_metadata` or `fill_metadata` on search-hit paths. Symlink target state
+remains unknown; retrieval does not probe a target. A zero tag mask with
+`tag_error` means unavailable, and the projection report includes that issue.
+Filename matching itself does not require successful tag decoration. Existing
+`SearchHit { path, score }` and report APIs remain compatible. Captured stamps
+are snapshots, not authorization for a later filesystem operation.
+
+`SearchQuery::parse` accepts filename terms and conjunctive `tag:Red` or
+`tag:"word tag"` terms; invalid/empty tag syntax is an error. Colour names
+match ASCII case-insensitively; unknown word tags match exactly after trimming.
+`tags::read_raw` remains compatible; retrieval errors are retained in reports,
+not silently interpreted as untagged. Legacy `find_by_name` is a Vec-returning
+adapter; new bridge code must consume the explicit report/session API.
 
 ## 6.4 Remote places
 
@@ -608,9 +683,73 @@ never decodes an untrusted byte in Gust's own process.
   sandboxed `ffprobe`, sanitised. Closing Quick Look kills both processes.
 - **Video** shows a frame and says "Enter plays it in your video player".
   Enter in Quick Look closes the preview and opens the file with its
-  default application, as Enter does in the list.
+  media viewer, with neighbouring media available (§6.18.1), as Enter does
+  in the list.
 - A file named like audio that is not audio says "Cannot play: …" and
   shows no controls.
+
+### 6.9.2 Structured preview payloads (core)
+
+`structured::parse(bytes, format, window, limits, cancel)` returns plain-data,
+serializable text/table/tree payloads for Text, JSON, CSV, TSV and TOML.
+`compare` returns a bounded line diff. Payloads are text, never HTML, active
+links or commands. UTF-8 BOM is consumed; other BOM encodings are explicitly
+unsupported, invalid UTF-8 and binary input are distinct states. CSV/TSV use
+logical records (quoted delimiters/newlines and doubled quotes), not physical
+line splits. Row windows retain absolute zero-based row/line offsets and the
+total count of the bounded input; a truncated source never claims a complete
+file count. Byte/row/column/cell/node/depth/diff-work bounds are disclosed by
+name. Malformed structured input is Invalid, and an input cut at a byte bound
+is never presented as a fully validated document. Cancellation clears payloads.
+JSON node paths use escaped JSON pointers, separately from their display value.
+Cell-byte limits apply to rendered text, including expanded tabs, replacement
+characters and escaped display paths. Clipping preserves UTF-8 boundaries and
+reports CellBytes when any rendered output is omitted. A shortened display path
+never replaces the raw JSON pointer identity; oversized raw pointers remain
+explicitly omitted as before.
+
+`structured::read_source(path, max_bytes, cancel)` is worker-only: no-follow,
+nonblocking open, regular files only, one extra byte to distinguish exact
+limits, metadata before/after and current-path identity checks. It returns
+`PreviewSource` with bytes, explicit truncation and nanosecond `FileStamp`
+(device/inode/size/mtime/ctime); `PreviewSource::parse` carries the read limit
+into the payload. Changed/replaced inputs are refused. These stamps are cache
+and stale-preview fences, not operation/Undo authority. Remote callers still
+need explicit opt-in and stall isolation; cancellation cannot interrupt a
+blocked kernel syscall. Existing Quick Look APIs remain compatibility paths.
+
+### 6.9.3 Bounded code roles (core)
+
+`syntax::preview_source(&PreviewSource, &OsStr, PreviewWindow, &PreviewLimits,
+&CancelToken)` returns additive `CodePreview { preview: Preview, syntax:
+SyntaxAnnotations }`. The existing text payload and all display budgets remain
+unchanged. Language selection uses only the supplied filename extension; no
+path access, code execution, parser process or browser is involved.
+
+`SyntaxAnnotations` serializes `language` as null or `rust`, `python`,
+`javascript`, `typescript`, `qml`, `c`, `cpp`, `shell`, `go`, `java`; `state` as
+`complete`, `unsupported`, `unavailable`, `limited`, `cancelled`; and `lines` as
+arrays of spans. A span contains `start_utf16`, `len_utf16`, and `role`, where
+role is `keyword`, `string`, `comment` or `number`. Offsets are zero-based UTF-16
+code units into the exact sanitized display line returned in the same preview
+and window. Neither boundary splits a surrogate pair. Spans are ordered and do
+not overlap; uncovered text remains plain. No source strings, markup or colors
+are included in annotations. APP adds `syntax` alongside its existing text
+projection; UI maps roles to theme tokens without interpreting source as HTML.
+
+Complete/limited annotation arrays align with `PreviewPayload::Text.lines`.
+Unknown languages use unsupported/plain fallback; invalid/binary/unavailable
+text has no annotations. A hard 16,384-span cap reports limited and leaves the
+remaining text plain; it never discards plain preview text. Lexical state is
+carried through skipped lines in the bounded source prefix, so paged comments
+and strings retain their roles. Existing byte/row/cell truncation remains in
+`preview.state`, separately from annotation completion. Cancellation clears
+both the preview payload and all spans. These are lexical hints for common
+code families, not grammar validation or executable/source identity.
+C++ digit separators stay within numeric tokens so they cannot introduce
+string state into following lines or windows; character literals remain strings.
+Trailing decimal points remain numeric before an exponent or suffix, including
+hexadecimal exponent forms; annotation does not validate literal semantics.
 
 ## 6.10 Scoped content search (`:grep`)
 
@@ -626,7 +765,7 @@ explicitly scoped and cancellable, and neither ever starts on its own.
 2. **Binary files are skipped.** A file is treated as binary if its first
    8 KiB contain a NUL. Grepping a disk image finds nothing useful and costs
    everything.
-3. **Bounded per file and overall.** At most 8 MiB read per file, and the
+3. **Bounded per file and overall.** At most 8 MiB searched per file, and the
    search stops at 500 matching files; the result says so rather than
    pretending it finished.
 4. **Cancellable at any moment**, with the same token the name search uses,
@@ -636,6 +775,42 @@ explicitly scoped and cancellable, and neither ever starts on its own.
    operations on the results.
 6. **Matches are counted, not concatenated.** The result list shows the file
    and how many lines matched; Gust does not build a giant text buffer.
+
+### 6.10.1 Bounded content details (core)
+
+`grep::grep_with_report(scope, needle, cancel, on_hit)` streams captured
+`DetailedContentHit { hit: ContentHit, snippet: ContentSnippet }` and returns
+`ContentSearchReport { hits, state, stats }`. Existing ContentHit path/count/
+first_line fields and legacy entry points remain compatibility APIs. The new
+report is required for truthful coverage. APP projects count, 1-based first
+line and snippet directly from the captured hit, without reopening its path.
+
+`ContentSnippet { text, truncated }` comes from the first matching line in the
+same bounded read. Its text uses existing display sanitization and never
+exceeds 256 rendered UTF-8 bytes, including expanded tabs/replacement chars.
+Context near the first match is preferred for long lines; omitted context is
+explicit. Raw paths remain typed byte identities, never snippet/display labels.
+
+Valid UTF-8 in the searched prefix uses per-character simple lowercasing for
+substring matching. Invalid UTF-8 retains ASCII-insensitive byte matching.
+There is no normalization or full Unicode case folding: for example, sharp-s
+is not expanded to `ss`. Query input is at most 4096 bytes; empty and excessive
+queries return invalid_query with detail empty or too_long. Compiled matching
+state is reused across lines/files and checks cancellation cooperatively.
+
+Ceilings are 8 MiB searched per file, 64 MiB total source bytes, 100,000 visited
+entries and 500 hit-files (or the smaller requested result limit). One extra
+byte detects per-file truncation and counts toward the total source budget.
+Bounds and omissions never imply a complete search. Serialized search state is partial,
+limited (detail hits/entries/bytes), cancelled, or invalid_query (detail
+empty/too_long). Stats retain entries/read_bytes/read_errors/entry_errors,
+depth_pruned/device_pruned/hidden_pruned/symlink_pruned, binary_files,
+ascii_fallback_files and file_byte_limits; scope_unverified is always true.
+The original iterative absolute-path traversal is still unanchored: it always
+reports partial unless a more specific terminal state applies. This work does
+not establish safe recursive scope, filesystem admission or syscall deadlines.
+Remote callers still need explicit admission and isolation. The pure bounded
+buffer matcher can be used without traversal; its result discloses byte limits.
 
 ## 6.11 Accessibility
 
@@ -696,9 +871,36 @@ Three places touch a path before any worker does, and all three are bounded:
 | the listing worker | Unbounded, the folder never settles and the worker never returns. |
 
 **Only paths that can actually stall are probed.** The filesystem type comes
-from `/proc/self/mounts`, which the kernel answers from its own tables and
+from `/proc/self/mountinfo`, which the kernel answers from its own tables and
 which therefore cannot itself hang. A path on ext4/btrfs/xfs/tmpfs spawns no
 child and pays nothing.
+
+`stall::fstype_for` reads bounded mountinfo bytes and delegates to the pure
+`stall::fstype_from_mountinfo(path, table_bytes)` API. No flat-table fallback,
+candidate open, stat or canonicalization is used. `MountInfo::parse` accepts at
+most 4 MiB / 65,536 records; explicit Limit/Invalid/Ambiguous/NoMount errors never
+publish a truncated inventory. `MountRecord` exposes id, parent_id, raw
+mount_point and fs_type; `resolve` returns the visible record and
+`visible_mounts` supplies the read-only inventory. Parent IDs select a unique
+same-path non-root overmount leaf, including autofs covered by a local mount. A
+stack at the starting `/` is globally Ambiguous for both resolution and
+inventory: absolute lookup begins at the process's held filesystem root, not
+necessarily at that stack's leaf. Mountinfo alone cannot authorize selecting a
+local root cover and discarding the held root's remote children. Nested
+records attached to a covered ancestor are hidden, even when the covering
+ancestor path has no duplicate record. Unresolved sibling stacks fence only
+their subtree for resolution; an inventory containing such a region returns
+Ambiguous. No first/last row ordering determines visibility. These semantics
+follow proc_pid_mountinfo(5). The compatibility `fstype_from_mounts` signature
+remains, but flat tables return None for duplicate matching points or differing
+matching ancestor filesystem types: they cannot establish visibility. An
+unknown production lookup requires a probe rather than authorizing direct I/O.
+
+Shared `mount_table::decode_field(&[u8]) -> OsString`
+handles the kernel's space, tab, newline and backslash octal escapes exactly
+once, retaining raw non-UTF-8 bytes and literal escape-looking name segments.
+Core drop handling uses the same decoder and byte field separators. Filesystem
+admission policy remains with each caller; lookup does not probe a candidate.
 
 ### What the user sees
 
@@ -729,6 +931,187 @@ and cannot hang on a network. Gust does not talk to UDisks to *enumerate* —
 only to mount and unmount, which are the operations that need privilege and
 a user's intent. Listing devices therefore works on a machine with no UDisks
 daemon at all; the actions are simply unavailable, and say so.
+
+`devices::parse_lsblk_checked(&str) -> Result<Vec<RawBlock>, LsblkParseError>`
+is the shared pure discovery parser. Errors are `InvalidJson`, `InvalidShape`
+or `Limit`, with fixed diagnostic text that never includes the input. The
+envelope requires a `blockdevices` array; every row and child requires nonempty
+string `name`, `path` and `type`. Optional `size` is a string (default empty),
+`rm`/`hotplug` are booleans (default false), and `fstype`/`label`/`mountpoint`/
+`pkname` are absent, null or strings. Empty optional strings retain legacy
+absence semantics; all other decoded strings are preserved exactly, including
+braces, quotes, backslashes, Unicode, tabs and newlines. Unknown fields are
+ignored. Children must be absent or an array of valid rows. Invalid children
+or fields fail the entire inventory, never a partial successful list.
+Envelope and row boundaries accept JSON objects only, including every child;
+positional array encodings are invalid. Decoded duplicate recognized keys fail.
+
+Preorder flattening preserves explicit parent names; filtering and encrypted
+child joins remain in `offerable_devices`. Bounds are 4 MiB JSON, 65,536 rows
+and 32 row levels; exceeding a bound returns `Limit`, never omitted rows.
+`parse_lsblk` remains a compatibility adapter that loses errors; fallible
+discovery callers use the checked API and propagate refusal before any changing
+action. Parsing performs no candidate I/O, location normalization or admission.
+
+### 6.13.3 Kernel instance evidence (R6-2; separate increment)
+
+This additive CORE/REMOTE/APP contract was agreed before implementation.
+Existing `Device`, `RawBlock`, checked/legacy parsers and
+`list_devices` remain compatible. A display row or a repeated path is not
+evidence that the same kernel device is still present.
+
+The exact additive public interface in `devices` is:
+
+```rust
+pub struct DeviceNumber { pub major: u32, pub minor: u32 }
+pub enum DeviceEvidenceOrigin { LsblkKernelSysfsV1 }
+pub enum DeviceEvidenceUnavailable {
+    MissingSourceInstance, MissingCleartextInstance, AmbiguousInstance,
+    AmbiguousRelationship, UnsupportedOrigin, UnverifiedLocator,
+}
+pub enum DeviceEvidence {
+    Available(DeviceBinding),
+    Unavailable(DeviceEvidenceUnavailable),
+}
+pub enum DeviceRevalidation {
+    Same(DeviceObservation), Changed, Unavailable(DeviceEvidenceUnavailable),
+}
+pub fn parse_lsblk_evidence_checked(
+    json: &str, origin: Option<DeviceEvidenceOrigin>,
+) -> Result<Vec<DeviceObservation>, LsblkParseError>;
+pub fn revalidate_device(
+    expected: &DeviceObservation, current: &[DeviceObservation],
+) -> DeviceRevalidation;
+pub fn bind_cleartext_after_unlock(
+    expected: &DeviceObservation, current: &[DeviceObservation], returned_locator: &str,
+) -> DeviceRevalidation;
+```
+
+`DeviceObservation`, `DeviceBinding`, `KernelBlockInstance` and
+`CleartextBinding` have private fields, are `Debug + Clone + PartialEq + Eq`,
+and expose only these read accessors:
+
+| Type | Accessor | Result |
+|---|---|---|
+| DeviceObservation | `device(&self)` | `&Device` |
+| DeviceObservation | `evidence(&self)` | `&DeviceEvidence` |
+| DeviceBinding | `source(&self)` | `KernelBlockInstance` |
+| DeviceBinding | `cleartext(&self)` | `Option<CleartextBinding>` |
+| DeviceBinding | `origin(&self)` | `DeviceEvidenceOrigin` |
+| KernelBlockInstance | `number(&self)` | `DeviceNumber` |
+| KernelBlockInstance | `disk_sequence(&self)` | `std::num::NonZeroU64` |
+| CleartextBinding | `instance(&self)` | `KernelBlockInstance` |
+| CleartextBinding | `parent(&self)` | `KernelBlockInstance` |
+
+The small value types and reason/origin enums are also `Copy`; kernel instances
+and device numbers implement `Hash`. These are worker values, without GUI JSON
+deserialization or public binding constructors. APP retains observations behind
+opaque epoch IDs instead of rebuilding them from display fields. The parser
+shares the checked map-only decoder and 4 MiB / 65,536 rows / 32 row-level bounds,
+validates the entire report before filtering, then returns offerable device rows.
+Missing evidence preserves a display row with typed `Unavailable`.
+
+The origin is `LsblkKernelSysfsV1`, supplied by the trusted capture caller,
+never asserted by a JSON field. REMOTE captures strict UTF-8 with its existing
+owned, bounded helper and the same cancellation token/remaining deadline:
+
+```text
+lsblk --json --tree --all --properties-by udev,none --output
+NAME,KNAME,PATH,PKNAME,SIZE,RM,HOTPLUG,TYPE,FSTYPE,LABEL,MOUNTPOINT,MAJ:MIN,DISK-SEQ
+```
+
+The column list is one argument. This profile reads kernel/sysfs relationships
+and uses udev-only filesystem properties, without falling back to block probing.
+Unsupported flags/columns, failed capture or malformed output never fall back
+to legacy discovery. The profile is grounded in [util-linux's source](https://github.com/util-linux/util-linux/blob/v2.41/misc-utils/lsblk.c)
+and [property-method contract](https://github.com/util-linux/util-linux/blob/v2.41/misc-utils/lsblk.8.adoc).
+The [kernel diskseq ABI](https://www.kernel.org/doc/html/next/admin-guide/abi-stable.html)
+provides the sequence value; it is not a filesystem-content identity.
+
+Under `LsblkKernelSysfsV1`, `type: "part"` is always unavailable as a source:
+`Unavailable(MissingSourceInstance)`, including a positive reported sequence.
+The display row and its parsed strings remain. util-linux can inherit the
+containing disk's `diskseq` when a partition lacks that attribute; Linux may
+remove/recreate the partition without replacing or incrementing that gendisk.
+Equal major/minor plus inherited sequence therefore cannot establish partition
+lifetime continuity between captures. This is a pre-capture replacement gap,
+not a contents-identity or post-check atomicity claim. See the versioned
+[provider fallback](https://github.com/util-linux/util-linux/blob/v2.41/lib/sysfs.c)
+and [partition lifecycle](https://github.com/torvalds/linux/blob/v6.18/block/partitions/core.c).
+No path, label, UUID, size, extent, stat, parent sequence or successful unlock
+substitutes for the unavailable continuity proof. A future supported partition
+mechanism needs its own justified contract; this origin grants none. Genuine
+whole-instance observations retain their existing sequence comparison and crypt
+edge rules. Missing child-instance proof remains `MissingCleartextInstance`.
+
+Available source evidence requires nonempty `kname`, canonical decimal
+`maj:min`, and a positive JSON unsigned-integer `disk-seq` from that profile.
+Missing/null/zero evidence is unavailable, never inferred from path, label,
+size, UUID or a neighboring row. Wrong field types or malformed numbers are
+`InvalidShape`. This includes a parser-reported numeric representation overflow
+in a known field (for example `disk-seq: 1e400` or numeric `kname: 1e400`), even
+though serde_json categorizes that range failure as syntax. Other reported JSON
+grammar/EOF failures remain `InvalidJson`; recursion/size bounds remain `Limit`.
+Classification follows the first reported failure, so a rejected known value
+may precede a later independent grammar fault. Unknown values are still skipped
+without numeric representation. No inheritance of absent sequence values is
+invented by CORE.
+Duplicate/conflicting instance or kernel-name observations make affected
+bindings unavailable; unrelated unambiguous devices may remain usable.
+Unavailable reasons are the enum above; diagnostics are fixed and contain no
+captured values. `None` origin means `UnsupportedOrigin`, never `Available`.
+Optional evidence keys still have exact types and duplicate-key refusal, including
+on unofferable rows. Legacy checked parsing continues to ignore those extra keys.
+The shared streaming map decoder grammar-skips genuinely unknown values using
+`IgnoredAny`, including out-of-range numeric grammar and nested metadata;
+legacy mode also treats the three kernel metadata keys as unknown. Evidence
+mode validates those keys' exact types and rejects decoded-key duplicates.
+There is no intermediate Value/Content map that buffers unknown values, no
+second JSON parser, and no weakening of object-only row/child boundaries,
+known-field duplicate/type refusal, exact strings, whole-report or byte/row/depth
+bounds. Invalid JSON grammar is still refused while skipping unknown values.
+
+Cleartext evidence requires exactly one captured `crypt` child, complete source
+and child instances, the explicit tree edge, and child `pkname` equal to the
+unique source `kname` in the same capture. Multiple candidates, missing evidence
+or conflicting parentage is unavailable. Names locate the observed edge;
+instance numbers/sequences provide its identity. `None` means no cleartext was
+observed in that complete supported capture, not a service-atomic absence proof.
+
+Pure `revalidate_device(expected, current_inventory)` returns
+`Same(fresh_observation)`, `Changed` or `Unavailable(reason)`. It finds the
+expected source by captured device number, refuses duplicate matches, then compares
+the positive sequence and the complete source/cleartext binding;
+it never admits a row by path/display equality. A positive differing instance
+or changed encrypted classification is `Changed`; missing/ambiguous proof is
+`Unavailable`. An unofferable or absent source is unavailable, without a path
+fallback. Changing any binding refuses
+the pending request. Actions/navigation use the fresh observation only.
+
+The intentional unlock transition is separate: `bind_cleartext_after_unlock` has
+the caller precondition of an actually successful accepted unlock of this own
+retained selection. It accepts only an available, encrypted, no-cleartext expected
+observation; an already-bound or unencrypted selection is `Changed`. It binds a
+newly observed cleartext child only when the retained source still matches, the relationship above is verified,
+and the returned cleartext locator exactly selects that captured child. That
+locator alone never supplies identity. Only exact equality with the child PATH
+from this capture is established; an alias, empty or differing returned locator
+is `Unavailable(UnverifiedLocator)`. No canonicalization, stat or synthesized
+`/dev/<kname>` alias is used. A missing new child is unavailable. `Same` returns
+the fresh observation with the new binding and locators. The new binding must
+itself be freshly revalidated before mount/navigation. No generic changed-target adoption exists.
+
+APP checks opaque selection/prompt epochs and reacquires fresh evidence after
+every GUI leave wait and immediately before each changing service request or
+navigation. After mount, APP also requires the fresh captured mount locator to
+exactly agree with the accepted service-returned locator before browsing; an
+unestablished alias refuses. REMOTE brackets capture/parse with remaining-budget
+checks and
+keeps the same token/deadline across the chain. Missing evidence disables the
+changing action; it does not hide a display row. No APP filesystem reads, second
+decoder, same-path stat substitute, automatic compensation or rollback is added.
+These are bounded observations, not atomic unplug-to-service immunity; a
+successful comparison does not freeze kernel topology or filesystem contents.
 
 ### What counts as a device worth showing
 
@@ -1016,7 +1399,20 @@ phases leaves recoverable temporary names rather than a lost file.
 ## 6.17 Open with…
 
 Mockup B puts `o open with…` next to `enter open`. Enter uses the default
-handler; this is for the other times.
+handler (or the neighbouring-media viewer, §6.18.1); this is for the other
+times.
+
+### Content is not a program because a mount supplies executable bits
+
+Phone and non-Unix mounts can report ordinary files as executable (AFC
+reports iPhone photographs as `0700`). Recognized media, documents and
+archives open with the desktop handler regardless of those permission bits.
+They are not offered as programs by Run. Known script/launcher/program
+extensions still require deliberate Run, even without executable bits;
+unknown files with executable bits do too, as do `.js`/`.ts` sources that
+carry an executable bit (shebang scripts). Activation, recent files,
+multi-file opening and Run share this classification, using only the name
+and already available mode, without reading file contents on the UI thread.
 
 ### The list comes from the desktop database, not from a command's output
 
@@ -1092,6 +1488,25 @@ Enter on a mixed selection opens only the cursor row, as it always did.
 
 Executables are refused exactly as they are for a single file (§4). Nothing
 about selecting several files makes running one of them safer.
+
+### 6.18.1 Browsing neighbouring media
+
+Activating a regular image, audio or video file opens one `mpv` window with
+the visible media rows in their current display order, starting at the
+activated row. The playlist is a snapshot: filtering and hidden-file settings
+apply, and folders, programs and other documents are skipped. Left / Right
+select the previous / next file and stop at either end; Shift+Left / Right
+seek five seconds, Space pauses, Escape closes. Images stay up until the
+user navigates; completed audio/video stays open too.
+Finishing a clip does not pause playback of the next file.
+
+The model builds this snapshot from names and cached entry kinds only.
+On a worker, Gust streams a file-URI M3U playlist to mpv's stdin, avoiding
+argv size limits and preserving raw names, including newlines. Keyboard
+bindings apply to this player process only. Non-media, explicit Open with…,
+and multi-selection retain their desktop handlers. If mpv is absent, the
+activated file opens with its desktop handler. Launch errors return to the
+owning model; no system file associations are changed.
 
 ## 6.19 The clipboard other applications can see
 
@@ -1461,3 +1876,8 @@ Untrusted bytes (thumbnail decoding, archive listing) run under
 and a private output directory — or the feature is unavailable. Parent
 validates helper output through a held descriptor: regular file, size bound,
 expected format, no symlink/FIFO.
+
+With `/usr` bound read-only, both archive and thumbnail sandboxes map `/lib`
+to `usr/lib` and `/lib64` to `usr/lib64`. Preserve the host's `lib64` alias:
+Arch and Ubuntu place the ELF interpreter differently, and redirecting both
+aliases to `usr/lib` prevents sandboxed executables from starting on Ubuntu.
