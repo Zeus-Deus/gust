@@ -415,6 +415,81 @@ Browsing and downloading can still work; the local source is retained after
 this refusal. Connecting successfully does not imply upload support. Gust
 never substitutes an overwrite-capable rename or replays the refused operation.
 
+### 6.4.3 File-send services
+
+`send::taildrop(target, paths, context)` and
+`send::localsend(peer, paths, context)` return `Result<SendReceipt, SendFailure>`.
+`SendReceipt { accepted_files }` counts receiver protocol acceptance.
+`SendFailure { error, accepted_files, delivery_uncertain }` retains known partial
+completion without claiming rollback. `LocalSendPeer { address: SocketAddr,
+public_key_pin: String }` requires an explicitly trusted SHA-256 SPKI pin
+(`sha256//BASE64`), distinct from LocalSend's certificate fingerprint. The pin
+authenticates self-signed TLS; redirects and proxies are disabled.
+They are explicit sends, never discovery side effects, moves, or source deletion.
+Taildrop uses the installed local Tailscale CLI and reports policy/offline refusal.
+LocalSend uses its v2 prepare/upload/cancel protocol over explicitly pinned TLS;
+receiver approval is required. Session tokens travel in private helper stdin,
+never argv/environment/logs/files. Inputs are bounded regular local files; source
+identity changes refuse transfer. Cancellation best-effort cancels the receiver
+session and reports possible partial delivery. A receipt means protocol acceptance,
+not proof of receiver persistence or physical-device/provider qualification.
+
+`send::inspect_localsend(address, context)` explicitly fetches an untrusted peer
+certificate and returns `LocalSendIdentity { peer, certificate_fingerprint }`.
+The app presents that fingerprint for comparison with the receiver; only an
+explicit trust choice permits `localsend(identity.peer, ...)`. Inspection itself
+never persists trust, sends file metadata, or accepts the inspected identity.
+OpenSSL is used through bounded pipes for certificate/public-key parsing; an
+ephemeral client certificate/key is generated for mutual TLS, retained only in a
+sealed owner-only memfd and reused for every request in that send session. It is
+never written to a disk/config file or passed as secret bytes in argv/env. Inherited TLS-keylog/debug
+settings are removed from owned helpers so they cannot persist session secrets.
+`send::localsend_with_pin(peer, paths, Option<String>, context)` supports a
+receiver PIN through the same private request pipe; the default `localsend`
+adapter supplies no PIN. A rejected PIN is an actionable authentication result,
+never a request to change receiver settings or weaken TLS.
+
+Send source admission refuses every FUSE subtype, including types absent from
+the general remote-stall classifier, before opening or querying source metadata.
+Cancelling LocalSend during prepare/receiver approval best-effort posts `cancel`
+without a session ID using the same trusted peer and client identity. Cleanup
+uses a fresh token and at most one second of the remaining overall budget;
+it preserves the original cancellation and delivery uncertainty and never retries
+file data. This is synthetic protocol coverage, not physical receiver qualification.
+
+Send admission uses CORE's shared byte-preserving mount-table classification.
+Kernel-escaped mount names (backslash, tab, newline and space) must select the
+visible mount by mount-ID/parent topology before the source is opened; classification
+must not canonicalize or query the source path. Synthetic mount-table-to-admission
+regressions cover FUSE subtypes, NFS and CIFS under escaped mount names. Exercise
+the shared parser and the pre-open policy together; a filesystem-name policy
+alone does not establish correct admission.
+
+`send::check_source_location(path) -> Result<(), RemoteError>` exposes the exact
+absolute/path/filesystem predicate used first by `Source::open`. It reads only
+the kernel mount table, with no candidate open, lstat, stat or canonicalization.
+The APP worker calls it before shelf `OwnedPath`/`Target` or shown-selection
+identity validation, then uses the existing send handlers. Source opening repeats this
+same guard; identity checks remain required afterward. The check does not make
+subsequent filesystem calls atomic with changes to the kernel mount table.
+
+Send admission must refuse mount visibility that the shared classification cannot
+establish. A stacked local/FUSE or network mount must not become eligible because
+of table order, equal mount-path lengths, or a longer descendant entry hidden by
+an ambiguous ancestor. Synthetic stacked-table tests exercise the same admission
+guard without candidate I/O; callers must not substitute a first/last-row rule.
+Production fixtures use `stall::fstype_from_mountinfo(path, bytes)`, matching
+`fstype_for` without opening candidates. The conservative flat-table compatibility
+seam remains covered separately. A uniquely resolved local mount over autofs stays
+eligible; remote mounts and descendants hidden below them cannot borrow the type
+of a covered local mount. An ambiguous subtree does not reject unrelated siblings.
+
+The process's held filesystem root is also the starting point for absolute source
+lookup. A mount stacked at `/` must not hide a remote root or its remote children
+from source admission. CORE conservatively treats a starting-root same-point stack
+as globally ambiguous for resolution and inventory; source admission refuses every
+path in that snapshot. Ordinary non-root overmount behavior remains unchanged.
+
 ## 6.5 Permanent delete
 
 The one operation with no undo. Reached only where Trash is genuinely
@@ -1888,6 +1963,11 @@ ordinary 1080p clips. This limits virtual address space, not resident memory.
 The CPU, wall-clock, process-count and output-size limits still apply.
 
 ### 6.4.2 Owned remote helper calls
+
+Noninteractive helper stdin borrows the caller's bytes for the duration of the
+owned call instead of copying them into an internal queue. The caller retains
+responsibility for the source buffer's lifetime and any required wiping. Existing
+interactive response queues and cancellation/descendant ownership remain unchanged.
 
 Remote service calls run on workers. `helper::CallContext { cancel: &CancelToken,
 timeout: Duration }` gives each call one overall budget. `RemoteError` carries a
