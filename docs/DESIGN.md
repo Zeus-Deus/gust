@@ -1580,3 +1580,8 @@ one-shot helpers still terminate leftover descendants even after a successful ex
 Host-key scans offer keys for trust only when every key has a fingerprint. Any
 fingerprint helper failure, cancellation or shared-budget exhaustion rejects the
 whole scan; no undisplayed key may remain in a successful trust offer.
+
+Noninteractive helper stdin borrows the caller's bytes for the duration of the
+owned call instead of copying them into an internal queue. The caller retains
+responsibility for the source buffer's lifetime and any required wiping. Existing
+interactive response queues and cancellation/descendant ownership remain unchanged.
