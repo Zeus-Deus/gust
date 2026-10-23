@@ -283,7 +283,7 @@ fn independent_mtimes(path: &std::path::Path) -> Vec<(String, i64, i64)> {
     };
     let inherited = std::fs::File::open(path).unwrap();
     let mut command = Command::new("/usr/bin/bwrap");
-    command.args(["--unshare-all","--die-with-parent","--clearenv","--setenv","LC_ALL","C.UTF-8","--ro-bind","/usr","/usr","--symlink","usr/lib","/lib","--symlink","usr/lib","/lib64","--proc","/proc","--dev","/dev","--ro-bind-fd"]).arg(inherited.as_raw_fd().to_string()).arg("/input").args(["/usr/bin/prlimit","--as=536870912","--cpu=10","--nofile=64","--fsize=0","--","/usr/bin/python3","-B","-c",r#"
+    command.args(["--unshare-all","--die-with-parent","--clearenv","--setenv","LC_ALL","C.UTF-8","--ro-bind","/usr","/usr","--symlink","usr/lib","/lib","--symlink","usr/lib64","/lib64","--proc","/proc","--dev","/dev","--ro-bind-fd"]).arg(inherited.as_raw_fd().to_string()).arg("/input").args(["/usr/bin/prlimit","--as=536870912","--cpu=10","--nofile=64","--fsize=0","--","/usr/bin/python3","-B","-c",r#"
 import ctypes as c,json
 lib=c.CDLL('libarchive.so');p=c.c_void_p
 lib.archive_read_new.restype=p
@@ -624,7 +624,7 @@ fn zip_unicode_link_name_with_opaque_target_has_correct_independent_encoding() {
     .unwrap();
     let inherited = std::fs::File::open(&destination).unwrap();
     let mut command = Command::new("/usr/bin/bwrap");
-    command.args(["--unshare-all","--die-with-parent","--clearenv","--ro-bind","/usr","/usr","--symlink","usr/lib","/lib","--symlink","usr/lib","/lib64","--proc","/proc","--dev","/dev","--ro-bind-fd"]).arg(inherited.as_raw_fd().to_string()).arg("/input").args(["/usr/bin/prlimit","--as=536870912","--cpu=10","--nofile=64","--fsize=0","--","/usr/bin/python3","-B","-c",r#"
+    command.args(["--unshare-all","--die-with-parent","--clearenv","--ro-bind","/usr","/usr","--symlink","usr/lib","/lib","--symlink","usr/lib64","/lib64","--proc","/proc","--dev","/dev","--ro-bind-fd"]).arg(inherited.as_raw_fd().to_string()).arg("/input").args(["/usr/bin/prlimit","--as=536870912","--cpu=10","--nofile=64","--fsize=0","--","/usr/bin/python3","-B","-c",r#"
 import json,struct,zipfile
 with zipfile.ZipFile('/input') as z:
  entries=z.infolist();assert len(entries)==1

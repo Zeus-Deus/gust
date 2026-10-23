@@ -435,7 +435,7 @@ impl Writer {
                 "usr/lib",
                 "/lib",
                 "--symlink",
-                "usr/lib",
+                "usr/lib64",
                 "/lib64",
                 "--proc",
                 "/proc",
