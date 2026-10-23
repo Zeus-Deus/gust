@@ -85,16 +85,9 @@ fn list_devices_using(
     }
     let text =
         std::str::from_utf8(&output.stdout).map_err(|_| discovery_failure(ErrorCode::Protocol))?;
-    // Validate the envelope, leaving all device parsing and filtering to CORE.
-    let envelope: serde_json::Value =
-        serde_json::from_str(text).map_err(|_| discovery_failure(ErrorCode::Protocol))?;
-    if !envelope
-        .get("blockdevices")
-        .is_some_and(serde_json::Value::is_array)
-    {
-        return Err(discovery_failure(ErrorCode::Protocol));
-    }
-    let devices = devices::offerable_devices(&devices::parse_lsblk(text));
+    let raw =
+        devices::parse_lsblk_checked(text).map_err(|_| discovery_failure(ErrorCode::Protocol))?;
+    let devices = devices::offerable_devices(&raw);
     remaining()?;
     Ok(devices)
 }
@@ -355,10 +348,6 @@ mod tests {
         ));
         let cancel = CancelToken::new();
         let listed = list_devices_using(fixture.program(), &context(&cancel)).unwrap();
-        assert_eq!(
-            listed,
-            devices::offerable_devices(&devices::parse_lsblk(json))
-        );
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].path, "/dev/fixture");
         assert!(listed[0].encrypted);
@@ -372,6 +361,85 @@ mod tests {
         assert!(list_devices_using(empty.program(), &context(&cancel))
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn discovery_preserves_braces_in_mounted_device_state() {
+        let json = r#"{"blockdevices":[{"name":"fixture","path":"/dev/fixture","pkname":null,"size":"4G","rm":true,"hotplug":true,"type":"part","fstype":"ext4","label":"BACKUP{A}","mountpoint":"/synthetic/BACKUP{A}"}]}"#;
+        let fixture = Fixture::new(&format!("print({json:?})"));
+        let cancel = CancelToken::new();
+        let listed = list_devices_using(fixture.program(), &context(&cancel)).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].path, "/dev/fixture");
+        assert_eq!(listed[0].label.as_deref(), Some("BACKUP{A}"));
+        assert_eq!(
+            listed[0].mount_point,
+            Some(PathBuf::from("/synthetic/BACKUP{A}"))
+        );
+        assert!(listed[0].is_mounted());
+    }
+
+    #[test]
+    fn discovery_decodes_json_escapes_without_changing_mount_locations() {
+        let cancel = CancelToken::new();
+        for path in [
+            "/synthetic/a\nb",
+            "/synthetic/a\tb",
+            "/synthetic/café\\share",
+            "/synthetic/a\"b",
+        ] {
+            let json = serde_json::json!({"blockdevices":[{
+                "name":"fixture","path":"/dev/fixture","pkname":null,"size":"4G",
+                "rm":true,"hotplug":true,"type":"part","fstype":"ext4",
+                "label":"Synthetic","mountpoint":path
+            }]})
+            .to_string();
+            let fixture = Fixture::new(&format!("print({json:?})"));
+            let listed = list_devices_using(fixture.program(), &context(&cancel)).unwrap();
+            assert_eq!(listed.len(), 1);
+            assert_eq!(listed[0].mount_point, Some(PathBuf::from(path)));
+        }
+    }
+
+    #[test]
+    fn discovery_refuses_invalid_device_objects_and_children() {
+        let cancel = CancelToken::new();
+        for entry in [
+            serde_json::Value::Null,
+            serde_json::json!(true),
+            serde_json::json!("row"),
+            serde_json::json!({}),
+        ] {
+            let json = serde_json::json!({"blockdevices":[entry]}).to_string();
+            let fixture = Fixture::new(&format!("print({json:?})"));
+            let e = list_devices_using(fixture.program(), &context(&cancel)).unwrap_err();
+            assert_eq!(e.error.code, ErrorCode::Protocol);
+            assert_eq!(e.effect, BlockEffect::NotStarted);
+        }
+        for children in [serde_json::json!([null]), serde_json::json!("children")] {
+            let json = serde_json::json!({"blockdevices":[{
+                "name":"fixture","path":"/dev/fixture","pkname":null,"size":"4G",
+                "rm":true,"hotplug":true,"type":"part","fstype":"ext4",
+                "label":"Synthetic","mountpoint":null,"children":children
+            }]})
+            .to_string();
+            let fixture = Fixture::new(&format!("print({json:?})"));
+            let e = list_devices_using(fixture.program(), &context(&cancel)).unwrap_err();
+            assert_eq!(e.error.code, ErrorCode::Protocol);
+            assert_eq!(e.effect, BlockEffect::NotStarted);
+        }
+    }
+
+    #[test]
+    fn discovery_refuses_parser_limits_instead_of_returning_an_empty_inventory() {
+        // Valid JSON below the helper's output bound, above CORE's parse bound.
+        let fixture = Fixture::new(
+            "import sys\nsys.stdout.buffer.write(b' '*(4*1024*1024)+b'{\"blockdevices\":[]}')",
+        );
+        let cancel = CancelToken::new();
+        let e = list_devices_using(fixture.program(), &context(&cancel)).unwrap_err();
+        assert_eq!(e.error.code, ErrorCode::Protocol);
+        assert_eq!(e.effect, BlockEffect::NotStarted);
     }
 
     #[test]
