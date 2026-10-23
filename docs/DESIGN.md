@@ -751,6 +751,135 @@ and 32 row levels; exceeding a bound returns `Limit`, never omitted rows.
 discovery callers use the checked API and propagate refusal before any changing
 action. Parsing performs no candidate I/O, location normalization or admission.
 
+### 6.13.3 Kernel instance evidence (R6-2; separate increment)
+
+This additive CORE/REMOTE/APP contract was agreed before implementation.
+Existing `Device`, `RawBlock`, checked/legacy parsers and
+`list_devices` remain compatible. A display row or a repeated path is not
+evidence that the same kernel device is still present.
+
+The exact additive public interface in `devices` is:
+
+```rust
+pub struct DeviceNumber { pub major: u32, pub minor: u32 }
+pub enum DeviceEvidenceOrigin { LsblkKernelSysfsV1 }
+pub enum DeviceEvidenceUnavailable {
+    MissingSourceInstance, MissingCleartextInstance, AmbiguousInstance,
+    AmbiguousRelationship, UnsupportedOrigin, UnverifiedLocator,
+}
+pub enum DeviceEvidence {
+    Available(DeviceBinding),
+    Unavailable(DeviceEvidenceUnavailable),
+}
+pub enum DeviceRevalidation {
+    Same(DeviceObservation), Changed, Unavailable(DeviceEvidenceUnavailable),
+}
+pub fn parse_lsblk_evidence_checked(
+    json: &str, origin: Option<DeviceEvidenceOrigin>,
+) -> Result<Vec<DeviceObservation>, LsblkParseError>;
+pub fn revalidate_device(
+    expected: &DeviceObservation, current: &[DeviceObservation],
+) -> DeviceRevalidation;
+pub fn bind_cleartext_after_unlock(
+    expected: &DeviceObservation, current: &[DeviceObservation], returned_locator: &str,
+) -> DeviceRevalidation;
+```
+
+`DeviceObservation`, `DeviceBinding`, `KernelBlockInstance` and
+`CleartextBinding` have private fields, are `Debug + Clone + PartialEq + Eq`,
+and expose only these read accessors:
+
+| Type | Accessor | Result |
+|---|---|---|
+| DeviceObservation | `device(&self)` | `&Device` |
+| DeviceObservation | `evidence(&self)` | `&DeviceEvidence` |
+| DeviceBinding | `source(&self)` | `KernelBlockInstance` |
+| DeviceBinding | `cleartext(&self)` | `Option<CleartextBinding>` |
+| DeviceBinding | `origin(&self)` | `DeviceEvidenceOrigin` |
+| KernelBlockInstance | `number(&self)` | `DeviceNumber` |
+| KernelBlockInstance | `disk_sequence(&self)` | `std::num::NonZeroU64` |
+| CleartextBinding | `instance(&self)` | `KernelBlockInstance` |
+| CleartextBinding | `parent(&self)` | `KernelBlockInstance` |
+
+The small value types and reason/origin enums are also `Copy`; kernel instances
+and device numbers implement `Hash`. These are worker values, without GUI JSON
+deserialization or public binding constructors. APP retains observations behind
+opaque epoch IDs instead of rebuilding them from display fields. The parser
+shares the checked map-only decoder and 4 MiB / 65,536 rows / 32 row-level bounds,
+validates the entire report before filtering, then returns offerable device rows.
+Missing evidence preserves a display row with typed `Unavailable`.
+
+The origin is `LsblkKernelSysfsV1`, supplied by the trusted capture caller,
+never asserted by a JSON field. REMOTE captures strict UTF-8 with its existing
+owned, bounded helper and the same cancellation token/remaining deadline:
+
+```text
+lsblk --json --tree --all --properties-by udev,none --output
+NAME,KNAME,PATH,PKNAME,SIZE,RM,HOTPLUG,TYPE,FSTYPE,LABEL,MOUNTPOINT,MAJ:MIN,DISK-SEQ
+```
+
+The column list is one argument. This profile reads kernel/sysfs relationships
+and uses udev-only filesystem properties, without falling back to block probing.
+Unsupported flags/columns, failed capture or malformed output never fall back
+to legacy discovery. The profile is grounded in [util-linux's source](https://github.com/util-linux/util-linux/blob/v2.41/misc-utils/lsblk.c)
+and [property-method contract](https://github.com/util-linux/util-linux/blob/v2.41/misc-utils/lsblk.8.adoc).
+The [kernel diskseq ABI](https://www.kernel.org/doc/html/next/admin-guide/abi-stable.html)
+provides the sequence value; it is not a filesystem-content identity.
+
+Available source evidence requires nonempty `kname`, canonical decimal
+`maj:min`, and a positive JSON unsigned-integer `disk-seq` from that profile.
+Missing/null/zero evidence is unavailable, never inferred from path, label,
+size, UUID or a neighboring row. Wrong field types or malformed numbers are
+`InvalidShape`. No inheritance of absent sequence values is invented by CORE.
+Duplicate/conflicting instance or kernel-name observations make affected
+bindings unavailable; unrelated unambiguous devices may remain usable.
+Unavailable reasons are the enum above; diagnostics are fixed and contain no
+captured values. `None` origin means `UnsupportedOrigin`, never `Available`.
+Optional evidence keys still have exact types and duplicate-key refusal, including
+on unofferable rows. Legacy checked parsing continues to ignore those extra keys.
+
+Cleartext evidence requires exactly one captured `crypt` child, complete source
+and child instances, the explicit tree edge, and child `pkname` equal to the
+unique source `kname` in the same capture. Multiple candidates, missing evidence
+or conflicting parentage is unavailable. Names locate the observed edge;
+instance numbers/sequences provide its identity. `None` means no cleartext was
+observed in that complete supported capture, not a service-atomic absence proof.
+
+Pure `revalidate_device(expected, current_inventory)` returns
+`Same(fresh_observation)`, `Changed` or `Unavailable(reason)`. It finds the
+expected source by captured device number, refuses duplicate matches, then compares
+the positive sequence and the complete source/cleartext binding;
+it never admits a row by path/display equality. A positive differing instance
+or changed encrypted classification is `Changed`; missing/ambiguous proof is
+`Unavailable`. An unofferable or absent source is unavailable, without a path
+fallback. Changing any binding refuses
+the pending request. Actions/navigation use the fresh observation only.
+
+The intentional unlock transition is separate: `bind_cleartext_after_unlock` has
+the caller precondition of an actually successful accepted unlock of this own
+retained selection. It accepts only an available, encrypted, no-cleartext expected
+observation; an already-bound or unencrypted selection is `Changed`. It binds a
+newly observed cleartext child only when the retained source still matches, the relationship above is verified,
+and the returned cleartext locator exactly selects that captured child. That
+locator alone never supplies identity. Only exact equality with the child PATH
+from this capture is established; an alias, empty or differing returned locator
+is `Unavailable(UnverifiedLocator)`. No canonicalization, stat or synthesized
+`/dev/<kname>` alias is used. A missing new child is unavailable. `Same` returns
+the fresh observation with the new binding and locators. The new binding must
+itself be freshly revalidated before mount/navigation. No generic changed-target adoption exists.
+
+APP checks opaque selection/prompt epochs and reacquires fresh evidence after
+every GUI leave wait and immediately before each changing service request or
+navigation. After mount, APP also requires the fresh captured mount locator to
+exactly agree with the accepted service-returned locator before browsing; an
+unestablished alias refuses. REMOTE brackets capture/parse with remaining-budget
+checks and
+keeps the same token/deadline across the chain. Missing evidence disables the
+changing action; it does not hide a display row. No APP filesystem reads, second
+decoder, same-path stat substitute, automatic compensation or rollback is added.
+These are bounded observations, not atomic unplug-to-service immunity; a
+successful comparison does not freeze kernel topology or filesystem contents.
+
 ### What counts as a device worth showing
 
 A volume is offered when it is **removable or hotplug** and is not the
