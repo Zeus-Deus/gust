@@ -318,13 +318,21 @@ fn cancellation_clears_both_the_preview_and_all_roles() {
     assert!(result.syntax.lines.is_empty());
 }
 
-const CPP_SEPARATED_NUMBERS: [&str; 6] = [
+const CPP_SEPARATED_NUMBERS: [&str; 14] = [
     "1'000",
     "0xCA'FE",
     "0b1010'0101",
     "1.23'45",
     "1e1'0",
     "0x1.A'Bp1'0",
+    "1.e1'0",
+    "1.E1'0f",
+    "1.e+1'0F",
+    "1.E-1'0L",
+    "0x1.p1'0",
+    "0XCA.P1'0L",
+    "0xA.p+1'0f",
+    "0XCA.P-1'0F",
 ];
 
 #[test]
@@ -354,11 +362,11 @@ fn cpp_digit_separators_preserve_following_keywords_and_character_literals() {
 #[test]
 fn cpp_digit_separators_do_not_poison_a_window_after_the_number() {
     for literal in CPP_SEPARATED_NUMBERS {
-        let input = format!("auto n = {literal};\nreturn n;\n");
+        let input = format!("auto n = {literal};\nreturn n;\nauto c = 'x';\n");
         let result = preview_source(
             &source(input.as_bytes()),
             OsStr::new("x.cpp"),
-            PreviewWindow { start: 1, count: 1 },
+            PreviewWindow { start: 1, count: 2 },
             &PreviewLimits::default(),
             &CancelToken::new(),
         );
@@ -370,5 +378,9 @@ fn cpp_digit_separators_do_not_poison_a_window_after_the_number() {
                 .any(|s| s.role == SyntaxRole::Keyword && piece(&text(&result)[0], s) == "return"),
             "paged keyword after {literal}"
         );
+        assert_eq!(text(&result), ["return n;", "auto c = 'x';"]);
+        assert!(result.syntax.lines[1]
+            .iter()
+            .any(|s| s.role == SyntaxRole::String && piece(&text(&result)[1], s) == "'x'"));
     }
 }

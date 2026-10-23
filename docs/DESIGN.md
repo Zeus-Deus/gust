@@ -672,6 +672,8 @@ both the preview payload and all spans. These are lexical hints for common
 code families, not grammar validation or executable/source identity.
 C++ digit separators stay within numeric tokens so they cannot introduce
 string state into following lines or windows; character literals remain strings.
+Trailing decimal points remain numeric before an exponent or suffix, including
+hexadecimal exponent forms; annotation does not validate literal semantics.
 
 ## 6.10 Scoped content search (`:grep`)
 
