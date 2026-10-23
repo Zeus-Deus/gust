@@ -3,7 +3,7 @@ use serde_json::{json, Value};
 use std::path::Path;
 
 fn source() -> Value {
-    json!({"name":"fixture1","kname":"fixture1","path":"/dev/fixture1","type":"part",
+    json!({"name":"fixture1","kname":"fixture1","path":"/dev/fixture1","type":"disk",
         "rm":true,"fstype":"ext4","maj:min":"8:1","disk-seq":41})
 }
 fn crypt() -> Value {
@@ -413,7 +413,7 @@ fn evidence_parser_retains_shared_byte_depth_and_row_limits() {
 }
 
 #[test]
-fn nested_partition_and_crypt_edges_survive_inventory_reordering() {
+fn nested_partition_remains_unavailable_after_inventory_reordering() {
     let mut disk = source();
     disk["name"] = json!("disk");
     disk["kname"] = json!("disk");
@@ -422,6 +422,7 @@ fn nested_partition_and_crypt_edges_survive_inventory_reordering() {
     disk["maj:min"] = json!("8:0");
     disk["rm"] = json!(false);
     let mut partition = encrypted(true);
+    partition["type"] = json!("part");
     partition["pkname"] = json!("disk");
     disk["children"] = json!([partition]);
     let old = observe(vec![disk.clone()]).remove(0);
@@ -431,9 +432,16 @@ fn nested_partition_and_crypt_edges_survive_inventory_reordering() {
     unrelated["path"] = json!("/dev/other");
     unrelated["maj:min"] = json!("8:2");
     let current = observe(vec![unrelated, disk]);
-    let fresh = same(revalidate_device(&old, &current));
-    assert_eq!(available(&old), available(&fresh));
-    assert_eq!(fresh.device().mount_target(), "/dev/mapper/clear");
+    assert_eq!(
+        revalidate_device(&old, &current),
+        DeviceRevalidation::Unavailable(DeviceEvidenceUnavailable::MissingSourceInstance)
+    );
+    unavailable(
+        &current[1],
+        DeviceEvidenceUnavailable::MissingSourceInstance,
+    );
+    available(&current[0]);
+    assert_eq!(current[1].device().mount_target(), "/dev/mapper/clear");
 }
 
 #[test]

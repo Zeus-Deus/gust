@@ -1,7 +1,11 @@
 //! Pure kernel-instance observations. Capture provenance belongs to the caller;
 //! neither parsing nor comparison performs I/O or makes a service call atomic.
-use super::{is_offerable, lsblk::parse_inventory, to_device, Device, LsblkParseError, RawBlock};
-use serde::Deserialize;
+use super::{
+    is_offerable,
+    lsblk::{parse_inventory, MetadataFields},
+    to_device, Device, LsblkParseError, RawBlock,
+};
+use serde::de::MapAccess;
 use std::{collections::HashMap, num::NonZeroU64, path::PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -116,13 +120,32 @@ pub enum DeviceRevalidation {
     Unavailable(DeviceEvidenceUnavailable),
 }
 
-#[derive(Default, Deserialize)]
+#[derive(Default)]
 struct KernelMetadata {
     kname: Option<String>,
-    #[serde(rename = "maj:min")]
     number: Option<String>,
-    #[serde(rename = "disk-seq")]
     disk_sequence: Option<u64>,
+    seen: u8,
+}
+impl MetadataFields for KernelMetadata {
+    fn field<'de, A: MapAccess<'de>>(&mut self, key: &str, map: &mut A) -> Result<bool, A::Error> {
+        let (bit, name) = match key {
+            "kname" => (1, "kname"),
+            "maj:min" => (2, "maj:min"),
+            "disk-seq" => (4, "disk-seq"),
+            _ => return Ok(false),
+        };
+        if self.seen & bit != 0 {
+            return Err(serde::de::Error::duplicate_field(name));
+        }
+        self.seen |= bit;
+        match name {
+            "kname" => self.kname = map.next_value()?,
+            "maj:min" => self.number = map.next_value()?,
+            _ => self.disk_sequence = map.next_value()?,
+        }
+        Ok(true)
+    }
 }
 struct Row {
     block: RawBlock,
@@ -252,6 +275,12 @@ impl<'a> Index<'a> {
         missing: DeviceEvidenceUnavailable,
     ) -> Result<KernelBlockInstance, DeviceEvidenceUnavailable> {
         let row = &self.rows[i];
+        // lsblk can inherit the containing gendisk's sequence for a partition.
+        // That token survives partition removal/recreation and cannot prove its
+        // own lifetime, even when all reported fields are positive and unique.
+        if row.block.kind == "part" {
+            return Err(missing);
+        }
         let name = row.kname.as_deref().ok_or(missing)?;
         let instance = row.instance.ok_or(missing)?;
         if self.names.get(name) != Some(&1)
