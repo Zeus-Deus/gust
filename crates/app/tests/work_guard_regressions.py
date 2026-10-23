@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Run the exact Main.qml close, tab-close and disconnect guards in Qt,
-and the actual InterruptedNotice shown after an interrupted run.
+and the actual InterruptedNotice and JobDrawer.
 
 Models are synthetic: their work is plain properties, so this proves the
 window logic, not DirModel's job handle or a real mount. `Qt.quit()` is the
@@ -28,7 +28,17 @@ QtObject {
     readonly property color accent: "#ccaa55"
     readonly property color warn: "#ddaa33"
     readonly property color selectedBackground: "#444444"
+    readonly property color selectedText: "#000000"
+    readonly property color backgroundDark: "#0a0a0a"
+    readonly property color muted: "#888888"
+    readonly property color danger: "#ff6666"
+    readonly property color ok: "#66cc66"
     readonly property int borderWidth: 1
+    readonly property int radius: 0
+    readonly property int animFast: 0
+    readonly property int spaceMd: 12
+    readonly property int spaceXxl: 32
+    readonly property real spacingScale: 1
     readonly property int rowPaddingX: 12
     readonly property int controlHeight: 32
     readonly property int spaceSm: 8
@@ -58,6 +68,7 @@ def main():
     output.mkdir(parents=True, mode=0o700)
     names = ["ui/Main.qml", "ui/tests/tst_work_guard.qml.in",
              "ui/InterruptedNotice.qml", "ui/tests/tst_interrupted_notice.qml",
+             "ui/JobDrawer.qml", "ui/tests/tst_job_drawer.qml",
              "crates/app/tests/work_guard_regressions.py",
              "crates/app/tests/tab_model_regressions.py"]
     hashes = {n: hashlib.sha256((source / n).read_bytes()).hexdigest() for n in names}
@@ -78,7 +89,8 @@ def main():
     fixture = fixture.replace("Qt.quit()", "win.quitCalls += 1")
     qml = output / "tst_work_guard.qml"
     qml.write_text(fixture)
-    for name in ["ui/InterruptedNotice.qml", "ui/tests/tst_interrupted_notice.qml"]:
+    for name in ["ui/InterruptedNotice.qml", "ui/tests/tst_interrupted_notice.qml",
+                 "ui/JobDrawer.qml", "ui/tests/tst_job_drawer.qml"]:
         shutil.copyfile(source / name, output / Path(name).name)
     module = output / "com/gust/app"
     module.mkdir(parents=True)
@@ -102,7 +114,7 @@ def main():
                     for n, h in hashes.items())
     receipt = {"argv": argv, "exit": p.returncode, "source_hashes": hashes,
                "source_unchanged": unchanged,
-               "scope": "exact Main.qml close/tab-close/disconnect guards and actual InterruptedNotice; "
+               "scope": "exact Main.qml close/tab-close/disconnect guards and actual InterruptedNotice/JobDrawer; "
                         "models and theme synthetic, Qt.quit counted"}
     (output / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
     print(log, end="")

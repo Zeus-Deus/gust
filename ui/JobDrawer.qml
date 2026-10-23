@@ -117,18 +117,20 @@ Rectangle {
             Text {
                 textFormat: Text.PlainText
                 id: messageText
+                objectName: "jobMessage"
                 anchors.left: stateText.right
                 anchors.right: detailText.left
                 anchors.rightMargin: Tokens.spaceLg
                 anchors.verticalCenter: parent.verticalCenter
                 // While stopping, say what it is waiting for. The stop is
                 // REQUESTED, not done: the read or write in flight has to
-                // return first — from a slow drive or a remote place that
-                // stopped answering — and only then is the unfinished item
-                // removed. A card that still said "Copying…" invited a
-                // second Cancel; one that said "Cancelled" would be a lie.
+                // return first, from a slow drive or a remote place that
+                // stopped answering. Nothing is promised about the
+                // unfinished item: a remote place may keep its temporary
+                // files. A card that still said "Copying…" invited a second
+                // Cancel; one that said "Cancelled" would be a lie.
                 text: !root.active ? ""
-                      : root.stopping ? qsTr("Stop requested — waiting for the current read or write to return, then removing the unfinished item")
+                      : root.stopping ? qsTr("Stop requested — the current read or write must return before the transfer can stop")
                       : root.job.message
                 color: Tokens.foreground
                 font.family: Tokens.fontFamily

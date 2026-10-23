@@ -114,6 +114,12 @@ TestCase {
         hints.message = ""
     }
 
+    // Nothing may promise what happens to the unfinished item: a remote
+    // place may keep temporary files on purpose, and cleanup can fail.
+    function verifyNoCleanupPromise(text) {
+        verify(!/discard|remov|clean/i.test(text), text)
+    }
+
     function tickWindow(n) { for (let i = 0; i < n; i++) closeAfterCancel.triggered() }
     function tickTabs(n) { for (let i = 0; i < n; i++) closeTabAfterCancel.triggered() }
 
@@ -124,6 +130,9 @@ TestCase {
         compare(close.accepted, false)
         compare(confirm.purpose, "close")
         verify(confirm.dangerous)
+        verify(confirm.body.indexOf("asks it to stop") >= 0, confirm.body)
+        verify(confirm.body.indexOf("temporary files") >= 0, confirm.body)
+        verifyNoCleanupPromise(confirm.body)
         win.confirmAccepted()
         compare(modelB.cancels, 1)
         verify(modelB.stopping, "cancel is only a request")
@@ -145,7 +154,9 @@ TestCase {
         compare(again.accepted, false, "a second close must not skip the wait silently")
         compare(confirm.purpose, "closewait")
         verify(confirm.dangerous)
-        verify(confirm.body.indexOf("temporary copy") >= 0)
+        verify(confirm.body.indexOf("temporary files") >= 0)
+        verify(confirm.body.indexOf("Check the destination") >= 0)
+        verifyNoCleanupPromise(confirm.body)
         // A finished move has already removed its originals, and a stuck
         // process may outlive the window: neither may be promised away.
         verify(confirm.body.indexOf("source") < 0, confirm.body)
@@ -192,6 +203,8 @@ TestCase {
         modelB.running = true
         win.closeTab(1)
         compare(confirm.purpose, "closetab")
+        verify(confirm.body.indexOf("asks it to stop") >= 0, confirm.body)
+        verifyNoCleanupPromise(confirm.body)
         compare(tabList.count, 3)
         win.confirmAccepted()
         compare(modelB.cancels, 1)

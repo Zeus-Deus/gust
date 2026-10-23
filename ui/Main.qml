@@ -78,13 +78,14 @@ Window {
 
     // A window close must not silently abandon pending transfers (plan §2).
     //
-    // This handler covers a close the toolkit tells us about. It is NOT
-    // sufficient on its own: Hyprland's `closewindow` was verified not to
-    // reach onClosing on Qt 6.11/Wayland — a bare Qt Quick window behaves
-    // the same, so it is a platform gap, not Gust's. The durable protection
-    // is that a copy stages under a private name and is renamed atomically,
-    // and that a listing sweeps staging files left by dead processes, so a
-    // killed transfer can never publish a partial file or leave debris.
+    // This handler covers a close the toolkit tells us about. A graceful
+    // compositor close (an xdg_toplevel close, e.g. Hyprland 0.56's
+    // `hl.dsp.window.close` on Qt 6.12) does reach it; an older pairing
+    // (Qt 6.11) was seen not to. A forced kill never does. So it is not
+    // the only protection: a copy stages under a private name and is
+    // renamed atomically, so a killed transfer never publishes a partial
+    // file. Its temporary files can remain, and a remote place may keep
+    // them on purpose.
     /// Every tab whose transfer is still running — not just the one on
     /// screen. A copy started in another tab is just as much the user's.
     function runningJobModels() {
@@ -123,9 +124,9 @@ Window {
             confirm.open(qsTr("Still stopping"),
                 qsTr("Gust is waiting for the drive or connection to answer before the stop is complete. "
                      + "The window closes by itself once it has stopped; Cancel keeps waiting.\n\n"
-                     + "If you close now, items already finished stay as they are. Only finished items get their final name; "
-                     + "a temporary copy of the one in progress may stay at the destination until Gust can clean it up. "
-                     + "Compressing or extracting may be left incomplete."),
+                     + "If you close now, items already finished stay as they are. The one in progress is not finished, "
+                     + "and temporary files from it may stay at the destination. "
+                     + "Compressing or extracting may be left incomplete. Check the destination before running it again."),
                 qsTr("Close without waiting"),
                 true)
             win.qaDump("close-still-stopping")
@@ -150,15 +151,16 @@ Window {
             ? qsTr(" Archive work cannot be stopped part-way; the window also waits for it.") : ""
         confirm.open(
             running.length > 1 ? qsTr("Transfers are still running") : qsTr("A transfer is still running"),
-            detail + qsTr("Closing now stops it. Files already copied are kept; "
-                          + "the one in progress is discarded. The window closes once it has stopped.")
+            detail + qsTr("Closing asks it to stop. Items already finished stay as they are; the one in progress "
+                          + "is not finished, and temporary files from it may remain. "
+                          + "The window closes once the transfer has stopped.")
                    + archive,
             qsTr("Stop and close"),
             true)
         win.qaDump("close-blocked")
     }
 
-    // Close only once every worker has actually stopped and cleaned up. A
+    // Close only once every worker has actually stopped. A
     // stop can wait on a remote call for as long as the connection takes to
     // answer, so there is no deadline here: quitting at one would drop the
     // work while it still holds files open. The user can still choose to
@@ -1223,9 +1225,9 @@ Window {
             confirm.purpose = "closetab"
             if (m.job_running())
                 confirm.open(qsTr("A transfer is still running"),
-                             qsTr("Closing this tab stops it. Files already copied "
-                                  + "are kept; the one in progress is discarded. "
-                                  + "The tab closes once it has stopped."),
+                             qsTr("Closing this tab asks it to stop. Items already finished stay as they are; "
+                                  + "the one in progress is not finished, and temporary files from it may remain. "
+                                  + "The tab closes once the transfer has stopped."),
                              qsTr("Stop and close"), true)
             else
                 confirm.open(qsTr("Archive work is still running"),
@@ -3601,8 +3603,8 @@ Window {
             }
             if (confirm.purpose === "close") {
                 // The user chose to abandon the transfers. Cancel every one
-                // so each worker stops and removes its staging file, then
-                // close once they have actually stopped.
+                // and close once each worker has actually stopped; whatever
+                // cleanup it manages is its own business, not promised here.
                 win.runningJobModels().forEach(m => m.cancel_job())
                 win.closing = true
                 win.qaDump("close-confirmed")
