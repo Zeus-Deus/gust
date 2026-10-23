@@ -1,194 +1,67 @@
-//! Content search — `:grep` (DESIGN §6.10, plan §2 and §4).
-//!
-//! Names are matched by [`super::find_by_name`]; this matches what is *in*
-//! a file. Both are explicitly scoped, bounded and cancellable, and neither
-//! ever starts on its own.
-//!
-//! The bounds are not tuning knobs, they are the feature: a content search
-//! that reads a 4 GB disk image, or walks a cloud mount, is a search that
-//! nobody can use.
-
+//! Scoped content search. The legacy absolute traversal is coverage-unverified.
+//! New callers use the detailed report rather than inferring completeness.
 use crate::lister::CancelToken;
 use crate::search::SearchScope;
-use std::io::Read;
-use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::path::Path;
+use std::path::PathBuf;
 
-/// Never read more than this from one file. A match beyond 8 MiB into a
-/// file is not worth making every other file wait.
+mod matcher;
+mod report;
+pub use matcher::{
+    match_buffer, ContentMatchError, ContentMatches, ContentQueryError, ContentSnippet,
+    MAX_QUERY_BYTES, MAX_SNIPPET_BYTES,
+};
+pub use report::*;
+
 pub const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
-
-/// How much of the head decides "is this binary".
 const SNIFF_BYTES: usize = 8 * 1024;
 
-/// One file that contained the needle.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContentHit {
     pub path: PathBuf,
-    /// How many lines matched, not the lines themselves: Gust counts rather
-    /// than building a giant buffer it would then have to show somewhere.
     pub lines: u32,
-    /// The first matching line number, so "open it and look here" is
-    /// possible later without re-reading now.
+    /// First matching line, one-based.
     pub first_line: u32,
 }
 
-/// Why a search stopped, so the UI can say so rather than implying it
-/// finished when it did not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GrepOutcome {
-    /// The whole scope was searched.
+    /// Legacy walk ended; coverage remains unverified. Use the detailed report.
     Complete,
-    /// Stopped at `max_results`.
+    /// A resource bound stopped the compatibility walk; use the report for its reason.
     HitLimit,
-    /// The user cancelled it.
     Cancelled,
 }
 
-/// Does this look like a file whose contents are text?
-///
-/// A NUL byte in the head is the standard, cheap signal. Being wrong in the
-/// conservative direction (skipping something that was technically text)
-/// costs a missed hit; being wrong the other way costs reading a disk image.
 pub fn looks_binary(head: &[u8]) -> bool {
     head.contains(&0)
 }
 
-/// Read at most the head of a file for sniffing plus matching.
-fn read_bounded(path: &Path, limit: u64) -> Option<Vec<u8>> {
-    let f = std::fs::File::open(path).ok()?;
-    let meta = f.metadata().ok()?;
-    if !meta.is_file() {
-        return None;
-    }
-    let n = meta.len().min(limit) as usize;
-    let mut buf = Vec::with_capacity(n.min(1 << 20));
-    f.take(limit).read_to_end(&mut buf).ok()?;
-    Some(buf)
-}
-
-/// Count matching lines in `data`, case-insensitively for ASCII.
-///
-/// Bytes are compared, not characters: a file that is not valid UTF-8 must
-/// still be searchable, and must never panic the search.
+/// Compatibility counts. Use `match_buffer` to retain errors and byte-limit state.
 pub fn count_matches(data: &[u8], needle: &str) -> (u32, u32) {
-    if needle.is_empty() {
-        return (0, 0);
-    }
-    let needle_lower: Vec<u8> = needle.as_bytes().to_ascii_lowercase();
-    let mut lines = 0u32;
-    let mut first = 0u32;
-    for (i, line) in data.split(|b| *b == b'\n').enumerate() {
-        let lower = line.to_ascii_lowercase();
-        if window_contains(&lower, &needle_lower) {
-            lines += 1;
-            if first == 0 {
-                first = (i + 1) as u32;
-            }
-        }
-    }
-    (lines, first)
+    match_buffer(data, needle, &CancelToken::new())
+        .map(|matched| (matched.lines, matched.first_line))
+        .unwrap_or((0, 0))
 }
 
-fn window_contains(haystack: &[u8], needle: &[u8]) -> bool {
-    if needle.is_empty() || haystack.len() < needle.len() {
-        return false;
-    }
-    haystack.windows(needle.len()).any(|w| w == needle)
-}
-
-/// Search file *contents* within an explicit scope.
-///
-/// Calls `on_hit` as results arrive so the UI can show them streaming, and
-/// checks `cancel` between every file.
+/// Compatibility adapter. Detailed reports expose partial coverage and omissions.
 pub fn grep_contents(
     scope: &SearchScope,
     needle: &str,
     cancel: &CancelToken,
     mut on_hit: impl FnMut(&ContentHit),
 ) -> (Vec<ContentHit>, GrepOutcome) {
-    let mut hits = Vec::new();
-    if needle.is_empty() {
-        return (hits, GrepOutcome::Complete);
-    }
-    let Some(root) = scope.root.as_path() else {
-        return (hits, GrepOutcome::Complete);
+    let report = grep_with_report(scope, needle, cancel, |hit| on_hit(&hit.hit));
+    let outcome = match report.state {
+        ContentSearchState::Cancelled => GrepOutcome::Cancelled,
+        ContentSearchState::Limited(_) => GrepOutcome::HitLimit,
+        _ => GrepOutcome::Complete,
     };
-    let root_dev = std::fs::metadata(root).ok().map(|m| {
-        use std::os::unix::fs::MetadataExt;
-        m.dev()
-    });
-
-    let mut stack: Vec<(PathBuf, usize)> = vec![(root.to_path_buf(), 0)];
-    let mut outcome = GrepOutcome::Complete;
-
-    while let Some((dir, depth)) = stack.pop() {
-        if cancel.is_cancelled() {
-            return (hits, GrepOutcome::Cancelled);
-        }
-        if hits.len() >= scope.max_results {
-            outcome = GrepOutcome::HitLimit;
-            break;
-        }
-        let Ok(rd) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in rd.flatten() {
-            if cancel.is_cancelled() {
-                return (hits, GrepOutcome::Cancelled);
-            }
-            if hits.len() >= scope.max_results {
-                outcome = GrepOutcome::HitLimit;
-                break;
-            }
-            let name = entry.file_name();
-            let is_hidden = name.to_string_lossy().starts_with('.');
-            if is_hidden && !scope.include_hidden {
-                continue;
-            }
-            // Symlinks are NOT followed: a link into / would turn a scoped
-            // search into a whole-disk one, and a link loop would never end.
-            let Ok(meta) = entry.metadata() else { continue };
-            let path = entry.path();
-
-            if meta.is_dir() {
-                if !scope.recursive || depth + 1 >= scope.max_depth {
-                    continue;
-                }
-                if scope.stay_on_device {
-                    use std::os::unix::fs::MetadataExt;
-                    if root_dev.is_some_and(|d| meta.dev() != d) {
-                        // A different filesystem: on a remote this would mean
-                        // downloading everything to search it (DESIGN §6.10).
-                        continue;
-                    }
-                }
-                stack.push((path, depth + 1));
-                continue;
-            }
-            if !meta.is_file() {
-                continue;
-            }
-
-            let Some(data) = read_bounded(&path, MAX_FILE_BYTES) else {
-                continue;
-            };
-            let head = &data[..data.len().min(SNIFF_BYTES)];
-            if looks_binary(head) {
-                continue;
-            }
-            let (lines, first_line) = count_matches(&data, needle);
-            if lines > 0 {
-                let hit = ContentHit {
-                    path,
-                    lines,
-                    first_line,
-                };
-                on_hit(&hit);
-                hits.push(hit);
-            }
-        }
-    }
-    (hits, outcome)
+    (
+        report.hits.into_iter().map(|hit| hit.hit).collect(),
+        outcome,
+    )
 }
 
 #[cfg(test)]

@@ -11,8 +11,10 @@
 //! - "mounted" is only claimed after the mount point is observably a
 //!   different filesystem, not because a command exited zero.
 
+use crate::helper::{self, CallContext, ErrorCode};
+use gust_core::lister::CancelToken;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::time::{Duration, Instant};
 
 /// How a remote place is reached.
@@ -117,6 +119,7 @@ pub enum MountError {
     AuthFailed,
     /// No answer in the time allowed.
     Timeout,
+    Cancelled,
     /// The mount point is unusable.
     BadMountPoint(String),
     /// Anything else, already made readable.
@@ -136,6 +139,7 @@ impl MountError {
             MountError::AuthFailed => {
                 "That computer refused the login. Check the username and your SSH key.".into()
             }
+            MountError::Cancelled => "Connection cancelled. Check the place before reconnecting; cancellation does not roll back a mount.".into(),
             MountError::Timeout => {
                 "That computer did not answer in time. It may be offline.".into()
             }
@@ -151,7 +155,7 @@ impl MountError {
 /// which is the symptom, not the cause. A bounded `ssh -o BatchMode` probe
 /// gets the real reason so a changed host key is never shown as a vague
 /// network error. Never disables any checking; it only asks.
-fn host_key_verdict(spec: &RemoteSpec) -> Option<MountError> {
+fn host_key_verdict(spec: &RemoteSpec, ctx: &CallContext<'_>) -> Option<MountError> {
     let mut c = Command::new("ssh");
     c.arg("-o")
         .arg("BatchMode=yes")
@@ -161,7 +165,7 @@ fn host_key_verdict(spec: &RemoteSpec) -> Option<MountError> {
         .arg("ConnectTimeout=5")
         .arg("-o")
         .arg("PasswordAuthentication=no");
-    if let Some(p) = spec.port {
+    if let Some(p) = spec.port.filter(|_| !spec.use_alias_as_target) {
         c.arg("-p").arg(p.to_string());
     }
     if let Some(id) = &spec.identity_file {
@@ -175,16 +179,16 @@ fn host_key_verdict(spec: &RemoteSpec) -> Option<MountError> {
     if let Some(cfg) = &spec.config_file {
         c.arg("-F").arg(cfg);
     }
-    let target = match &spec.user {
-        Some(u) => format!("{u}@{}", spec.host),
-        None => spec.host.clone(),
+    let target = if spec.use_alias_as_target {
+        spec.alias.clone()
+    } else {
+        match &spec.user {
+            Some(u) => format!("{u}@{}", spec.host),
+            None => spec.host.clone(),
+        }
     };
-    let out = c
-        .arg(target)
-        .arg("true")
-        .stdin(Stdio::null())
-        .output()
-        .ok()?;
+    c.arg("--").arg(target).arg("true");
+    let out = helper::run(c, &[], ctx).ok()?;
     if out.status.success() {
         return None;
     }
@@ -370,6 +374,22 @@ pub fn mount_recovering(
     mount_point: &Path,
     timeout: Duration,
 ) -> Result<Option<PathBuf>, MountError> {
+    mount_recovering_with_context(
+        spec,
+        mount_point,
+        &CallContext {
+            cancel: &CancelToken::new(),
+            timeout,
+        },
+    )
+}
+
+pub fn mount_recovering_with_context(
+    spec: &RemoteSpec,
+    mount_point: &Path,
+    ctx: &CallContext<'_>,
+) -> Result<Option<PathBuf>, MountError> {
+    ctx.check().map_err(helper_error)?;
     if !Backend::Sshfs.available() {
         return Err(MountError::ToolMissing("sshfs"));
     }
@@ -377,7 +397,7 @@ pub fn mount_recovering(
         return Ok(None); // already connected
     }
     let recovered = prepare_mount_point(mount_point, &spec.alias)?;
-    mount_prepared(spec, mount_point, timeout)?;
+    mount_prepared(spec, mount_point, ctx)?;
     Ok(recovered)
 }
 
@@ -499,67 +519,49 @@ fn runtime_base() -> Option<PathBuf> {
         .map(Path::to_path_buf)
 }
 
+fn helper_error(error: helper::RemoteError) -> MountError {
+    match error.code {
+        ErrorCode::Cancelled => MountError::Cancelled,
+        ErrorCode::Timeout => MountError::Timeout,
+        _ => MountError::Other(error.message),
+    }
+}
 fn mount_prepared(
     spec: &RemoteSpec,
     mount_point: &Path,
-    timeout: Duration,
+    ctx: &CallContext<'_>,
 ) -> Result<(), MountError> {
-    let args = sshfs_args(spec, mount_point, timeout.as_secs().max(1) as u32);
-    let mut child = Command::new("sshfs")
-        .args(&args)
-        // No terminal: a password prompt must never appear on Gust's stdin.
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| MountError::Other(e.to_string()))?;
-
-    // sshfs daemonises, so waiting on the child is bounded by our own clock.
-    let deadline = Instant::now() + timeout;
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let mut err = String::new();
-                if let Some(mut s) = child.stderr.take() {
-                    use std::io::Read;
-                    let _ = s.read_to_string(&mut err);
-                }
-                if status.success() {
-                    break;
-                }
-                let first = classify(&err);
-                // A vague transport error may really be a rejected host key.
-                if matches!(first, MountError::Other(_)) {
-                    if let Some(real) = host_key_verdict(spec) {
-                        return Err(real);
-                    }
-                }
-                return Err(first);
+    let started = Instant::now();
+    let mut command = Command::new("sshfs");
+    command.args(sshfs_args(
+        spec,
+        mount_point,
+        ctx.timeout.as_secs().clamp(1, u32::MAX as u64) as u32,
+    ));
+    let out = helper::run_daemon_startup(command, ctx).map_err(helper_error)?;
+    if !out.status.success() {
+        let first = classify(&String::from_utf8_lossy(&out.stderr));
+        if matches!(first, MountError::Other(_)) {
+            let remaining = ctx.timeout.saturating_sub(started.elapsed());
+            let probe = CallContext {
+                cancel: ctx.cancel,
+                timeout: remaining,
+            };
+            if let Some(real) = host_key_verdict(spec, &probe) {
+                return Err(real);
             }
-            Ok(None) => {
-                if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    gust_core::stall::reap_in_background(child);
-                    return Err(MountError::Timeout);
-                }
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            Err(e) => return Err(MountError::Other(e.to_string())),
         }
+        ctx.check().map_err(helper_error)?;
+        return Err(first);
     }
-
-    // "Mounted" is only true when the mount point is really a different
-    // filesystem. sshfs can exit 0 and leave nothing behind.
-    let settle = Instant::now() + Duration::from_secs(3);
-    while Instant::now() < settle {
+    while started.elapsed() < ctx.timeout {
+        ctx.check().map_err(helper_error)?;
         if is_mounted(mount_point) {
             return Ok(());
         }
-        std::thread::sleep(Duration::from_millis(50));
+        std::thread::sleep(Duration::from_millis(20));
     }
-    Err(MountError::Other(
-        "The connection reported success but nothing was mounted.".into(),
-    ))
+    Err(MountError::Timeout)
 }
 
 /// Disconnect a remote place.
@@ -567,6 +569,17 @@ fn mount_prepared(
 /// Never a lazy unmount by default: detaching a filesystem with unwritten
 /// data is how people lose work (plan §9 — do not lazy-unmount dirty mounts).
 pub fn unmount(mount_point: &Path) -> Result<(), MountError> {
+    unmount_with_context(
+        mount_point,
+        &CallContext {
+            cancel: &CancelToken::new(),
+            timeout: Duration::from_secs(10),
+        },
+    )
+}
+
+pub fn unmount_with_context(mount_point: &Path, ctx: &CallContext<'_>) -> Result<(), MountError> {
+    ctx.check().map_err(helper_error)?;
     if !is_mounted(mount_point) {
         return Ok(());
     }
@@ -579,23 +592,20 @@ pub fn unmount(mount_point: &Path) -> Result<(), MountError> {
     else {
         return Err(MountError::ToolMissing("fusermount3"));
     };
-    let out = Command::new(tool)
-        .args(["-u", &mount_point.to_string_lossy()])
-        .stdin(Stdio::null())
-        .output();
-    match out {
-        Ok(o) if o.status.success() => Ok(()),
-        Ok(o) => {
-            let err = String::from_utf8_lossy(&o.stderr);
-            if err.to_ascii_lowercase().contains("busy") {
-                Err(MountError::Other(
-                    "Something is still using this place. Close it and try again.".into(),
-                ))
-            } else {
-                Err(classify(&err))
-            }
+    let mut command = Command::new(tool);
+    command.arg("-u").arg("--").arg(mount_point);
+    let out = helper::run(command, &[], ctx).map_err(helper_error)?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        let err = String::from_utf8_lossy(&out.stderr);
+        if err.to_ascii_lowercase().contains("busy") {
+            Err(MountError::Other(
+                "Something is still using this place. Close it and try again.".into(),
+            ))
+        } else {
+            Err(classify(&err))
         }
-        Err(e) => Err(MountError::Other(e.to_string())),
     }
 }
 
