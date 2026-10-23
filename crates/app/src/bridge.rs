@@ -6039,11 +6039,60 @@ impl qobject::DirModel {
             );
         }
 
-        // Hand the file to the desktop's own opener. Gust does not decide
-        // what the file is by running it, and does not run it itself.
         let Some(path) = target.as_path() else {
             return QString::from("blocked:this location is not a local file");
         };
+        // One media window needs the neighbours, in this pane's displayed
+        // order. Build from cached rows; process lookup and playlist I/O
+        // happen on a worker so opening media cannot stall the UI.
+        if let Some(playlist) = self.as_ref().key.as_path().and_then(|directory| {
+            gust_core::open::media::Playlist::from_entries(
+                directory,
+                self.as_ref().visible_entries(),
+                &name,
+            )
+        }) {
+            let Some(thread) = self.as_ref().qt_thread_handle() else {
+                return QString::from("blocked:the media viewer is not ready");
+            };
+            let path = path.to_path_buf();
+            let launch = std::thread::Builder::new()
+                .name("gust-media".into())
+                .spawn(move || {
+                    let result = if let Some(player) = gust_core::open::which("mpv") {
+                        playlist
+                            .launch(&player)
+                            .and_then(|mut child| {
+                                let status = child.wait()?;
+                                if status.success() {
+                                    Ok(())
+                                } else {
+                                    Err(std::io::Error::other(format!(
+                                        "the media viewer exited with {status}"
+                                    )))
+                                }
+                            })
+                            .map_err(|error| error.to_string())
+                    } else {
+                        gust_core::open::open_with_desktop(&path, mode)
+                            .map(|_| ())
+                            .map_err(|error| error.to_string())
+                    };
+                    if let Err(error) = result {
+                        let _ = thread.queue(move |mut model| {
+                            model.as_mut().set_status(QString::from(&format!(
+                                "Could not open media: {error}"
+                            )));
+                        });
+                    }
+                });
+            return match launch {
+                Ok(_) => QString::from("file"),
+                Err(error) => QString::from(&format!("blocked:could not open media: {error}")),
+            };
+        }
+        // Non-media keeps its desktop handler; explicit Open with… also
+        // remains available when a different media application is wanted.
         match gust_core::open::open_with_desktop(path, mode) {
             Ok(_opener) => QString::from("file"),
             Err(e) => QString::from(&format!("blocked:{e}")),

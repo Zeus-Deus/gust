@@ -19,9 +19,10 @@
 //! Names from a phone are untrusted text: shown escaped, and only ever passed
 //! to a program as one argv element.
 
-use std::io::{BufRead, BufReader, Read, Write};
+use crate::helper::{self, CallContext, ErrorCode};
+use gust_core::lister::CancelToken;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::time::{Duration, Instant};
 
 /// What kind of thing is plugged in.
@@ -247,29 +248,18 @@ pub fn backend_installed(kind: PhoneKind) -> bool {
 /// The device's own name ("Alex's iPhone"), from GVfs's list of volumes.
 /// `gio mount -li` reads the monitors' state: it does not talk to the phone.
 pub fn friendly_names() -> Vec<(String, String)> {
-    let Ok(mut child) = gio()
-        .args(["mount", "-li"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-    else {
-        return Vec::new();
-    };
-    let mut text = String::new();
-    if let Some(mut o) = child.stdout.take() {
-        // Bounded: a wedged monitor must not hold a worker for ever.
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let mut s = String::new();
-            let _ = o.read_to_string(&mut s);
-            let _ = tx.send(s);
-        });
-        text = rx.recv_timeout(Duration::from_secs(5)).unwrap_or_default();
-    }
-    let _ = child.kill();
-    gust_core::stall::reap_in_background(child);
-    parse_volume_names(&text)
+    let mut command = gio();
+    command.args(["mount", "-li"]);
+    let out = helper::run(
+        command,
+        &[],
+        &CallContext {
+            cancel: &CancelToken::new(),
+            timeout: Duration::from_secs(5),
+        },
+    );
+    out.map(|o| parse_volume_names(&String::from_utf8_lossy(&o.stdout)))
+        .unwrap_or_default()
 }
 
 /// `(serial without hyphens, upper-case; name)` for each phone volume in
@@ -411,112 +401,60 @@ pub fn mount(
     progress: &mut dyn FnMut(PhoneState),
     cancelled: &dyn Fn() -> bool,
 ) -> Result<PathBuf, PhoneState> {
+    let started = Instant::now();
+    if cancelled() {
+        return Err(PhoneState::Ready);
+    }
     if !backend_installed(phone.kind) {
         return Err(PhoneState::NeedsPackage(phone.kind.package()));
     }
-    if let Some(p) = local_path(&phone.uri) {
+    if let Some(p) = local_path_control(&phone.uri, timeout.min(Duration::from_secs(4)), cancelled)
+    {
         return Ok(p);
     }
-    let mut child = gio()
-        .args(["mount", "--"])
-        .arg(&phone.uri)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| PhoneState::Failed(format!("Could not start gio: {e}")))?;
-    let mut stdin = child.stdin.take();
-    // Read stdout on a thread: questions arrive without a final newline
-    // ("Choice: "), so lines are split on the choice list instead.
-    let (tx, rx) = std::sync::mpsc::channel::<String>();
-    if let Some(o) = child.stdout.take() {
-        std::thread::spawn(move || {
-            let mut r = BufReader::new(o);
-            let mut line = String::new();
-            while r.read_line(&mut line).map(|n| n > 0).unwrap_or(false) {
-                let _ = tx.send(std::mem::take(&mut line));
-            }
-        });
-    }
-    let err_text = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
-    if let Some(mut e) = child.stderr.take() {
-        let et = err_text.clone();
-        std::thread::spawn(move || {
-            let mut s = String::new();
-            let _ = e.read_to_string(&mut s);
-            if let Ok(mut g) = et.lock() {
-                *g = s;
-            }
-        });
-    }
-    let started = Instant::now();
+    let mut command = gio();
+    command.args(["mount", "--"]).arg(&phone.uri);
     let mut said = String::new();
-    // When the user stops waiting, gio is told Cancel and given a moment to
-    // pass it on and exit; it is killed only if it does not.
-    let mut give_up_at: Option<Instant> = None;
-    loop {
-        while let Ok(l) = rx.try_recv() {
-            said.push_str(&l);
-            // "[1] Try again" ends the question block: answer it.
-            if l.trim_start().starts_with("[1]") {
-                let waiting = if said.contains("is locked") {
-                    PhoneState::WaitingForUnlock
-                } else {
-                    PhoneState::WaitingForTrust
-                };
-                progress(waiting);
-                said.clear();
-                // Give the person time to reach the phone before asking again.
-                let until = Instant::now() + Duration::from_secs(3);
-                while Instant::now() < until && !cancelled() {
-                    std::thread::sleep(Duration::from_millis(100));
-                }
-                let answer = if cancelled() { "2\n" } else { "1\n" };
-                if let Some(s) = stdin.as_mut() {
-                    let _ = s.write_all(answer.as_bytes());
-                    let _ = s.flush();
-                }
-                if cancelled() && give_up_at.is_none() {
-                    give_up_at = Some(Instant::now() + Duration::from_secs(2));
-                }
+    let result = helper::run_interactive(
+        &mut command,
+        &[],
+        timeout.saturating_sub(started.elapsed()),
+        cancelled,
+        &mut |chunk| {
+            said.push_str(&String::from_utf8_lossy(chunk));
+            if !said.lines().any(|l| l.trim_start().starts_with("[1]")) {
+                return None;
             }
-        }
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                std::thread::sleep(Duration::from_millis(50));
-                let err = err_text.lock().map(|g| g.clone()).unwrap_or_default();
-                if status.success() {
-                    return local_path(&phone.uri).ok_or_else(|| {
-                        PhoneState::Failed("It opened, but Gust could not find its folder.".into())
-                    });
-                }
-                if cancelled() {
-                    return Err(PhoneState::Ready);
-                }
-                return Err(classify_failure(&err, phone.kind));
-            }
-            Ok(None) => {}
-            Err(e) => return Err(PhoneState::Failed(e.to_string())),
-        }
-        if cancelled() && give_up_at.is_none() {
-            // Not mid-question: closing stdin makes gio's next question
-            // read end-of-file, which it takes as Cancel.
-            stdin = None;
-            give_up_at = Some(Instant::now() + Duration::from_secs(2));
-        }
-        let gave_up = give_up_at.is_some_and(|t| Instant::now() >= t);
-        if started.elapsed() >= timeout || gave_up {
-            let _ = child.kill();
-            gust_core::stall::reap_in_background(child);
-            return Err(if cancelled() {
-                PhoneState::Ready
+            progress(if said.contains("is locked") {
+                PhoneState::WaitingForUnlock
             } else {
-                PhoneState::Failed(
-                    "The phone did not answer in time. Unlock it and try again.".into(),
-                )
+                PhoneState::WaitingForTrust
             });
-        }
-        std::thread::sleep(Duration::from_millis(50));
+            said.clear();
+            let until = Instant::now() + Duration::from_secs(3);
+            while Instant::now() < until && started.elapsed() < timeout && !cancelled() {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Some(if cancelled() || started.elapsed() >= timeout {
+                b"2\n".to_vec()
+            } else {
+                b"1\n".to_vec()
+            })
+        },
+    );
+    match result {
+        Ok(out) if out.status.success() => local_path_control(
+            &phone.uri,
+            timeout.saturating_sub(started.elapsed()),
+            cancelled,
+        )
+        .ok_or_else(|| PhoneState::Failed("It opened, but Gust could not find its folder.".into())),
+        Ok(out) => Err(classify_failure(
+            &String::from_utf8_lossy(&out.stderr),
+            phone.kind,
+        )),
+        Err(error) if error.code == ErrorCode::Cancelled => Err(PhoneState::Ready),
+        Err(error) => Err(PhoneState::Failed(error.message)),
     }
 }
 
@@ -556,13 +494,21 @@ pub fn classify_failure(err: &str, kind: PhoneKind) -> PhoneState {
 /// The local folder GVfs exposes for a mounted URI, or None if it is not
 /// mounted. `gio info` answers from the GVfs daemon.
 pub fn local_path(uri: &str) -> Option<PathBuf> {
-    let out = gio()
+    local_path_control(uri, Duration::from_secs(4), &|| false)
+}
+pub fn local_path_with_context(uri: &str, ctx: &CallContext<'_>) -> Option<PathBuf> {
+    local_path_control(uri, ctx.timeout, &|| ctx.cancel.is_cancelled())
+}
+fn local_path_control(
+    uri: &str,
+    timeout: Duration,
+    cancelled: &dyn Fn() -> bool,
+) -> Option<PathBuf> {
+    let mut command = gio();
+    command
         .args(["info", "-a", "standard::name", "--"])
-        .arg(uri)
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
+        .arg(uri);
+    let out = helper::run_interactive(&mut command, &[], timeout, cancelled, &mut |_| None).ok()?;
     if !out.status.success() {
         return None;
     }
@@ -589,12 +535,18 @@ pub fn uris(phone: &Phone) -> Vec<String> {
 /// Unmount a phone. Never forced: a phone is what people copy photos from,
 /// and a forced unmount can cut a copy short.
 pub fn unmount(phone: &Phone) -> Result<(), String> {
-    let out = gio()
-        .args(["mount", "-u", "--"])
-        .arg(&phone.uri)
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|e| e.to_string())?;
+    unmount_with_context(
+        phone,
+        &CallContext {
+            cancel: &CancelToken::new(),
+            timeout: Duration::from_secs(10),
+        },
+    )
+}
+pub fn unmount_with_context(phone: &Phone, ctx: &CallContext<'_>) -> Result<(), String> {
+    let mut command = gio();
+    command.args(["mount", "-u", "--"]).arg(&phone.uri);
+    let out = helper::run(command, &[], ctx).map_err(|e| e.message)?;
     if out.status.success() {
         Ok(())
     } else {

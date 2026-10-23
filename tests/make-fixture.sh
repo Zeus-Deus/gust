@@ -5,8 +5,8 @@
 set -euo pipefail
 
 ROOT="${1:-/tmp/gust-fixture}"
-rm -rf "$ROOT"
-mkdir -p "$ROOT"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(python3 "$HERE/fixture-root.py" "$ROOT")"
 
 cd "$ROOT"
 

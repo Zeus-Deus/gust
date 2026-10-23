@@ -1,192 +1,242 @@
 # Testing Gust
 
-Four gates. All four must be green before a change lands.
+A successful command is evidence only for its stated scope and selected source.
+Release qualification requires no skipped or ignored cases in each required gate,
+an installed artifact matching the recorded build, and native desktop/theme
+acceptance. Historical source tests do not qualify a current installation.
 
-```
-just test          # 1. library behaviour — no display needed
-just lint          # 2. fmt, clippy -D warnings, QML token discipline
-just qa            # 3. desktop interaction on a real compositor
-just theme-matrix  # 4. every installed Omarchy theme renders
-```
+## Source and Rust tests
 
-## Safety: the tests never touch your files
-
-Every desktop test runs with:
-
-- `HOME` pointed at a throwaway fixture (`/tmp/gust-fixture`)
-- `XDG_DATA_HOME` pointed inside that fixture, so **Trash tests use a private
-  trash** and can never reach the real one
-- `XDG_CACHE_HOME` likewise
-- `GUST_OMARCHY_STATE` pointed at the real theme directory **read-only**, so
-  theming is genuinely exercised without a fixture HOME hiding it
-
-`tests/qa.sh` asserts at the end that it ran entirely against the fixture.
-The fixture builder (`tests/make-fixture.sh`) creates only files under the
-directory it is given.
-
-## How the desktop QA works
-
-Screenshot-only testing proves very little, so the harness does two things:
-
-1. **Real input.** `wtype` sends actual Wayland key events to the real window.
-   No synthetic signals, no internal function calls.
-2. **Exact state.** When `GUST_QA_STATE` is set, Gust writes a JSON snapshot of
-   its own state (location, count, cursor, filter, view, dialog state, visible
-   entry names) on every change. Assertions compare against that rather than
-   guessing from pixels. Screenshots are captured too, as evidence and for a
-   secondary OCR check.
-
-The state probe refuses to write anywhere outside `/tmp`, and writes nothing
-at all when the variable is unset.
-
-### Writing a new check
-
-```bash
-expect "what it means"       "d['model']['count']" "11"
-expect_contains "a substring" "d['model']['cursor_name']" "Projects"
-wait_for "d['view']" "grid" 10      # poll instead of sleeping
+```sh
+python3 tests/test-release-runners.py
+python3 tests/test-package-artifacts.py
+python3 tests/test-source-archive.py
+python3 tests/check-setup-packaging.py
+python3 packaging/check-dependencies.py
+./tests/run-tests.sh
+./tests/run-tests.sh --app
+./tests/run-tests.sh --workspace
+./tests/run-tests.sh --required
 ```
 
-Always `wait_for` a state change rather than sleeping a fixed time — the
-harness types faster than any human and will otherwise race the UI.
+The runner uses a fresh private directory under `target/test-runs/` for each
+invocation, including concurrent invocations. `cargo.log` and `skips.tsv` are raw
+private evidence; `summary.json` and stdout contain aggregate counts. Instrumented
+runtime skips are subtracted from libtest's pass count. Required mode sets
+`GUST_ALL_REQUIRED=1` and also rejects recorded skips, ignored tests, malformed
+accounting and a command that exits zero without observed tests. A compilation
+failure is a failure even if no test summary was printed. Filters still select
+only their stated tests; filtered-out tests are not evidence of coverage.
 
-## Regression cases worth keeping
+Failure summaries additionally expose at most 16 Rust error codes and 16 crate
+names already present in Cargo.lock, plus build-script/native-compiler/test-process
+failure categories. Custom-build-command headers use the same locked-crate
+allowlist; fixed Qt detection/tool, QML generation and cc-rs markers expose only
+booleans. These are observed markers, not an inferred dependency diagnosis.
+Hosted library observation explicitly sets `GUST_PUBLIC_TEST_IDS=1`. This adds
+at most 64 failed integration-test identifiers, each matched exactly to a
+top-level `#[test]` declaration in committed HEAD and an allowlisted Gust crate.
+Only uniquely owned integration targets qualify. Dirty source, unknown targets,
+nested/unit names and unavailable Git metadata cannot supply identifiers;
+unreported failures remain counted as unclassified. Local runs keep identifiers
+private by default. Identifier collection never changes the test result.
+Diagnostic prose, paths, source excerpts and panic payloads
+remain in the private log. Gate output preserves these bounded fields so a
+hosted failure can be investigated without publishing raw evidence.
 
-These exist because they actually broke:
+`--package-unit` explicitly selects `--lib` and filters the one manual disk
+benchmark `recursive::tests::copy_1000_small_files`. Its exclusion is recorded in
+the summary, rather than counted as a pass. Every other ignored test still fails
+required mode. The benchmark needs a separately provisioned destination and its
+own measurement/acceptance; enabling all ignored tests cannot qualify it.
 
-| Test | What it caught |
-| --- | --- |
-| `type_ahead_buffers_a_multi_character_prefix` | typing "Pro" searched for "o" and opened the wrong folder |
-| `rejects_a_fifo_output_without_hanging` | a FIFO where a thumbnail should be hung the process forever |
-| `fallback_defines_every_required_token` | a missing token painted the header magenta |
-| `a_light_theme_never_gets_a_dark_bar_from_a_stale_shell_file` | light themes rendered a dark header |
-| `refuses_symlinked_intermediate_directory` | a mid-path symlink swap defeating `O_NOFOLLOW` |
-| QA §10c | undo overwriting work created after a delete |
-| QA "keyboard focus returns" | Escape from an overlay left the app deaf to keys |
+The ledger can account only for tests using `gust_testkit::skip!`; crate owners
+must instrument new fixture early returns. Individual fixture flags such as
+`GUST_SSHFS_REQUIRED=1` and `GUST_PREVIEWS_REQUIRED=1` remain supported by their
+owning crates. No fixture service or live clipboard is enabled implicitly.
 
-## Running Gust by hand against the fixture
+Use minimal selectors and the shared `/tmp/gust-build.lock` for compilation in
+this development environment. `tests/release-gates.py` acquires it nonblockingly
+around Rust/model checks; `packaging/build-artifact.py` owns it for release builds.
+Do not nest those commands inside another acquisition of the same lock. A busy
+lease is SKIP/TEMPFAIL, not a test pass. Direct Cargo commands need an externally
+coordinated build lease.
+The owned command boundary retires surviving descendants before returning any
+immediate-child status, including success, failure or direct child termination.
+Synthetic builder/gate tests verify lease exclusion while those descendants are
+live, retirement before status/receipt publication, and unrelated-process safety.
 
-```bash
-./tests/make-fixture.sh /tmp/gust-fixture
-HOME=/tmp/gust-fixture \
-XDG_DATA_HOME=/tmp/gust-fixture/.local/share \
-GUST_OMARCHY_STATE=$HOME/.local/state/omarchy \
-  ./target/debug/gust
+## Fast GitHub Actions checks
+
+`.github/workflows/ci.yml` runs on pull requests, pushes to `master`, and
+manual dispatch. Its `Check` job runs formatting, `just lint`, the library
+test runner, and a debug build of the complete Rust/Qt application on Ubuntu
+26.04 with Qt 6.10, which supports the Qt Quick features Gust already uses.
+Dependencies are locked to `Cargo.lock` for compilation and tests.
+
+One job shares build outputs between lint, tests and the app build. Cargo
+downloads and compiled dependencies are cached across runs; debug symbols
+and incremental compilation are disabled to reduce cache size. Downloaded
+Ubuntu packages are cached too, and installation uses the HTTPS Ubuntu
+mirror after the default Azure mirror took over ten minutes in a hosted run.
+The package cache is saved immediately after installation, even if later
+checks fail; changes to the workflow invalidate it. New commits
+cancel outdated runs for the same PR or branch. Branch pushes outside
+`master` do not duplicate the PR run, and there is no platform matrix or
+release build in this fast check. The job has a 15-minute timeout, including
+cold builds; a cached run should be measured before assigning a time budget.
+
+Changes limited to Markdown and `docs/screens/` skip setup and compilation
+while still completing `Check`, so it can be required by branch protection.
+If the two-commit checkout cannot resolve the comparison base (for example,
+a multi-commit push to `master`), checks run conservatively. Manual dispatch
+always runs the full check. Packaging files under `docs/release/` still
+trigger checks.
+
+Hosted CI has no Omarchy compositor or live remote fixtures. Missing fixture
+cases remain explicit skips in the test log and workflow summary, rather
+than being counted as passes. A green `Check` covers only the fast checks;
+real-desktop QA, the theme matrix, benchmarks, and the fixture-required
+release tests remain separate gates before landing or releasing. Run
+`just test-required` with the fixtures and desktop session available, plus
+`just qa-release`, `just theme-matrix`, and `just bench` against the candidate.
+
+## Gate orchestration
+
+```sh
+python3 tests/release-gates.py --gate static --required --output /tmp/gust-static-fresh
+python3 tests/release-gates.py --gate app --required --output /tmp/gust-app-fresh
+python3 tests/release-gates.py --gate models --output /tmp/gust-models-fresh
 ```
 
-`tests/vmsession` resolves a headless/VM Wayland session's environment from the
-running compositor when you need it.
+Output must be fresh and outside the checkout. Every gate is named PASS, FAIL or
+SKIP. `--required` makes every non-PASS fatal. Without it, skips remain explicit
+and are never a release qualification. `--gate` can be repeated. With no selector,
+all implemented gate scopes are requested, including unavailable native gates.
+Benchmark and hardware/provider acceptance remain separate coordinated work;
+this runner never turns their historical evidence into a current pass.
 
-## Never run two QA suites at once
+`library-unit` selects that package unit scope; `libraries` includes integration/doc tests.
+`app` runs the app Rust tests and requires Qt >= 6.11.2 build tools. An explicit
+`QMAKE` is authoritative; a missing/old selection cannot fall back to system Qt.
+`model-seams` runs the
+portable ConnectPanel and phone-worker source-extraction harnesses. `models` also
+requests tab, pane and insertion harnesses; their existing KVM/UID-1000 admission
+is preserved. These seams substitute external model I/O/CXX transport and do not
+establish real native job, portal, focus or clipboard behavior. App-local tests
+remain owned by the app lane.
 
-`tests/qa.sh` drives the one real desktop: it kills every `gust` process,
-types into whatever window has focus and rewrites shared fixtures. Two runs
-overlapping destroy each other and produce failures that describe only the
-collision.
+## Contained fixtures and native acceptance
 
-The suite now takes an exclusive `flock` on `/tmp/gust-qa.lock` and exits 3
-rather than starting a second run, keeps its state file inside its own output
-directory, and kills the app it started on any exit path. If you see
-`refusing to run two at once`, a previous run is still going — check with
-`pgrep -af qa.sh`.
+`tests/make-fixture.sh` accepts only a fresh/empty owned directory below `/tmp`.
+It refuses existing data, traversal and symlink ancestry instead of deleting a
+caller-selected tree. Regression tests verify that refused destinations and
+symlink targets retain sentinel data. This guard is not a claim that every
+legacy desktop/remote fixture script has the same containment.
 
-**When a QA report looks wrong, check its age before believing it.** Compare
-the fixture's timestamp against `tests/qa.sh`; a run started before an edit
-is executing a different suite than the one on disk, and bash reads scripts
-incrementally, so editing the file mid-run corrupts the running copy.
+The native gate consumes the UI-owned `ui-flea-journeys.sh` contract. Until that
+local script is available, the gate is SKIP. It may be selected from an unpushed
+UI integration checkout using `--native-runner`; that does not authorize
+publishing the UI code. The runner owns `/tmp/gust-qa.lock` and closes the
+descriptor for children. The current local UI contract creates a private
+headless labwc compositor and uses its absolute Wayland socket, with synthetic
+HOME/XDG roots. It stops only its own Gust/compositor PIDs; input cannot reach
+the host desktop.
+Callers must not acquire the QA lease again.
 
-### The lock must not leak into children
+```sh
+GUST_DEDICATED_QA=1 python3 tests/release-gates.py --gate native --required \
+  --installed-root /tmp/gust-package-fresh/root \
+  --native-runner /path/to/local-ui-checkout/tests/ui-flea-journeys.sh \
+  --output /tmp/gust-native-fresh
+```
 
-`flock` on fd 9 is inherited by everything the suite spawns. The app can
-launch a viewer (`xdg-open`, an editor) that outlives the run, and those
-grandchildren then hold the lock forever — every later run exits 3 with no
-obvious cause. Every spawn closes it explicitly with `9>&-`.
+The private lab needs labwc, grim, wtype, wl-paste, python3 and wlr-randr; the
+UI-owned runner admits these prerequisites. It does not require a host Wayland
+or Hyprland session. Pointer journeys additionally need `GUST_UI_VPTR`; missing
+pointer support leaves those journeys SKIP. Every HOME/XDG base and fixture
+belongs inside the runner's output; the
+Omarchy token source is read-only. The binary must match the current source build
+receipt before input starts. Native runner exits 75 (busy) and 77 (unavailable)
+are SKIP. Its `results.tsv` must account for journeys; mixed PASS/SKIP is still
+SKIP even if the script exits zero. The QML warning ledger must be a regular,
+empty `qml-warnings.txt`; a missing ledger or collected runtime error fails
+acceptance. Raw paths, logs and images never reach public
+CI summaries.
 
-To find a stuck lock: `fuser -v /tmp/gust-qa.lock`.
+The `themes` gate additionally needs `--themes-dir`, ImageMagick and the same
+installed root/UI runner. It enumerates the supplied theme set, copies each to
+private state, invokes the input-free `launch` journey, checks the exact journey
+receipt and requires that theme's background in the window-region capture.
+Missing color files count as skips. A successful subset is not the complete
+installed matrix. It never switches the global theme. The matrix wrapper does
+not hold a lease while the UI runner acquires it.
+Labwc acceptance does not qualify Hyprland blur, transparency or window rules;
+those require separate coordinated acceptance on the intended compositor.
 
-## Test the artifact, not just the source
+Legacy `tests/qa.sh`, `tests/qa-one.sh`, `tests/theme-matrix.sh`, accessibility and
+benchmark drivers have wider desktop/process/fixture side effects, including
+some global process termination. Do not use them on a shared/human desktop or
+as the native release gate. Their old evidence does not qualify a new artifact.
+No native/theme or benchmark acceptance is run automatically on public hosted CI.
 
-`just qa` runs against `target/debug/gust`. The plan requires the release
-artifact to be tested too, because that is what a user installs — different
-optimisation, different codegen, and a debug-only difference would otherwise
-ship unnoticed.
+## Installed artifacts and dependencies
 
-    just qa-release        # builds --release, then runs the full suite on it
+See [release preparation](release/README.md). `installed` requires
+`--installed-root` and checks bytes, modes, ELF architecture, recorded build/source
+identity and host dynamic-library resolution. `dependencies` additionally reads
+the Arch package database and checks required helper executables. A non-Arch
+host reports that dependency gate as SKIP. Presence checks do not prove service
+state, codec functionality, user authorization, TLS/provider behavior or physical
+device transfers.
 
-The suite prints which binary it is exercising (`gust qa: testing <path>`)
-so a green result can never be mistaken for coverage it does not have.
-Override with `GUST_BIN=/path/to/gust ./tests/qa.sh <outdir>`.
-
-## Optional dependencies
-
-Gust must run with none of them. To reproduce a bare system, point `PATH`
-at a directory containing only core utilities and start it there — no
-`bwrap`, no `prlimit`, no image tools. Expected behaviour: it lists and
-browses normally, Grid shows placeholder glyphs rather than broken images,
-and the hint strip explains the missing capability instead of staying
-silent. It must never fall back to decoding untrusted bytes in-process.
-
-## Driving the window from Hyprland
-
-This Omarchy build uses **Lua dispatch**, not the classic string form.
-`hyprctl dispatch resizeactive exact 400 300` is a syntax error here; the
-working calls are:
-
-    hyprctl dispatch 'hl.dsp.window.float()'
-    hyprctl dispatch 'hl.dsp.window.resize({ x = 520, y = 320 })'
-    hyprctl dispatch 'hl.dsp.cursor.move({ x = 460, y = 400 })'
-
-A tiled window ignores resize requests, so float it first.
-
-## qmllint is not a syntax gate
-
-`qmllint` gives up on a file whose imports it cannot resolve (`com.gust.app`
-is registered by the Rust build, not visible to the standalone tool) and
-then exits 0 on **syntactically broken QML**. A mismatched brace once passed
-a full `QML lint: PASS`. `tests/lint-qml.sh` now checks brace balance
-directly, which needs no imports and cannot be fooled by them.
-
-## Pointer injection
-
-The plan's §10 lists "restore an authorised interaction runner for the
-missing end-to-end input checks" as an open item. `wtype` covers the
-keyboard; nothing on this system covered the pointer, so every mouse control
-was only ever verified by looking at a screenshot.
-
-`tests/uinput-mouse.py` creates a temporary virtual mouse through
-`/dev/uinput`, uses it, and removes it on exit:
-
-    sudo python3 tests/uinput-mouse.py click 1212 59
-    sudo python3 tests/uinput-mouse.py doubleclick 600 121
-    sudo python3 tests/uinput-mouse.py drag 100 200 400 500
-    sudo python3 tests/uinput-mouse.py wheel 460 400 -3
-
-It uses **absolute** positioning, not relative motion: a relative mouse
-depends on where the pointer already was, which makes a test that passes
-once fail the next time. Verified accurate to 1px against `hyprctl
-cursorpos`.
-
-It needs write access to `/dev/uinput` (root on most systems). The QA suite
-probes for it once and **reports the mouse cases as failures when injection
-is unavailable**, rather than skipping silently — an untested control that
-looks tested is worse than an obvious gap.
-
-## Testing remote places without touching anybody's real machines
-
-`tests/remote-fixture.sh start` builds a private SSH server: its own host key,
-its own client key, its own `authorized_keys`, listening on 127.0.0.1:2222.
-It never reads or writes the user's `~/.ssh`.
-
-Two lessons paid for by getting this wrong:
-
-- **Pin the session inside the fixture.** Without `ForceCommand internal-sftp
-  -d <share>`, a connection lands in the login directory — which is the real
-  home directory of whoever runs the test. The first live run mounted and
-  listed personal folders. `ChrootDirectory` is the stronger form but needs a
-  root-owned tree and a privileged sshd; an unprivileged fixture reports
-  "server lacks privileges to chroot" and falls back to the whole home.
-- **`Match` must be the last block in sshd_config.** Every directive after it
-  belongs to that block, so a trailing `StrictModes no` fails to parse.
-
-Live tests skip (rather than fail) when the fixture is not running, and the
-QA suite reports the skip so a silent gap is visible.
+`.github/workflows/checks.yml` runs required source/app/portable seam checks and
+native x86_64/aarch64 release builds with staging checks. Portable seams run first
+using Ubuntu's Qt 6.4.2. The app and artifact jobs then select public Qt 6.11.2
+(`linux_gcc_64` / `linux_gcc_arm64`) using pinned aqtinstall 3.3.0 in private runner
+storage, without an account or system Qt replacement. SDK installation uses
+Python 3.14.0 on both native architectures: older Python can misclassify the
+official ARM Qt tools 7z archive as ZIP, producing `BadZipFile`
+([upstream report](https://github.com/miurahr/aqtinstall/issues/1042#issuecomment-5329253499)).
+This selects only the hosted CI toolchain; the Arch package uses its distribution
+Qt and does not run aqt. Installer failures retain
+raw output/tracebacks privately and expose only an exit code, fixed exception
+classes and prerequisite flags. SDK metadata dry runs do not prove archive
+extraction or a usable installed SDK. The unquoted `public`
+property in this source snapshot is rejected by Qt 6.4.2's QML parser; an isolated
+quoted-key control compiles. The chosen qualification floor does not claim to
+identify the earliest compatible Qt release. No UI source is changed by CI.
+This snapshot also uses `Shape.preferredRendererType`, which the
+[Qt documentation](https://doc.qt.io/qt-6/qml-qtquick-shapes-shape.html#preferredRendererType-prop)
+dates to Qt 6.6; fixing the one grammar error would not establish Qt 6.4 support.
+The artifact jobs fetch and
+verify the recipe's declared source archive, build that extracted source, then
+stage it with the reviewed recipe; a checkout alias cannot satisfy source-pin
+qualification. Build receipts record Qt selection. Staging checks reject missing,
+mixed or older Qt libraries and require resolution inside the selected SDK. This
+proves only that SDK's staging environment; the Arch package gate separately
+checks the declared versioned runtime dependencies.
+Library observation reports unprovisioned fixture skips explicitly. Frozen
+archive extraction tests require `libarchive-dev`/`pkg-config` to build the native
+helper, `libarchive-tools` for bsdtar fixtures, and runtime libarchive,
+`/usr/bin/bwrap`, `/usr/bin/prlimit` and the matching helper executable. Cargo's
+integration-test build supplies the helper; CI selects that exact debug sibling.
+`bubblewrap` and `util-linux` are explicit hosted prerequisites. A real
+`--unshare-all` user/mount namespace probe is fatal on refusal or timeout; its raw
+output stays private. Ubuntu's AppArmor denies unprivileged user namespaces
+(Arch does not), so the ephemeral runner loads a profile granting `userns` to
+`/usr/bin/bwrap` alone. That admits the real sandbox; CI never disables it, runs
+untrusted bytes unsandboxed or treats a refusal as anything but a failure.
+Artifact staging runs independently of library observation only after successful
+SDK/app and sandbox admission, and never after cancellation. A failing library
+or sandbox step keeps the job red even if a separate artifact check passes.
+The frozen SMB availability test needs both successful `gio --help` and
+`/usr/share/gvfs/mounts/smb.mount`. Hosted Ubuntu provisioning explicitly includes
+`libglib2.0-bin` and `gvfs-backends` for those prerequisites; GLib development
+headers alone are insufficient. This availability test does not start a fixture,
+authenticate or mount a share, and its success cannot qualify a provider.
+Full `--required` fixtures,
+KVM-only models, desktop/theme, benchmark and hardware/provider qualification
+remain separately required before release; hosted build success cannot certify
+them. There are no screenshot, log or receipt uploads and no self-hosted jobs
+that would expose private runner identities.

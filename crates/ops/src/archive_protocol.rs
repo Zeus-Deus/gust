@@ -59,6 +59,33 @@ pub enum WriteFormat {
     Zip,
     SevenZip,
 }
+impl WriteFormat {
+    pub fn timestamp_range(self) -> ((i64, u32), (i64, u32)) {
+        match self {
+            // PAX's native reader cannot parse the minimum negative integer.
+            Self::TarZstd => ((i64::MIN + 1, 0), (i64::MAX, 999_999_999)),
+            // Common interval for signed and unsigned 32-bit ZIP readers.
+            Self::Zip => ((0, 0), (i32::MAX.into(), 999_999_999)),
+            Self::SevenZip => {
+                const TICKS: u64 = 10_000_000;
+                const EPOCH: i64 = 11_644_473_600;
+                (
+                    (0, 0),
+                    (
+                        (u64::MAX / TICKS) as i64 - EPOCH,
+                        ((u64::MAX % TICKS) * 100 + 99) as u32,
+                    ),
+                )
+            }
+        }
+    }
+    pub fn supports_timestamp(self, seconds: i64, nanoseconds: u32) -> bool {
+        let (minimum, maximum) = self.timestamp_range();
+        nanoseconds < 1_000_000_000
+            && (seconds, nanoseconds) >= minimum
+            && (seconds, nanoseconds) <= maximum
+    }
+}
 #[derive(Serialize, Deserialize)]
 pub struct WriteRequest {
     pub format: WriteFormat,
