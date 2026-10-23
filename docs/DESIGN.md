@@ -449,8 +449,13 @@ there is no ordinary-rename or check-then-rename fallback. Connecting
 successfully does not imply upload support for every file type or backend.
 Unknown mount types retain the existing copy rename path without asserted
 support. Missing or empty mount evidence refuses move admission before
-conflict preservation or merge effects. The engine retains lossless path
-bytes for decoded mount lookup; new claim records encode path bytes so
+conflict preservation or merge effects. Safety classification matches the
+held descriptor's bounded `/proc/self/fdinfo` mount ID to the bounded decoded
+mountinfo inventory. A renamed/replaced lexical path cannot downgrade a held
+SSHFS mount to local. Missing/detached/ambiguous mount evidence remains Unknown.
+Claims take identity and network classification from the actual created/opened
+object descriptor, not a re-resolved pathname. Lossless lexical paths remain
+only as recovery locations; new claim records encode path bytes so
 non-UTF-8 names and newlines cannot redirect ownership or inject fields.
 Each operation gets a unique stage and exclusively creates its initial
 claim. Version 2 requires every recognized field exactly once and canonical

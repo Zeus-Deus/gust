@@ -223,22 +223,44 @@ fn write_record(f: &mut fs::File, c: &StagingClaim) -> std::io::Result<()> {
 
 /// Complete a claim with the identity of the file actually created.
 pub fn confirm(claim_path: &Path, staged: &Path) -> std::io::Result<()> {
-    use std::os::unix::fs::MetadataExt;
+    let (dir, name) = crate::anchor::resolve_parent(staged)?;
+    confirm_at(claim_path, staged, &dir, &name)
+}
+
+pub(crate) fn confirm_at(
+    claim_path: &Path,
+    staged: &Path,
+    dir: &crate::anchor::DirHandle,
+    name: &std::ffi::OsStr,
+) -> std::io::Result<()> {
+    let fd = rustix::fs::openat(
+        dir.as_fd(),
+        name,
+        rustix::fs::OFlags::PATH | rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )?;
+    confirm_file(claim_path, staged, &fd)
+}
+
+pub(crate) fn confirm_file(
+    claim_path: &Path,
+    staged: &Path,
+    fd: impl rustix::fd::AsFd,
+) -> std::io::Result<()> {
     #[cfg(test)]
     if fault::CONFIRM.with(|c| c.get()) {
         return Err(std::io::Error::from_raw_os_error(28));
     }
-    let md = staged.symlink_metadata()?;
-    // Missing mount evidence is not proof of a stable local inode namespace.
-    let net = gust_core::stall::fstype_for(staged).is_none_or(|t| gust_core::stall::can_stall(&t));
+    let st = rustix::fs::fstat(&fd)?;
+    let net = crate::anchor::fstype_for_fd(&fd).is_none_or(|t| gust_core::stall::can_stall(&t));
     write_claim(&StagingClaim {
         path: staged.to_path_buf(),
-        dev: md.dev(),
-        ino: md.ino(),
+        dev: st.st_dev,
+        ino: st.st_ino,
         boot_id: boot_id(),
         pid: std::process::id(),
         claim_file: claim_path.to_path_buf(),
-        since: md.mtime(),
+        since: st.st_mtime,
         net,
         written: 0,
     })

@@ -200,7 +200,7 @@ fn discard_staged(dst_dir: &DirHandle, stage: &OsStr, claim: &Option<PathBuf>, w
 /// Copy one regular file into `dst_dir` under `dst_name`.
 ///
 /// Staged under a private name with restrictive permissions from creation,
-/// then atomically renamed into place. A partial copy never appears at the
+/// then atomically published. A partial copy never appears at the
 /// destination name.
 pub fn copy_regular_file(
     src_dir: &DirHandle,
@@ -267,7 +267,7 @@ enum RegularPublication {
 /// SSHFS does not implement directory fsync: client success cannot prove
 /// durability of the newly linked name before a move deletes its source.
 pub(crate) fn require_move_durability(dst_dir: &DirHandle) -> OpResult<()> {
-    let fstype = gust_core::stall::fstype_for(dst_dir.path());
+    let fstype = dst_dir.fstype();
     require_move_durability_on(fstype.as_deref())
 }
 
@@ -286,7 +286,7 @@ impl RegularPublication {
         if publication_tests::USE_LINK.with(|v| v.get()) {
             return Self::Link;
         }
-        match gust_core::stall::fstype_for(dir.path()).as_deref() {
+        match dir.fstype().as_deref() {
             Some("fuse.sshfs") => Self::Link,
             _ => Self::Rename,
         }
@@ -312,7 +312,7 @@ impl RegularPublication {
             OpError::Io(io::Error::other(
                 "This place could not confirm it can safely add this file before transfer. No file contents were copied. Reconnect or choose a different destination."))
         })?;
-        if let Err(e) = crate::staging::confirm(&claim, &path) {
+        if let Err(e) = crate::staging::confirm_at(&claim, &path, dir, &alias) {
             return Err(OpError::Recovery(e));
         }
         rustix::fs::unlinkat(dir.as_fd(), &alias, rustix::fs::AtFlags::empty())?;
@@ -503,7 +503,7 @@ pub(crate) fn stage_regular_file(
     if let Some(c) = &claim {
         // Bind the claim to the object actually created (device + inode), so
         // reclaiming can prove it is the same file and not a replacement.
-        if let Err(e) = crate::staging::confirm(c, &staged_abs) {
+        if let Err(e) = crate::staging::confirm_file(c, &staged_abs, &dst) {
             drop(dst);
             discard_staged(dst_dir, &stage, &claim, 0);
             return Err(OpError::Recovery(e));
@@ -678,7 +678,7 @@ pub(crate) fn copy_symlink_with_policy(
         return Err(e.into());
     }
     if let Some(c) = &claim {
-        if let Err(e) = crate::staging::confirm(c, &staged_abs) {
+        if let Err(e) = crate::staging::confirm_at(c, &staged_abs, dst_dir, &stage) {
             discard_staged(dst_dir, &stage, &claim, 0);
             return Err(OpError::Recovery(e));
         }
@@ -1263,14 +1263,10 @@ mod tests {
 
 /// Remove staging files left behind by a process that died mid-copy.
 ///
-/// A copy stages under `.gust-staging-<pid>-<name>` and renames it into place
-/// atomically, so a crash can never publish a partial file — but it can leave
-/// the staging file behind. Nothing else will ever clean it up, so a folder
-/// that survived a crash would accumulate hidden debris forever.
-///
-/// Only files whose owning PID is no longer alive are removed. A staging file
-/// belonging to a RUNNING process is another copy in flight, and taking it
-/// would corrupt that copy.
+/// Stages have unique per-operation names. Only abandoned, validated local
+/// claims with exact object identity authorize cleanup. Network, unconfirmed,
+/// legacy and uncertain records/files remain for inspection; no sweep touches
+/// the final publication name or an active operation's stage.
 pub fn sweep_stale_staging(dir: &Path) -> usize {
     let mut removed = 0usize;
 
@@ -1285,8 +1281,8 @@ pub fn sweep_stale_staging(dir: &Path) -> usize {
         }
         // A copy in flight right now — in another process or in this one —
         // is never touched. A claim this process holds for a copy that has
-        // already failed is debris: that is how a remote that dropped
-        // mid-copy gets cleaned up once it is back.
+        // already failed is abandoned, but remote ownership still cannot
+        // be inferred from the name, size, time or synthetic inode.
         if !crate::staging::is_abandoned(&c) {
             continue;
         }

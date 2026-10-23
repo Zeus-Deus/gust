@@ -389,12 +389,17 @@ fn run(
         .and_then(|d| gust_core::stall::fstype_for(&d))
         .unwrap_or_default();
     #[cfg(test)]
-    let dest_fstype = publication_tests::DEST_FSTYPE
-        .with(|v| v.take().map(str::to_owned))
-        .unwrap_or(dest_fstype);
+    let guard_override = publication_tests::DEST_FSTYPE.with(|v| v.take());
     if matches!(req, Request::Move { .. }) {
-        let evidence = (!dest_fstype.is_empty()).then_some(dest_fstype.as_str());
-        if let Err(e) = crate::engine::require_move_durability_on(evidence) {
+        // Resolve the actual destination directory, then match its held mount
+        // id. A saved path label is not authority over the descriptor's mount.
+        let evidence = req
+            .dest_dir()
+            .and_then(|d| crate::anchor::resolve_parent(&d.join(".gust-move-evidence")).ok())
+            .and_then(|(dir, _)| dir.fstype());
+        #[cfg(test)]
+        let evidence = guard_override.map(str::to_owned).or(evidence);
+        if let Err(e) = crate::engine::require_move_durability_on(evidence.as_deref()) {
             if let Err(e) = set_rec(&|r| r.state = crate::journal::JobState::Failed) {
                 lost(e);
                 return;
