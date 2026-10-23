@@ -7,7 +7,8 @@
 //!
 //! - host identity is verified, never bypassed;
 //! - no secret reaches argv, the environment, a log or a config file;
-//! - a blocked mount must not block Gust, so everything is bounded;
+//! - startup helpers have cancellation/deadline budgets; existing FUSE
+//!   filesystem calls may still block and must stay on owned workers;
 //! - "mounted" is only claimed after the mount point is observably a
 //!   different filesystem, not because a command exited zero.
 
@@ -340,7 +341,7 @@ pub fn sshfs_args(spec: &RemoteSpec, mount_point: &Path, timeout_s: u32) -> Vec<
         a.push(format!("UserKnownHostsFile={}", kh.display()));
     }
 
-    // A blocked mount must not block Gust: fail rather than hang forever.
+    // Bound SSH connection establishment, not existing FUSE filesystem calls.
     a.push("-o".into());
     a.push(format!("ConnectTimeout={timeout_s}"));
     // Never prompt on a terminal Gust does not own.
@@ -357,9 +358,10 @@ pub fn sshfs_args(spec: &RemoteSpec, mount_point: &Path, timeout_s: u32) -> Vec<
     a
 }
 
-/// Connect a remote place. Blocking, bounded, and never interactive.
+/// Connect a remote place. Blocking and never interactive.
 ///
-/// Call this on a worker: it is the one function here that touches a network.
+/// Startup helpers have a deadline; filesystem calls do not. Call this on a
+/// worker, as with the preparation and unmount paths.
 pub fn mount(spec: &RemoteSpec, mount_point: &Path, timeout: Duration) -> Result<(), MountError> {
     mount_recovering(spec, mount_point, timeout).map(|_| ())
 }
