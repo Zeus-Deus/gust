@@ -226,6 +226,17 @@ fn parse_mode(s: &str) -> u32 {
     mode
 }
 
+/// Where the sandbox's `/lib64` points, inside the read-only `/usr` bind.
+/// x86_64 binaries load `/lib64/ld-linux-x86-64.so.2`: Arch keeps it in
+/// `/usr/lib` (with `/usr/lib64 -> lib`), Debian/Ubuntu in `/usr/lib64`.
+fn lib64_target() -> &'static str {
+    if Path::new("/usr/lib64").is_dir() {
+        "usr/lib64"
+    } else {
+        "usr/lib"
+    }
+}
+
 /// Compatibility command builder. `false` now refuses the unsandboxed path.
 /// Production parsing uses the structured helper, never this human listing.
 pub fn list_command(path: &Path, sandbox: bool) -> std::io::Result<Command> {
@@ -252,7 +263,7 @@ pub fn list_command(path: &Path, sandbox: bool) -> std::io::Result<Command> {
         "usr/lib",
         "/lib",
         "--symlink",
-        "usr/lib",
+        lib64_target(),
         "/lib64",
         "--symlink",
         "usr/bin",
@@ -557,7 +568,7 @@ impl Reader {
                 "usr/lib",
                 "/lib",
                 "--symlink",
-                "usr/lib",
+                lib64_target(),
                 "/lib64",
                 "--proc",
                 "/proc",
