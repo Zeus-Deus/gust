@@ -557,7 +557,7 @@ impl Reader {
                 "usr/lib",
                 "/lib",
                 "--symlink",
-                "usr/lib",
+                "usr/lib64",
                 "/lib64",
                 "--proc",
                 "/proc",
@@ -684,9 +684,20 @@ impl Reader {
                     return Err(protocol_error());
                 }
                 // A successfully terminated stream cannot carry trailing frames.
+                // The sandbox may still hold the write end briefly after bwrap
+                // exits, so wait for EOF instead of treating WouldBlock as an error.
                 let mut byte = [0];
-                if self.output.read(&mut byte)? != 0 {
-                    return Err(protocol_error());
+                loop {
+                    self.check(cancel)?;
+                    match self.output.read(&mut byte) {
+                        Ok(0) => break,
+                        Ok(_) => return Err(protocol_error()),
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(Duration::from_millis(5))
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                        Err(e) => return Err(e.into()),
+                    }
                 }
                 let now =
                     crate::anchor::FileIdentity::from_stat(&rustix::fs::fstat(&self.archive)?);
