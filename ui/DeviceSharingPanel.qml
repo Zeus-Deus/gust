@@ -142,8 +142,8 @@ Item {
         shareConfirm.path = root.chosenToken
         shareConfirm.preferCancel = true
         shareConfirm.open(root.sharedPath ? qsTr("Turn off folder access?") : qsTr("Let devices open this folder?"),
-            root.sharedPath ? qsTr("%1\n\nDevices can no longer open it. All files stay on this computer.").arg(root.chosenFolder)
-                : qsTr("%1\n\nDevices your Tailscale settings allow can open, change and delete files in it. That can include other people on your network. Files stay on this computer.").arg(root.chosenFolder),
+            root.sharedPath ? qsTr("“%1”\n\nDevices can no longer open it. All files stay on this computer.").arg(root.chosenFolder)
+                : qsTr("“%1”\n\nDevices your Tailscale settings allow can open, change and delete files in it. That can include other people on your network. Files stay on this computer.").arg(root.chosenFolder),
             root.sharedPath ? qsTr("Turn Off") : qsTr("Turn On"), false)
     }
     Connections {

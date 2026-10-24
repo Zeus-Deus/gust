@@ -1,7 +1,7 @@
 //! Personal-device sharing through the local Tailscale daemon (DESIGN §6.4.1).
 //! Reading state never contacts a peer; mutations require an explicit UI action.
 use crate::helper::{self, CallContext, ErrorCode, RemoteError};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt};
@@ -143,49 +143,26 @@ pub fn parse_targets(bytes: &[u8]) -> Result<Vec<SendTarget>, RemoteError> {
     Ok(targets)
 }
 
-/// `drive list` is a padded table, not whitespace-separated paths. Fail closed
-/// if its header/columns change instead of guessing about a published folder.
+/// The LocalAPI JSON retains trailing filename whitespace that `drive list`
+/// cannot distinguish from column padding. Refuse malformed/changed schemas.
 pub fn parse_shares(bytes: &[u8]) -> Result<Vec<(String, String)>, RemoteError> {
-    let text = std::str::from_utf8(bytes).map_err(|_| RemoteError::new(ErrorCode::Protocol))?;
-    if bytes.len() > 256 * 1024 || text.lines().count() > 1024 {
+    #[derive(Deserialize)]
+    struct Share {
+        name: String,
+        path: String,
+    }
+    if bytes.len() > 256 * 1024 {
         return Err(RemoteError::new(ErrorCode::Protocol));
     }
-    let mut lines = text.lines();
-    let header = lines
-        .next()
-        .ok_or_else(|| RemoteError::new(ErrorCode::Protocol))?;
-    let path_col = header
-        .find("path")
-        .filter(|n| *n >= 8)
-        .ok_or_else(|| RemoteError::new(ErrorCode::Protocol))?;
-    let as_col = header
-        .find("as")
-        .filter(|n| *n >= path_col + 8)
-        .ok_or_else(|| RemoteError::new(ErrorCode::Protocol))?;
-    if !header.starts_with("name")
-        || header[as_col..].trim() != "as"
-        || !lines
-            .next()
-            .is_some_and(|s| s.chars().all(|c| c == '-' || c == ' '))
-    {
+    // A nil Go slice is encoded as null; it is an empty share list.
+    let records = serde_json::from_slice::<Option<Vec<Share>>>(bytes)
+        .map_err(|_| RemoteError::new(ErrorCode::Protocol))?
+        .unwrap_or_default();
+    if records.len() > 1024 {
         return Err(RemoteError::new(ErrorCode::Protocol));
     }
     let mut shares = Vec::new();
-    for line in lines {
-        let chars: Vec<_> = line.chars().collect();
-        if chars.len() < as_col {
-            return Err(RemoteError::new(ErrorCode::Protocol));
-        }
-        let name: String = chars[..path_col]
-            .iter()
-            .collect::<String>()
-            .trim_end()
-            .into();
-        let path: String = chars[path_col..as_col]
-            .iter()
-            .collect::<String>()
-            .trim_end()
-            .into();
+    for Share { name, path } in records {
         if name.is_empty()
             || !Path::new(&path).is_absolute()
             || name.chars().any(char::is_control)
@@ -200,7 +177,10 @@ pub fn parse_shares(bytes: &[u8]) -> Result<Vec<(String, String)>, RemoteError> 
 }
 
 fn shares(ctx: &CallContext<'_>) -> Result<Vec<(String, String)>, RemoteError> {
-    parse_shares(&call(&["drive", "list"], ctx)?)
+    parse_shares(&call(
+        &["debug", "localapi", "GET", "/localapi/v0/drive/shares"],
+        ctx,
+    )?)
 }
 
 pub fn snapshot(home: &Path, ctx: &CallContext<'_>) -> Snapshot {
@@ -518,22 +498,36 @@ mod tests {
     }
 
     #[test]
-    fn share_columns_preserve_spaces_and_reject_changed_or_duplicate_tables() {
-        let table = b"name    path                      as\n----    ----------------------    --\ngust    /home/alex/Gust Shared    alex\n";
+    fn share_json_preserves_filename_whitespace_and_rejects_ambiguous_input() {
+        let json = br#"[{"name":"gust","path":"/home/fixture/Photos ","who":"fixture"},
+            {"name":"other","path":"/home/fixture/Photos"}]"#;
         assert_eq!(
-            parse_shares(table).unwrap(),
-            vec![("gust".into(), "/home/alex/Gust Shared".into())]
+            parse_shares(json).unwrap(),
+            vec![
+                ("gust".into(), "/home/fixture/Photos ".into()),
+                ("other".into(), "/home/fixture/Photos".into())
+            ]
         );
-        assert!(parse_shares(b"unexpected output").is_err());
-        let mut twice = table.to_vec();
-        twice.extend_from_slice(b"gust    /home/alex/Gust Shared    alex\n");
-        assert!(parse_shares(&twice).is_err());
-        assert_eq!(
-            parse_shares(b"name    path    as\n----    ----    --\n")
-                .unwrap()
-                .len(),
-            0
-        );
+        for empty in [b"[]".as_slice(), b"null"] {
+            assert!(parse_shares(empty).unwrap().is_empty());
+        }
+        for bad in [
+            "unexpected output",
+            "name    path    as\n----    ----    --\n",
+            r#"[{"name":"gust"}]"#,
+            r#"[{"name":"gust","path":"relative"}]"#,
+            r#"[{"name":"gust","path":"/one"},{"name":"gust","path":"/two"}]"#,
+            r#"[{"name":"gust","path":"/one","path":"/two"}]"#,
+            r#"[{"name":"gust","path":"/two\nlines"}]"#,
+            "[null]",
+            "{}",
+        ] {
+            assert!(parse_shares(bad.as_bytes()).is_err());
+        }
+        let too_many =
+            serde_json::to_vec(&vec![serde_json::json!({"name":"x","path":"/x"}); 1025]).unwrap();
+        assert!(parse_shares(&too_many).is_err());
+        assert!(parse_shares(&vec![b' '; 256 * 1024 + 1]).is_err());
     }
 
     #[test]

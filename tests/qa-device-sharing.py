@@ -28,12 +28,9 @@ if a == ['status', '--json']:
         'pad':{'HostName':'ipad','DNSName':'ipad.fixture.test.','TailscaleIPs':['100.64.0.3'],'OS':'iPadOS','Online':False}}}))
 elif a == ['file','cp','--targets']:
     print('100.64.0.2\tiphone-15\n100.64.0.3\tipad\toffline')
-elif a == ['drive','list']:
+elif a == ['debug','localapi','GET','/localapi/v0/drive/shares']:
     shares = json.loads((r/'shares.json').read_text())
-    nw = max([4]+[len(n) for n in shares]); pw = max([4]+[len(p) for p in shares.values()])
-    print(f'{"name":<{nw}}    {"path":<{pw}}    as')
-    print(f'{"-"*nw}    {"-"*pw}    --')
-    for n,p in shares.items(): print(f'{n:<{nw}}    {p:<{pw}}    fixture')
+    print(json.dumps([{'name':n,'path':p,'who':'fixture'} for n,p in shares.items()]))
 elif a[:2] == ['drive','share']:
     shares = json.loads((r/'shares.json').read_text()); shares[a[2]] = a[3]
     (r/'shares.json').write_text(json.dumps(shares))
@@ -260,6 +257,36 @@ def main():
         blocked = (out/'blocked.log').read_text() if (out/'blocked.log').exists() else ''
         check('ssh-keyscan' not in blocked and 'sshfs' not in blocked and 'xdg-open' not in blocked,
               'sharing never attempts SSH or opens incoming files')
+        app.terminate(); app.wait(timeout=5)
+        plain, spaced = home/'Photos', home/'Photos '
+        for folder in [plain, spaced]:
+            folder.mkdir()
+            for n in ['a.txt', 'b.txt']: (folder/n).write_text('keep this folder\n')
+        (out/'state.json').unlink()
+        app = spawn([str(binary), str(spaced)], 'gust-space-path.log', env)
+        wait(lambda: state().get('model',{}).get('settled'), 'space-path Gust started', 30)
+        time.sleep(.8)
+        for _ in range(6):
+            key('End')
+            if state().get('model',{}).get('cursor') == 1: break
+            time.sleep(.3)
+        palette('Share this folder'); wait(lambda: state().get('sharingOpen'), 'space-path sharing'); ready()
+        button('publishDeviceFolder'); wait(lambda: state().get('sharingConfirmOpen'), 'space-path confirmation')
+        check(state().get('sharingConfirmBody', '').startswith(f'“{spaced}”\n\n'),
+              'publication confirmation quotes the trailing-space folder exactly')
+        key('Tab'); key('Return'); ready()
+        share = state().get('sharingState', {})
+        check(not state()['sharingFailed'] and share.get('shared_path') == str(spaced)
+              and share.get('shared_token') == 'local:' + os.fsencode(spaced).hex()
+              and json.loads((out/'shares.json').read_text()) == {'gust':str(spaced)},
+              'publication and JSON read-back preserve the trailing-space folder identity')
+        button('publishDeviceFolder'); wait(lambda: state().get('sharingConfirmOpen'), 'space-path stop confirmation')
+        check(state().get('sharingConfirmBody', '').startswith(f'“{spaced}”\n\n'),
+              'unsharing confirms the actual trailing-space folder, not its neighbour')
+        key('Tab'); key('Return'); ready()
+        check(not state()['sharingFailed'] and json.loads((out/'shares.json').read_text()) == {}
+              and all((folder/'a.txt').read_text() == 'keep this folder\n' for folder in [plain, spaced]),
+              'unsharing the trailing-space folder retains both distinct folders and their files')
         # Display escaping deliberately makes these names look alike. The
         # selected newline path must be refused, never replaced by its label.
         app.terminate(); app.wait(timeout=5)

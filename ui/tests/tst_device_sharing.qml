@@ -143,6 +143,21 @@ TestCase {
         confirm.accepted()
         compare(model.calls[0].value, "local:2f686f6d652f666978747572652f74776f0a6c696e6573")
     }
+    function test_trailing_space_stays_inside_the_confirmation_and_unshare_identity() {
+        const state = JSON.parse(model.sharing_json)
+        state.shared_path = "/home/fixture/Photos "
+        state.shared_label = state.shared_path
+        state.shared_token = "local:2f686f6d652f666978747572652f50686f746f7320"
+        model.sharing_json = JSON.stringify(state)
+        panel.show(model, "", "", "", "folder")
+        panel.askFolder()
+        const confirm = findChild(panel, "confirmDeviceFolder")
+        verify(confirm.body.startsWith("“/home/fixture/Photos ”\n\n"))
+        compare(confirm.path, state.shared_token)
+        confirm.accepted()
+        compare(model.calls[0].action, "unpublish")
+        compare(model.calls[0].value, state.shared_token)
+    }
     function test_error_is_retained_without_reopening_or_automatic_retry() {
         panel.start("receive", "")
         panel.hide()

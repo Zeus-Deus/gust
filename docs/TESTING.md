@@ -196,9 +196,11 @@ records screenshots, command calls, a runtime QML-error ledger, binary hash and
 check receipt. It covers mobile discovery without SSH, keyboard Connect → device sheet,
 focused Send-only and folder-only entry points, confirmation/cancel,
 changed-share refusal, unsharing without file deletion, incoming-file retention,
-partial failure, Show files, sending, cancellation and the close guard. Missing native
-prerequisites are exit 77; a busy QA lease is exit 75. This is focused debug-build
-integration evidence, not installed-artifact, live-provider or physical-iOS
+partial failure, Show files, sending, cancellation and the close guard.
+It also publishes and unshares a trailing-space folder beside its unspaced
+neighbour, checking the JSON mapping, native token and quoted confirmation.
+Missing native prerequisites are exit 77; a busy QA lease is exit 75. This is
+focused debug-build integration evidence, not installed-artifact, live-provider or physical-iOS
 qualification. Compile under the documented build lease before running it.
 
 ## Installed artifacts and dependencies

@@ -387,6 +387,11 @@ never overwritten with another path; stopping sharing rechecks the displayed
 mapping and removes only that share, retaining all files. CLI list/mutation
 is serialized across Gust processes by a private runtime-file lease, but is
 not a service-atomic compare-and-swap with external administrators.
+Share mappings are read losslessly from the local daemon's JSON endpoint using
+`tailscale debug localapi GET /localapi/v0/drive/shares`. The alpha API is
+version-sensitive: bounded schema validation fails closed, with no fallback to
+the ambiguous padded `drive list` table. Trailing spaces remain part of native
+folder identities, and confirmation quotes the path so its boundaries are visible.
 
 Phone-to-desktop sending uses the existing iOS Share → Tailscale destination;
 Files access uses the existing Tailscale File Provider. Neither exposes the
