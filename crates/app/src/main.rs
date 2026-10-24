@@ -3,6 +3,7 @@
 pub mod bridge;
 mod cli;
 mod clipboard;
+mod directory_cache;
 mod fm1;
 mod folder_sizes;
 mod place_work;

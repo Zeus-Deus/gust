@@ -53,6 +53,44 @@ python3 tests/grid-thumbnail.py
 QT_SCALE_FACTOR=2 python3 tests/grid-thumbnail.py
 ```
 
+## Folder and preview reuse
+
+Local names can be reused from a process-local, 8 MiB / 16-location LRU after
+worker-side directory identity and nanosecond timestamp checks. File metadata
+is read again. Explicit Refresh bypasses the cache; remote/FUSE paths bypass
+it entirely. There is no resident background process or persistent file index.
+
+Grid previews use verified source-version URLs and Qt's decoded-image cache.
+Cache hits are attached before installing a listing when its Grid preference
+is known, and published before any missing preview is rendered. Two render
+workers share a process-wide two-helper limit. Cancellation retires the owned
+helper group, and live refresh keeps unchanged URLs while clearing failed or
+changed previews. The normal 128-pixel decode bound remains unchanged.
+
+Three alternating release pairs on a generated 500-JPEG fixture (1600×1200
+sources, 91 visible previews, isolated 1600×1000 software-rendered desktop)
+observed median first-full-grid time **2.47 → 1.73 seconds** with empty thumbnail
+caches. Warm new-process launches measured **438 → 368 ms**; Back navigation
+measured **172 → 121 ms**. Every run displayed all 91 previews, generated the
+same 156 cache files, and rewrote none on warm launches. Warm process PSS was
+approximately 115 MiB in both variants, excluding GPU memory and external
+services. The diagnostic sampled image readiness about every 100 ms; shared
+host timing ranges overlap for warm launches and Back. These observations do
+not establish a general startup-speed gain or promise instant uncached images.
+
+A separate nine-round alternating worker measurement of 100,000 generated
+names observed **32.9 → 1.8 ms** for enumeration/sorting versus validated name
+reuse, with matching names, kinds and order. This excludes metadata, model
+installation and painting; it is not a whole-directory-loading measurement.
+
+Regression coverage includes LRU bounds, byte-safe ordering, membership changes,
+explicit-refresh bypass, cache-first delivery, the two-worker/helper limits,
+cancellation, versioned local image URLs and immediate decoded-pixel reuse.
+Isolated desktop checks additionally verify same-second replacement pixels,
+unchanged sibling cache files, failed-preview clearing, edits while away,
+last-row previews and navigation cancellation. Captures and raw measurements
+remain private and are not part of the source change.
+
 ## Prior release measurements
 
 These observations come from paired synthetic-fixture comparisons of the

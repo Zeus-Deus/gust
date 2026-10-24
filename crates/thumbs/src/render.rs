@@ -11,6 +11,7 @@
 
 use crate::cache::{cache_base, file_uri, thumbnail_path, thumbnail_path_in, ThumbSize};
 use crate::sandbox::{sandbox_available, validate_output, SandboxSpec, ValidationError};
+use gust_core::lister::CancelToken;
 use std::io::Read;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -207,6 +208,46 @@ pub fn cached(path: &Path, size: ThumbSize) -> Option<PathBuf> {
     cached_version(&target, want).then_some(target)
 }
 
+/// A cache entry checked against a source version on a worker.
+#[derive(Clone, Debug)]
+pub struct Thumbnail {
+    pub path: PathBuf,
+    version: SourceVersion,
+}
+
+impl Thumbnail {
+    /// Changing the source changes Qt's decoded-image cache identity.
+    pub fn url(&self) -> String {
+        format!("{}?gust={}", file_uri(&self.path), self.version.tag())
+    }
+}
+
+pub fn cached_thumbnail(path: &Path, size: ThumbSize) -> Option<Thumbnail> {
+    let target = thumbnail_path(path, size)?;
+    let version = source_version(path).ok()?;
+    cached_version(&target, version).then_some(Thumbnail {
+        path: target,
+        version,
+    })
+}
+
+/// Grid rendering has bounded admission and can stop an already running helper.
+pub fn thumbnail_cancellable(
+    path: &Path,
+    mime: &str,
+    size: ThumbSize,
+    cancel: &CancelToken,
+) -> Result<Thumbnail, ThumbError> {
+    let version = source_version(path)?;
+    let base = cache_base().ok_or_else(|| ThumbError::Cache("no cache dir".into()))?;
+    let target = thumbnail_in_cancel(&base, path, mime, size, cancel)?;
+    verify_source(path, version)?;
+    Ok(Thumbnail {
+        path: target,
+        version,
+    })
+}
+
 fn cached_version(target: &Path, want: SourceVersion) -> bool {
     use rustix::fs::{Mode, OFlags};
     let Ok(fd) = rustix::fs::open(
@@ -305,6 +346,17 @@ fn thumbnail_in(
     mime: &str,
     size: ThumbSize,
 ) -> Result<PathBuf, ThumbError> {
+    thumbnail_in_cancel(base, path, mime, size, &CancelToken::new())
+}
+
+fn thumbnail_in_cancel(
+    base: &Path,
+    path: &Path,
+    mime: &str,
+    size: ThumbSize,
+    cancel: &CancelToken,
+) -> Result<PathBuf, ThumbError> {
+    check_cancel(cancel)?;
     let version = source_version(path)?;
     let target = thumbnail_path_in(base, path, size);
     if cached_version(&target, version) {
@@ -329,7 +381,7 @@ fn thumbnail_in(
     let _ = std::fs::remove_dir_all(&scratch);
     std::fs::create_dir_all(&scratch).map_err(|e| ThumbError::Cache(e.to_string()))?;
 
-    let result = run_helpers(path, &helpers, &scratch);
+    let result = run_helpers_cancel(path, &helpers, &scratch, cancel);
 
     let out = match result {
         Ok(bytes) => bytes,
@@ -341,7 +393,7 @@ fn thumbnail_in(
 
     // A helper may have read while the source was edited or replaced. Never
     // publish those bytes as a verified preview of either version.
-    if let Err(e) = verify_source(path, version) {
+    if let Err(e) = check_cancel(cancel).and_then(|_| verify_source(path, version)) {
         let _ = std::fs::remove_dir_all(&scratch);
         return Err(e);
     }
@@ -508,8 +560,56 @@ fn pdf_page_in(base: &Path, path: &Path, page: u32, px: u32) -> Result<PathBuf, 
 
 /// Try each helper in turn; the first that yields a valid PNG wins.
 fn run_helpers(path: &Path, helpers: &[Helper], scratch: &Path) -> Result<Vec<u8>, ThumbError> {
+    run_helpers_cancel(path, helpers, scratch, &CancelToken::new())
+}
+
+fn check_cancel(cancel: &CancelToken) -> Result<(), ThumbError> {
+    if cancel.is_cancelled() {
+        Err(ThumbError::HelperFailed("cancelled".into()))
+    } else {
+        Ok(())
+    }
+}
+
+// Shared across tabs and windows in this process, including cancelled passes
+// that have not yet retired their helper. Hits never wait for admission.
+static HELPERS: std::sync::Mutex<usize> = std::sync::Mutex::new(0);
+struct Permit;
+impl Permit {
+    fn acquire(cancel: &CancelToken) -> Result<Self, ThumbError> {
+        loop {
+            check_cancel(cancel)?;
+            let mut active = HELPERS
+                .lock()
+                .map_err(|_| ThumbError::HelperFailed("admission unavailable".into()))?;
+            if *active < 2 {
+                *active += 1;
+                return Ok(Self);
+            }
+            drop(active);
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+}
+impl Drop for Permit {
+    fn drop(&mut self) {
+        if let Ok(mut active) = HELPERS.lock() {
+            *active -= 1;
+        }
+    }
+}
+
+fn run_helpers_cancel(
+    path: &Path,
+    helpers: &[Helper],
+    scratch: &Path,
+    cancel: &CancelToken,
+) -> Result<Vec<u8>, ThumbError> {
+    let input = crate::helper::Input::open(path, u64::MAX)
+        .map_err(|_| ThumbError::Source("cannot open preview input".into()))?;
     let mut last = ThumbError::NoHelper;
     for h in helpers {
+        check_cancel(cancel)?;
         let mut spec = SandboxSpec::new(path, scratch);
         if h.binary == "ffmpegthumbnailer" {
             // Decoder/scaler thread stacks can exhaust 512 MiB of virtual
@@ -518,16 +618,22 @@ fn run_helpers(path: &Path, helpers: &[Helper], scratch: &Path) -> Result<Vec<u8
             spec.address_space_bytes = 1024 * 1024 * 1024;
         }
         let hargs: Vec<&str> = h.args.iter().map(String::as_str).collect();
-        let argv = spec.bwrap_argv(h.binary, &hargs);
+        let argv = crate::helper::argv(&spec, h.binary, &hargs);
         let out_file = scratch.join("thumb.png");
         let _ = std::fs::remove_file(&out_file);
 
-        let status = Command::new(&argv[0])
-            .args(&argv[1..])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        let permit = Permit::acquire(cancel)?;
+        let status = crate::helper::OwnedChild::spawn_input(&argv, &input, Stdio::null()).and_then(
+            |mut child| {
+                child.retain_until_exit(permit);
+                crate::helper::wait(
+                    &mut child,
+                    cancel,
+                    std::time::Duration::from_secs(u64::from(spec.wall_timeout_seconds)),
+                    scratch,
+                )
+            },
+        );
 
         match status {
             Ok(s) if s.success() => match validate_output(&out_file, spec.max_output_bytes) {
@@ -535,7 +641,7 @@ fn run_helpers(path: &Path, helpers: &[Helper], scratch: &Path) -> Result<Vec<u8
                 Err(e) => last = ThumbError::BadOutput(e),
             },
             Ok(s) => last = ThumbError::HelperFailed(format!("{} exited with {s}", h.binary)),
-            Err(e) => last = ThumbError::HelperFailed(format!("{}: {e}", h.binary)),
+            Err(e) => last = ThumbError::HelperFailed(format!("{}: {e:?}", h.binary)),
         }
     }
     Err(last)
@@ -911,6 +1017,84 @@ mod tests {
         );
         assert_eq!(&tagged[..8], &png[..8], "the PNG header must stay intact");
         assert_eq!(&tagged[12..16], b"IHDR", "IHDR must stay first");
+    }
+
+    #[test]
+    fn decoded_cache_urls_encode_paths_and_separate_file_versions() {
+        let version = example_version();
+        let thumbnail = Thumbnail {
+            path: PathBuf::from("/cache/a #?.png"),
+            version,
+        };
+        let url = thumbnail.url();
+        assert!(url.starts_with("file:///cache/a%20%23%3F.png?gust="));
+        assert_eq!(thumbnail.clone().url(), url);
+        for changed in [
+            SourceVersion {
+                ino: version.ino + 1,
+                ..version
+            },
+            SourceVersion {
+                mtime_nsec: version.mtime_nsec + 1,
+                ..version
+            },
+            SourceVersion {
+                ctime_nsec: version.ctime_nsec + 1,
+                ..version
+            },
+        ] {
+            assert_ne!(
+                Thumbnail {
+                    path: thumbnail.path.clone(),
+                    version: changed
+                }
+                .url(),
+                url
+            );
+        }
+    }
+
+    #[test]
+    fn cancelled_grid_request_does_not_enter_a_helper() {
+        let cancel = CancelToken::new();
+        cancel.cancel();
+        let d = tmp("cancel-grid");
+        let source = d.join("source.png");
+        fs::write(&source, b"invalid image").unwrap();
+        assert!(thumbnail_in_cancel(
+            &d.join("cache"),
+            &source,
+            "image/png",
+            ThumbSize::Normal,
+            &cancel
+        )
+        .is_err());
+        assert!(!d.join("cache").exists());
+        fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn helper_admission_is_process_wide_and_cancellable() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let active = AtomicUsize::new(0);
+        let peak = AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                let active = &active;
+                let peak = &peak;
+                scope.spawn(move || {
+                    let _permit = Permit::acquire(&CancelToken::new()).unwrap();
+                    let n = active.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak.fetch_max(n, Ordering::SeqCst);
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                    active.fetch_sub(1, Ordering::SeqCst);
+                });
+            }
+        });
+        assert!((1..=2).contains(&peak.load(Ordering::SeqCst)));
+        let cancel = CancelToken::new();
+        cancel.cancel();
+        assert!(Permit::acquire(&cancel).is_err());
     }
 
     #[test]

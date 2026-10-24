@@ -14,8 +14,8 @@ Image {
     height: implicitHeight * fitScale
     visible: status === Image.Ready
     asynchronous: true
-    // Live replacements reuse the URL. Never retain stale decoded pixels.
-    cache: false
+    // The worker versions URLs by source identity, including subsecond edits.
+    cache: true
     fillMode: Image.Stretch
     sourceSize.width: 128
     sourceSize.height: 128
