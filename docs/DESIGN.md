@@ -332,6 +332,69 @@ opens a connection on its own (plan §3).
 
 ### 6.4.1 Connect: one list of every place
 
+#### Apple devices and personal file sharing
+
+Tailscale discovery is not evidence of an SSH file server. Peers whose OS is
+`iOS`/`iPadOS` appear under **Phones and tablets**, outside computer/SSH route
+grouping, with **Share…** instead of Connect. Explicit SSH-config routes remain
+available. No device is contacted or folder published by discovery.
+
+**Device sharing** is one window-owned sheet whose initiating model and selected
+native paths are captured before a send. Every entry point opens the same
+sheet, which names each direction from this computer's point of view:
+
+| Row | Direction | Scope shown |
+|---|---|---|
+| **Send a copy** | this computer → one chosen device | the captured selection; originals stay |
+| **Get files from your devices** | any device → `~/Gust Inbox` | computer-wide, explicit check only |
+| **Let devices open a folder** | devices read/write a folder here | one folder, On/Off, Tailscale policy |
+
+The Connect phone/tablet row titles the sheet with that device's real name and
+puts it first among receivers, but receiving and folder access keep their
+computer-wide wording: neither is restricted to that device. A file's
+**Send a copy to a device…** opens only the Send row; a folder's **Let devices
+open this folder…** opens only the folder row. The general sheet offers Send
+only for an explicit selection and otherwise says how to select. Results and
+progress appear in the row that started them; Stop and Done stay in the footer.
+Copy never guesses iPhone versus iPad: it uses the device name or
+"phone or tablet". Setup links and provider limitations live behind Help; the
+folder-access boundary stays in the explicit confirmation. There is no sidebar
+inbox or pending count, because Gust cannot know what is waiting without
+claiming it. It offers Taildrop sends of regular
+local files, explicit retrieval of the local Taildrop inbox, and a single
+Taildrive share named `gust`. Eligible send targets come from the local CLI's
+`file cp --targets`; discovery alone never grants eligibility. The existing
+identity-checked `send::taildrop` owns sending and preserves partial acceptance
+and delivery uncertainty. Cancellation never promises remote rollback.
+
+Taildrop retrieval uses a fresh private batch directory under `~/Gust Inbox`,
+a held directory descriptor and conflict-safe CLI handling; it never executes
+or previews incoming files. Retrieval and publishing run on cancellable workers.
+Sharing work participates in close/tab/disconnect guards until the worker
+acknowledges completion, and a destroyed model cancels its work.
+
+Taildrive publishes only the folder explicitly displayed and confirmed by the
+person. Folder identities cross QML only as validated `PathToken`s; escaped
+display labels are never converted back into operation paths. Taildrive's CLI
+requires UTF-8 paths; unsupported byte/control names are refused explicitly.
+The home directory itself, hidden directories, symlink ancestry and
+network/FUSE sources are refused. Gust neither changes tailnet policy nor
+claims that a share is restricted to the selected phone: existing Tailscale
+grants control readers/writers. Confirmation states that boundary. The panel
+links to official setup instructions, explains the alpha status, and guides
+iOS Files → Browse → Tailscale → computer → gust. An existing `gust` share is
+never overwritten with another path; stopping sharing rechecks the displayed
+mapping and removes only that share, retaining all files. CLI list/mutation
+is serialized across Gust processes by a private runtime-file lease, but is
+not a service-atomic compare-and-swap with external administrators.
+
+Phone-to-desktop sending uses the existing iOS Share → Tailscale destination;
+Files access uses the existing Tailscale File Provider. Neither exposes the
+iPhone/iPad filesystem or Photos library to Gust. No iCloud credentials,
+custom iOS app, automatic inbox draining or automatic synchronization is added.
+Fixture/native desktop checks qualify the app flow, not a physical Apple device
+or an individual account's Tailscale policy.
+
 The sidebar's **Remote** heading carries a **Connect…** button (also `:`
 → "Connect to a computer or cloud…"). It opens one panel listing:
 

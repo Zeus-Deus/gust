@@ -83,7 +83,10 @@ Item {
         root.selectionKey = ""
         root.current = 0
         root.open = true
-        Qt.callLater(() => keys.forceActiveFocus())
+        Qt.callLater(() => {
+            if (root.selectionKey === "" && !root.actionable(root.current)) root.step(1)
+            keys.forceActiveFocus()
+        })
     }
     function showRoutes(key) {
         root.routeKey = key
@@ -205,6 +208,15 @@ Item {
                 lost: !active && routes.some(x => x.lost) }))
         }
 
+        const mobile = p.mobile || []
+        if (mobile.length > 0) {
+            out.push({ type: "head", text: qsTr("Phones and tablets") })
+            for (const device of mobile)
+                out.push(Object.assign({}, device, { type: "place", kind: "mobile", label: device.name,
+                    detail: qsTr("Phone or tablet · send and get files"), connected: false, lost: false,
+                    extra: device.online ? "" : qsTr("offline") }))
+        }
+
         out.push({ type: "head", text: qsTr("Cloud storage (rclone)") })
         const cl = p.cloud || []
         if (p.cloudError) note(p.cloudError)
@@ -216,6 +228,7 @@ Item {
         out.push({ type: "head", text: qsTr("Add") })
         out.push({ type: "action", action: "cloud-setup", text: qsTr("Add cloud storage (opens rclone config)") })
         out.push({ type: "action", action: "share-add", text: qsTr("Add a shared folder (Windows or NFS)") })
+        out.push({ type: "action", action: "device-sharing", text: qsTr("Send or get files with a phone, tablet or computer") })
         return out
     }
     /// The height of the rows, summed by type, BEFORE any delegate exists
@@ -263,6 +276,7 @@ Item {
             return
         }
         if (r.type !== "place") return
+        if (r.kind === "mobile") { root.actionRequested("device-share:" + r.name); return }
         if (r.connected && !r.lost) { root.openRequested(r.path); return }
         if (r.computer && r.computer.routes.length > 1) {
             root.showRoutes(r.kind + ":" + r.name)
@@ -571,7 +585,7 @@ Item {
                               : [row.modelData.computer ? row.modelData.detail
                                  : (row.modelData.user ? row.modelData.user + "@" : "") + row.modelData.detail
                                    + (row.modelData.port ? ":" + row.modelData.port : ""),
-                                 row.modelData.computer ? "" : row.modelData.remote_path || qsTr("login folder"),
+                                 row.modelData.computer || row.modelData.kind === "mobile" ? "" : row.modelData.remote_path || qsTr("login folder"),
                                  row.modelData.extra,
                                  row.modelData.lost ? qsTr("connection lost")
                                  : row.modelData.connected ? qsTr("connected") : ""]
@@ -663,6 +677,7 @@ Item {
                             anchors.centerIn: parent
                             text: root.busy ? qsTr("Please wait")
                                   : row.isAction ? (row.modelData.action === "back" ? qsTr("Back") : qsTr("Set up"))
+                                  : row.modelData.kind === "mobile" ? qsTr("Share…")
                                   : row.modelData.connected && !row.modelData.lost ? qsTr("Open")
                                   : row.modelData.computer && row.modelData.computer.routes.length > 1 ? qsTr("Connections…")
                                   : row.modelData.lost ? qsTr("Disconnect first")

@@ -18,6 +18,7 @@ pub mod phones;
 pub mod send;
 pub mod setup;
 pub mod shares;
+pub mod sharing;
 pub mod ssh_config;
 pub mod tailscale;
 pub mod upload;

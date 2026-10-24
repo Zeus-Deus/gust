@@ -54,11 +54,13 @@ QtObject {
     readonly property int fontSmall: 13
     readonly property int fontBody: 15
     readonly property int fontSubtitle: 20
+    readonly property int fontTitle: 22
     readonly property string fontFamily: "monospace"
     function withAlpha(c, a) { return Qt.rgba(c.r, c.g, c.b, a) }
 }
 ''')
-    names = ["ui/ConnectPanel.qml", "ui/WheelScroll.qml", "ui/ConfirmDialog.qml", "ui/Main.qml",
+    names = ["ui/ConnectPanel.qml", "ui/DeviceSharingPanel.qml", "ui/SharingButton.qml", "ui/ScrollIndicator.qml", "ui/WheelScroll.qml", "ui/ConfirmDialog.qml", "ui/Main.qml",
+             "ui/tests/tst_device_sharing.qml",
              "ui/tests/tst_connections.qml", "ui/tests/tst_connection_controller.qml.in",
              "crates/app/tests/connection_regressions.py", "crates/app/tests/tab_model_regressions.py"]
     hashes = {}

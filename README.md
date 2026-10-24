@@ -22,6 +22,8 @@ and their prerequisites.
   sandboxed thumbnail helpers. Availability depends on installed tools/codecs.
 - Explicit SSHFS, rclone and GVfs connections; Tailscale discovery; phone,
   camera and removable-volume actions; Open/Save portal integration.
+- Personal-device sharing: Taildrop sends/receives and explicitly confirmed
+  Taildrive folder access. iPhones/iPads offer Share rather than SSH Connect.
 - Archive listing/extraction and tar.zst creation. Archive containment and
   recovery are being strengthened; a displayed preview is not proof that
   extraction is complete or safe for every archive.
@@ -31,6 +33,26 @@ mount/eject and individual cloud accounts need their own qualification. A
 successful mount does not establish upload, atomic rename or recovery support.
 New backend contracts become user features only after app/UI consumption and
 native acceptance.
+
+To exchange files with an iPhone, iPad or other device, open **Connect** and
+choose **Share…** on the device. One sheet names each direction:
+
+- **Send a copy**: right-click selected local files → **Send a copy to a
+  device…**, then choose the receiver. Originals stay on this computer.
+- **Get files from your devices**: on the phone or tablet, **Share → Tailscale
+  → your computer**, then **Check for files** in Gust. Waiting files are saved
+  in private batches in `~/Gust Inbox`, without overwriting previous files or
+  opening received content.
+- **Let devices open a folder**: **Turn On…** (or right-click a local folder →
+  **Let devices open this folder…**), confirm the exact folder, then browse it
+  in the Files app under Tailscale → your network → your computer → `gust`.
+  Taildrive must be enabled by your tailnet administrator, whose existing
+  policy controls who can read/write; Gust does not alter that policy.
+  **Turn Off…** removes access and keeps the files.
+
+Taildrive is alpha. This does not expose the phone's filesystem, mount Photos,
+configure iCloud, or provide automatic synchronization. Physical iOS/account
+qualification remains separate from the simulated desktop sharing journey.
 
 ## Build and run
 

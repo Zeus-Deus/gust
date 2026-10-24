@@ -87,7 +87,30 @@ pub mod qobject {
         /// remotes, each with whether it is connected. Reading these opens
         /// no connection to any of them (DESIGN §6.4.1).
         #[qproperty(QString, places_json)]
+        #[qproperty(QString, sharing_json)]
+        #[qproperty(bool, sharing_busy)]
+        #[qproperty(bool, sharing_checking)]
         type DirModel = super::DirModelRust;
+
+        #[qsignal]
+        fn sharing_done(
+            self: Pin<&mut DirModel>,
+            action: QString,
+            success: bool,
+            message: QString,
+            path: QString,
+        );
+        #[qinvokable]
+        fn request_sharing(self: Pin<&mut DirModel>);
+        /// Capture native selection paths before opening the receiver picker.
+        #[qinvokable]
+        fn prepare_device_send(self: Pin<&mut DirModel>, row: i32) -> QString;
+        #[qinvokable]
+        fn device_folder(self: &DirModel, row: i32) -> QString;
+        #[qinvokable]
+        fn device_share(self: Pin<&mut DirModel>, action: QString, value: QString) -> QString;
+        #[qinvokable]
+        fn cancel_device_share(self: Pin<&mut DirModel>);
 
         /// A place operation finished on its worker. `message` is "" on
         /// success, "ASK:<question>" when the user must decide, or a
@@ -946,7 +969,7 @@ use gust_core::lister::{
 use gust_core::location::LocationKey;
 use gust_core::search::{filter_entries, type_ahead_index};
 use gust_core::theme::Tokens;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 // Role ids exposed to QML.
 const ROLE_NAME: i32 = 0x0100;
@@ -1072,6 +1095,10 @@ pub struct DirModelRust {
     jump_rev: i32,
     jump_completion: QString,
     places_json: QString,
+    sharing_json: QString,
+    sharing_busy: bool,
+    sharing_checking: bool,
+    sharing_work: SharingWork,
     /// Coalesce periodic and explicit refreshes; never publish overlapping snapshots.
     places_refreshing: bool,
     places_again: bool,
@@ -1114,6 +1141,19 @@ struct PendingTransfer {
     /// The paste came from a cut: the clipboard is consumed only when the
     /// job really starts, so a cancelled dialog leaves it pasteable.
     consumes_cut: bool,
+}
+
+#[derive(Default)]
+struct SharingWork {
+    cancel: CancelToken,
+    prepared: Vec<PathBuf>,
+    active_paths: Vec<PathBuf>,
+}
+
+impl Drop for SharingWork {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+    }
 }
 
 /// What a transfer funnel returns when it must ask first. QML opens the
@@ -1334,6 +1374,10 @@ impl DirModelRust {
             jump_rev: 0,
             jump_completion: QString::default(),
             places_json: QString::from("{}"),
+            sharing_json: QString::from("{}"),
+            sharing_busy: false,
+            sharing_checking: false,
+            sharing_work: SharingWork::default(),
             places_refreshing: false,
             places_again: false,
             jump_cands: Vec::new(),
@@ -4308,6 +4352,156 @@ impl qobject::DirModel {
 
     // --- every connectable place (DESIGN §6.4.1) --------------------------
 
+    fn request_sharing(mut self: Pin<&mut Self>) {
+        if self.sharing_checking || self.sharing_busy {
+            return;
+        }
+        let Some(thread) = self.qt_thread_handle() else {
+            return;
+        };
+        let home = PathBuf::from(self.home_path.to_string());
+        self.as_mut().set_sharing_checking(true);
+        let spawned = std::thread::Builder::new().name("gust-sharing-state".into()).spawn(move || {
+            let snapshot = std::panic::catch_unwind(|| {
+                let cancel = CancelToken::new();
+                let snapshot = gust_remote::sharing::snapshot(&home, &gust_remote::helper::CallContext {
+                    cancel: &cancel, timeout: gust_remote::sharing::discovery_timeout(),
+                });
+                serde_json::to_string(&snapshot).unwrap_or_default()
+            }).unwrap_or_else(|_| r#"{"send_error":"Sharing could not be checked. Check again.","drive_error":"Sharing could not be checked. Check again."}"#.into());
+            let _ = thread.queue(move |mut model| {
+                model.as_mut().set_sharing_json(QString::from(&snapshot));
+                model.as_mut().set_sharing_checking(false);
+            });
+        });
+        if spawned.is_err() {
+            self.as_mut().set_sharing_checking(false);
+            self.as_mut().set_sharing_json(QString::from(r#"{"send_error":"Could not start checking sharing. Check again.","drive_error":"Could not start checking sharing. Check again."}"#));
+        }
+    }
+
+    fn prepare_device_send(mut self: Pin<&mut Self>, row: i32) -> QString {
+        if self.sharing_busy {
+            return QString::default();
+        }
+        self.as_mut().set_cursor_if_no_selection(row);
+        let paths = self.target_paths();
+        let description = if paths.len() == 1 {
+            gust_core::location::escape_for_display(paths[0].file_name().unwrap_or_default())
+        } else {
+            format!("{} selected items", paths.len())
+        };
+        self.as_mut().rust_mut().sharing_work.prepared = paths;
+        QString::from(&description)
+    }
+
+    fn device_folder(&self, row: i32) -> QString {
+        let path = if row < 0 {
+            self.key.as_path().map(Path::to_path_buf)
+        } else {
+            self.path_of_row(row)
+        };
+        let descriptor = path.as_ref().and_then(|p| gust_core::location::PathToken::from_path(p)).map(|p|
+            serde_json::json!({"path": gust_core::location::escape_for_display(p.as_path().as_os_str()), "token": p.to_token()}))
+            .unwrap_or_else(|| serde_json::json!({"path": "This location cannot be shared", "token": ""}));
+        QString::from(&descriptor.to_string())
+    }
+
+    fn cancel_device_share(self: Pin<&mut Self>) {
+        self.sharing_work.cancel.cancel();
+    }
+
+    fn device_share(mut self: Pin<&mut Self>, action: QString, value: QString) -> QString {
+        if self.sharing_busy || self.sharing_checking {
+            return QString::from("Wait for the current sharing action to finish.");
+        }
+        let action = action.to_string();
+        if !matches!(
+            action.as_str(),
+            "send" | "receive" | "publish" | "unpublish"
+        ) {
+            return QString::from("That sharing action is unsupported.");
+        }
+        let Some(thread) = self.qt_thread_handle() else {
+            return QString::from("Sharing is not ready.");
+        };
+        let home = PathBuf::from(self.home_path.to_string());
+        let paths = self.sharing_work.prepared.clone();
+        if action == "send" && paths.is_empty() {
+            return QString::from("Select local files to send first.");
+        }
+        let value = value.to_string();
+        let folder = if action == "publish" || action == "unpublish" {
+            let Some(token) = gust_core::location::PathToken::parse(&value) else {
+                return QString::from("That folder identity is invalid. Choose the folder again.");
+            };
+            if token.as_path().to_str().is_none() {
+                return QString::from("Tailscale folder sharing needs a UTF-8 folder path. Choose another folder; no name was changed.");
+            }
+            Some(token.as_path().to_path_buf())
+        } else {
+            None
+        };
+        let cancel = CancelToken::new();
+        self.as_mut().rust_mut().sharing_work.cancel = cancel.clone();
+        self.as_mut().rust_mut().sharing_work.active_paths = if action == "send" {
+            paths.clone()
+        } else if action == "publish" {
+            folder.iter().cloned().collect()
+        } else {
+            Vec::new()
+        };
+        self.as_mut().set_sharing_busy(true);
+        let spawned = std::thread::Builder::new().name("gust-device-sharing".into()).spawn(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<(String, PathBuf), String> {
+                use gust_remote::{helper::CallContext, sharing};
+                let ctx = CallContext { cancel: &cancel, timeout: std::time::Duration::from_secs(30 * 60) };
+                match action.as_str() {
+                    "send" => {
+                        sharing::eligible_target(&value, &CallContext { cancel: &cancel, timeout: std::time::Duration::from_secs(5) }).map_err(|e| e.message)?;
+                        match gust_remote::send::taildrop(&value, &paths, &ctx) {
+                            Ok(receipt) => Ok((format!("{} file(s) accepted by the receiving device. Your originals stay here. Open Tailscale on the device to finish saving them.", receipt.accepted_files), PathBuf::new())),
+                            Err(failure) => Err(format!("{} {} file(s) were already accepted. {}", failure.error.message,
+                                failure.accepted_files, if failure.delivery_uncertain { "Other files may also have arrived. Check the receiver before retrying." } else { "Your originals stay here." })),
+                        }
+                    }
+                    "receive" => {
+                        let received = sharing::receive(&home, &ctx).map_err(|e| e.message)?;
+                        Ok((if received.files == 0 { "No files are waiting. On your phone or tablet, select a file or photo, tap Share, choose Tailscale, then choose this computer.".into() }
+                            else { format!("{} file(s) received in Gust Inbox. Nothing was opened automatically.", received.files) }, received.path))
+                    }
+                    "publish" => {
+                        let path = folder.as_ref().ok_or("No folder was selected.")?;
+                        sharing::publish(&home, path, &CallContext { cancel: &cancel, timeout: std::time::Duration::from_secs(15) }).map_err(|e| e.message)?;
+                        Ok(("Devices can open this folder now. In the Files app on your phone or tablet, choose Browse → Tailscale → your network → this computer → gust. Access follows your Tailscale policy.".into(), path.clone()))
+                    }
+                    "unpublish" => {
+                        let path = folder.as_ref().and_then(|p| p.to_str()).ok_or("No folder was selected.")?;
+                        sharing::unpublish(path, &CallContext { cancel: &cancel, timeout: std::time::Duration::from_secs(15) }).map_err(|e| e.message)?;
+                        Ok(("Devices can no longer open this folder. All files stay on this computer.".into(), PathBuf::new()))
+                    }
+                    _ => unreachable!(),
+                }
+            })).unwrap_or_else(|_| Err("The sharing worker stopped unexpectedly. Some work may have completed; check sharing and the receiver before retrying.".into()));
+            let _ = thread.queue(move |mut model| {
+                model.as_mut().rust_mut().sharing_work.active_paths.clear();
+                model.as_mut().set_sharing_busy(false);
+                let (success, message, path) = match result {
+                    Ok((message, path)) => (true, message, path),
+                    Err(message) => (false, message, PathBuf::new()),
+                };
+                model.as_mut().sharing_done(QString::from(&action), success, QString::from(&message), QString::from(path.to_string_lossy().as_ref()));
+                model.as_mut().request_sharing();
+            });
+        });
+        if spawned.is_err() {
+            self.as_mut().rust_mut().sharing_work.active_paths.clear();
+            self.as_mut().set_sharing_busy(false);
+            return QString::from("Could not start the sharing worker. Nothing was started.");
+        }
+        QString::default()
+    }
+
     fn request_places(mut self: Pin<&mut Self>) {
         if self.as_ref().places_refreshing {
             self.as_mut().rust_mut().places_again = true;
@@ -4405,7 +4599,19 @@ impl qobject::DirModel {
             });
         }
         let users = tailscale::users_path();
+        let mobile: Vec<_> = snapshot
+            .peers
+            .iter()
+            .filter(|p| gust_remote::sharing::is_apple_mobile(&p.os))
+            .map(|p| {
+                serde_json::json!({"name": p.name, "target": p.target, "os": p.os,
+                "online": p.online, "available": snapshot.available})
+            })
+            .collect();
         for peer in snapshot.peers.iter().take(200) {
+            if gust_remote::sharing::is_apple_mobile(&peer.os) {
+                continue;
+            }
             let user = users
                 .as_ref()
                 .and_then(|p| tailscale::remembered_user(p, &peer.name))
@@ -4514,7 +4720,7 @@ impl qobject::DirModel {
             }
             Err(error) => cloud_error = error.message(),
         }
-        serde_json::json!({"computers": computers::group_computers(routes), "ssh": ssh, "tailnet": tail,
+        serde_json::json!({"computers": computers::group_computers(routes), "ssh": ssh, "tailnet": tail, "mobile": mobile,
             "tailnetError": snapshot.error, "cloud": cloud, "cloudError": cloud_error,
             "sshfs": mount::Backend::Sshfs.available(), "setup": gust_remote::setup::snapshot(),
             "localUser": local_user}).to_string()
@@ -7811,6 +8017,14 @@ impl qobject::DirModel {
         let Some(mount) = mount else {
             return QString::default();
         };
+        if self.sharing_busy && crate::place_work::touches(&self.sharing_work.active_paths, &mount)
+        {
+            return QString::from(if self.sharing_work.cancel.is_cancelled() {
+                "stopping"
+            } else {
+                "transfer"
+            });
+        }
         if let Some(job) = self.job.as_ref() {
             if crate::place_work::touches(&crate::place_work::job_paths(job), &mount) {
                 return QString::from(if self.job_stopping() {
@@ -8882,6 +9096,7 @@ impl qobject::DirModel {
     }
 
     fn cancel_job(self: Pin<&mut Self>) {
+        self.sharing_work.cancel.cancel();
         if let Some(job) = self.job.as_ref() {
             job.cancel();
         }
