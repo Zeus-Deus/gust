@@ -1848,9 +1848,7 @@ impl qobject::DirModel {
         let names = window
             .into_iter()
             .filter_map(|i| snap.entries.get(i))
-            .filter(|e| {
-                e.kind != EntryKind::Dir && gust_core::mime::thumbnail_mime(&e.name).is_some()
-            })
+            .filter(|e| crate::thumbnails::mime(e).is_some())
             .map(|e| e.name.clone());
         crate::thumbnails::cached_rows(dir, names, cancel)
     }
@@ -1899,10 +1897,7 @@ impl qobject::DirModel {
                 .iter()
                 .chain(r.visible[window.start..first].iter())
                 .filter_map(|i| r.all.get(*i))
-                .filter(|e| e.kind != EntryKind::Dir)
-                .filter_map(|e| {
-                    gust_core::mime::thumbnail_mime(&e.name).map(|m| (e.name.clone(), m))
-                })
+                .filter_map(|e| crate::thumbnails::mime(e).map(|m| (e.name.clone(), m)))
                 .collect()
         };
         self.as_mut().rust_mut().thumb_cancel.cancel();
@@ -5502,8 +5497,8 @@ impl qobject::DirModel {
             .collect();
         {
             let mut r = self.as_mut().rust_mut();
+            crate::thumbnails::retain_eligible(&mut r.thumbs, &snap.entries);
             r.all = snap.entries;
-            r.thumbs.retain(|name, _| index_of.contains_key(name));
             r.visible = survivors
                 .iter()
                 .filter_map(|n| index_of.get(n).copied())

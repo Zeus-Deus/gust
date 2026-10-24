@@ -223,12 +223,9 @@ impl Thumbnail {
 }
 
 pub fn cached_thumbnail(path: &Path, size: ThumbSize) -> Option<Thumbnail> {
-    let target = thumbnail_path(path, size)?;
+    let base = cache_base()?;
     let version = source_version(path).ok()?;
-    cached_version(&target, version).then_some(Thumbnail {
-        path: target,
-        version,
-    })
+    immutable_cached(&base, path, size, version)
 }
 
 /// Grid rendering has bounded admission and can stop an already running helper.
@@ -240,12 +237,102 @@ pub fn thumbnail_cancellable(
 ) -> Result<Thumbnail, ThumbError> {
     let version = source_version(path)?;
     let base = cache_base().ok_or_else(|| ThumbError::Cache("no cache dir".into()))?;
-    let target = thumbnail_in_cancel(&base, path, mime, size, cancel)?;
+    let target = render_thumbnail(&base, path, mime, size, cancel, true)?;
     verify_source(path, version)?;
     Ok(Thumbnail {
         path: target,
         version,
     })
+}
+
+fn immutable_path(base: &Path, source: &Path, size: ThumbSize, version: SourceVersion) -> PathBuf {
+    let name = crate::cache::md5_hex(file_uri(source).as_bytes());
+    let revision = crate::cache::md5_hex(version.tag().as_bytes());
+    base.join("gust-grid")
+        .join(size.dir_name())
+        .join(format!("{name}-{revision}.png"))
+}
+
+fn immutable_cached(
+    base: &Path,
+    source: &Path,
+    size: ThumbSize,
+    version: SourceVersion,
+) -> Option<Thumbnail> {
+    let target = immutable_path(base, source, size, version);
+    if !cached_version(&target, version) {
+        // Pin the shared inode while checking and promoting its bytes. Checking
+        // one pathname and then copying it would race another renderer's rename.
+        let bytes = read_cached_png(&thumbnail_path_in(base, source, size), version)?;
+        publish_cache(&target, &bytes, false).ok()?;
+        if !cached_version(&target, version) {
+            return None;
+        }
+    }
+    Some(Thumbnail {
+        path: target,
+        version,
+    })
+}
+
+fn read_cached_png(target: &Path, version: SourceVersion) -> Option<Vec<u8>> {
+    use rustix::fs::{Mode, OFlags};
+    let fd = rustix::fs::open(
+        target,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .ok()?;
+    read_cached_file(std::fs::File::from(fd), version)
+}
+
+fn read_cached_file(file: std::fs::File, version: SourceVersion) -> Option<Vec<u8>> {
+    const MAX: u64 = 8 * 1024 * 1024 + 512;
+    let meta = file.metadata().ok()?;
+    if !meta.is_file() || meta.len() > MAX {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX + 1).read_to_end(&mut bytes).ok()?;
+    if bytes.len() as u64 > MAX || png_source_matches(&mut bytes.as_slice(), version) != Some(true)
+    {
+        return None;
+    }
+    Some(bytes)
+}
+
+/// Stage complete bytes before publication. Immutable destinations are linked
+/// without replacement; another process can only win with the same version.
+fn publish_cache(target: &Path, bytes: &[u8], replace: bool) -> Result<(), ThumbError> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let parent = target
+        .parent()
+        .ok_or_else(|| ThumbError::Cache("no cache parent".into()))?;
+    std::fs::create_dir_all(parent).map_err(|e| ThumbError::Cache(e.to_string()))?;
+    let stage = parent.join(format!(".gust-publish-{}-{n}", std::process::id()));
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&stage)
+        .map_err(|e| ThumbError::Cache(e.to_string()))?;
+    let result = (|| {
+        file.write_all(bytes)?;
+        drop(file);
+        if replace {
+            std::fs::rename(&stage, target)
+        } else {
+            match std::fs::hard_link(&stage, target) {
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+                result => result,
+            }
+        }
+    })();
+    let _ = std::fs::remove_file(stage);
+    result.map_err(|e| ThumbError::Cache(e.to_string()))
 }
 
 fn cached_version(target: &Path, want: SourceVersion) -> bool {
@@ -356,10 +443,25 @@ fn thumbnail_in_cancel(
     size: ThumbSize,
     cancel: &CancelToken,
 ) -> Result<PathBuf, ThumbError> {
+    render_thumbnail(base, path, mime, size, cancel, false)
+}
+
+fn render_thumbnail(
+    base: &Path,
+    path: &Path,
+    mime: &str,
+    size: ThumbSize,
+    cancel: &CancelToken,
+    immutable: bool,
+) -> Result<PathBuf, ThumbError> {
     check_cancel(cancel)?;
     let version = source_version(path)?;
     let target = thumbnail_path_in(base, path, size);
-    if cached_version(&target, version) {
+    if immutable {
+        if let Some(thumbnail) = immutable_cached(base, path, size, version) {
+            return Ok(thumbnail.path);
+        }
+    } else if cached_version(&target, version) {
         return Ok(target);
     }
     if !sandbox_available() {
@@ -399,27 +501,33 @@ fn thumbnail_in_cancel(
     }
     let tagged = with_source_text(&out, version);
 
-    if let Some(parent) = target.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| ThumbError::Cache(e.to_string()))?;
-    }
-    // Stage then rename: a reader never sees a half-written PNG.
-    let stage = target.with_file_name(format!(
-        ".gust-staging-{}-{n}-{}",
-        std::process::id(),
-        target
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("thumb")
-    ));
-    let write = std::fs::write(&stage, &tagged)
-        .and_then(|_| std::fs::rename(&stage, &target))
-        .map_err(|e| ThumbError::Cache(e.to_string()));
+    let write = publish_rendered(base, path, size, version, &tagged, immutable);
     let _ = std::fs::remove_dir_all(&scratch);
-    if let Err(e) = write {
-        let _ = std::fs::remove_file(&stage);
-        return Err(e);
+    write
+}
+
+fn publish_rendered(
+    base: &Path,
+    source: &Path,
+    size: ThumbSize,
+    version: SourceVersion,
+    tagged: &[u8],
+    immutable: bool,
+) -> Result<PathBuf, ThumbError> {
+    let target = thumbnail_path_in(base, source, size);
+    let immutable_target = immutable_path(base, source, size, version);
+    if immutable {
+        publish_cache(&immutable_target, tagged, false)?;
     }
-    Ok(target)
+    publish_cache(&target, tagged, true)?;
+    if immutable {
+        if !cached_version(&immutable_target, version) {
+            return Err(ThumbError::Cache("immutable preview is invalid".into()));
+        }
+        Ok(immutable_target)
+    } else {
+        Ok(target)
+    }
 }
 
 fn verify_source(path: &Path, version: SourceVersion) -> Result<(), ThumbError> {
@@ -1052,6 +1160,81 @@ mod tests {
                 url
             );
         }
+    }
+
+    #[test]
+    fn late_old_renderer_cannot_replace_pixels_behind_a_new_version_url() {
+        let d = tmp("immutable-race");
+        let source = d.join("source.png");
+        let base = d.join("cache");
+        fs::write(&source, b"old source").unwrap();
+        let old = source_version(&source).unwrap();
+        let mut old_bytes = with_source_text(&png_header(), old);
+        old_bytes.extend_from_slice(b"old pixels");
+        let (checked_tx, checked_rx) = std::sync::mpsc::sync_channel(0);
+        let (resume_tx, resume_rx) = std::sync::mpsc::sync_channel(0);
+        std::thread::scope(|scope| {
+            let source = &source;
+            let base = &base;
+            let old_bytes = &old_bytes;
+            let late = scope.spawn(move || {
+                verify_source(source, old).unwrap();
+                checked_tx.send(()).unwrap();
+                resume_rx.recv().unwrap();
+                publish_rendered(base, source, ThumbSize::Normal, old, old_bytes, true).unwrap();
+                assert!(verify_source(source, old).is_err());
+            });
+            checked_rx.recv().unwrap();
+            let replacement = d.join("replacement.png");
+            fs::write(&replacement, b"new source").unwrap();
+            fs::rename(replacement, source).unwrap();
+            let new = source_version(source).unwrap();
+            let mut new_bytes = with_source_text(&png_header(), new);
+            new_bytes.extend_from_slice(b"new pixels");
+            let published =
+                publish_rendered(base, source, ThumbSize::Normal, new, &new_bytes, true).unwrap();
+            let url = Thumbnail {
+                path: published.clone(),
+                version: new,
+            }
+            .url();
+            resume_tx.send(()).unwrap();
+            late.join().unwrap();
+            assert_eq!(
+                fs::read(thumbnail_path_in(base, source, ThumbSize::Normal)).unwrap(),
+                *old_bytes
+            );
+            assert_eq!(fs::read(&published).unwrap(), new_bytes);
+            let cached = immutable_cached(base, source, ThumbSize::Normal, new).unwrap();
+            assert_eq!(cached.url(), url);
+            assert_eq!(fs::read(cached.path).unwrap(), new_bytes);
+            // Even a duplicate publication cannot replace an immutable inode.
+            publish_cache(&published, old_bytes, false).unwrap();
+            assert_eq!(fs::read(published).unwrap(), new_bytes);
+        });
+        fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn shared_cache_promotion_reads_the_checked_inode_after_a_path_replacement() {
+        let d = tmp("immutable-promotion");
+        let target = d.join("shared.png");
+        let version = example_version();
+        let mut wanted = with_source_text(&png_header(), version);
+        wanted.extend_from_slice(b"wanted pixels");
+        publish_cache(&target, &wanted, true).unwrap();
+        let held = fs::File::open(&target).unwrap();
+        let other = with_source_text(
+            &png_header(),
+            SourceVersion {
+                ino: version.ino + 1,
+                ..version
+            },
+        );
+        publish_cache(&target, &other, true).unwrap();
+        assert_eq!(read_cached_file(held, version), Some(wanted));
+        assert!(read_cached_png(&target, version).is_none());
+        fs::remove_dir_all(d).unwrap();
     }
 
     #[test]

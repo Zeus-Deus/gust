@@ -4,6 +4,24 @@ use gust_core::lister::CancelToken;
 use std::ffi::OsString;
 use std::path::Path;
 
+pub fn mime(entry: &gust_core::Entry) -> Option<&'static str> {
+    (entry.kind != gust_core::EntryKind::Dir)
+        .then(|| gust_core::mime::thumbnail_mime(&entry.name))
+        .flatten()
+}
+
+pub fn retain_eligible(
+    previews: &mut std::collections::HashMap<OsString, String>,
+    entries: &[gust_core::Entry],
+) {
+    let eligible: std::collections::HashSet<_> = entries
+        .iter()
+        .filter(|e| mime(e).is_some())
+        .map(|e| &e.name)
+        .collect();
+    previews.retain(|name, _| eligible.contains(name));
+}
+
 pub fn cached_rows(
     dir: &Path,
     names: impl IntoIterator<Item = OsString>,
@@ -178,6 +196,17 @@ impl Work {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn live_file_to_directory_replacement_drops_the_retained_preview() {
+        use gust_core::{Entry, EntryKind};
+        let name = OsString::from("photo.jpg");
+        let mut previews = std::collections::HashMap::from([(name.clone(), "old-photo".into())]);
+        retain_eligible(&mut previews, &[Entry::new(name.clone(), EntryKind::File)]);
+        assert_eq!(previews.len(), 1);
+        retain_eligible(&mut previews, &[Entry::new(name, EntryKind::Dir)]);
+        assert!(previews.is_empty());
+    }
 
     #[test]
     fn hits_publish_before_generation_and_misses_have_two_workers() {

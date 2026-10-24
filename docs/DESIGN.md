@@ -2217,9 +2217,15 @@ remains counted until it exits, and no replacement pass starts in that view.
 Only a visible view reports viewport rows, and becoming visible reports its
 current bounds again. Every previewable row in those bounds is eligible; a
 fixed prefix limit must not strand tiles on large or zoomed-out viewports.
-Grid image URLs use the encoded cache-file URI plus the verified source-version
-query. Qt may reuse its decoded-image cache for unchanged versions; replacements
-must publish a different URL. Failed revalidation removes an old preview.
+Grid image URLs address immutable source-version-specific PNGs under the
+thumbnail cache's `gust-grid` directory, separate from the replaceable freedesktop
+cache path. Publication never replaces an immutable file. Promoting an existing
+freedesktop entry reads and checks its tags and bytes through the same held
+descriptor, so a concurrent rename cannot bind one version's URL to another's
+pixels. Qt may reuse unchanged decoded pixels; replacements publish a different
+URL. Immutable copies consume additional disposable cache space. Failed
+revalidation, removed entries and entries that cease to be previewable (including
+same-name file-to-directory replacements) remove their old previews.
 Initial cache hits are attached before the listing is installed, so revisiting
 a folder need not repaint placeholders before rediscovering its cached images.
 The grid bounds decoded PNGs to the normal thumbnail's 128-pixel box. Aspect

@@ -61,6 +61,10 @@ is read again. Explicit Refresh bypasses the cache; remote/FUSE paths bypass
 it entirely. There is no resident background process or persistent file index.
 
 Grid previews use verified source-version URLs and Qt's decoded-image cache.
+The URLs now address immutable version-specific copies, separate from the
+replaceable freedesktop PNGs. Cache promotion checks the bytes through a held
+descriptor; late concurrent publications cannot overwrite another version's
+pixels. This uses additional disposable disk cache space.
 Cache hits are attached before installing a listing when its Grid preference
 is known, and published before any missing preview is rendered. Two render
 workers share a process-wide two-helper limit. Cancellation retires the owned
@@ -90,6 +94,11 @@ Isolated desktop checks additionally verify same-second replacement pixels,
 unchanged sibling cache files, failed-preview clearing, edits while away,
 last-row previews and navigation cancellation. Captures and raw measurements
 remain private and are not part of the source change.
+
+Review regressions additionally cover coalesced file-to-directory replacements,
+an old renderer publishing after a new version, and shared-cache replacement
+while a promotion holds its descriptor. The timings above precede the immutable
+publication follow-up; its correctness is checked separately.
 
 ## Prior release measurements
 
