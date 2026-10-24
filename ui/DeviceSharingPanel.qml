@@ -87,7 +87,9 @@ Item {
         const buttons = []
         function visit(item) {
             if (item.visible && item.enabled && item.activeFocusOnTab) buttons.push(item)
-            for (const child of item.children || []) visit(child)
+            // QML child lists are indexable, but not iterable on system Qt 6.4.
+            const children = item.children || []
+            for (let i = 0; i < children.length; i++) visit(children[i])
         }
         visit(card)
         if (buttons.length === 0) return
@@ -110,7 +112,8 @@ Item {
                 const p = item.mapToItem(null, item.width / 2, item.height / 2)
                 points[item.objectName] = [Math.round(p.x), Math.round(p.y)]
             }
-            for (const child of item.children || []) visit(child)
+            const children = item.children || []
+            for (let i = 0; i < children.length; i++) visit(children[i])
         }
         visit(card)
         return points

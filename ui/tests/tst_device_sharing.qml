@@ -38,7 +38,8 @@ TestCase {
     function visibleTexts(item, out) {
         if (!item.visible) return out
         if (item.text !== undefined && typeof item.text === "string" && item.text !== "") out.push(item.text)
-        for (const child of item.children || []) visibleTexts(child, out)
+        const children = item.children || []
+        for (let i = 0; i < children.length; i++) visibleTexts(children[i], out)
         return out
     }
     function cleanup() { model.sharing_busy = false; panel.hide() }
