@@ -114,6 +114,11 @@ jobs:
           echo "QML_IMPORT_PATH=$SDK_ROOT/qml" >>"$GITHUB_ENV"
       - name: Validate selected Qt SDK
         run: python3 packaging/qt-contract.py
+      - name: File icon clipping and compositing (selected SDK)
+        run: |
+          for scale in 1 1.5 2; do
+            QT_SCALE_FACTOR="$scale" python3 tests/file-icon.py --runner "$GUST_EXPECT_QT_ROOT/bin/qmltestrunner"
+          done
       - name: Required app tests (selected SDK)
         id: app-tests
         run: python3 tests/release-gates.py --gate app --required --output "$RUNNER_TEMP/gust-app"

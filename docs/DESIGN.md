@@ -1975,6 +1975,14 @@ Quattro surfaces rather than like Nautilus.
 - **Drawn with QtQuick.Shapes** (`ui/FileIcon.qml`): two paths and a label,
   no image files. Every colour is a token, so a theme switch restyles icons
   with the window and the 22-theme screenshot matrix covers them.
+  Icons must respect ancestor clipping, visibility and opacity when views
+  scroll or reuse delegates. Qt Quick's software Shape render nodes can paint
+  outside an empty clip, including after the view is hidden; layering those
+  nodes also loses content at HiDPI. On that backend only, the same polygons
+  are drawn into an icon-sized Canvas image, with labels kept as ordinary
+  Text items. This uses normal image clipping and opacity without depending
+  on software Shape or layer projection behavior. The GPU backend keeps its
+  direct Shape rendering; renderer selection and preferences are unchanged.
 - **The UI thread never reads files.** `gust_core::icons::Looks` (the MIME
   database: `globs2` and `generic-icons` from every `mime` data dir, plus
   `user-dirs.dirs`) is built on a worker (`gust-icons`). `key_for(name, kind,
