@@ -92,7 +92,7 @@ Window {
         const out = []
         for (let i = 0; i < tabList.count; i++) {
             const m = tabs.objectAt(i)
-            if (m && m.job_running()) out.push(m)
+            if (m && (m.job_running() || m.sharing_busy)) out.push(m)
         }
         return out
     }
@@ -103,7 +103,7 @@ Window {
         const out = []
         for (let i = 0; i < tabList.count; i++) {
             const m = tabs.objectAt(i)
-            if (m && (m.job_running() || m.archive_running())) out.push(m)
+            if (m && (m.job_running() || m.archive_running() || m.sharing_busy)) out.push(m)
         }
         return out
     }
@@ -132,8 +132,15 @@ Window {
             win.qaDump("close-still-stopping")
             return
         }
-        const running = busy.filter(m => m.job_running())
+        const running = busy.filter(m => m.job_running() || m.sharing_busy)
         confirm.purpose = "close"
+        if (busy.some(m => m.sharing_busy)) {
+            confirm.open(qsTr("File sharing is still running"),
+                qsTr("Closing asks file sharing and transfers to stop. Files or sharing changes may already have been accepted. Check the receiver and shared folders before retrying. The window closes once all work has stopped."),
+                qsTr("Stop and close"), true)
+            win.qaDump("close-blocked")
+            return
+        }
         if (running.length === 0) {
             confirm.open(qsTr("Archive work is still running"),
                 qsTr("Gust cannot stop compressing or extracting part-way. "
@@ -823,6 +830,7 @@ Window {
         return true
     }
     function connectPlace(kind, name, target, user) {
+        if (kind === "mobile") { win.runAction("device-share:" + name); return }
         if (!win.requireSupport(kind === "cloud" ? "cloud" : "ssh")) return
         if (kind === "ssh" || kind === "cloud") {
             const op = kind === "ssh" ? "remote-connect" : "cloud-connect"
@@ -1110,7 +1118,7 @@ Window {
     // context menu, a confirm or conflict dialog), a file created or deleted
     // by another program must not shift the rows under it: the rename would
     // hit the wrong file. Live updates wait, and land when it closes.
-    readonly property bool liveHold: palette.visible || confirm.visible || connectionRecovery.visible || settingsPanel.open || trashPanel.open || recentPanel.open || connectPanel.open
+    readonly property bool liveHold: palette.visible || confirm.visible || connectionRecovery.visible || settingsPanel.open || trashPanel.open || recentPanel.open || connectPanel.open || deviceSharing.open
                                      || contextMenu.open || conflictDialog.visible
                                      || prompt.visible || prompt.claimingFocus
     onLiveHoldChanged: {
@@ -1218,12 +1226,16 @@ Window {
             win.qaDump("tab-close-waiting")
             return
         }
-        if (m && (m.job_running() || m.archive_running())) {
+        if (m && (m.job_running() || m.archive_running() || m.sharing_busy)) {
             // Work belongs to the tab that started it. Closing it asks
             // first, exactly as closing the window does.
             win.pendingCloseTab = i
             confirm.purpose = "closetab"
-            if (m.job_running())
+            if (m.sharing_busy)
+                confirm.open(qsTr("File sharing is still running"),
+                    qsTr("Closing this tab asks sharing to stop. Files or sharing changes may already have been accepted. Check before retrying. The tab closes once all work has stopped."),
+                    qsTr("Stop and close"), true)
+            else if (m.job_running())
                 confirm.open(qsTr("A transfer is still running"),
                              qsTr("Closing this tab asks it to stop. Items already finished stay as they are; "
                                   + "the one in progress is not finished, and temporary files from it may remain. "
@@ -1397,7 +1409,7 @@ Window {
         // could not be typed into.
         if (palette.visible || confirm.visible || connectionRecovery.visible || contextMenu.open
             || conflictDialog.visible || settingsPanel.open || trashPanel.open || recentPanel.open || connectPanel.open
-            || prompt.visible || prompt.claimingFocus || renameCard.open)
+            || prompt.visible || prompt.claimingFocus || renameCard.open || deviceSharing.open)
             return
         listFocus.forceActiveFocus()
     }
@@ -1784,6 +1796,21 @@ Window {
         else if (a === "share-add") {
             win.askShareAddress()
         }
+        else if (a === "device-sharing" || a.startsWith("device-share:")) {
+            connectPanel.hide()
+            // The whole sheet offers Send only for files someone explicitly
+            // selected; the cursor alone is not a choice to send anything.
+            const selection = dirModel.sel_count() > 0 ? dirModel.prepare_device_send(-1) : ""
+            deviceSharing.show(dirModel, selection, "", a.startsWith("device-share:") ? a.substring(13) : "", "")
+        }
+        else if (a === "device-send") {
+            const selection = dirModel.prepare_device_send(dirModel.cursor)
+            deviceSharing.show(dirModel, selection, "", "", "send")
+        }
+        else if (a === "device-share-here" || a === "device-share-folder") {
+            const folder = JSON.parse(dirModel.device_folder(a === "device-share-here" ? -1 : dirModel.cursor))
+            deviceSharing.show(dirModel, "", folder, "", "folder")
+        }
         else if (a.startsWith("device-mount:")) {
             win.openDevice(a.substring(13), false)
         }
@@ -1855,6 +1882,7 @@ Window {
                 { label: qsTr("Open terminal here"), hint: "", action: "terminal" },
                 { label: qsTr("Open as administrator"), hint: "", action: "open-admin" },
                 { label: qsTr("Copy folder path"), hint: "", action: "copy-path-folder" },
+                { label: qsTr("Let devices open this folder…"), hint: "", action: "device-share-here" },
                 win.bookmarkList.some(b => b.path === dirModel.location)
                     ? { label: qsTr("Remove this folder from Bookmarks"), hint: "", action: "unpin-here" }
                     : { label: qsTr("Add this folder to Bookmarks"), hint: "Ctrl+B", action: "pin-here" },
@@ -1870,6 +1898,8 @@ Window {
         if (many) list.push({ label: qsTr("Open ") + dirModel.sel_count() + qsTr(" items"), hint: "Enter", action: "open" })
         else list.push({ label: qsTr("Open"), hint: "Enter", action: "open" })
         if (!many && dir) list.push({ label: qsTr("Open in new tab"), hint: "", action: "open-tab" })
+        if (!many && dir) list.push({ label: qsTr("Let devices open this folder…"), hint: "", action: "device-share-folder" })
+        if (many || !dir) list.push({ label: qsTr("Send a copy to a device…"), hint: "", action: "device-send" })
         if (!many && dir) {
             const p = dirModel.entry_path(row)
             const pinned = win.bookmarkList.some(b => b.path === p)
@@ -3410,6 +3440,25 @@ Window {
         }
         onClosed: { win.focusList(); win.qaDump("connect-closed") }
         onVisibleChanged: win.qaDump("connect")
+        onSelectionKeyChanged: win.qaDump("connect-select")
+    }
+
+    DeviceSharingPanel {
+        id: deviceSharing
+        onOpenRequested: (path) => { if (path) dirModel.navigate(path) }
+        onClosed: { win.focusList(); win.qaDump("sharing-closed") }
+        onOpenChanged: win.qaDump("sharing")
+        onMessageChanged: win.qaDump("sharing-message")
+        onBusyChanged: {
+            if (!deviceSharing.busy && hints.message === qsTr("Transfer continues") && win.busyModels().length === 0)
+                hints.message = ""
+            win.qaDump("sharing-busy")
+        }
+        onCheckingChanged: win.qaDump("sharing-checking")
+        onStateChanged: win.qaDump("sharing-state")
+        onFocusedButtonChanged: win.qaDump("sharing-focus")
+        onFolderConfirmationOpenChanged: win.qaDump("sharing-confirm")
+        onHelpOpenChanged: win.qaDump("sharing-help")
     }
 
     TrashPanel {
@@ -3592,7 +3641,7 @@ Window {
                 const m = win.tabModelAt(i)
                 if (!m) return
                 // Archive work has no cancel; it is only waited for.
-                if (m.job_running()) m.cancel_job()
+                if (m.job_running() || m.sharing_busy) m.cancel_job()
                 // The tab stays, showing "Stopping", until its worker has
                 // actually stopped — the same wait the window close makes.
                 closeTabAfterCancel.wait(m)
@@ -3915,11 +3964,30 @@ Window {
             connectionRecoveryButtons: connectionRecovery.buttonCenters(),
             connectRouteKey: connectPanel.routeKey,
             connectRows: connectPanel.rows,
+            connectSelection: connectPanel.selectionKey,
             connectOpen: connectPanel.open,
             connectFeedbackTitle: connectPanel.statusTitle,
             connectFeedbackBody: connectPanel.statusBody,
             connectBusy: connectPanel.busy,
             connectPoints: connectPanel.open ? connectPanel.buttonPoints() : ({}),
+            sharingOpen: deviceSharing.open,
+            sharingBusy: deviceSharing.busy,
+            sharingChecking: deviceSharing.checking,
+            sharingMessage: deviceSharing.message,
+            sharingFailed: deviceSharing.failed,
+            sharingState: deviceSharing.state,
+            sharingPoints: deviceSharing.open ? deviceSharing.buttonPoints() : ({}),
+            sharingConfirmOpen: deviceSharing.open && deviceSharing.folderConfirmationOpen,
+            sharingConfirmTitle: deviceSharing.folderConfirmationTitle,
+            sharingConfirmBody: deviceSharing.folderConfirmationBody,
+            sharingFocus: deviceSharing.focusedButton,
+            sharingHelpOpen: deviceSharing.helpOpen,
+            sharingOnly: deviceSharing.only,
+            sharingTitle: deviceSharing.preferredDevice,
+            sharingLastAction: deviceSharing.lastAction,
+            sharingInboxButton: deviceSharing.open && deviceSharing.inboxTouched,
+            windowWidth: win.width,
+            windowHeight: win.height,
             places: win.placesInfo,
             tabCenters: win.tabCenters(),
             confirmTitle: confirm.title,
@@ -3971,7 +4039,7 @@ Window {
             start()
         }
         onTriggered: {
-            const done = models.filter(m => !m.job_running() && !m.archive_running())
+            const done = models.filter(m => !m.job_running() && !m.archive_running() && !m.sharing_busy)
             models = models.filter(m => done.indexOf(m) < 0)
             if (models.length === 0) stop()
             // Off the waiting list first, so closeTab removes it for real.

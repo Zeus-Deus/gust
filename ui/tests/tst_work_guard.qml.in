@@ -12,13 +12,14 @@ TestCase {
         property bool running: false
         property bool stopping: false
         property bool archive: false
+        property bool sharing_busy: false
         property string place: ""
         property int cancels: 0
         function job_running() { return running }
         function archive_running() { return archive }
         // Cancel is a REQUEST: the worker keeps running until the test says
         // its remote call returned.
-        function cancel_job() { cancels += 1; if (running) stopping = true }
+        function cancel_job() { cancels += 1; if (running || sharing_busy) stopping = true }
         function work_on_place(kind, name) {
             if (name !== place) return ""
             if (running) return stopping ? "stopping" : "transfer"
@@ -99,7 +100,7 @@ TestCase {
 
     function init() {
         for (const m of win.models) {
-            m.running = false; m.stopping = false; m.archive = false; m.place = ""; m.cancels = 0
+            m.running = false; m.stopping = false; m.archive = false; m.sharing_busy = false; m.place = ""; m.cancels = 0
         }
         closeAfterCancel.stop(); closeAfterCancel.ticks = 0
         closeTabAfterCancel.stop(); closeTabAfterCancel.models = []
@@ -122,6 +123,36 @@ TestCase {
 
     function tickWindow(n) { for (let i = 0; i < n; i++) closeAfterCancel.triggered() }
     function tickTabs(n) { for (let i = 0; i < n; i++) closeTabAfterCancel.triggered() }
+
+    function test_window_keeps_a_sharing_worker_until_cancellation_is_acknowledged() {
+        modelB.sharing_busy = true
+        const close = {accepted: true}
+        win.handleClosing(close)
+        compare(close.accepted, false)
+        compare(confirm.title, "File sharing is still running")
+        verify(confirm.body.indexOf("may already have been accepted") >= 0)
+        win.confirmAccepted()
+        compare(modelB.cancels, 1)
+        tickWindow(15)
+        compare(win.quitCalls, 0)
+        modelB.sharing_busy = false
+        tickWindow(1)
+        compare(win.quitCalls, 1)
+    }
+
+    function test_tab_keeps_a_sharing_worker_until_it_has_stopped() {
+        modelB.sharing_busy = true
+        win.closeTab(1)
+        compare(tabList.count, 3)
+        compare(confirm.title, "File sharing is still running")
+        win.confirmAccepted()
+        compare(modelB.cancels, 1)
+        tickTabs(15)
+        compare(tabList.count, 3)
+        modelB.sharing_busy = false
+        tickTabs(1)
+        compare(tabList.count, 2)
+    }
 
     function test_window_waits_for_an_actual_stop_however_long_it_takes() {
         modelB.running = true

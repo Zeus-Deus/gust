@@ -35,6 +35,8 @@ fn main() {
         "ui/Emblem.qml",
         "ui/DragTarget.qml",
         "ui/ConnectPanel.qml",
+        "ui/DeviceSharingPanel.qml",
+        "ui/SharingButton.qml",
         "ui/RenameCard.qml",
         "ui/TagDots.qml",
     ];

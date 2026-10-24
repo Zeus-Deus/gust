@@ -94,6 +94,9 @@ Rectangle {
         { id: "unsplit",      label: "Split: one pane",       hint: "" },
         { id: "send-copy",    label: "Copy to other pane",    hint: "F5" },
         { id: "send-move",    label: "Move to other pane",    hint: "F6" },
+        { id: "device-send",  label: "Send a copy to a device…", hint: "" },
+        { id: "device-sharing", label: "Share with iPhone, iPad or another device…", hint: "" },
+        { id: "device-share-here", label: "Let devices open this folder…", hint: "" },
         { id: "view-rows",    label: "View: Rows",            hint: "" },
         { id: "sort-name",    label: "Sort by name",          hint: "" },
         { id: "sort-kind",    label: "Sort by kind",          hint: "" },
@@ -234,6 +237,19 @@ Rectangle {
         // unavailable or incomplete (plan §3).
         if (t.toLowerCase().startsWith("share") || t.toLowerCase().startsWith("nas")
             || t.toLowerCase().startsWith("smb")) {
+            if (t.toLowerCase().startsWith("share")) {
+                // "Share folder" is how people ask for folder access, even
+                // though the action itself is named for what devices can do.
+                for (const entry of [
+                    { kind: "action", label: "Share with iPhone, iPad or another device…", payload: "device-sharing",
+                      keys: ["share with iphone, ipad or another device"] },
+                    { kind: "action", label: "Let devices open this folder…", payload: "device-share-here",
+                      keys: ["share this folder", "share folder"] }
+                ]) {
+                    if (entry.keys.some(k => k.startsWith(t.toLowerCase())))
+                        results.append({ kind: entry.kind, label: entry.label, payload: entry.payload })
+                }
+            }
             results.append({ kind: "action",
                              label: "Add a shared folder (SMB)",
                              payload: "share-add" })

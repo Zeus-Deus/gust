@@ -1,4 +1,5 @@
 import QtQuick
+import com.gust.app
 
 // Minimal scroll indicator in plain QtQuick.
 //

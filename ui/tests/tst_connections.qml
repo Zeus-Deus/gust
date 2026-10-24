@@ -114,6 +114,19 @@ TestCase {
         wait(0)
     }
     function cleanup() { panel.hide() }
+    function test_reopening_with_an_unchanged_snapshot_selects_a_real_row_for_enter() {
+        panel.places = {computers: [], cloud: [], mobile: [
+            {name: "ipad", target: "100.64.0.3", os: "iPadOS", online: true, available: true}]}
+        panel.show(); wait(0)
+        compare(panel.selectionKey, "mobile:ipad")
+        panel.hide(); panel.show(); wait(0)
+        compare(panel.selectionKey, "mobile:ipad")
+        actionSpy.clear()
+        keyClick(Qt.Key_Return)
+        compare(actionSpy.count, 1)
+        compare(actionSpy.signalArguments[0][0], "device-share:ipad")
+        compare(connectSpy.count, 0)
+    }
     function test_missing_sshfs_has_a_prominent_actionable_notice() {
         const p = fixture()
         p.sshfs = false
@@ -128,6 +141,22 @@ TestCase {
         verify(notice.height > 0, "Notice height=" + notice.height + ", panel=" + panel.height)
         const check = findChild(panel, "connectionCheckAgain")
         verify(check && check.visible)
+    }
+
+    function test_apple_mobile_devices_offer_sharing_without_an_ssh_attempt() {
+        const p = fixture()
+        p.mobile = [{name: "iphone-15", target: "100.64.0.2", os: "iOS", online: true, available: true},
+                    {name: "ipad", target: "100.64.0.3", os: "iPadOS", online: false, available: false}]
+        panel.places = p
+        actionSpy.clear()
+        const phones = panel.rows.filter(r => r.kind === "mobile")
+        compare(phones.length, 2)
+        panel.activate(panel.rows.findIndex(r => r.name === "iphone-15"))
+        compare(actionSpy.count, 1)
+        compare(actionSpy.signalArguments[0][0], "device-share:iphone-15")
+        panel.activate(panel.rows.findIndex(r => r.name === "ipad"))
+        compare(actionSpy.count, 2, "Offline devices must still offer setup guidance")
+        compare(connectSpy.count, 0, "An iPhone must never enter the SSH account/key flow")
     }
     function test_attempt_stays_visible_and_retains_failure() {
         compare(panel.busy, false)
