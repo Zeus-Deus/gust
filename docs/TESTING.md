@@ -126,6 +126,12 @@ is preserved. These seams substitute external model I/O/CXX transport and do not
 establish real native job, portal, focus or clipboard behavior. App-local tests
 remain owned by the app lane.
 
+`python3 tests/file-icon.py` checks the shipped icon component's software
+rendering with deterministic theme tokens: clipping, visibility, opacity,
+delegate reuse, theme changes and icon sizes. `QT_SCALE_FACTOR` selects display
+scaling; CI runs 1, 1.5 and 2 with the selected Qt SDK's `qmltestrunner`
+(`--runner`). These pixel checks do not substitute for native desktop QA.
+
 ## Contained fixtures and native acceptance
 
 `tests/make-fixture.sh` accepts only a fresh/empty owned directory below `/tmp`.

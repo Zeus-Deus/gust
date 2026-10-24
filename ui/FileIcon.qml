@@ -16,6 +16,8 @@ Item {
     width: size
     height: size
 
+    readonly property bool softwareRenderer: GraphicsInfo.api === GraphicsInfo.Software
+
     readonly property var parts: { return root.look.split("\t") }
     readonly property string shape: parts[0] || "page"
     readonly property string family: parts.length > 1 ? parts[1] : ""
@@ -57,8 +59,58 @@ Item {
         desktop: 0xF0379, templates: 0xF1517, "public": 0xF000E
     })
 
+    // Software Shape nodes ignore empty clips; software layers also lose
+    // their contents at HiDPI. A Canvas image uses normal item clipping and
+    // opacity. Canvas supplies the backing image's DPR; do not scale twice.
+    Canvas {
+        id: raster
+        anchors.fill: parent
+        visible: root.softwareRenderer
+        renderTarget: Canvas.Image
+        property color ink: root.isFolder ? Tokens.accent : root.tint
+        onInkChanged: requestPaint()
+        onVisibleChanged: if (visible) requestPaint()
+        onWidthChanged: requestPaint()
+        onHeightChanged: requestPaint()
+        Connections {
+            target: root
+            function onIsFolderChanged() { raster.requestPaint() }
+            function onDetailedChanged() { raster.requestPaint() }
+            function onLineChanged() { raster.requestPaint() }
+        }
+        onPaint: {
+            const ctx = getContext("2d")
+            ctx.reset()
+            const isFolder = root.isFolder
+            const w = isFolder ? folder.width : page.width
+            const h = isFolder ? folder.height : page.height
+            const x = (root.size - w) / 2
+            const y = isFolder && !root.detailed ? (root.size - h) / 2 : root.size - h
+            const sx = w / (isFolder ? 50 : 40)
+            const sy = h / (isFolder ? 42 : 50)
+            function path(points) {
+                ctx.beginPath()
+                ctx.moveTo(x + points[0][0] * sx, y + points[0][1] * sy)
+                for (let i = 1; i < points.length; ++i)
+                    ctx.lineTo(x + points[i][0] * sx, y + points[i][1] * sy)
+                ctx.closePath()
+            }
+            path(isFolder ? [[1,5],[18,5],[22,9],[49,9],[49,41],[1,41]]
+                          : [[1,1],[28,1],[39,12],[39,49],[1,49]])
+            ctx.fillStyle = Tokens.withAlpha(ink, isFolder ? 0.16 : 0.12)
+            ctx.fill()
+            ctx.strokeStyle = ink
+            ctx.lineWidth = root.line
+            ctx.lineJoin = "miter"
+            ctx.stroke()
+            path(isFolder ? [[1,5],[18,5],[22,9],[1,9]] : [[28,1],[28,12],[39,12]])
+            ctx.fillStyle = isFolder ? ink : Tokens.withAlpha(ink, 0.6)
+            ctx.fill()
+        }
+    }
+
     // --- folder: 50 x 42 units, bottom-aligned in the box ----------------
-    Shape {
+    Item {
         id: folder
         visible: root.isFolder
         width: root.size
@@ -68,21 +120,27 @@ Item {
         anchors.bottom: root.detailed ? parent.bottom : undefined
         anchors.verticalCenter: root.detailed ? undefined : parent.verticalCenter
         anchors.horizontalCenter: parent.horizontalCenter
-        preferredRendererType: Shape.CurveRenderer
         readonly property size k: Qt.size(width / 50, height / 42)
-        ShapePath {
-            scale: folder.k
-            strokeColor: Tokens.accent
-            strokeWidth: root.line
-            fillColor: Tokens.withAlpha(Tokens.accent, 0.16)
-            joinStyle: ShapePath.MiterJoin
-            PathSvg { path: "M1,5 H18 L22,9 H49 V41 H1 Z" }
-        }
-        ShapePath {
-            scale: folder.k
-            strokeColor: "transparent"
-            fillColor: Tokens.accent
-            PathSvg { path: "M1,5 H18 L22,9 H1 Z" }
+        Loader {
+            anchors.fill: parent
+            active: root.GraphicsInfo.api !== GraphicsInfo.Unknown && !root.softwareRenderer
+            sourceComponent: Shape {
+                preferredRendererType: Shape.CurveRenderer
+                ShapePath {
+                    scale: folder.k
+                    strokeColor: Tokens.accent
+                    strokeWidth: root.line
+                    fillColor: Tokens.withAlpha(Tokens.accent, 0.16)
+                    joinStyle: ShapePath.MiterJoin
+                    PathSvg { path: "M1,5 H18 L22,9 H49 V41 H1 Z" }
+                }
+                ShapePath {
+                    scale: folder.k
+                    strokeColor: "transparent"
+                    fillColor: Tokens.accent
+                    PathSvg { path: "M1,5 H18 L22,9 H1 Z" }
+                }
+            }
         }
         Text {
             textFormat: Text.PlainText
@@ -98,28 +156,34 @@ Item {
     }
 
     // --- page: 40 x 50 units -------------------------------------------
-    Shape {
+    Item {
         id: page
         visible: !root.isFolder
         width: Math.round(root.size * 0.8)
         height: root.size
         anchors.bottom: parent.bottom
         anchors.horizontalCenter: parent.horizontalCenter
-        preferredRendererType: Shape.CurveRenderer
         readonly property size k: Qt.size(width / 40, height / 50)
-        ShapePath {
-            scale: page.k
-            strokeColor: root.tint
-            strokeWidth: root.line
-            fillColor: Tokens.withAlpha(root.tint, 0.12)
-            joinStyle: ShapePath.MiterJoin
-            PathSvg { path: "M1,1 H28 L39,12 V49 H1 Z" }
-        }
-        ShapePath {
-            scale: page.k
-            strokeColor: "transparent"
-            fillColor: Tokens.withAlpha(root.tint, 0.6)
-            PathSvg { path: "M28,1 V12 H39 Z" }
+        Loader {
+            anchors.fill: parent
+            active: root.GraphicsInfo.api !== GraphicsInfo.Unknown && !root.softwareRenderer
+            sourceComponent: Shape {
+                preferredRendererType: Shape.CurveRenderer
+                ShapePath {
+                    scale: page.k
+                    strokeColor: root.tint
+                    strokeWidth: root.line
+                    fillColor: Tokens.withAlpha(root.tint, 0.12)
+                    joinStyle: ShapePath.MiterJoin
+                    PathSvg { path: "M1,1 H28 L39,12 V49 H1 Z" }
+                }
+                ShapePath {
+                    scale: page.k
+                    strokeColor: "transparent"
+                    fillColor: Tokens.withAlpha(root.tint, 0.6)
+                    PathSvg { path: "M28,1 V12 H39 Z" }
+                }
+            }
         }
         // The extension, the exact type at a glance.
         Text {
