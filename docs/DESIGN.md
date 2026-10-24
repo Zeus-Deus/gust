@@ -2200,17 +2200,29 @@ their repeated controls until opened.
 Expanded natural-sort keys have a bounded scratch-memory budget; unusually
 large or digit-heavy listings fall back to the existing comparator.
 
-Thumbnail work is bounded and cancellable between helpers. Repeated requests
+Local name listings may reuse a process-local LRU on a worker after validating
+the directory's device/inode and nanosecond mtime/ctime before and after the
+lookup. It retains at most 16 locations and 8 MiB, including names and row
+storage. Only complete, stable listings enter it; metadata is never retained.
+Remote/FUSE paths bypass it. Explicit Refresh bypasses and replaces cached
+names. Cached rows are display data, never operation authority; visible metadata
+and thumbnail source versions are read afresh. No background process or persistent
+directory-content index is introduced.
+
+Thumbnail work is bounded and cancellable, including a running helper. Repeated requests
 reuse valid cached results; cache admission still checks source freshness and
 validates helper output under the existing sandbox rules. Optimizations must
 not decode untrusted source contents on the UI thread or bypass the sandbox.
 Grid requests cover the viewport and its prefetch margin, with on-screen rows
 first, rather than a fixed prefix of the directory. Navigation and live changes
 cancel the previous pass; queued results also check cancellation before publish.
-An unchanged viewport does not restart its pass. Live changes invalidate the
-in-memory paths so replacement files are revalidated on a worker.
-Each model admits only one active thumbnail worker, including a helper still
-finishing after cancellation. New requests retain the newest pending viewport
+An unchanged viewport does not restart its pass. Live changes revalidate all
+requested source versions on a worker while retaining unchanged displayed URLs.
+Cache hits are published before any missing thumbnail is generated. Each pass
+has at most two render workers; a process-wide admission gate permits at most
+two grid-thumbnail helpers across all models. Cancellation kills/reaps only the
+request's owned helper group before releasing admission. Each model admits only
+one active pass. New requests retain the newest pending viewport
 and resume when that worker exits. Changes to visible ordering or membership
 invalidate the remembered pass even when row bounds stay the same.
 QML explicitly disables thumbnail requests outside Grid; the finishing worker
@@ -2218,8 +2230,17 @@ remains counted until it exits, and no replacement pass starts in that view.
 Only a visible view reports viewport rows, and becoming visible reports its
 current bounds again. Every previewable row in those bounds is eligible; a
 fixed prefix limit must not strand tiles on large or zoomed-out viewports.
-Grid image items reload updated cached files instead of retaining stale Qt
-decoded-image cache entries after live replacement.
+Grid image URLs address immutable source-version-specific PNGs under the
+thumbnail cache's `gust-grid` directory, separate from the replaceable freedesktop
+cache path. Publication never replaces an immutable file. Promoting an existing
+freedesktop entry reads and checks its tags and bytes through the same held
+descriptor, so a concurrent rename cannot bind one version's URL to another's
+pixels. Qt may reuse unchanged decoded pixels; replacements publish a different
+URL. Immutable copies consume additional disposable cache space. Failed
+revalidation, removed entries and entries that cease to be previewable (including
+same-name file-to-directory replacements) remove their old previews.
+Initial cache hits are attached before the listing is installed, so revisiting
+a folder need not repaint placeholders before rediscovering its cached images.
 The grid bounds decoded PNGs to the normal thumbnail's 128-pixel box. Aspect
 ratio is preserved by the displayed item's geometry, not a decoder fit mode
 that can enlarge a small PNG to cover the requested decode box. Zoom and

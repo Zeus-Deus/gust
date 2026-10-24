@@ -174,6 +174,7 @@ pub(crate) fn pinned_argv(args: Vec<String>, output_dir: &Path) -> Vec<OsString>
 
 pub(crate) struct OwnedChild {
     child: Option<Child>,
+    retirement_guard: Option<Box<dyn Send>>,
 }
 impl OwnedChild {
     pub fn spawn(argv: &[OsString], stdin: Stdio, stdout: Stdio) -> Result<Self, Error> {
@@ -247,10 +248,18 @@ impl OwnedChild {
             .stderr(Stdio::null())
             .spawn()
             .map_err(|_| Error::Failed)?;
-        Ok(Self { child: Some(child) })
+        Ok(Self {
+            child: Some(child),
+            retirement_guard: None,
+        })
     }
     pub fn child(&mut self) -> &mut Child {
         self.child.as_mut().expect("owned child")
+    }
+
+    /// Admission survives even a blocked child handed to the background reaper.
+    pub fn retain_until_exit(&mut self, guard: impl Send + 'static) {
+        self.retirement_guard = Some(Box::new(guard));
     }
 }
 impl Drop for OwnedChild {
@@ -276,9 +285,11 @@ impl Drop for OwnedChild {
         }
         // A mount syscall can be in uninterruptible sleep. Cancellation must
         // still return; a reaper retains ownership until the kernel releases it.
+        let retirement_guard = self.retirement_guard.take();
         let _ = std::thread::Builder::new()
             .name("gust-preview-reap".into())
             .spawn(move || {
+                let _retirement_guard = retirement_guard;
                 let _ = child.wait();
             });
     }
@@ -287,6 +298,31 @@ impl Drop for OwnedChild {
 pub(crate) fn nonblocking(fd: &impl std::os::fd::AsFd) -> Result<(), Error> {
     let flags = rustix::fs::fcntl_getfl(fd).map_err(|_| Error::Io)?;
     rustix::fs::fcntl_setfl(fd, flags | OFlags::NONBLOCK).map_err(|_| Error::Io)
+}
+
+/// Wait without inheriting helper output; cancellation retires the owned group.
+pub(crate) fn wait(
+    child: &mut OwnedChild,
+    cancel: &CancelToken,
+    wall: Duration,
+    output: &Path,
+) -> Result<std::process::ExitStatus, Error> {
+    let deadline = Instant::now() + wall;
+    let mut last_disk_check = Instant::now();
+    loop {
+        check(cancel)?;
+        if Instant::now() >= deadline {
+            return Err(Error::Limit);
+        }
+        if let Some(status) = child.child().try_wait().map_err(|_| Error::Io)? {
+            return Ok(status);
+        }
+        if last_disk_check.elapsed() >= Duration::from_millis(50) {
+            check_output_tree(output)?;
+            last_disk_check = Instant::now();
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
 }
 
 /// Bounded stdout even when a helper floods or holds its pipe open. No stderr
@@ -441,6 +477,39 @@ pub(crate) fn read_file(path: &Path, max: usize, cancel: &CancelToken) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quiet_helper_wait_cancels_and_reaps_its_owned_process() {
+        struct Guard(std::sync::Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        let scratch = Scratch::new().unwrap();
+        let args = ["/bin/sleep", "30"].map(OsString::from);
+        let mut child = OwnedChild::spawn(&args, Stdio::null(), Stdio::null()).unwrap();
+        let retired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        child.retain_until_exit(Guard(retired.clone()));
+        let pid = child.child().id();
+        let cancel = CancelToken::new();
+        let other = cancel.clone();
+        let stop = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(30));
+            other.cancel();
+        });
+        let start = Instant::now();
+        assert_eq!(
+            wait(&mut child, &cancel, Duration::from_secs(30), &scratch.0),
+            Err(Error::Cancelled)
+        );
+        assert!(!retired.load(std::sync::atomic::Ordering::SeqCst));
+        drop(child);
+        stop.join().unwrap();
+        assert!(start.elapsed() < Duration::from_secs(2));
+        assert!(!Path::new(&format!("/proc/{pid}")).exists());
+        assert!(retired.load(std::sync::atomic::Ordering::SeqCst));
+    }
     fn shell(script: &str) -> Vec<OsString> {
         vec!["sh".into(), "-c".into(), script.into()]
     }

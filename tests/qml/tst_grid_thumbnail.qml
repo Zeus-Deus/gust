@@ -66,6 +66,21 @@ TestCase {
         compare(spy.count, 0)
         spy.destroy()
     }
+
+    function test_cached_pixels_and_versioned_local_urls() {
+        const first = load("landscape")
+        verify(first.cache)
+        const reused = createTemporaryObject(thumbnail, frame, {source: first.source})
+        compare(reused.status, Image.Ready)
+        // File query strings retain normal local-file loading semantics.
+        const second = createTemporaryObject(thumbnail, frame, {source: fixtures + "landscape.png?gust=first"})
+        tryCompare(second, "status", Image.Ready)
+        compare(second.implicitWidth, 128)
+        second.source = fixtures + "portrait.png?gust=second"
+        tryCompare(second, "status", Image.Ready)
+        compare(second.implicitWidth, 96)
+        compare(second.implicitHeight, 128)
+    }
     Component { id: signalSpy; SignalSpy {} }
 
     function test_recycled_tile_changes_aspect_and_clears() {

@@ -1645,7 +1645,11 @@ impl qobject::DirModel {
     /// arrive first so the window paints immediately, then metadata fills
     /// the columns. Every result is tagged with a generation, so a late
     /// answer for a directory the user already left is dropped.
-    fn load_current(mut self: Pin<&mut Self>) {
+    fn load_current(self: Pin<&mut Self>) {
+        self.load_current_cached(true);
+    }
+
+    fn load_current_cached(mut self: Pin<&mut Self>, reuse: bool) {
         let key = self.as_ref().key.clone();
         let gen = self.as_ref().generation + 1;
         // Per-folder sort: this folder's remembered choice, or by name.
@@ -1687,6 +1691,12 @@ impl qobject::DirModel {
         let filter_now = self.as_ref().filter.to_string();
         let hidden_now = self.as_ref().show_hidden;
         let focus_now = self.as_ref().focus_name.clone();
+        let grid_now = self.as_ref().thumbs_wanted
+            || self
+                .as_ref()
+                .views
+                .get(&key)
+                .is_some_and(|view| view.as_str() == "grid");
 
         let display = key.display_path();
         self.as_mut().set_location(QString::from(&display));
@@ -1753,7 +1763,7 @@ impl qobject::DirModel {
                 if let Some(dir) = key.as_path() {
                     let _ = gust_ops::engine::sweep_stale_staging(dir);
                 }
-                let mut snap = list_names(&key, gen, &cancel, |_| {});
+                let mut snap = crate::directory_cache::list(&key, gen, &cancel, reuse);
                 if cancel.is_cancelled() {
                     return;
                 }
@@ -1773,7 +1783,13 @@ impl qobject::DirModel {
                     if cancel.is_cancelled() {
                         return;
                     }
-                    let _ = thread.queue(move |model| {
+                    let hits =
+                        Self::initial_thumbnails(&snap, grid_now, &filter_now, hidden_now, &cancel);
+                    let _ = thread.queue(move |mut model| {
+                        if model.as_ref().generation != gen {
+                            return;
+                        }
+                        model.as_mut().rust_mut().thumbs.extend(hits);
                         Self::apply_snapshot(model, snap, true);
                     });
                     return;
@@ -1800,11 +1816,41 @@ impl qobject::DirModel {
                 if !fill_metadata_for(&mut snap, &window, &cancel) {
                     return;
                 }
-                let _ = thread.queue(move |model| {
+                let hits =
+                    Self::initial_thumbnails(&snap, grid_now, &filter_now, hidden_now, &cancel);
+                let _ = thread.queue(move |mut model| {
+                    if model.as_ref().generation != gen {
+                        return;
+                    }
+                    model.as_mut().rust_mut().thumbs.extend(hits);
                     Self::apply_snapshot(model, snap, true);
                 });
             })
             .ok();
+    }
+
+    /// Cache I/O happens before queuing the model reset, on its listing worker.
+    fn initial_thumbnails(
+        snap: &gust_core::DirectorySnapshot,
+        wanted: bool,
+        filter: &str,
+        hidden: bool,
+        cancel: &CancelToken,
+    ) -> Vec<(std::ffi::OsString, String)> {
+        if !wanted || admin_session() {
+            return Vec::new();
+        }
+        let Some(dir) = snap.key.as_path() else {
+            return Vec::new();
+        };
+        let shown = visible_indices(&snap.entries, filter, hidden);
+        let window = first_window(&shown, None, FIRST_WINDOW);
+        let names = window
+            .into_iter()
+            .filter_map(|i| snap.entries.get(i))
+            .filter(|e| crate::thumbnails::mime(e).is_some())
+            .map(|e| e.name.clone());
+        crate::thumbnails::cached_rows(dir, names, cancel)
     }
 
     /// Produce thumbnails for the current folder on a WORKER thread.
@@ -1851,11 +1897,7 @@ impl qobject::DirModel {
                 .iter()
                 .chain(r.visible[window.start..first].iter())
                 .filter_map(|i| r.all.get(*i))
-                .filter(|e| e.kind != EntryKind::Dir)
-                .filter(|e| !r.thumbs.contains_key(&e.name))
-                .filter_map(|e| {
-                    gust_core::mime::thumbnail_mime(&e.name).map(|m| (e.name.clone(), m))
-                })
+                .filter_map(|e| crate::thumbnails::mime(e).map(|m| (e.name.clone(), m)))
                 .collect()
         };
         self.as_mut().rust_mut().thumb_cancel.cancel();
@@ -1876,45 +1918,23 @@ impl qobject::DirModel {
         let spawned = std::thread::Builder::new()
             .name("gust-thumbs".into())
             .spawn(move || {
-                let render = || {
-                    if !gust_thumbs::sandbox::sandbox_available() {
-                        let _ = thread.queue(move |mut model| {
-                            if model.as_ref().generation == gen && !cancel.is_cancelled() {
-                                model.as_mut().set_notice(QString::from(
-                                    "Previews need bubblewrap — install bwrap to enable them",
-                                ));
-                            }
-                        });
-                        return;
-                    }
-                    for (name, mime) in want {
-                        if cancel.is_cancelled() {
-                            return;
+                if !gust_thumbs::sandbox::sandbox_available() {
+                    let _ = thread.queue(move |mut model| {
+                        if model.as_ref().generation == gen {
+                            model.as_mut().set_notice(QString::from(
+                                "Previews need bubblewrap — install bwrap to enable them",
+                            ));
                         }
-                        let src = dir.join(&name);
-                        let Ok(path) = gust_thumbs::render::thumbnail(
-                            &src,
-                            mime,
-                            gust_thumbs::cache::ThumbSize::Normal,
-                        ) else {
-                            // A file we cannot preview keeps its placeholder.
-                            // Never a fallback that decodes it in this process.
-                            continue;
-                        };
-                        if cancel.is_cancelled() {
-                            return;
+                    });
+                }
+                crate::thumbnails::run(&dir, want, &cancel, |batch| {
+                    let publish_cancel = cancel.clone();
+                    let _ = thread.queue(move |model| {
+                        if !publish_cancel.is_cancelled() {
+                            Self::publish_thumbnails(model, gen, batch);
                         }
-                        let shown = path.to_string_lossy().into_owned();
-                        let n = name.clone();
-                        let publish_cancel = cancel.clone();
-                        let _ = thread.queue(move |model| {
-                            if !publish_cancel.is_cancelled() {
-                                Self::publish_thumbnail(model, gen, n, shown);
-                            }
-                        });
-                    }
-                };
-                render();
+                    });
+                });
                 let _ = thread.queue(move |mut model| {
                     if model.as_mut().rust_mut().thumb_work.finish() {
                         model.as_mut().start_thumbnails();
@@ -5088,33 +5108,45 @@ impl qobject::DirModel {
         }
     }
 
-    fn publish_thumbnail(
+    fn publish_thumbnails(
         mut self: Pin<&mut Self>,
         gen: u64,
-        name: std::ffi::OsString,
-        path: String,
+        batch: Vec<(std::ffi::OsString, String)>,
     ) {
         if self.as_ref().generation != gen {
             return;
         }
-        self.as_mut().rust_mut().thumbs.insert(name.clone(), path);
-
-        // Repaint only the row that changed.
-        let Some(row) = self
+        let mut changed = std::collections::HashSet::new();
+        for (name, url) in batch {
+            let mut r = self.as_mut().rust_mut();
+            if url.is_empty() {
+                if r.thumbs.remove(&name).is_some() {
+                    changed.insert(name);
+                }
+            } else if r.thumbs.get(&name) != Some(&url) {
+                r.thumbs.insert(name.clone(), url);
+                changed.insert(name);
+            }
+        }
+        if changed.is_empty() {
+            return;
+        }
+        let rows: Vec<_> = self
             .as_ref()
             .visible
             .iter()
-            .position(|i| self.as_ref().all.get(*i).map(|e| &e.name) == Some(&name))
-        else {
-            return;
-        };
+            .enumerate()
+            .filter_map(|(row, &i)| changed.contains(&self.as_ref().all[i].name).then_some(row))
+            .collect();
         let mut roles = cxx_qt_lib::QVector::<i32>::default();
         roles.append(ROLE_THUMB);
-        unsafe {
-            let idx = self
-                .as_ref()
-                .index(row as i32, 0, &cxx_qt_lib::QModelIndex::default());
-            self.as_mut().data_changed(&idx, &idx, &roles);
+        for row in rows {
+            unsafe {
+                let idx = self
+                    .as_ref()
+                    .index(row as i32, 0, &cxx_qt_lib::QModelIndex::default());
+                self.as_mut().data_changed(&idx, &idx, &roles);
+            }
         }
     }
 
@@ -5358,7 +5390,7 @@ impl qobject::DirModel {
         // on the worker, including replacements that kept the same name.
         self.as_mut().rust_mut().thumb_cancel.cancel();
         self.as_mut().rust_mut().thumb_work.invalidate();
-        self.as_mut().rust_mut().thumbs.clear();
+
         let snap_complete = snap.complete.clone();
         // A sub-folder whose own timestamp moved had something added,
         // removed or renamed inside it: its cached size is stale. (A file
@@ -5465,6 +5497,7 @@ impl qobject::DirModel {
             .collect();
         {
             let mut r = self.as_mut().rust_mut();
+            crate::thumbnails::retain_eligible(&mut r.thumbs, &snap.entries);
             r.all = snap.entries;
             r.visible = survivors
                 .iter()
@@ -5875,7 +5908,7 @@ impl qobject::DirModel {
     }
 
     fn reload(self: Pin<&mut Self>) {
-        self.load_current();
+        self.load_current_cached(false);
     }
 
     /// Ctrl+R: the user asked for fresh facts, so folders are re-measured
@@ -5884,7 +5917,7 @@ impl qobject::DirModel {
     fn reload_all(mut self: Pin<&mut Self>) {
         self.as_mut().rust_mut().size_cancel.cancel();
         self.as_mut().rust_mut().dir_sizes.clear();
-        self.load_current();
+        self.load_current_cached(false);
     }
 
     fn toggle_hidden(mut self: Pin<&mut Self>) {
@@ -9042,13 +9075,12 @@ impl qobject::DirModel {
                 &gust_core::tags::keys_of(e.meta.map(|m| m.tags).unwrap_or(0)).join(","),
             )),
             ROLE_THUMB => {
-                // Only ever a CACHED thumbnail. This runs on the GUI thread,
-                // so it must not render, and must not even stat the source
-                // beyond what `cached` already does.
+                // The complete versioned URL was validated on a worker.
+                // This role performs no I/O.
                 let url = self
                     .thumbs
                     .get(&e.name)
-                    .map(|p| QString::from(&format!("file://{p}")))
+                    .map(QString::from)
                     .unwrap_or_default();
                 QVariant::from(&url)
             }
