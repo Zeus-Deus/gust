@@ -1998,12 +1998,17 @@ Quattro surfaces rather than like Nautilus.
 
 ## 6.22 Wheel and keyboard ownership
 
-- **Wheel.** Qt Quick turns each wheel event into a small flick. A
-  high-resolution wheel reports a notch as eight events of 15/120, and eight
-  tiny flicks barely move the list (5 notches: 0 px in the qa probe). Every
-  scrolling list uses `WheelScroll`, which moves a fixed distance per notch
-  — GTK's `page_height ^ (2/3)`, about three rows — and passes a touchpad's
-  pixel deltas straight through. Modified wheels are left alone.
+- **Wheel.** Every scrolling list uses `WheelScroll`: three theme rows per
+  notch, independent of viewport height, including fractional high-resolution
+  wheel deltas. Angle-based movement accumulates into a short eased transition
+  (two thirds of `animFast`), preserving distance during a free spin. Reversing
+  discards the pending movement in the old direction. External scrolling,
+  dragging, or layout changes stop the transition so navigation owns its
+  position. Touchpad/continuous gesture pixel deltas pass straight through;
+  mouse wheels use angular rotation even when Wayland also supplies pixels
+  and Qt labels the device as a touchpad. Gesture phases distinguish the two.
+  Modified wheels are left alone. No additional wheel inertia or acceleration
+  is added.
 - **Keyboard.** One item, `listFocus` in Main.qml, owns the file-list keys.
   Views set `keyNavigationEnabled: false` and nothing in a view calls
   `forceActiveFocus()` on itself; a click on a row or on empty space reports

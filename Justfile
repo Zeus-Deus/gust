@@ -27,6 +27,10 @@ test-all:
 test-app:
     ./tests/run-tests.sh --app
 
+# Wheel distance, rapid high-resolution input, reversal and navigation ownership.
+test-wheel:
+    python3 tests/wheel-scroll.py
+
 # Source-only checks and orchestration regression tests, no desktop/build.
 check-release:
     python3 tests/test-release-runners.py
