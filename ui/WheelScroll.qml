@@ -1,18 +1,8 @@
 import QtQuick
 
-// Mouse-wheel scrolling at the desktop's pace (DESIGN §6.22).
-//
-// Qt Quick turns every wheel event into a small flick. A high-resolution
-// wheel (most current mice) reports one notch as eight small events, and
-// eight tiny flicks barely move the list: five notches moved it by nothing
-// at all in the qa probe, which is the "slow motion" scrolling people saw
-// next to GTK apps. This scrolls a fixed distance per notch instead — the
-// one GTK uses, page height ^ (2/3), about three rows in a normal window —
-// and passes a touchpad's pixel deltas through unchanged so two-finger
-// scrolling stays smooth.
-//
-// Declare it inside the ListView/GridView it scrolls and point `view` at it.
-// A modified wheel (Ctrl, Shift) is left to the view's own handling.
+// Keep fractional wheel rotation proportional, with a short transition rather
+// than a separate flick per event. A free-spinning wheel supplies its own tail.
+// Declare inside the Flickable being scrolled (DESIGN §6.22).
 WheelHandler {
     id: wheel
     required property Flickable view
@@ -20,19 +10,74 @@ WheelHandler {
     acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
     acceptedModifiers: Qt.NoModifier
 
-    onWheel: (event) => {
+    property real scrollPosition: 0
+    property bool applyingScroll: false
+
+    onScrollPositionChanged: {
+        if (!view) return
+        applyingScroll = true
+        view.contentY = scrollPosition
+        applyingScroll = false
+    }
+
+    property NumberAnimation scrollAnimation: NumberAnimation {
+        target: wheel
+        property: "scrollPosition"
+        duration: Math.round(Tokens.animFast * 2 / 3)
+        easing.type: Easing.OutCubic
+    }
+
+    // Animation writes go through scrollPosition so an independent contentY
+    // change (keyboard, scrollbar, navigation) can cancel pending wheel travel.
+    property Connections viewChanges: Connections {
+        target: wheel.view
+        ignoreUnknownSignals: true
+        function onContentYChanged() {
+            if (!wheel.applyingScroll) wheel.scrollAnimation.stop()
+        }
+        function onCurrentIndexChanged() { wheel.scrollAnimation.stop() }
+        function onContentHeightChanged() { wheel.scrollAnimation.stop() }
+        function onHeightChanged() { wheel.scrollAnimation.stop() }
+        function onOriginYChanged() { wheel.scrollAnimation.stop() }
+        function onDraggingChanged() {
+            if (wheel.view.dragging) wheel.scrollAnimation.stop()
+        }
+    }
+
+    onEnabledChanged: if (!enabled) scrollAnimation.stop()
+
+    onWheel: function(event) {
         const v = wheel.view
-        let dy = event.pixelDelta.y
-        if (dy === 0)
-            dy = event.angleDelta.y / 120 * Math.pow(v.height, 2 / 3)
+        // Qt Wayland can label a mouse wheel as a touchpad and supply pixels
+        // only on some events. Gesture phases distinguish continuous scrolling;
+        // otherwise keep every wheel event on the same angular scale.
+        const continuous = event.phase !== Qt.NoScrollPhase
+                        || event.angleDelta.y === 0
+        const pixels = continuous ? event.pixelDelta.y : 0
+        const dy = pixels !== 0 ? pixels
+                 : event.angleDelta.y / 120 * Tokens.rowHeight * 3
         if (dy === 0) {
             event.accepted = false
             return
         }
-        const top = v.originY
-        const bottom = v.originY + Math.max(0, v.contentHeight - v.height)
+        // Accumulate against the destination, not the last animation frame.
+        // On reversal, start at the visible position for an immediate response.
+        const continuing = scrollAnimation.running
+                         && (scrollAnimation.to - v.contentY) * dy < 0
+        const base = pixels === 0 && continuing ? scrollAnimation.to : v.contentY
+        scrollAnimation.stop()
         v.cancelFlick()
-        v.contentY = Math.max(top, Math.min(v.contentY - dy, bottom))
+        const top = v.originY
+        const bottom = top + Math.max(0, v.contentHeight - v.height)
+        const destination = Math.max(top, Math.min(base - dy, bottom))
+        if (pixels !== 0) {
+            v.contentY = destination
+        } else {
+            scrollPosition = v.contentY
+            scrollAnimation.from = v.contentY
+            scrollAnimation.to = destination
+            scrollAnimation.start()
+        }
         event.accepted = true
     }
 }
