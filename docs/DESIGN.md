@@ -881,6 +881,25 @@ answer; a preview that required running the file is not.
    publishes a snapshot, exactly as listing is.
 4. **Escape closes it**, before the selection and before the filter, because
    it is the most recently opened thing (§4 Escape ladder).
+5. **Left / Right browse neighbouring files without leaving Quick Look.**
+   Media previews follow the visible media order from §6.18.1; other files
+   follow visible regular files. Folders, links and programs are skipped,
+   and either end stays put. `preview_neighbor(row, delta)` resolves the row
+   from cached entries only, returning the current row at either end. The
+   cursor follows the preview; switching files stops its audio and hash work.
+   While Quick Look is open, `liveHold` holds watched-directory row changes
+   for the lifetime of its stored row (including browsing, page and hash
+   requests). A relist queued before the hold must also defer at `apply_live`,
+   mark the model dirty and retry after the last overlay releases the hold.
+   Up / Down zoom an image, PDF page or video frame without changing the
+   file. Explicit zoom may enlarge the sandboxed preview beyond its native
+   pixels and stays clipped to the preview area; opening another file resets
+   it to fit. PDF Left / Right still turn pages; Page Up / Down also turn pages.
+   PDFs own these keys while loading, after a render failure and at single-page
+   or end boundaries: consume without browsing or requesting an unavailable
+   page. Before page metadata arrives, identify the PDF from the peek's
+   case-insensitive `.pdf` name suffix (preserved by display sanitisation),
+   not a nonexistent MIME field or a translated kind label.
 
 ### 6.9.1 Previews of everyday files
 
@@ -903,7 +922,7 @@ never decodes an untrusted byte in Gust's own process.
   own PCM player (`pw-play`, else `paplay`), which only ever sees samples.
   Gust owns the clock: pause stops the relay, a seek restarts the decoder
   at the new time; both take effect within the ~0.25 s already queued.
-  `p` / `k` play and pause, Left / Right skip five seconds, the bar seeks
+  `p` / `k` play and pause, Shift+Left / Right skip five seconds, the bar seeks
   by click or drag. Title, artist and album come from the file's tags via
   sandboxed `ffprobe`, sanitised. Closing Quick Look kills both processes.
 - **Video** shows a frame and says "Enter plays it in your video player".
@@ -1876,9 +1895,9 @@ Activating a regular image, audio or video file opens one `mpv` window with
 the visible media rows in their current display order, starting at the
 activated row. The playlist is a snapshot: filtering and hidden-file settings
 apply, and folders, programs and other documents are skipped. Left / Right
-select the previous / next file and stop at either end; Shift+Left / Right
-seek five seconds, Space pauses, Escape closes. Images stay up until the
-user navigates; completed audio/video stays open too.
+select the previous / next file and stop at either end; Up / Down zoom in /
+out, Shift+Left / Right seek five seconds, Space pauses, Escape closes.
+Images stay up until the user navigates; completed audio/video stays open too.
 Finishing a clip does not pause playback of the next file.
 
 The model builds this snapshot from names and cached entry kinds only.

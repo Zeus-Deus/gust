@@ -24,6 +24,7 @@ Item {
     signal closed()
     /// The row shown, so h can hash it.
     property int row: -1
+    property real imageZoom: 1
 
     /// The model, so the panel can ask for and receive its visual preview.
     property var model: null
@@ -35,6 +36,11 @@ Item {
     }
 
     function show(json, row) {
+        if (root.open && root.model) {
+            audioPoll.stop()
+            root.model.audio_stop()
+            root.model.hash_cancel()
+        }
         try {
             root.info = JSON.parse(json)
         } catch (e) {
@@ -43,16 +49,39 @@ Item {
         root.open = root.info !== null && root.info.ok
         root.row = row === undefined ? -1 : row
         root.audio = null
+        root.imageZoom = 1
         if (root.open && root.model && row !== undefined) root.model.request_peek_visual(row)
+    }
+
+    function browse(delta) {
+        if (!root.open || !root.model) return false
+        const next = root.model.preview_neighbor(root.row, delta)
+        if (next !== root.row) {
+            root.model.focus_row(next)
+            root.show(root.model.peek_row(next), next)
+        }
+        // At either end, keep the key out of the file list underneath.
+        return true
+    }
+
+    function zoomBy(delta) {
+        if (!root.open) return false
+        if (root.visual && root.visual.image !== undefined)
+            root.imageZoom = Math.max(0.125, Math.min(8, root.imageZoom * Math.pow(2, delta / 10)))
+        // Audio/text have no image to zoom; keep their cursor in place too.
+        return true
     }
 
     // --- PDF pages --------------------------------------------------------
     readonly property int page: root.visual && root.visual.page ? root.visual.page : 0
     readonly property int pages: root.visual && root.visual.pages ? root.visual.pages : 0
-    /// Turn the page by `d` (Left/Right, PageUp/PageDown). False when this
-    /// is not a document with pages, so the key does what it always does.
+    /// Turn the page by `d` (Left/Right, PageUp/PageDown). A PDF owns these
+    /// keys even while loading, on failure or with only one page; other files
+    /// fall through to browsing. The peek name has no MIME field, and display
+    /// sanitisation preserves its .pdf suffix.
     function turnPage(d) {
-        if (!root.open || root.pages < 2 || !root.model) return false
+        if (!root.open || !root.model) return false
+        if (root.pages < 2) return root.info !== null && /\.pdf$/i.test(root.info.name)
         const want = Math.max(1, Math.min(root.pages, root.page + d))
         if (want !== root.page) root.model.request_peek_page(root.row, want)
         return true
@@ -81,7 +110,7 @@ Item {
         root.model.audio_toggle()
         return true
     }
-    /// Left / Right: five seconds back or forward.
+    /// Shift+Left / Right: five seconds back or forward.
     function seekBy(d) {
         if (!root.isAudio || !root.model || !root.audio) return false
         root.model.audio_seek(Math.max(0, root.audio.pos + d))
@@ -101,11 +130,13 @@ Item {
     }
     /// Is the close hint inside the panel? (qa)
     /// The preview image: rendered size and drawn size, in pixels (qa).
-    /// Drawn larger than rendered means it was stretched, i.e. blurry.
+    /// Explicit user zoom can enlarge it; fit mode never upscales the render.
     function imageInfo() {
         if (!visualImage.visible || visualImage.status !== Image.Ready) return null
         return { rendered: [visualImage.implicitWidth, visualImage.implicitHeight],
-                 drawn: [Math.round(visualImage.paintedWidth), Math.round(visualImage.paintedHeight)] }
+                 drawn: [Math.round(visualImage.paintedWidth * root.imageZoom),
+                         Math.round(visualImage.paintedHeight * root.imageZoom)],
+                 zoom: root.imageZoom }
     }
 
     function closeInside() {
@@ -242,6 +273,7 @@ Item {
             Item {
                 visible: panel.hasPreview
                 width: parent.width
+                clip: visualImage.visible
                 // Everything else in the column, plus one spacing per gap.
                 height: panel.height - Tokens.spaceXl * 2
                         - qlName.height - qlKind.height - qlClose.height
@@ -253,9 +285,8 @@ Item {
                 // Image, PDF first page or video frame: a PNG the sandboxed
                 // helper made. Only this PNG is decoded here, never the file.
                 //
-                // Never larger than the render itself: stretching a small
-                // image past its own pixels is what made previews blurry.
-                // Larger renders are scaled DOWN to fit, with mipmaps.
+                // Fit without upscaling by default. Only explicit user zoom
+                // enlarges the cached preview, clipped inside this area.
                 Image {
                     id: visualImage
                     objectName: "quickLookImage"
@@ -272,6 +303,7 @@ Item {
                     cache: false
                     smooth: true
                     mipmap: true
+                    scale: root.imageZoom
                 }
 
                 // A PDF with more than one page: where we are, and how to move.
@@ -346,7 +378,7 @@ Item {
                 }
 
                 // Audio: decoded in the sandbox, played through the
-                // desktop's own player. p pauses, Left / Right skip.
+                // desktop's own player. p pauses, Shift+Left / Right seek.
                 Column {
                     id: audioPanel
                     objectName: "quickLookAudio"
@@ -478,7 +510,7 @@ Item {
                         wrapMode: Text.WordWrap
                         text: root.visual && root.visual.audio === false ? root.visual.why
                               : root.audio && root.audio.state === "failed" ? qsTr("Cannot play: %1").arg(root.audio.why)
-                              : qsTr("p play / pause  ·  ← → 5 seconds  ·  Enter opens your music player")
+                              : qsTr("p play / pause  ·  ← → previous / next  ·  Shift+← → 5 seconds  ·  Enter opens your music player")
                         color: audioPanel.failed ? Tokens.danger : Tokens.foregroundDim
                         font.bold: audioPanel.failed
                         font.family: Tokens.fontFamily
@@ -585,7 +617,8 @@ Item {
                 id: qlClose
                 width: parent.width
                 horizontalAlignment: Text.AlignRight
-                text: qsTr("Space or Escape to close")
+                text: visualImage.visible ? qsTr("↑ ↓ zoom  ·  Space or Escape to close")
+                                          : qsTr("Space or Escape to close")
                 color: Tokens.foregroundDim
                 font.family: Tokens.fontFamily
                 font.pixelSize: Tokens.fontCaption

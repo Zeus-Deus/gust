@@ -135,10 +135,10 @@ if need ffmpeg && need bwrap && { need pw-play || need paplay; }; then
   a="$(aud "['pos']")"; sleep 1.2; b="$(aud "['pos']")"
   [[ "$a" == "$b" ]] && ok "paused means paused ($a s)" || bad "moved while paused ($a -> $b)"
   key p; sleep 0.5
-  key Right; sleep 0.8
+  vm wtype -M shift -k Right -m shift; sleep 0.8
   c="$(aud "['pos']")"
   python3 -c "import sys; sys.exit(0 if float('$c')-float('$b')>=4.0 else 1)" \
-    && ok "Right skips five seconds ($b -> $c)" || bad "Right did not skip ($b -> $c)"
+    && ok "Shift+Right skips five seconds ($b -> $c)" || bad "Shift+Right did not skip ($b -> $c)"
   # Clicking the position bar near its end jumps there.
   read -r WX WY WW WH <<<"$(win_geo)"
   if [[ "$MOUSE_OK" == 1 ]] && pt="$(state "' '.join(map(str, d['audioBarPoint']))" 2>/dev/null)" && [[ "$pt" != ERR* ]]; then

@@ -3,7 +3,8 @@
 
 Run inside the desktop session after building:
   python3 tests/media-navigation.py --binary target/debug/gust --output /tmp/gust-media-qa
-The output directory must be new. Requires wtype, hyprctl, grim, magick, ffmpeg, mpv.
+The output directory must be new. Requires wtype, hyprctl, grim, magick, ffmpeg,
+mpv and Poppler's pdfinfo/pdftoppm for PDF preview checks.
 """
 import argparse
 import fcntl
@@ -69,6 +70,7 @@ def main():
     run("ffmpeg", "-v", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=30", str(media / "30-audio.wav"))
     run("ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=15:duration=3",
         "-pix_fmt", "yuv420p", str(media / "40-video.mp4"))
+    run("magick", "-size", "600x800", "xc:white", "xc:gray", str(media / "60-report.pdf"))
     (media / "00-folder.png").mkdir()
     (media / "15-notes.txt").write_text("Skip this document.\n")
     (media / "25-archive.zip").write_bytes(b"Not media")
@@ -146,7 +148,8 @@ def main():
         focus(f"pid:{app.pid}")
 
     def screenshot(name):
-        window = next(c for c in json.loads(run("hyprctl", "clients", "-j")) if c["pid"] == player["pid"])
+        pid = player["pid"] if player else app.pid
+        window = next(c for c in json.loads(run("hyprctl", "clients", "-j")) if c["pid"] == pid)
         x, y = window["at"]
         width, height = window["size"]
         run("grim", "-g", f"{x},{y} {width}x{height}", str(output / name))
@@ -159,6 +162,16 @@ def main():
         wait_for(lambda: state()["model"]["cursor_name"] == images[1], "selected middle image")
         open_selected()
         expect_file(images[1])
+        zoom = command("get_property", "video-zoom")
+        key("Up")
+        wait_for(lambda: command("get_property", "video-zoom") > zoom, "Up zooms into opened image")
+        expect_file(images[1])
+        screenshot("image-zoomed.png")
+        key("Down")
+        wait_for(lambda: abs(command("get_property", "video-zoom") - zoom) < 0.001,
+                 "Down restores opened image zoom")
+        expect_file(images[1])
+        checks.append("Viewer Up/Down zoom the image without switching files")
         playlist = command("get_property", "playlist")
         assert [p["filename"] for p in playlist] == [str(media / name) for name in
                                                     [images[0], images[1], "30-audio.wav", "40-video.mp4", images[2]]], playlist
@@ -185,6 +198,14 @@ def main():
         screenshot("audio.png")
         key("Right")
         expect_file("40-video.mp4")
+        zoom = command("get_property", "video-zoom")
+        key("Up")
+        wait_for(lambda: command("get_property", "video-zoom") > zoom, "Up zooms into opened video")
+        expect_file("40-video.mp4")
+        key("Down")
+        wait_for(lambda: abs(command("get_property", "video-zoom") - zoom) < 0.001,
+                 "Down restores opened video zoom")
+        checks.append("Viewer Up/Down zoom video without seeking or switching files")
         screenshot("video.png")
         wait_for(lambda: command("get_property", "eof-reached"), "video stays open after ending")
         key("Left")
@@ -200,6 +221,91 @@ def main():
         expect_playing("40-video.mp4")
         screenshot("post-eof-video.png")
         close_player()
+
+        def expect_preview(name):
+            shown_name = name.replace("\n", "<U+000A>")
+            wait_for(lambda: state()["quickLookOpen"] and state()["quickLookName"] == shown_name,
+                     f"Quick Look: {name!r}")
+            assert state()["model"]["cursor_name"] == shown_name
+            assert state()["model"]["location"] == str(media)
+
+        def check_preview_zoom(name):
+            wait_for(lambda: state()["quickLookImage"] is not None, "preview image to zoom")
+            before = state()["quickLookImage"]
+            key("Up")
+            wait_for(lambda: state()["quickLookImage"]["zoom"] > before["zoom"] and
+                     state()["quickLookImage"]["drawn"][0] > before["drawn"][0], "Up enlarges preview")
+            expect_preview(name)
+            screenshot("quicklook-zoomed.png")
+            key("Down")
+            wait_for(lambda: abs(state()["quickLookImage"]["zoom"] - before["zoom"]) < 0.001,
+                     "Down restores preview zoom")
+            expect_preview(name)
+
+        key("space")
+        expect_preview(images[1])
+        key("Left")
+        expect_preview(images[0])
+        key("Left")
+        expect_preview(images[0])
+        key("Right")
+        expect_preview(images[1])
+        wait_for(lambda: state()["quickLookImage"] is not None, "preview image")
+        screenshot("quicklook-image.png")
+        check_preview_zoom(images[1])
+        checks.append("Quick Look Up/Down zoom the image without changing the file or cursor")
+        key("Right")
+        expect_preview("30-audio.wav")
+        wait_for(lambda: state()["quickLookAudio"] and
+                 json.loads(state()["quickLookAudio"])["state"] == "playing", "preview audio")
+        before = json.loads(state()["quickLookAudio"])["pos"]
+        key("Right", shift=True)
+        wait_for(lambda: json.loads(state()["quickLookAudio"])["pos"] > before + 3,
+                 "Shift+Right seeks preview audio")
+        key("Up")
+        key("Down")
+        expect_preview("30-audio.wav")
+        key("Right")
+        expect_preview("40-video.mp4")
+        assert state()["quickLookAudio"] == "", "Previous preview audio must stop"
+        key("Right")
+        expect_preview(images[2])
+        key("Right")
+        expect_preview(images[2])
+        key("Left")
+        expect_preview("40-video.mp4")
+        key("Escape")
+        checks.append("Quick Look arrows update media and cursor, skip non-media, and stop at either end")
+        checks.append("Shift+Right seeks preview audio and changing previews stops playback")
+
+        run("wtype", "15-notes")
+        wait_for(lambda: state()["model"]["cursor_name"] == "15-notes.txt", "selected document")
+        key("space")
+        expect_preview("15-notes.txt")
+        key("Left")
+        expect_preview(images[0])
+        key("Escape")
+        checks.append("Document previews can browse neighbouring files without entering folders")
+
+        key("End")
+        key("space")
+        expect_preview("60-report.pdf")
+        wait_for(lambda: state()["quickLookPage"] == [1, 2], "first PDF page")
+        check_preview_zoom("60-report.pdf")
+        assert state()["quickLookPage"] == [1, 2], "Zoom keeps the current PDF page"
+        key("Right")
+        wait_for(lambda: state()["quickLookPage"] == [2, 2], "second PDF page")
+        expect_preview("60-report.pdf")
+        key("Right")
+        assert state()["quickLookPage"] == [2, 2], "PDF stops at its last page"
+        key("Left")
+        wait_for(lambda: state()["quickLookPage"] == [1, 2], "previous PDF page")
+        key("Next")
+        wait_for(lambda: state()["quickLookPage"] == [2, 2], "Page Down still turns PDF pages")
+        screenshot("quicklook-pdf.png")
+        key("Escape")
+        checks.append("PDF arrows and Page Down still turn pages without changing files")
+
         key("slash")
         run("wtype", "image")
         wait_for(lambda: state()["model"]["count"] == 3, "filtered images")
@@ -213,6 +319,34 @@ def main():
         expect_file(images[2])
         checks.append("A committed folder filter also limits the viewer playlist")
         close_player()
+        key("space")
+        expect_preview(images[0])
+        key("Right")
+        expect_preview(images[1])
+        key("Right")
+        expect_preview(images[2])
+        key("Right")
+        expect_preview(images[2])
+        key("Escape")
+        checks.append("Quick Look navigation respects the committed folder filter")
+        for view in ["grid", "columns"]:
+            run("wtype", ":")
+            run("wtype", f"View: {view.title()}")
+            key("Return")
+            wait_for(lambda: state()["view"] == view, f"{view} view")
+            key("Home")
+            key("space")
+            expect_preview(images[0])
+            key("Right")
+            expect_preview(images[1])
+            key("Left")
+            expect_preview(images[0])
+            key("Left")
+            expect_preview(images[0])
+            check_preview_zoom(images[0])
+            screenshot(f"quicklook-{view}.png")
+            key("Escape")
+            checks.append(f"Preview Left/Right browse and Up/Down zoom in {view} view")
         (output / "results.json").write_text(json.dumps({"passed": checks}, indent=2) + "\n")
         print(f"PASS: {len(checks)} checks; screenshots and results in {output}")
     except Exception:
@@ -225,8 +359,10 @@ def main():
             except (OSError, AssertionError):
                 pass
         (output / "failure.json").write_text(json.dumps(failure, indent=2) + "\n")
-        if player:
+        try:
             screenshot("failure.png")
+        except (OSError, StopIteration, subprocess.CalledProcessError):
+            pass
         raise
     finally:
         try:

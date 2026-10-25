@@ -12,7 +12,16 @@ cat > "$d48/.bin/xdg-open" <<'STUB'
 #!/bin/sh
 printf '%s\n' "$@" >> "$(dirname "$0")/opened"
 STUB
-chmod 755 "$d48/.bin/xdg-open"
+cat > "$d48/.bin/mpv" <<'STUB'
+#!/usr/bin/python3
+import pathlib, sys, urllib.parse
+start = next(int(a.split('=', 1)[1]) for a in sys.argv if a.startswith('--playlist-start='))
+uris = [line for line in sys.stdin.read().splitlines() if line and not line.startswith('#')]
+path = urllib.parse.unquote(urllib.parse.urlsplit(uris[start]).path)
+with (pathlib.Path(__file__).parent / 'opened').open('a') as output:
+    output.write(path + '\n')
+STUB
+chmod 755 "$d48/.bin/xdg-open" "$d48/.bin/mpv"
 export QA_PATH_PREPEND="$d48/.bin"
 stop_gust; start_gust "$d48"
 wait_for "d['model']['settled']" "True" 20 >/dev/null

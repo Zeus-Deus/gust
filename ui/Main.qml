@@ -1115,11 +1115,11 @@ Window {
     readonly property bool canForward: dirModel ? (dirModel.location, dirModel.can_go_forward()) : false
 
     // While an overlay refers to a row BY INDEX (the rename prompt, a
-    // context menu, a confirm or conflict dialog), a file created or deleted
+    // context menu, Quick Look, a confirm or conflict dialog), a file created or deleted
     // by another program must not shift the rows under it: the rename would
     // hit the wrong file. Live updates wait, and land when it closes.
     readonly property bool liveHold: palette.visible || confirm.visible || connectionRecovery.visible || settingsPanel.open || trashPanel.open || recentPanel.open || connectPanel.open || deviceSharing.open
-                                     || contextMenu.open || conflictDialog.visible
+                                     || contextMenu.open || conflictDialog.visible || quickLook.open
                                      || prompt.visible || prompt.claimingFocus
     onLiveHoldChanged: {
         for (let i = 0; i < tabList.count; i++) {
@@ -2964,14 +2964,21 @@ Window {
                 win.qaDump("hash")
                 event.accepted = true; return
             }
-            // Quick Look's own keys (DESIGN §6.9.1): p / k play and pause a
-            // sound, Left / Right skip five seconds or turn a PDF's page,
-            // Page Up / Page Down turn pages. Anything else falls through.
+            // A preview owns arrow keys so they cannot navigate the list
+            // underneath it. PDF pages keep Left/Right; audio seeks with Shift.
+            if (quickLook.open && event.modifiers === Qt.ShiftModifier
+                && (event.key === Qt.Key_Left || event.key === Qt.Key_Right)) {
+                quickLook.seekBy(event.key === Qt.Key_Left ? -5 : 5)
+                win.qaDump("quicklook-key")
+                event.accepted = true; return
+            }
             if (quickLook.open && event.modifiers === Qt.NoModifier) {
                 let used = false
                 if (event.key === Qt.Key_P || event.key === Qt.Key_K) used = quickLook.togglePlay()
-                else if (event.key === Qt.Key_Left) used = quickLook.seekBy(-5) || quickLook.turnPage(-1)
-                else if (event.key === Qt.Key_Right) used = quickLook.seekBy(5) || quickLook.turnPage(1)
+                else if (event.key === Qt.Key_Left) used = quickLook.turnPage(-1) || quickLook.browse(-1)
+                else if (event.key === Qt.Key_Right) used = quickLook.turnPage(1) || quickLook.browse(1)
+                else if (event.key === Qt.Key_Up) used = quickLook.zoomBy(1)
+                else if (event.key === Qt.Key_Down) used = quickLook.zoomBy(-1)
                 else if (event.key === Qt.Key_PageUp) used = quickLook.turnPage(-1)
                 else if (event.key === Qt.Key_PageDown) used = quickLook.turnPage(1)
                 else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {

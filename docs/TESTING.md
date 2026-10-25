@@ -269,3 +269,39 @@ KVM-only models, desktop/theme, benchmark and hardware/provider qualification
 remain separately required before release; hosted build success cannot certify
 them. There are no screenshot, log or receipt uploads and no self-hosted jobs
 that would expose private runner identities.
+
+## Media navigation and zoom
+
+Run the portable, display-free preview regression with Qt 6 installed:
+
+```bash
+python3 -B tests/preview-navigation-regressions.py --output "$TMPDIR/gust-preview-regression-new"
+```
+
+Use a new output directory; `--source` selects an independent source snapshot
+and `--runner` selects the Qt SDK's `qmltestrunner`. The runner extracts exact
+Quick Look methods/bindings and Main's preview key branch, `liveHold` binding
+and notification handler into an offscreen QtTest fixture. It checks earlier
+sibling insertion/removal, frozen browse order and release on close; loading,
+failed and single-page PDFs retain arrows; multi-page turns clamp; non-PDF
+browsing and another overlay's hold remain intact. HOME, XDG and TMPDIR are
+private and no desktop/display/bus environment is inherited. Source, extracted
+bindings, test bytes, logs, actual Qt exit and hashes are retained in the output.
+DirModel, watcher and renderer are boundary doubles: this does not exercise
+native relisting or PDF rendering. The already-queued `apply_live` hold guard
+is separately checked **statically**, before row publication; native watcher,
+queued-completion and renderer timing still need the desktop lane below.
+
+Run the focused check in the desktop session after building:
+
+```bash
+python3 tests/media-navigation.py --binary target/debug/gust --output /tmp/gust-media-navigation-new
+```
+
+The output directory must be new. The check drives isolated Gust and mpv
+windows with real keys, preserves existing windows, and saves screenshots.
+It covers previous/next media, folder and program exclusion, end boundaries,
+filters, audio seeking and stopping, PDF pages, Up/Down zoom in the viewer
+and preview, and Quick Look in Rows, Grid and Columns. It needs mpv, wtype,
+hyprctl, grim, ImageMagick, ffmpeg, Poppler and the sandbox/audio helpers
+used by Quick Look.

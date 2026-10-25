@@ -466,6 +466,9 @@ pub mod qobject {
         /// (DESIGN §6.9).
         #[qinvokable]
         fn peek_row(self: &DirModel, row: i32) -> QString;
+        /// Adjacent previewable file in the visible order, without filesystem I/O.
+        #[qinvokable]
+        fn preview_neighbor(self: &DirModel, row: i32, delta: i32) -> i32;
         /// Hash a row's file on a worker; the answer lands in peek_hash.
         /// A second call (or hash_cancel) stops the first.
         #[qinvokable]
@@ -5020,6 +5023,34 @@ impl qobject::DirModel {
             .ok();
     }
 
+    fn preview_neighbor(&self, row: i32, delta: i32) -> i32 {
+        use gust_core::mime::{category_for_name, needs_trusted_launch, Category};
+        let Some(current) = self.entry_at(row) else {
+            return row;
+        };
+        if delta == 0 {
+            return row;
+        }
+        let is_media = |entry: &Entry| {
+            matches!(
+                category_for_name(&entry.name),
+                Category::Image | Category::Audio | Category::Video
+            )
+        };
+        let media_only = is_media(current);
+        let mut next = row + delta.signum();
+        while let Some(entry) = self.entry_at(next) {
+            if entry.kind == EntryKind::File
+                && (!media_only || is_media(entry))
+                && !needs_trusted_launch(&entry.name, entry.meta.map(|meta| meta.mode))
+            {
+                return next;
+            }
+            next += delta.signum();
+        }
+        row
+    }
+
     /// What Quick Look shows for a row.
     ///
     /// Bytes and metadata only. Nothing is executed, no preview script runs,
@@ -5592,6 +5623,13 @@ impl qobject::DirModel {
         if cancel.is_cancelled() || snap.generation != self.as_ref().generation {
             return;
         }
+        // An overlay may have opened after this relist was queued. Keep its
+        // row indices stable and fetch a fresh listing when the hold ends.
+        if self.as_ref().live_hold {
+            self.as_mut().rust_mut().live_dirty = true;
+            return;
+        }
+
         // The watch observed a filesystem change. Revalidate cached images
         // on the worker, including replacements that kept the same name.
         self.as_mut().rust_mut().thumb_cancel.cancel();
