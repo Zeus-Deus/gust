@@ -1182,6 +1182,13 @@ Window {
         win.paneBModel = win.paneCount > 1 ? win.paneModel(1) : null
         win.paneAView = win.paneViewMode(0)
         win.paneBView = win.paneViewMode(1)
+        // Restored/same-view tabs never pass through setView(). The pane
+        // owners, including the inactive split, decide which models render.
+        for (let i = 0; i < tabList.count; i++) {
+            const m = tabs.objectAt(i)
+            if (m) m.request_thumbnails((m === win.paneAModel && win.paneAView === "grid")
+                                        || (m === win.paneBModel && win.paneBView === "grid"))
+        }
     }
     function refreshPaneTabCount() {
         win.activePaneTabCount = win.paneTabs(win.activePane).length
@@ -1332,9 +1339,6 @@ Window {
         // applyRememberedView() must never call this.
         dirModel.remember_view(m)
         sessionSaveTimer.restart()
-        // Only Grid shows thumbnails. Asking for them anywhere else would
-        // spend a sandbox launch per file for something nobody can see.
-        dirModel.request_thumbnails(m === "grid")
         focusList()
         qaDump("view")
     }
@@ -1352,7 +1356,6 @@ Window {
             // switcher says one view while the pane shows another.
             if (win.activeTab >= 0) win.tabViews[win.activeTab] = want
             win.refreshPanes()
-            dirModel.request_thumbnails(want === "grid")
             qaDump("view")
         }
     }

@@ -40,6 +40,8 @@ TestCase {
         delegate: QtObject {
             required property string startPath
             property bool everActivated: false
+            property bool thumbnailsWanted: false
+            function request_thumbnails(enabled) { thumbnailsWanted = enabled }
             property string location: startPath
             readonly property string tabLabel: location.substring(location.lastIndexOf("/") + 1)
             property int navigationCount: 0

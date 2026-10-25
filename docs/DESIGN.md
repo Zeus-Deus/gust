@@ -2295,6 +2295,10 @@ and resume when that worker exits. Changes to visible ordering or membership
 invalidate the remembered pass even when row bounds stay the same.
 QML explicitly disables thumbnail requests outside Grid; the finishing worker
 remains counted until it exits, and no replacement pass starts in that view.
+Pane refresh synchronizes thumbnail requests for every tab model with the
+visible panes and their views. Restoring or activating a Grid tab enables its
+previews even when the view mode does not change; hidden tabs stop requesting
+work, while a Grid in the other visible pane remains enabled.
 Only a visible view reports viewport rows, and becoming visible reports its
 current bounds again. Every previewable row in those bounds is eligible; a
 fixed prefix limit must not strand tiles on large or zoomed-out viewports.
