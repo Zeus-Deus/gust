@@ -63,6 +63,8 @@ impl Playlist {
             "--osd-playing-msg=${filename} (${playlist-pos-1}/${playlist-count})",
             "--input-commands-append=keybind LEFT 'playlist-prev weak'",
             "--input-commands-append=keybind RIGHT 'playlist-next weak'",
+            "--input-commands-append=keybind UP 'add video-zoom 0.1'",
+            "--input-commands-append=keybind DOWN 'add video-zoom -0.1'",
             "--input-commands-append=keybind Shift+LEFT 'seek -5'",
             "--input-commands-append=keybind Shift+RIGHT 'seek 5'",
             "--input-commands-append=keybind ESC quit",
@@ -163,6 +165,8 @@ mod tests {
         assert!(args.contains(&"--playlist-start=1"));
         assert!(args.contains(&"--input-commands-append=keybind LEFT 'playlist-prev weak'"));
         assert!(args.contains(&"--input-commands-append=keybind RIGHT 'playlist-next weak'"));
+        assert!(args.contains(&"--input-commands-append=keybind UP 'add video-zoom 0.1'"));
+        assert!(args.contains(&"--input-commands-append=keybind DOWN 'add video-zoom -0.1'"));
         assert!(!args.iter().any(|a| a.contains("touch nope")));
     }
 }

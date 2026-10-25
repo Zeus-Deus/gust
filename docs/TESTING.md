@@ -269,3 +269,19 @@ KVM-only models, desktop/theme, benchmark and hardware/provider qualification
 remain separately required before release; hosted build success cannot certify
 them. There are no screenshot, log or receipt uploads and no self-hosted jobs
 that would expose private runner identities.
+
+## Media navigation and zoom
+
+Run the focused check in the desktop session after building:
+
+```bash
+python3 tests/media-navigation.py --binary target/debug/gust --output /tmp/gust-media-navigation-new
+```
+
+The output directory must be new. The check drives isolated Gust and mpv
+windows with real keys, preserves existing windows, and saves screenshots.
+It covers previous/next media, folder and program exclusion, end boundaries,
+filters, audio seeking and stopping, PDF pages, Up/Down zoom in the viewer
+and preview, and Quick Look in Rows, Grid and Columns. It needs mpv, wtype,
+hyprctl, grim, ImageMagick, ffmpeg, Poppler and the sandbox/audio helpers
+used by Quick Look.
