@@ -35,5 +35,23 @@ else
   wait_for "d['model']['location']" "$FIXTURE/Documents" 10 >/dev/null
   expect "a place held over the left third opens in this pane" "d['model']['location']" "$FIXTURE/Documents"
   expect "without splitting" "d['paneCount']" "1"
+
+  # A transfer makes the split's own tab the user's, even once undone.
+  key BackSpace
+  wait_for "d['model']['location']" "$FIXTURE" 10 >/dev/null
+  printf 'move me\n' > "$FIXTURE/snap-move.txt"
+  wait_for "'snap-move.txt' in d['rowPoints']" "True" 10 >/dev/null
+  read -r dx dy <<<"$(state "' '.join(map(str, d['rowPoints']['Documents']))")"
+  key F3; sleep 0.8
+  read -r fx fy <<<"$(state "' '.join(map(str, d['rowPoints']['snap-move.txt']))")"
+  mouse drag $((WX + fx)) $((WY + fy)) $((WX + dx)) $((WY + dy)) 1
+  for _ in $(seq 20); do [[ -e "$FIXTURE/Documents/snap-move.txt" ]] && break; sleep 0.5; done
+  ctrl z
+  for _ in $(seq 20); do [[ -e "$FIXTURE/snap-move.txt" ]] && break; sleep 0.5; done
+  [[ -e "$FIXTURE/snap-move.txt" ]] && ok "the move from the split's tab was undone" || bad "snap-move.txt did not come back"
+  key F3; sleep 0.8
+  expect "a split tab that moved files stays as a tab" "d['tabCount']" "2"
+  ctrl w
+  rm -f "$FIXTURE/snap-move.txt" "$FIXTURE/Documents/snap-move.txt"
 fi
 stop_gust; start_gust "$FIXTURE"

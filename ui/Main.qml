@@ -1097,6 +1097,13 @@ Window {
         win.splitMadeAt = win.splitMadeModel ? win.splitMadeModel.location : ""
     }
 
+    /// A transfer makes the split's own tab the user's, even after it
+    /// finishes, fails or is undone. Call before polling: the poll that sees
+    /// a job end also forgets it.
+    function noteSplitTabWork(m) {
+        if (m === win.splitMadeModel && m.job_running()) win.splitMadeModel = null
+    }
+
     function noteSplitTabMoved(m) {
         if (m === win.splitMadeModel && win.splitMadeAt !== "" && m.location !== win.splitMadeAt)
             win.splitMadeModel = null
@@ -3117,6 +3124,7 @@ Window {
             model: dirModel
             job: win.job
             onRequestPause: {
+                win.noteSplitTabWork(dirModel)
                 dirModel.pause_job()
                 hints.message = qsTr("Paused · Resume carries on, Cancel stops")
                 const raw = dirModel.poll_job()
@@ -3124,6 +3132,7 @@ Window {
                 win.qaDump("job-pause")
             }
             onRequestResume: {
+                win.noteSplitTabWork(dirModel)
                 dirModel.resume_job()
                 hints.message = qsTr("Resumed")
                 const raw = dirModel.poll_job()
@@ -3131,6 +3140,7 @@ Window {
                 win.qaDump("job-resume")
             }
             onRequestCancel: {
+                win.noteSplitTabWork(dirModel)
                 dirModel.cancel_job()
                 // Show "Stopping" now, not on the next poll.
                 const raw = dirModel.poll_job()
@@ -3534,10 +3544,8 @@ Window {
             // there as "running" until its tab was shown again.
             for (let i = 0; i < tabList.count; i++) {
                 const o = tabs.objectAt(i)
+                if (o) win.noteSplitTabWork(o)
                 if (o && o !== dirModel && o.job_running()) o.poll_job()
-                // A transfer makes the split's own tab the user's, even
-                // after it finishes and is undone.
-                if (o && o === win.splitMadeModel && o.job_running()) win.splitMadeModel = null
             }
             const raw = dirModel.poll_job()
             if (raw === "") {
