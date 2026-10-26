@@ -466,9 +466,9 @@ pub mod qobject {
         /// (DESIGN §6.9).
         #[qinvokable]
         fn peek_row(self: &DirModel, row: i32) -> QString;
-        /// peek_row for a file of this folder named by its path.
+        /// peek_row for the tracked file.
         #[qinvokable]
-        fn peek_path(self: &DirModel, path: &QString) -> QString;
+        fn peek_preview(self: &DirModel) -> QString;
         /// Adjacent previewable file in the visible order, without filesystem I/O.
         #[qinvokable]
         fn preview_neighbor(self: &DirModel, row: i32, delta: i32) -> i32;
@@ -513,15 +513,21 @@ pub mod qobject {
         /// program not allowed to run yet) or "" (content; it opens).
         #[qinvokable]
         fn program_state(self: &DirModel, row: i32) -> QString;
-        /// program_state for a file of this folder named by its path, which
-        /// Quick Look holds: a row index can move under an open preview.
+        /// Quick Look opened on `row` (or closed, -1): remember that file
+        /// byte-exact, so the preview's actions follow it, not the row.
         #[qinvokable]
-        fn program_state_of(self: &DirModel, path: &QString) -> QString;
-        /// Allow (u+x) or stop (a-x) one file running as a program, named by
-        /// path, never the selection. Only a regular file directly in this
-        /// folder. Ctrl+Z puts the mode back. "" or why not.
+        fn preview_track(self: Pin<&mut DirModel>, row: i32);
+        /// The tracked file's row now, or -1 if it is no longer listed.
         #[qinvokable]
-        fn set_runnable(self: Pin<&mut DirModel>, path: &QString, on: bool) -> QString;
+        fn preview_row(self: &DirModel) -> i32;
+        /// program_state for the tracked file.
+        #[qinvokable]
+        fn program_state_preview(self: &DirModel) -> QString;
+        /// Allow (u+x) or stop (a-x) the tracked file running as a program,
+        /// never the selection. Only a regular file directly in this folder.
+        /// Ctrl+Z puts the mode back. "" or why not.
+        #[qinvokable]
+        fn set_runnable(self: Pin<&mut DirModel>, on: bool) -> QString;
         /// Give the row u+x, then run it as run_row does. Only ever called
         /// after the user confirmed a dialog naming the file. "" or why not.
         #[qinvokable]
@@ -1018,6 +1024,9 @@ pub struct DirModelRust {
     columns_gen: u64,
     peek_visual: QString,
     peek_gen: u64,
+    /// The file Quick Look shows, byte-exact. Rows move under an open
+    /// preview (a chmod reloads the folder); this does not.
+    preview_target: Option<std::path::PathBuf>,
     /// The sound Quick Look is playing, if any. Dropping it stops it.
     peek_player: Option<gust_thumbs::audio::Player>,
     delete_total: QString,
@@ -1341,6 +1350,7 @@ impl DirModelRust {
             columns_gen: 0,
             peek_visual: QString::from(""),
             peek_gen: 0,
+            preview_target: None,
             peek_player: None,
             delete_total: QString::from(""),
             delete_gen: 0,
@@ -5118,18 +5128,37 @@ impl qobject::DirModel {
         self.peek_json(&path)
     }
 
-    fn peek_path(&self, path: &QString) -> QString {
-        match self.in_this_folder(path) {
+    fn peek_preview(&self) -> QString {
+        match self.preview_path() {
             Some(path) => self.peek_json(&path),
             None => QString::from(r#"{"ok":false}"#),
         }
     }
 
-    /// A path from QML that names an entry directly in this folder, or None.
-    fn in_this_folder(&self, path: &QString) -> Option<PathBuf> {
-        let path = PathBuf::from(path.to_string());
+    fn preview_track(mut self: Pin<&mut Self>, row: i32) {
+        let target = self.as_ref().path_of_row(row);
+        self.as_mut().rust_mut().preview_target = target;
+    }
+
+    /// The tracked file, if it is still directly in the folder shown.
+    fn preview_path(&self) -> Option<PathBuf> {
+        let target = self.preview_target.as_ref()?;
         let folder = self.key.as_path()?;
-        (path.is_absolute() && path.parent() == Some(folder)).then_some(path)
+        (target.parent() == Some(folder)).then(|| target.clone())
+    }
+
+    fn preview_row(&self) -> i32 {
+        let Some(name) = self
+            .preview_path()
+            .and_then(|p| p.file_name().map(|n| n.to_owned()))
+        else {
+            return -1;
+        };
+        self.visible_entries()
+            .iter()
+            .position(|e| e.name.as_os_str() == name.as_os_str())
+            .and_then(|i| i32::try_from(i).ok())
+            .unwrap_or(-1)
     }
 
     fn peek_json(&self, path: &std::path::Path) -> QString {
@@ -8616,8 +8645,8 @@ impl qobject::DirModel {
         }
     }
 
-    fn program_state_of(&self, path: &QString) -> QString {
-        match self.in_this_folder(path) {
+    fn program_state_preview(&self) -> QString {
+        match self.preview_path() {
             Some(path) => Self::program_state_at(&path),
             None => QString::default(),
         }
@@ -8638,10 +8667,10 @@ impl qobject::DirModel {
         )
     }
 
-    fn set_runnable(mut self: Pin<&mut Self>, path: &QString, on: bool) -> QString {
-        // Named by path, checked here: never a folder (a-x would take its
+    fn set_runnable(mut self: Pin<&mut Self>, on: bool) -> QString {
+        // The tracked file, checked here: never a folder (a-x would take its
         // search permission), a link, or a file outside the folder shown.
-        let Some(path) = self.as_ref().in_this_folder(path) else {
+        let Some(path) = self.as_ref().preview_path() else {
             return QString::from("that file is no longer shown here");
         };
         if !path.symlink_metadata().is_ok_and(|m| m.is_file()) {

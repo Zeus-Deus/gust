@@ -3533,7 +3533,7 @@ Window {
         onRunRequested: (row) => {
             quickLook.hide()
             if (row >= 0) win.askRun(row)
-            else win.alertText = qsTr("That file moved; choose it again")
+            else win.alertText = qsTr("That file is gone")
         }
         onClosed: win.focusList()
     }

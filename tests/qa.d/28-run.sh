@@ -102,6 +102,20 @@ key x; sleep 1.0
    && "$(stat -c %a "$d28/aa-shift.sh")" == 644 ]] \
   && ok "toggles after a row shift still change only plain.sh" \
   || bad "a row shift retargeted the switch: $(stat -c '%n %a' "$d28"/*)"
+key h; sleep 2.0
+expect "after the reload, h hashes the file shown" "d['quickLookHash']" "$(sha256sum "$d28/plain.sh" | cut -c1-64)"
+expect "and the cursor followed it" "d['model']['cursor_name']" "plain.sh"
+key Escape; sleep 0.4
+# Identity is byte-exact, not display text: a newline in a name and its
+# escaped spelling look the same but are different files.
+esc="$d28/esc"; mkdir -p "$esc"
+printf '#!/bin/sh\n' > "$esc/tool"$'\n'".sh"; printf '#!/bin/sh\n' > "$esc/tool<U+000A>.sh"; chmod 644 "$esc"/*
+goto "$esc" || bad "could not open $esc"
+key Home; key space; sleep 0.8; key x; sleep 1.2; key Escape
+key End; key space; sleep 0.8; key x; sleep 1.2; key Escape
+[[ "$(stat -c %a "$esc/tool"$'\n'".sh")" == 744 && "$(stat -c %a "$esc/tool<U+000A>.sh")" == 744 ]] \
+  && ok "each look-alike name toggled its own file" || bad "a look-alike name retargeted the switch"
+goto "$d28" || bad "could not return to $d28"
 # Another tab is another folder: Quick Look closes, x changes nothing there.
 ctrl t; sleep 1.0
 goto "$FIXTURE" || bad "could not open $FIXTURE in a second tab"

@@ -28,14 +28,10 @@ Item {
     /// starts. -1 when the file is no longer at the cursor.
     signal runRequested(int row)
     function requestRun() {
-        const c = root.model ? root.model.cursor : -1
-        root.runRequested(c >= 0 && root.model.entry_path(c) === root.path ? c : -1)
+        root.runRequested(root.model ? root.model.preview_row() : -1)
     }
     /// The row shown, so h can hash it.
     property int row: -1
-    /// The file shown, by path. Permission changes go by this, never by
-    /// row: a reload after one can move rows under the open panel.
-    property string path: ""
     property real imageZoom: 1
 
     /// The model, so the panel can ask for and receive its visual preview.
@@ -43,6 +39,24 @@ Item {
     // The panel belongs to the folder it was opened in. Another tab means
     // another model whose rows are different files: close, never act on them.
     onModelChanged: if (root.open) root.hide()
+    // The model tracks the file shown byte-exact (preview_track). When its
+    // rows are rebuilt — a chmod from this panel reloads the folder — the
+    // row follows that file, so h, pages and browsing act on what is shown.
+    Connections {
+        target: root.model
+        function onModelReset() { root.followFile() }
+        function onRowsInserted() { root.followFile() }
+        function onRowsRemoved() { root.followFile() }
+    }
+    function followFile() {
+        if (!root.open || !root.model) return
+        const r = root.model.preview_row()
+        if (r < 0) { root.hide(); return }
+        root.row = r
+        // The cursor follows the preview, as when browsing: Enter opens
+        // what is shown.
+        if (root.model.cursor !== r) root.model.focus_row(r)
+    }
     /// Image path or archive listing, rendered on a worker (sandboxed).
     readonly property var visual: {
         const s = root.model && root.open ? root.model.peek_visual : ""
@@ -58,16 +72,16 @@ Item {
     property bool programSeen: false
     property string programError: ""
     function refreshProgram() {
-        root.program = root.open && root.model && root.path !== "" ? root.model.program_state_of(root.path) : ""
+        root.program = root.open && root.model ? root.model.program_state_preview() : ""
         if (root.program !== "") root.programSeen = true
     }
     /// The Properties switch: allow (u+x) or stop (a-x) this one file.
     function setRunnable(on) {
-        if (!root.open || !root.model || root.path === "") return
-        root.programError = root.model.set_runnable(root.path, on)
+        if (!root.open || !root.model) return
+        root.programError = root.model.set_runnable(on)
         // The mode line and the Permissions fact change with it.
         try {
-            const fresh = JSON.parse(root.model.peek_path(root.path))
+            const fresh = JSON.parse(root.model.peek_preview())
             if (fresh.ok) root.info = fresh
         } catch (e) {}
         root.refreshProgram()
@@ -86,7 +100,7 @@ Item {
         }
         root.open = root.info !== null && root.info.ok
         root.row = row === undefined ? -1 : row
-        root.path = root.open && root.model && root.row >= 0 ? root.model.entry_path(root.row) : ""
+        if (root.model) root.model.preview_track(root.open ? root.row : -1)
         root.audio = null
         root.imageZoom = 1
         root.programSeen = false
@@ -192,7 +206,7 @@ Item {
         root.audio = null
         root.open = false
         root.info = null
-        root.path = ""
+        if (root.model) root.model.preview_track(-1)
         root.program = ""
         root.programSeen = false
         root.closed()

@@ -923,11 +923,14 @@ close`); the SHA-256 line appears only once asked for.
    switch and a Run… button, without explanatory prose. The switch (or `x`) sets `u+x` on, or `a-x`
    off, for that one file, never the selection, through the same undo record
    as Permissions… (Ctrl+Z puts the mode back). It stays visible after being
-   turned off, so it can be turned back on. The panel names the file by path
-   (`program_state_of`, `set_runnable`, `peek_path`), never by row: the reload
-   after a chmod can move rows under it. The bridge accepts only a regular
-   file directly in the folder shown, and Quick Look closes when its model
-   changes (another tab), so a key can never act on another folder's row. Run… never starts anything
+   turned off, so it can be turned back on. The model tracks the file shown
+   byte-exact (`preview_track`), never as display text and never by row: the
+   reload after a chmod can move rows under the panel. `set_runnable`,
+   `program_state_preview` and `peek_preview` act on that file; on any row
+   reset the panel re-finds its row (`preview_row`) so `h`, pages and browsing
+   follow the same file, and closes if it is gone. The bridge accepts only a
+   regular file directly in the folder shown, and Quick Look closes when its
+   model changes (another tab). Run… never starts anything
    itself: it closes the preview and opens the Run prompt.
 
 ### 6.9.1 Previews of everyday files
