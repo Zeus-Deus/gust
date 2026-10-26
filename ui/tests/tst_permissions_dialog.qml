@@ -38,11 +38,15 @@ Item {
 
         function findChildrenNamed(item, name) {
             let out = []
-            for (const c of item.children) {
+            let contentIsChild = false
+            // Qt 6.4 child-item lists are indexable, not JavaScript arrays.
+            for (let i = 0; i < item.children.length; i++) {
+                const c = item.children[i]
+                if (c === item.contentItem) contentIsChild = true
                 if (c.objectName === name) out.push(c)
                 out = out.concat(findChildrenNamed(c, name))
             }
-            if (item.contentItem && item.contentItem !== item && item.children.indexOf(item.contentItem) < 0)
+            if (item.contentItem && item.contentItem !== item && !contentIsChild)
                 out = out.concat(findChildrenNamed(item.contentItem, name))
             return out
         }
@@ -87,7 +91,7 @@ Item {
 
         /// `it`'s rectangle in the card's coordinates.
         function inCard(it) {
-            const card = dialog.children.find(c => c.objectName === "permCard")
+            const card = findChild(dialog, "permCard")
             return it.mapToItem(card, 0, 0, it.width, it.height)
         }
 
@@ -302,7 +306,7 @@ Item {
             for (const h of findChildrenNamed(dialog, "permHeader"))
                 verify(!h.truncated, h.text + " is whole, if wrapped")
             const flick = findChild(dialog, "permFlick")
-            const card = dialog.children.find(c => c.objectName === "permCard")
+            const card = findChild(dialog, "permCard")
             verify(flick.contentHeight > flick.height, "the choices scroll here")
             // The buttons never scroll: they sit inside the card, below the choices.
             for (const name of ["permCancel", "permApply"]) {
