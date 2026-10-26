@@ -2594,6 +2594,7 @@ Window {
                 height: parent.height
                 visible: win.sidebarVisible
                 model: dirModel
+                activePanel: trashPanel.open ? "trash" : recentPanel.open ? "recent" : ""
                 onPlaceChosen: (p) => { dirModel.navigate(p); win.focusList() }
                 onDragHover: (t) => { hints.message = t; win.qaDump("drag-hover") }
                 onDragLanded: (m, e) => { hints.message = ""; win.transferStarted(m, e, "drop") }
