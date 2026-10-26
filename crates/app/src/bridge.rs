@@ -1620,7 +1620,7 @@ impl qobject::DirModel {
                     Ok(outcome) => outcome,
                     Err(_) => {
                         let message =
-                            "The connection stopped unexpectedly. Check again before retrying."
+                            "The connection stopped unexpectedly; its outcome is unknown. Check again before retrying."
                                 .to_string();
                         if op == "phone-open" {
                             Self::set_phone_state(
