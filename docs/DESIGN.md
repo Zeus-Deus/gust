@@ -2099,7 +2099,15 @@ Quattro surfaces rather than like Nautilus.
   (two thirds of `animFast`), preserving distance during a free spin. Reversing
   discards the pending movement in the old direction. External scrolling,
   dragging, or layout changes stop the transition so navigation owns its
-  position. Touchpad/continuous gesture pixel deltas pass straight through;
+  position. Touchpad/continuous gesture pixel deltas use GTK's 2.5 surface-unit
+  conversion, matching the scrolling containers used by Omarchy's Nautilus.
+  Hyprland applies the user's scroll factor before delivery; Gust does not
+  read, invert, or override that setting. Gesture movement stays immediate,
+  including momentum events. Frames rounded to zero pixels never fall back
+  to angular wheel movement, and begin/end frames stop pending wheel travel.
+  Horizontal-only gestures do not move the vertical list. The conversion follows
+  GTK's `MAGIC_SCROLL_FACTOR` in `gtk/gtkscrolledwindow.c` and its Wayland surface
+  events (`gdk/wayland/gdkseat-wayland.c`), as of GTK 4.24.1;
   mouse wheels use angular rotation even when Wayland also supplies pixels
   and Qt labels the device as a touchpad. Gesture phases distinguish the two.
   Modified wheels are left alone. No additional wheel inertia or acceleration
