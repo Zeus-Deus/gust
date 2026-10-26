@@ -4100,9 +4100,19 @@ Window {
             start()
         }
         onTriggered: {
-            const done = models.filter(m => !m.job_running() && !m.archive_running()
-                                            && !m.permissions_running() && !m.sharing_busy)
-            models = models.filter(m => done.indexOf(m) < 0)
+            // Avoid per-tick closures here: Qt 6.4's ARM64 JIT can leave
+            // invalid GC roots while creating their call contexts.
+            const done = []
+            const pending = []
+            for (let i = 0; i < models.length; i++) {
+                const m = models[i]
+                if (!m.job_running() && !m.archive_running()
+                        && !m.permissions_running() && !m.sharing_busy)
+                    done.push(m)
+                else
+                    pending.push(m)
+            }
+            models = pending
             if (models.length === 0) stop()
             // Off the waiting list first, so closeTab removes it for real.
             for (const m of done) {

@@ -379,6 +379,35 @@ TestCase {
         verify(!closeTabAfterCancel.running)
     }
 
+    function test_tabs_finish_independently_while_other_permissions_are_pending() {
+        modelB.perms = true
+        modelC.perms = true
+        win.closeTab(1)
+        win.confirmAccepted()
+        win.closeTab(2)
+        win.confirmAccepted()
+        tickTabs(100)
+        compare(tabList.count, 3)
+        compare(closeTabAfterCancel.models.length, 2)
+
+        modelB.perms = false
+        tickTabs(1)
+        compare(tabList.count, 2)
+        compare(win.tabModelAt(1), modelC, "the other waiting tab shifts with the list")
+        compare(closeTabAfterCancel.models.length, 1)
+        compare(closeTabAfterCancel.models[0], modelC)
+        verify(closeTabAfterCancel.running)
+        tickTabs(100)
+        compare(tabList.count, 2, "finishing one tab must not release the other's work")
+
+        modelC.perms = false
+        tickTabs(1)
+        compare(tabList.count, 1)
+        compare(win.tabModelAt(0), modelA)
+        compare(closeTabAfterCancel.models.length, 0)
+        verify(!closeTabAfterCancel.running)
+    }
+
     function test_window_close_beside_a_transfer_also_waits_for_permissions() {
         modelA.running = true
         modelB.perms = true
