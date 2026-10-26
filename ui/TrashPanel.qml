@@ -193,7 +193,7 @@ Item {
             anchors.right: parent.right
             anchors.bottom: parent.bottom
             anchors.margins: Tokens.spaceXl
-            text: qsTr("Enter restores · Escape closes")
+            text: qsTr("Enter restore · Esc close")
             color: Tokens.foregroundDim
             font.family: Tokens.fontFamily
             font.pixelSize: Tokens.fontCaption

@@ -847,6 +847,18 @@ OneDrive OAuth is not a template for Proton or Filen, and a half-built OAuth
 path that works for one provider is worse than sending the user to
 `rclone config`, which handles every provider correctly.
 
+## 6.8a Copy: few words
+
+Gust should read sleek. A dialog is a title plus at most one short line; a
+panel note is a phrase, not a sentence; key hints are `key action` pairs
+(`Enter rename · Esc cancel`). No reassurance filler ("nothing happens
+automatically"), no instructions the UI already shows. What stays is the one
+fact a user could be hurt by not knowing, in its shortest form: an
+irreversible delete says it CANNOT be undone; a stop is "asked", never
+promised; work may leave temporary files or may already have been accepted;
+sharing a folder says others on the network can change it. Tests pin those
+facts, not the surrounding prose.
+
 ## 6.9 Quick Look
 
 Space shows what a file *is* without running it (plan §4). It never launches
@@ -868,7 +880,12 @@ Facts Gust can state without interpreting the file's contents:
   as "Opens with imv" and NOT acted upon
 
 For anything else it says what it is and stops. "No preview" is an honest
-answer; a preview that required running the file is not.
+answer; a preview that required running the file is not. Such a file gets a
+compact card sized to its facts, not an empty preview area: `peek_row`
+reports `visualExpected` from the name alone (the same checks as
+`visual_json`), so the size is right before the worker answers and never
+jumps. Keys live in one hint line (`h sha-256 · x allow · Enter run · Esc
+close`); the SHA-256 line appears only once asked for.
 
 ### Rules
 
@@ -900,6 +917,14 @@ answer; a preview that required running the file is not.
    page. Before page metadata arrives, identify the PDF from the peek's
    case-insensitive `.pdf` name suffix (preserved by display sanitisation),
    not a nonexistent MIME field or a translated kind label.
+6. **A program's run permission is a switch here.** When the row is a
+   program (`DirModel::program_state` is `run` or `allow`, see §6.17), Quick
+   Look — which is also Properties (Alt+Enter) — shows an "Allow running"
+   switch and a Run… button, without explanatory prose. The switch (or `x`) sets `u+x` on, or `a-x`
+   off, for that one file, never the selection, through the same undo record
+   as Permissions… (Ctrl+Z puts the mode back). It stays visible after being
+   turned off, so it can be turned back on. Run… never starts anything
+   itself: it closes the preview and opens the Run prompt.
 
 ### 6.9.1 Previews of everyday files
 
@@ -1813,6 +1838,27 @@ unknown files with executable bits do too, as do `.js`/`.ts` sources that
 carry an executable bit (shebang scripts). Activation, recent files,
 multi-file opening and Run share this classification, using only the name
 and already available mode, without reading file contents on the UI thread.
+
+### Activating a program asks; it does not refuse in the status line
+
+Enter or a double-click on a program never runs it and never opens it in an
+editor. `activate` returns `program` and the window opens the Run prompt,
+which names the file and has Cancel focused, so Enter Enter still runs
+nothing. `gust_core::open::program_state(path, mode, is_regular)` decides
+which prompt:
+
+Copy stays to a title and one line ("Only run programs you trust.").
+
+- `Runnable` (Run would accept it): "Run <name>?" → Run.
+- `NeedsPermission`: a regular file at an absolute path, with no x bit,
+  that already looks like a program by name (`.AppImage`, `.sh`, `.run`…).
+  Browsers save downloads without the x bit, so this is the usual state of
+  a new AppImage. "Allow <name> to run?" → "Allow and run", which sets
+  `u+x` on that path (undoable, Ctrl+Z) and then runs it, resolving the path
+  before the chmod so a reload cannot retarget the row.
+- `NotAProgram`: content keeps opening in its application. An extensionless
+  file without the bit is indistinguishable from data and is never offered
+  the permission.
 
 ### The list comes from the desktop database, not from a command's output
 

@@ -142,8 +142,8 @@ Item {
         shareConfirm.path = root.chosenToken
         shareConfirm.preferCancel = true
         shareConfirm.open(root.sharedPath ? qsTr("Turn off folder access?") : qsTr("Let devices open this folder?"),
-            root.sharedPath ? qsTr("“%1”\n\nDevices can no longer open it. All files stay on this computer.").arg(root.chosenFolder)
-                : qsTr("“%1”\n\nDevices your Tailscale settings allow can open, change and delete files in it. That can include other people on your network. Files stay on this computer.").arg(root.chosenFolder),
+            root.sharedPath ? qsTr("“%1”\n\nAll files stay on this computer.").arg(root.chosenFolder)
+                : qsTr("“%1”\n\nDevices on your Tailscale network can open, change and delete its files — including other people's.").arg(root.chosenFolder),
             root.sharedPath ? qsTr("Turn Off") : qsTr("Turn On"), false)
     }
     Connections {
@@ -314,7 +314,7 @@ Item {
                         width: parent.width
                         text: root.checking ? qsTr("Checking devices…")
                             : root.preferredDevice && root.only === "" && root.preferredTarget && !root.preferredTarget.online
-                              ? qsTr("Offline · open Tailscale on it, then check again")
+                              ? qsTr("Offline · open Tailscale on it")
                             : qsTr("Through Tailscale · this computer is %1").arg(root.computerName)
                         textFormat: Text.PlainText
                         wrapMode: Text.Wrap
@@ -333,11 +333,11 @@ Item {
                     detail: root.selection ? qsTr("%1 · the original stays here").arg(root.selection) : ""
                     detailIsPath: true
                     hasActions: root.selection !== ""
-                    hint: !root.selection ? qsTr("Select files in Gust, then right-click → Send a copy to a device.")
+                    hint: !root.selection ? qsTr("Select files first")
                         : root.checking ? ""
                         : root.state.send_error ? root.state.send_error
-                        : root.receivers.length === 0 ? qsTr("No devices can receive files right now. Open Tailscale on the device, then check again.")
-                        : root.receivers.length > 1 ? qsTr("Choose where it goes.") : ""
+                        : root.receivers.length === 0 ? qsTr("No device is online")
+                        : ""
                     Repeater {
                         model: root.selection ? root.receivers : []
                         SharingButton {
@@ -358,7 +358,7 @@ Item {
                     glyph: "←"
                     title: qsTr("Get files from your devices")
                     detail: qsTr("On the phone or tablet: Share → Tailscale → %1").arg(root.computerName)
-                    hint: qsTr("Then check here. Files are saved in Gust Inbox.")
+                    hint: qsTr("Saved in Gust Inbox")
                     SharingButton {
                         objectName: "receiveDeviceFiles"
                         onFocusStep: (direction) => root.cycleFocus(direction)
@@ -384,12 +384,12 @@ Item {
                     title: qsTr("Let devices open a folder")
                     badge: root.state.drive_error ? qsTr("Needs setup") : root.sharedPath ? qsTr("On") : root.checking ? "" : qsTr("Off")
                     badgeOn: !root.state.drive_error && root.sharedPath !== ""
-                    detail: root.state.drive_error ? qsTr("Tailscale folder access (Taildrive) is not set up yet.") : root.chosenFolder
+                    detail: root.state.drive_error ? qsTr("Taildrive is not set up") : root.chosenFolder
                     detailIsPath: !root.state.drive_error
                     hint: root.state.drive_error ? ""
                         : root.otherFolderOn ? qsTr("Only one folder at a time. Turn this one off to choose %1.").arg(root.folderPath.split("/").pop())
-                        : root.sharedPath ? qsTr("In the Files app: Browse → Tailscale → your network → %1 → gust").arg(root.computerName)
-                        : qsTr("Open and edit it from the Files app on your phone or tablet.")
+                        : root.sharedPath ? qsTr("Files app → Tailscale → %1 → gust").arg(root.computerName)
+                        : ""
                     SharingButton {
                         id: folderButton
                         objectName: "publishDeviceFolder"
@@ -410,7 +410,7 @@ Item {
                     Divider {}
                     Text {
                         width: parent.width
-                        text: qsTr("Sending and getting files use Taildrop. Folder access uses Taildrive, a Tailscale preview that whoever runs your Tailscale network may need to turn on. Send folders as a compressed file.")
+                        text: qsTr("Folder access uses Taildrive, a Tailscale preview your network admin may need to turn on.")
                         textFormat: Text.PlainText
                         wrapMode: Text.Wrap
                         color: Tokens.foregroundDim
@@ -473,7 +473,7 @@ Item {
                 enabled: !root.stopping
                 onClicked: {
                     root.stopping = true
-                    root.message = qsTr("Stopping… Changes may already have been accepted.")
+                    root.message = qsTr("Stopping… changes may already have been accepted.")
                     root.owner.cancel_device_share()
                 }
             }

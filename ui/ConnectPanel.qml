@@ -41,11 +41,11 @@ Item {
     readonly property string statusTitle: root.feedbackTitle || (root.checkingSupport ? qsTr("Checking connection support…")
         : root.missingSupport ? root.supportTitle : root.supportReady ? qsTr("Connection support is installed") : "")
     readonly property string statusBody: root.feedbackTitle ? root.feedbackBody : root.checkingSupport
-        ? qsTr("Checking installed helpers. Nothing opens automatically. Choose Check again if this takes longer than expected.") : root.missingSupport
+        ? "" : root.missingSupport
         ? (root.requirement.installable
-           ? qsTr("Gust needs %1. Choose Install support and approve the system prompt. Nothing connects automatically.").arg(root.requirement.packages.join(", "))
-           : qsTr("This installation is missing %1. Install Gust with its device and network support using your system package manager, then choose Check again.").arg(root.requirement.packages.join(", ")))
-        : root.supportReady ? qsTr("Choose your device or connection again. Signing in is checked when Gust connects.") : ""
+           ? qsTr("Needs %1.").arg(root.requirement.packages.join(", "))
+           : qsTr("Needs %1. Install it with your package manager, then check again.").arg(root.requirement.packages.join(", ")))
+        : root.supportReady ? qsTr("Choose what to connect to.") : ""
     function showSupport(key) {
         root.show()
         if (!root.busy) {
@@ -113,7 +113,7 @@ Item {
         if (root.busy) return false
         root.operation = {op: op, name: name}
         root.feedbackTitle = title
-        root.feedbackBody = qsTr("Waiting for the result. Closing this panel does not cancel the attempt.")
+        root.feedbackBody = ""
         root.feedbackFailed = false
         root.open = true
         Qt.callLater(() => { if (root.open) keys.forceActiveFocus() })
@@ -180,7 +180,7 @@ Item {
         const note = (t) => out.push({ type: "note", text: t })
         if (root.selectedComputer) {
             out.push({ type: "action", action: "back", text: qsTr("Back to computers") })
-            note(qsTr("Each connection keeps its own account and folder. Interrupted file operations are not retried."))
+            note(qsTr("Interrupted file operations are not retried."))
             if (p.tailnetError) note(p.tailnetError)
             for (const r of root.selectedComputer.routes) {
                 const via = r.kind === "tailnet" ? qsTr("Tailscale") : qsTr("SSH config")
@@ -193,7 +193,7 @@ Item {
         out.push({ type: "head", text: qsTr("Computers") })
         if (p.tailnetError) note(p.tailnetError)
         const computers = p.computers || []
-        if (computers.length === 0) note(qsTr("No computers found in Tailscale or SSH config"))
+        if (computers.length === 0) note(qsTr("None in Tailscale or SSH config"))
         for (const c of computers) {
             const routes = c.routes || []
             if (routes.length === 0) continue
@@ -213,22 +213,22 @@ Item {
             out.push({ type: "head", text: qsTr("Phones and tablets") })
             for (const device of mobile)
                 out.push(Object.assign({}, device, { type: "place", kind: "mobile", label: device.name,
-                    detail: qsTr("Phone or tablet · send and get files"), connected: false, lost: false,
+                    detail: qsTr("Send and get files"), connected: false, lost: false,
                     extra: device.online ? "" : qsTr("offline") }))
         }
 
         out.push({ type: "head", text: qsTr("Cloud storage (rclone)") })
         const cl = p.cloud || []
         if (p.cloudError) note(p.cloudError)
-        else if (cl.length === 0) note(qsTr("No cloud storage set up yet"))
+        else if (cl.length === 0) note(qsTr("None set up yet"))
         for (const c of cl)
             out.push({ type: "place", kind: "cloud", name: c.name, detail: c.detail, extra: "",
                        online: true, connected: c.connected, lost: c.lost, path: c.path, user: "" })
 
         out.push({ type: "head", text: qsTr("Add") })
-        out.push({ type: "action", action: "cloud-setup", text: qsTr("Add cloud storage (opens rclone config)") })
-        out.push({ type: "action", action: "share-add", text: qsTr("Add a shared folder (Windows or NFS)") })
-        out.push({ type: "action", action: "device-sharing", text: qsTr("Send or get files with a phone, tablet or computer") })
+        out.push({ type: "action", action: "cloud-setup", text: qsTr("Add cloud storage…") })
+        out.push({ type: "action", action: "share-add", text: qsTr("Add a Windows or NFS share…") })
+        out.push({ type: "action", action: "device-sharing", text: qsTr("Send or get files…") })
         return out
     }
     /// The height of the rows, summed by type, BEFORE any delegate exists
@@ -374,7 +374,7 @@ Item {
             Text {
                 textFormat: Text.PlainText
                 width: parent.width
-                text: qsTr("Browse another computer or your cloud storage like a folder. Nothing connects until you choose Connect.")
+                text: qsTr("Other computers and cloud storage, as folders.")
                 color: Tokens.foregroundDim
                 font.family: Tokens.fontFamily
                 font.pixelSize: Tokens.fontSmall
@@ -706,9 +706,9 @@ Item {
             anchors.right: parent.right
             anchors.bottom: parent.bottom
             anchors.margins: Tokens.spaceXl
-            text: root.busy ? qsTr("Escape closes · attempt keeps running")
-                  : root.routeKey !== "" ? qsTr("Enter chooses · R checks again · Escape goes back")
-                  : qsTr("Enter connects or opens · R checks again · Escape closes")
+            text: root.busy ? qsTr("Esc close")
+                  : root.routeKey !== "" ? qsTr("Enter choose · R refresh · Esc back")
+                  : qsTr("Enter connect · R refresh · Esc close")
             color: Tokens.foregroundDim
             font.family: Tokens.fontFamily
             font.pixelSize: Tokens.fontCaption

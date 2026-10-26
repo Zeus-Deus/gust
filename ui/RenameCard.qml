@@ -343,7 +343,7 @@ Rectangle {
                 Text {
                     textFormat: Text.PlainText
                     anchors.verticalCenter: parent.verticalCenter
-                    text: qsTr("Enter renames · Esc cancels · Ctrl+Z undoes it later")
+                    text: qsTr("Enter rename · Esc cancel")
                     color: Tokens.foregroundDim
                     font.family: Tokens.fontFamily
                     font.pixelSize: Tokens.fontCaption

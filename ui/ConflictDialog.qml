@@ -131,7 +131,7 @@ Rectangle {
                 textFormat: Text.PlainText
                 width: parent.width
                 visible: root.clash && !root.clash.canReplace
-                text: qsTr("Replace is off here: this place has no Trash, so the old item could not be brought back.")
+                text: qsTr("No Trash here, so Replace is off.")
                 color: Tokens.foregroundDim
                 font.family: Tokens.fontFamily
                 font.pixelSize: Tokens.fontSmall
@@ -142,7 +142,7 @@ Rectangle {
                 textFormat: Text.PlainText
                 width: parent.width
                 visible: !!(root.clash && root.clash.canMerge)
-                text: qsTr("Merge puts what is missing into the folder there. Nothing is overwritten: a file with the same name and different contents lands beside it as a copy.")
+                text: qsTr("Merge adds what's missing. Nothing is overwritten.")
                 color: Tokens.foregroundDim
                 font.family: Tokens.fontFamily
                 font.pixelSize: Tokens.fontSmall

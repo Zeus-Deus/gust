@@ -168,6 +168,31 @@ pub fn run_argv(path: &Path, mode: u32, is_regular: bool) -> Result<Vec<String>,
     ])
 }
 
+/// Where a file stands as a program, for the activation prompt and the
+/// Properties toggle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProgramState {
+    /// Content, a folder, or not a local path: it opens, it is never run.
+    NotAProgram,
+    /// A program with an executable bit: Run… can start it.
+    Runnable,
+    /// A program that is not allowed to run yet — a downloaded AppImage or
+    /// `install.sh` arrives without the x bit. Allowing it adds `u+x`.
+    NeedsPermission,
+}
+
+/// Classify a file for Run. Only something that already looks like a
+/// program is offered the permission; a document is never promoted to one.
+pub fn program_state(path: &Path, mode: u32, is_regular: bool) -> ProgramState {
+    if run_argv(path, mode, is_regular).is_ok() {
+        return ProgramState::Runnable;
+    }
+    if is_regular && path.is_absolute() && mode & 0o111 == 0 && is_runnable(path, Some(mode)) {
+        return ProgramState::NeedsPermission;
+    }
+    ProgramState::NotAProgram
+}
+
 pub fn terminal_command(dir: &Path, have: impl Fn(&str) -> bool) -> Option<Command> {
     if have("xdg-terminal-exec") {
         let mut c = Command::new("xdg-terminal-exec");
@@ -488,5 +513,40 @@ mod tests {
             .contains("not executable"));
         assert!(run_argv(Path::new("/tmp/d"), 0o755, false).is_err());
         assert!(run_argv(Path::new("rel.sh"), 0o755, true).is_err());
+    }
+
+    #[test]
+    fn a_program_without_the_bit_is_offered_the_permission() {
+        let s = |name: &str, mode: u32, regular: bool| {
+            program_state(&Path::new("/home/u/Downloads").join(name), mode, regular)
+        };
+        // Downloaded programs arrive 644: they need permission, not a guess.
+        assert_eq!(
+            s("Synara-1.0.9-x86_64.AppImage", 0o100644, true),
+            ProgramState::NeedsPermission
+        );
+        assert_eq!(
+            s("install.sh", 0o100644, true),
+            ProgramState::NeedsPermission
+        );
+        assert_eq!(s("install.sh", 0o100755, true), ProgramState::Runnable);
+        // An extensionless binary with the bit runs; without it, it is
+        // indistinguishable from data and is not promoted.
+        assert_eq!(s("tool", 0o100755, true), ProgramState::Runnable);
+        assert_eq!(s("tool", 0o100644, true), ProgramState::NotAProgram);
+        // Content stays content, with or without bits.
+        for name in ["report.pdf", "notes.txt", "photo.png", "build.js"] {
+            assert_eq!(s(name, 0o100644, true), ProgramState::NotAProgram, "{name}");
+        }
+        assert_eq!(s("IMG_0001.JPG", 0o100700, true), ProgramState::NotAProgram);
+        // Only regular files at absolute paths.
+        assert_eq!(
+            s("app.AppImage", 0o040755, false),
+            ProgramState::NotAProgram
+        );
+        assert_eq!(
+            program_state(Path::new("rel.AppImage"), 0o100644, true),
+            ProgramState::NotAProgram
+        );
     }
 }

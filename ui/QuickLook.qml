@@ -20,8 +20,12 @@ Item {
     property var info: null
     /// SHA-256 state from the model (peek_hash).
     readonly property string hash: root.model && root.open ? root.model.peek_hash : ""
+    /// Folders have no SHA-256. The kind is "Folder" locally, "folder" remotely.
+    readonly property bool hashable: root.info !== null && root.info.kind.toLowerCase() !== "folder"
 
     signal closed()
+    /// Run… was chosen for the row; the window asks before anything starts.
+    signal runRequested(int row)
     /// The row shown, so h can hash it.
     property int row: -1
     property real imageZoom: 1
@@ -33,6 +37,29 @@ Item {
         const s = root.model && root.open ? root.model.peek_visual : ""
         if (!s) return null
         try { return JSON.parse(s) } catch (e) { return null }
+    }
+
+    // --- running as a program -------------------------------------------
+    /// "run", "allow" or "" — DirModel.program_state for the row shown.
+    property string program: ""
+    /// Stays true once the row was a program, so turning the permission
+    /// off does not make the switch that turns it back on disappear.
+    property bool programSeen: false
+    property string programError: ""
+    function refreshProgram() {
+        root.program = root.open && root.model && root.row >= 0 ? root.model.program_state(root.row) : ""
+        if (root.program !== "") root.programSeen = true
+    }
+    /// The Properties switch: allow (u+x) or stop (a-x) this one file.
+    function setRunnable(on) {
+        if (!root.open || !root.model || root.row < 0) return
+        root.programError = root.model.set_runnable(root.row, on)
+        // The mode line and the Permissions fact change with it.
+        try {
+            const fresh = JSON.parse(root.model.peek_row(root.row))
+            if (fresh.ok) root.info = fresh
+        } catch (e) {}
+        root.refreshProgram()
     }
 
     function show(json, row) {
@@ -50,6 +77,9 @@ Item {
         root.row = row === undefined ? -1 : row
         root.audio = null
         root.imageZoom = 1
+        root.programSeen = false
+        root.programError = ""
+        root.refreshProgram()
         if (root.open && root.model && row !== undefined) root.model.request_peek_visual(row)
     }
 
@@ -150,6 +180,8 @@ Item {
         root.audio = null
         root.open = false
         root.info = null
+        root.program = ""
+        root.programSeen = false
         root.closed()
     }
 
@@ -167,24 +199,24 @@ Item {
     Rectangle {
         id: panel
         anchors.centerIn: parent
-        width: Math.min(parent.width - Tokens.spaceXl * 4,
-                        Math.round(Tokens.rowHeight * 26))
-        // As tall as it needs: a folder or a binary has no preview, and a
-        // mostly-empty panel reads as "something failed to load".
+        // A file with nothing to preview gets a compact card that fits its
+        // facts; only text, images, pages, archives and sound get the big
+        // panel. Decided from the name up front, so it never jumps.
         readonly property bool hasPreview: root.info !== null
-            && ((root.info.lines && root.info.lines.length > 0) || root.info.noPreview !== ""
-                || root.visual !== null)
+            && ((root.info.lines && root.info.lines.length > 0)
+                || root.info.visualExpected === true || root.visual !== null)
+        width: Math.min(parent.width - Tokens.spaceXl * 4,
+                        Math.round(Tokens.rowHeight * (hasPreview ? 26 : 20)))
         height: hasPreview
                 ? Math.min(parent.height - Tokens.spaceXl * 4, Math.round(Tokens.rowHeight * 24))
-                : Math.min(parent.height - Tokens.spaceXl * 4,
-                           Tokens.spaceXl * 2 + Tokens.rowHeight * 3 + Tokens.spaceLg * 4
-                           + (factsGrid.visible ? factsGrid.height : 0))
+                : Math.min(parent.height - Tokens.spaceXl * 4, qlColumn.implicitHeight + Tokens.spaceXl * 2)
         color: Tokens.backgroundDark
         border.width: Math.max(1, Tokens.borderWidth)
         border.color: Tokens.withAlpha(Tokens.border, Tokens.borderAlpha)
         radius: Tokens.radius
 
         Column {
+            id: qlColumn
             anchors.fill: parent
             anchors.margins: Tokens.spaceXl
             spacing: Tokens.spaceLg
@@ -250,9 +282,9 @@ Item {
                 id: qlHash
                 objectName: "quickLookHash"
                 width: parent.width
-                visible: root.info && root.info.kind !== "folder"
-                text: root.hash === "" ? qsTr("SHA-256  ·  press h to compute")
-                    : root.hash === "…" ? qsTr("SHA-256  ·  reading…  (Esc stops)")
+                // Offered in the key hints; the line appears once asked for.
+                visible: root.hashable && root.hash !== ""
+                text: root.hash === "…" ? qsTr("SHA-256  reading…")
                     : qsTr("SHA-256  ") + root.hash
                 color: root.hash.length === 64 ? Tokens.foreground : Tokens.foregroundDim
                 font.family: Tokens.fontFamily
@@ -261,10 +293,133 @@ Item {
                 textFormat: Text.PlainText
             }
 
+            // Run permission, where it matters. A downloaded program arrives
+            // without it; this is the switch a Properties window would hold.
+            Column {
+                id: qlProgram
+                objectName: "quickLookProgram"
+                width: parent.width
+                spacing: Tokens.spaceXs
+                visible: root.programSeen
+
+                Item {
+                    width: parent.width
+                    height: Tokens.controlHeight
+
+                    Row {
+                        id: allowSwitch
+                        objectName: "quickLookAllowRun"
+                        readonly property bool checked: root.program === "run"
+                        anchors.verticalCenter: parent.verticalCenter
+                        spacing: Tokens.spaceLg
+
+                        Rectangle {
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: Math.round(Tokens.fontBody * 1.2)
+                            height: width
+                            color: allowSwitch.checked ? Tokens.withAlpha(Tokens.accent, 0.2) : "transparent"
+                            border.width: Math.max(1, Tokens.borderWidth)
+                            border.color: allowSwitch.checked || allowArea.containsMouse
+                                          ? Tokens.accent : Tokens.foregroundDim
+                            radius: Tokens.radius
+                            Text {
+                                textFormat: Text.PlainText
+                                anchors.centerIn: parent
+                                visible: allowSwitch.checked
+                                text: "✓"
+                                color: Tokens.accent
+                                font.family: Tokens.fontFamily
+                                font.pixelSize: Tokens.fontSmall
+                                font.bold: true
+                            }
+                        }
+                        Text {
+                            textFormat: Text.PlainText
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: qsTr("Allow running")
+                            color: Tokens.foregroundBright
+                            font.family: Tokens.fontFamily
+                            font.pixelSize: Tokens.fontSmall
+                        }
+
+                        Accessible.role: Accessible.CheckBox
+                        Accessible.name: qsTr("Allow running")
+                        Accessible.checkable: true
+                        Accessible.checked: allowSwitch.checked
+                    }
+                    MouseArea {
+                        id: allowArea
+                        anchors.fill: allowSwitch
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.setRunnable(!allowSwitch.checked)
+                    }
+
+                    Rectangle {
+                        id: runButton
+                        objectName: "quickLookRun"
+                        anchors.right: parent.right
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: runLabel.implicitWidth + Tokens.spaceXxl
+                        height: Tokens.controlHeight
+                        visible: root.program !== ""
+                        color: runArea.containsMouse ? Tokens.withAlpha(Tokens.accent, 0.2) : "transparent"
+                        border.width: Math.max(1, Tokens.borderWidth)
+                        border.color: Tokens.accent
+                        radius: Tokens.radius
+                        Text {
+                            id: runLabel
+                            textFormat: Text.PlainText
+                            anchors.centerIn: parent
+                            text: qsTr("Run…")
+                            color: Tokens.foregroundBright
+                            font.family: Tokens.fontFamily
+                            font.pixelSize: Tokens.fontSmall
+                        }
+                        MouseArea {
+                            id: runArea
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: root.runRequested(root.row)
+                        }
+                        Accessible.role: Accessible.Button
+                        Accessible.name: runLabel.text
+                    }
+                }
+
+                // Only a failure gets words; the switch speaks for itself.
+                Text {
+                    textFormat: Text.PlainText
+                    width: parent.width
+                    visible: root.programError !== ""
+                    text: root.programError
+                    color: Tokens.danger
+                    font.family: Tokens.fontFamily
+                    font.pixelSize: Tokens.fontCaption
+                    wrapMode: Text.WordWrap
+                }
+            }
+
             Rectangle {
+                visible: panel.hasPreview
                 width: parent.width
                 height: Math.max(1, Tokens.borderWidth)
                 color: Tokens.withAlpha(Tokens.border, Tokens.borderAlpha)
+            }
+
+            // The compact card keeps a reason only when it tells something
+            // (a link, a vanished file); "no preview" is what it already looks like.
+            Text {
+                textFormat: Text.PlainText
+                width: parent.width
+                visible: !panel.hasPreview && root.info !== null
+                         && root.info.noPreview !== "" && root.info.kind !== "File"
+                text: root.info ? root.info.noPreview : ""
+                color: Tokens.foregroundDim
+                font.family: Tokens.fontFamily
+                font.pixelSize: Tokens.fontSmall
+                wrapMode: Text.WordWrap
             }
 
             // Either a bounded text peek, or an honest sentence about why
@@ -279,6 +434,7 @@ Item {
                         - qlName.height - qlKind.height - qlClose.height
                         - (factsGrid.visible ? factsGrid.height + parent.spacing : 0)
                         - (qlHash.visible ? qlHash.height + parent.spacing : 0)
+                        - (qlProgram.visible ? qlProgram.height + parent.spacing : 0)
                         - (qlTrunc.visible ? qlTrunc.height + parent.spacing : 0)
                         - Math.max(1, Tokens.borderWidth) - parent.spacing * 4
 
@@ -510,7 +666,7 @@ Item {
                         wrapMode: Text.WordWrap
                         text: root.visual && root.visual.audio === false ? root.visual.why
                               : root.audio && root.audio.state === "failed" ? qsTr("Cannot play: %1").arg(root.audio.why)
-                              : qsTr("p play / pause  ·  ← → previous / next  ·  Shift+← → 5 seconds  ·  Enter opens your music player")
+                              : qsTr("p play  ·  ← → track  ·  Shift+← → seek  ·  Enter open")
                         color: audioPanel.failed ? Tokens.danger : Tokens.foregroundDim
                         font.bold: audioPanel.failed
                         font.family: Tokens.fontFamily
@@ -554,7 +710,7 @@ Item {
                     textFormat: Text.PlainText
                     anchors.fill: parent
                     visible: root.visual && root.visual.why !== undefined && root.visual.audio === undefined
-                    text: visible ? qsTr("No preview: the file could not be read as what its name says (%1)").arg(root.visual.why) : ""
+                    text: visible ? qsTr("Can't preview: %1").arg(root.visual.why) : ""
                     color: Tokens.foregroundDim
                     font.family: Tokens.fontFamily
                     font.pixelSize: Tokens.fontSmall
@@ -617,8 +773,11 @@ Item {
                 id: qlClose
                 width: parent.width
                 horizontalAlignment: Text.AlignRight
-                text: visualImage.visible ? qsTr("↑ ↓ zoom  ·  Space or Escape to close")
-                                          : qsTr("Space or Escape to close")
+                text: [root.hashable && root.hash === "" ? qsTr("h sha-256") : "",
+                       visualImage.visible ? qsTr("↑ ↓ zoom") : "",
+                       root.programSeen ? qsTr("x allow") : "",
+                       root.program !== "" ? qsTr("Enter run") : "",
+                       qsTr("Esc close")].filter(t => t !== "").join("  ·  ")
                 color: Tokens.foregroundDim
                 font.family: Tokens.fontFamily
                 font.pixelSize: Tokens.fontCaption

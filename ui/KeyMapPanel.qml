@@ -92,7 +92,7 @@ Item {
                 Text {
                     textFormat: Text.PlainText
                     anchors.baseline: parent.children[0].baseline
-                    text: qsTr("preset: ") + root.preset + qsTr("  ·  ? or F1 opens this  ·  Settings changes the preset")
+                    text: qsTr("preset: ") + root.preset
                     color: Tokens.foregroundDim
                     font.family: Tokens.fontFamily
                     font.pixelSize: Tokens.fontSmall

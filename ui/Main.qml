@@ -122,12 +122,8 @@ Window {
             // or quit behind their back.
             confirm.purpose = "closewait"
             confirm.open(qsTr("Still stopping"),
-                qsTr("Gust is waiting for the drive or connection to answer before the stop is complete. "
-                     + "The window closes by itself once it has stopped; Cancel keeps waiting.\n\n"
-                     + "If you close now, items already finished stay as they are. The one in progress is not finished, "
-                     + "and temporary files from it may stay at the destination. "
-                     + "Compressing or extracting may be left incomplete. Check the destination before running it again."),
-                qsTr("Close without waiting"),
+                qsTr("Waiting for the drive. Closing now may leave temporary files. Check the destination."),
+                qsTr("Close anyway"),
                 true)
             win.qaDump("close-still-stopping")
             return
@@ -136,32 +132,27 @@ Window {
         confirm.purpose = "close"
         if (busy.some(m => m.sharing_busy)) {
             confirm.open(qsTr("File sharing is still running"),
-                qsTr("Closing asks file sharing and transfers to stop. Files or sharing changes may already have been accepted. Check the receiver and shared folders before retrying. The window closes once all work has stopped."),
+                qsTr("Closing asks it to stop. Changes may already have been accepted."),
                 qsTr("Stop and close"), true)
             win.qaDump("close-blocked")
             return
         }
         if (running.length === 0) {
             confirm.open(qsTr("Archive work is still running"),
-                qsTr("Gust cannot stop compressing or extracting part-way. "
-                     + "The window closes once it has finished."),
+                qsTr("It can't stop part-way. Gust closes when it's done."),
                 qsTr("Close when finished"),
                 false)
             win.qaDump("close-blocked")
             return
         }
         const detail = running.length > 1
-            ? qsTr("%1 transfers are running in different tabs. ").arg(running.length)
+            ? qsTr("%1 in different tabs. ").arg(running.length)
             : (win.job && win.job.message && running[0] === dirModel) ? win.job.message + ". "
-            : qsTr("A transfer is running in another tab. ")
-        const archive = busy.length > running.length
-            ? qsTr(" Archive work cannot be stopped part-way; the window also waits for it.") : ""
+            : qsTr("In another tab. ")
+        const archive = busy.length > running.length ? qsTr(" Archive work finishes first.") : ""
         confirm.open(
             running.length > 1 ? qsTr("Transfers are still running") : qsTr("A transfer is still running"),
-            detail + qsTr("Closing asks it to stop. Items already finished stay as they are; the one in progress "
-                          + "is not finished, and temporary files from it may remain. "
-                          + "The window closes once the transfer has stopped.")
-                   + archive,
+            detail + qsTr("Closing asks it to stop; the current item may leave temporary files.") + archive,
             qsTr("Stop and close"),
             true)
         win.qaDump("close-blocked")
@@ -186,7 +177,7 @@ Window {
                 return
             }
             if (ticks === 8)
-                hints.message = qsTr("Still stopping — the window closes by itself once everything has stopped")
+                hints.message = qsTr("Still stopping…")
         }
     }
 
@@ -370,15 +361,14 @@ Window {
             let k = {}
             try { k = JSON.parse(message.substring(7)) } catch (e) { k = {} }
             const model = owner || win.connectionOwner
-            win.finishPlaceFeedback(op, name, qsTr("Check the SSH fingerprints before connecting."), model)
-            connectPanel.feedbackTitle = qsTr("Verify this computer's SSH identity")
+            win.finishPlaceFeedback(op, name, qsTr("Check the fingerprints."), model)
+            connectPanel.feedbackTitle = qsTr("Verify this computer")
             connectPanel.feedbackFailed = false
             win.pendingTailnet = { name: k.name, target: k.target, model: model }
             win.pendingTailnetUser = k.user || ""
             confirm.purpose = "tailnetkey"
             confirm.open(qsTr("First connection to %1").arg(k.name),
-                         qsTr("Gust has not seen this computer's SSH key before. Tailscale has already checked the device; "
-                              + "if you expect these fingerprints, trust them and connect.\n\n%1")
+                         qsTr("New SSH key. Trust it only if you expect these fingerprints.\n\n%1")
                              .arg((k.fingerprints || []).join("\n\n")),
                          qsTr("Trust and connect"), false)
             win.refreshPlaces()
@@ -577,7 +567,7 @@ Window {
         prompt.secret = false
         prompt.mode = "bulk"
         prompt.openWith(qsTr("Rename these files"), "{name}.{ext}",
-                        qsTr("{n} numbers them · {name} is the name · {ext} the extension"))
+                        qsTr("{n} number · {name} name · {ext} extension"))
         win.qaDump("bulk-prompt")
     }
 
@@ -657,7 +647,7 @@ Window {
         if (!apps && !fromMenu && stateKey === "open" && d && d.mountPoint) { dirModel.navigate(d.mountPoint); return }
         if (stateKey === "trust" || stateKey === "unlock" || stateKey === "opening") {
             if (fromMenu) {
-                connectPanel.showFeedback(qsTr("Waiting for your device"), qsTr("Keep it unlocked and finish any Trust prompt on its screen."), false)
+                connectPanel.showFeedback(qsTr("Waiting for your device"), qsTr("Keep it unlocked and tap Trust if asked."), false)
                 return
             }
             dirModel.phone_cancel(id)
@@ -671,8 +661,8 @@ Window {
         if (!win.beginPlaceFeedback("phone-open", id, qsTr("Opening %1…").arg(d.label))) return
         connectPanel.supportKey = d.phone
         connectPanel.feedbackBody = d.phone === "apple"
-            ? qsTr("Unlock your device and tap Trust on its screen if asked. Gust never accepts Trust for you. Close this panel and choose the device again to stop waiting.")
-            : qsTr("Keep your device unlocked. On Android, choose File transfer in its USB notification. Close this panel and choose the device again to stop waiting.")
+            ? qsTr("Unlock it and tap Trust if asked.")
+            : qsTr("Unlock it and choose File transfer in its USB notification.")
         const model = win.connectionOwner
         const error = model.phone_open(id, apps === true)
         if (error !== "") win.finishPlaceFeedback("phone-open", id, error, model)
@@ -687,7 +677,7 @@ Window {
         if (mounted) {
             const d = win.deviceList.find((x) => x.path === path)
             if (d && d.mountPoint) dirModel.navigate(d.mountPoint)
-            else win.alertText = qsTr("That device is mounted, but Gust could not tell where.")
+            else win.alertText = qsTr("Mounted, but its folder is unknown")
             return
         }
         const err = dirModel.device_mount(path)
@@ -703,7 +693,7 @@ Window {
         prompt.secret = true
         prompt.mode = "unlock"
         prompt.openWith(qsTr("Unlock %1").arg(d ? d.label : qsTr("drive")), "",
-                        qsTr("Passphrase · sent to udisks, never stored by Gust"))
+                        qsTr("Never stored"))
         win.qaDump("unlock-prompt")
     }
     function unlockEntered(text) {
@@ -781,8 +771,8 @@ Window {
         const model = owner || dirModel
         if (!model) return false
         if (model.place_busy) {
-            connectPanel.showFeedback(qsTr("Another connection is still in progress"),
-                qsTr("Wait for it to finish before starting another connection."), false)
+            connectPanel.showFeedback(qsTr("Another connection is in progress"),
+                qsTr("Wait for it to finish."), false)
             return false
         }
         if (!connectPanel.beginFeedback(op, name, title)) return false
@@ -797,8 +787,8 @@ Window {
             if (op === "setup-install") {
                 connectPanel.feedbackTitle = message === "" ? qsTr("Connection support is installed") : qsTr("Setup did not finish")
                 if (message === "") connectPanel.feedbackBody = name === "apple"
-                    ? qsTr("Reconnect your device, unlock it and tap Trust if asked. Then choose it under Devices. Nothing was opened automatically.")
-                    : qsTr("Choose your computer, cloud storage or device again to connect. Nothing was connected automatically.")
+                    ? qsTr("Reconnect your device, then choose it under Devices.")
+                    : qsTr("Choose what to connect to.")
                 win.refreshPlaces()
             }
         }
@@ -808,7 +798,7 @@ Window {
         connectPanel.showSupport(key)
         if (!connectPanel.missingSupport || !connectPanel.requirement.installable) return
         if (!win.beginPlaceFeedback("setup-install", key, qsTr("Installing connection support…"))) return
-        connectPanel.feedbackBody = qsTr("Approve the system's authorization prompt. Keep Gust open until setup finishes. Closing this panel does not stop package installation.")
+        connectPanel.feedbackBody = qsTr("Approve the system prompt and keep Gust open.")
         const model = win.connectionOwner
         const error = model.install_support(key)
         if (error !== "") win.finishPlaceFeedback("setup-install", key, error, model)
@@ -818,7 +808,7 @@ Window {
         if (win.connectionOwner !== model) return
         const pending = connectPanel.operation
         if (pending) connectPanel.completeFeedback(pending.op, pending.name,
-            qsTr("The tab that started this attempt was closed. Its connection outcome is unknown; choose Check again before reconnecting."))
+            qsTr("Its tab was closed; the outcome is unknown."))
         win.connectionOwner = null
     }
     function requireSupport(key) {
@@ -846,7 +836,7 @@ Window {
         prompt.mode = "tailnet-user"
         prompt.secret = false
         prompt.openWith(qsTr("Log in to %1 as").arg(name), user,
-                        qsTr("Your account on that computer. Your own SSH key is used; no password is asked here."))
+                        qsTr("Uses your SSH key"))
         win.qaDump("tailnet-user-prompt")
     }
     function tailnetUserEntered(text) {
@@ -859,7 +849,7 @@ Window {
         win.pendingTailnet = null
         if (!t || !t.model) {
             connectPanel.showFeedback(qsTr("Connection not started"),
-                qsTr("That connection is no longer available. Choose the computer again."), false)
+                qsTr("Choose the computer again."), false)
             return
         }
         if (!win.beginPlaceFeedback("tailnet-connect", t.name, qsTr("Connecting to %1…").arg(t.name), t.model)) return
@@ -883,12 +873,11 @@ Window {
             if (rank.indexOf(w) > rank.indexOf(found)) found = w
         }
         if (found === "stopping")
-            return qsTr("A transfer using %1 is still stopping: it is waiting for %1 to answer. "
-                        + "Disconnect once it has stopped.").arg(name)
+            return qsTr("A transfer on %1 is still stopping").arg(name)
         if (found === "transfer")
-            return qsTr("A transfer using %1 is still running. Let it finish or cancel it, then disconnect.").arg(name)
+            return qsTr("A transfer on %1 is still running").arg(name)
         if (found === "archive")
-            return qsTr("Archive work using %1 is still running. Disconnect once it has finished.").arg(name)
+            return qsTr("Archive work on %1 is still running").arg(name)
         return ""
     }
     /// Refuse a disconnect while work still uses the place, saying so where
@@ -1229,7 +1218,7 @@ Window {
         if (m && closeTabAfterCancel.models.indexOf(m) >= 0) {
             // Already asked and confirmed: the tab is waiting for its work to
             // stop, and a second request must not ask again or skip the wait.
-            hints.message = qsTr("Still stopping — this tab closes once its work has stopped")
+            hints.message = qsTr("Still stopping…")
             win.qaDump("tab-close-waiting")
             return
         }
@@ -1240,18 +1229,15 @@ Window {
             confirm.purpose = "closetab"
             if (m.sharing_busy)
                 confirm.open(qsTr("File sharing is still running"),
-                    qsTr("Closing this tab asks sharing to stop. Files or sharing changes may already have been accepted. Check before retrying. The tab closes once all work has stopped."),
+                    qsTr("Closing asks it to stop. Changes may already have been accepted."),
                     qsTr("Stop and close"), true)
             else if (m.job_running())
                 confirm.open(qsTr("A transfer is still running"),
-                             qsTr("Closing this tab asks it to stop. Items already finished stay as they are; "
-                                  + "the one in progress is not finished, and temporary files from it may remain. "
-                                  + "The tab closes once the transfer has stopped."),
+                             qsTr("Closing asks it to stop; the current item may leave temporary files."),
                              qsTr("Stop and close"), true)
             else
                 confirm.open(qsTr("Archive work is still running"),
-                             qsTr("Gust cannot stop compressing or extracting part-way. "
-                                  + "The tab closes once it has finished."),
+                             qsTr("It can't stop part-way. The tab closes when it's done."),
                              qsTr("Close when finished"), false)
             win.qaDump("tab-close-blocked")
             return
@@ -1475,6 +1461,9 @@ Window {
             }
         }
         const r = dirModel.activate(row)
+        // A program is never opened by a click; the Run prompt explains it
+        // and, if it is not allowed to run yet, offers that too.
+        if (r === "program") { win.askRun(row); return }
         if (r.startsWith("blocked:"))
             hints.message = r.substring(8)
         else if (r === "file")
@@ -1581,23 +1570,30 @@ Window {
         prompt.mode = "permissions"
         prompt.openWith(n > 1 ? qsTr("Permissions for ") + n + qsTr(" items") : qsTr("Permissions"),
                         n > 1 ? "" : dirModel.mode_text().split("  ")[1],
-                        qsTr("Now: ") + dirModel.mode_text()
-                            + qsTr("  ·  a number (644, 755) or a change (u+x, go-w, +x).  Ctrl+Z undoes it."), -1)
+                        qsTr("Now: ") + dirModel.mode_text() + qsTr("  ·  e.g. 755 or u+x"), -1)
         win.qaDump("prompt")
     }
 
     /// The safe prompt before running a program: names the file; Cancel has
-    /// the focus, so Enter cancels.
+    /// the focus, so Enter cancels. A program that arrived without its run
+    /// permission (a downloaded AppImage) is offered that permission here,
+    /// in the same deliberate step, rather than sent to Permissions….
     property int pendingRunRow: -1
     function askRun(row) {
-        const why = dirModel.run_check(row)
-        if (why !== "") { win.alertText = why; win.qaDump("run-refused"); return }
+        const state = dirModel.program_state(row)
+        if (state === "") {
+            const why = dirModel.run_check(row)
+            win.alertText = why !== "" ? why : qsTr("this file opens in an app, not as a program")
+            win.qaDump("run-refused")
+            return
+        }
+        const name = dirModel.entry_name(row)
+        const allow = state === "allow"
         win.pendingRunRow = row
-        confirm.purpose = "run"
-        confirm.open(qsTr("Run ") + dirModel.entry_name(row) + qsTr("?"),
-                     qsTr("This starts the program in a terminal, in the folder it is in. ")
-                     + qsTr("Only run programs you trust: it can do anything your account can."),
-                     qsTr("Run"), true)
+        confirm.purpose = allow ? "allow-run" : "run"
+        confirm.open(allow ? qsTr("Allow %1 to run?").arg(name) : qsTr("Run %1?").arg(name),
+                     qsTr("Only run programs you trust."),
+                     allow ? qsTr("Allow and run") : qsTr("Run"), true)
         win.qaDump("run-confirm-open")
     }
 
@@ -1844,7 +1840,7 @@ Window {
             // for a cloud password and never sees one.
             const serr = dirModel.cloud_setup()
             if (serr !== "") win.alertText = serr
-            const instruction = qsTr("Finish rclone config in the terminal, then choose Check again to see your storage.")
+            const instruction = qsTr("Finish rclone config in the terminal, then check again.")
             connectPanel.showFeedback(serr !== "" ? qsTr("Cloud storage setup needs attention") : qsTr("Continue setup in your terminal"),
                 serr || instruction, serr !== "")
             if (serr === "") hints.message = instruction
@@ -1912,7 +1908,7 @@ Window {
         }
         if (!many && !dir) list.push({ label: qsTr("Open with…"), hint: win.keyPreset === "vim" ? "o" : "", action: "open-with" })
         // Programs start only from here or the palette, after a prompt.
-        if (!many && !dir && dirModel.run_check(row) === "")
+        if (!many && !dir && dirModel.program_state(row) !== "")
             list.push({ label: qsTr("Run…"), hint: "", action: "run" })
         list.push({ label: qsTr("Quick Look"), hint: "Space", action: "quicklook" })
         if (!many) list.push({ label: qsTr("Properties"), hint: "Alt+Enter", action: "quicklook" })
@@ -1997,7 +1993,7 @@ Window {
         if (name === "") { hints.message = "Nothing selected"; return }
         prompt.mode = "rename"
         prompt.openWith(qsTr("Rename"), name,
-                        qsTr("The extension is kept unless you edit it."), row)
+                        qsTr("Enter rename · Esc cancel"), row)
         win.qaDump("prompt")
     }
 
@@ -2028,8 +2024,7 @@ Window {
         const n = dirModel.sel_count()
         prompt.mode = "owner"
         prompt.openWith(n > 1 ? qsTr("Owner for ") + n + qsTr(" items") : qsTr("Owner"), "",
-                        qsTr("Now: ") + dirModel.owner_text()
-                            + qsTr("  ·  a user, :group or user:group.  Ctrl+Z undoes it."), -1)
+                        qsTr("Now: ") + dirModel.owner_text() + qsTr("  ·  user, :group or user:group"), -1)
         win.qaDump("prompt")
     }
 
@@ -2173,7 +2168,7 @@ Window {
         function onDelete_totalChanged() {
             if (!confirm.visible || (confirm.purpose !== "trash") || dirModel.delete_total === "") return
             if (win.deleteBody === "") win.deleteBody = confirm.body.split("\n\n")[0]
-            confirm.body = win.deleteBody + "\n\n" + qsTr("That is ") + dirModel.delete_total + "."
+            confirm.body = win.deleteBody + "\n\n" + dirModel.delete_total
             // Dump after the dialog has laid out the new text, so the
             // button positions in the state match the screen.
             Qt.callLater(() => win.qaDump("delete-total"))
@@ -2203,12 +2198,8 @@ Window {
         // so the buttons do not jump under the pointer when it arrives.
         confirm.open(
             hard ? "Delete permanently?" : "Move to Trash?",
-            (hard
-              ? subject + " cannot be moved to Trash from this location. "
-                + "Deleting " + (n > 1 ? "them" : "it") + " permanently CANNOT be undone."
-              : subject + " will be moved to Trash. You can restore "
-                + (n > 1 ? "them" : "it") + " later.")
-              + "\n\n" + qsTr("Counting what is inside…"),
+            (hard ? subject + " — no Trash here. This CANNOT be undone." : subject)
+              + "\n\n" + qsTr("Counting…"),
             dirModel.delete_action_label(),
             hard)
     }
@@ -2246,7 +2237,7 @@ Window {
                 anchors.verticalCenter: parent.verticalCenter
                 x: Tokens.rowPaddingX
                 width: parent.width - Tokens.rowPaddingX * 2
-                text: qsTr("Administrator — changes here affect the whole system")
+                text: qsTr("Administrator — changes affect the whole system")
                 color: Tokens.foregroundBright
                 font.family: Tokens.fontFamily
                 font.pixelSize: Tokens.fontSmall
@@ -2975,6 +2966,11 @@ Window {
             if (quickLook.open && event.modifiers === Qt.NoModifier) {
                 let used = false
                 if (event.key === Qt.Key_P || event.key === Qt.Key_K) used = quickLook.togglePlay()
+                else if (event.key === Qt.Key_X && quickLook.programSeen) {
+                    // x flips the run permission of the program shown.
+                    quickLook.setRunnable(quickLook.program !== "run")
+                    used = true
+                }
                 else if (event.key === Qt.Key_Left) used = quickLook.turnPage(-1) || quickLook.browse(-1)
                 else if (event.key === Qt.Key_Right) used = quickLook.turnPage(1) || quickLook.browse(1)
                 else if (event.key === Qt.Key_Up) used = quickLook.zoomBy(1)
@@ -3533,6 +3529,8 @@ Window {
         // Polled player state; dumped so qa can follow playback.
         onAudioChanged: win.qaDump("quicklook-audio")
         onHashChanged: win.qaDump("hash")
+        onProgramChanged: win.qaDump("quicklook-program")
+        onRunRequested: (row) => { quickLook.hide(); win.askRun(row) }
         onClosed: win.focusList()
     }
 
@@ -3613,12 +3611,16 @@ Window {
         onVisibleChanged: win.qaDump("confirm")
         onClosed: { if (connectPanel.open) connectPanel.refocus(); else win.focusList() }
         onAccepted: {
-            if (confirm.purpose === "run") {
+            if (confirm.purpose === "run" || confirm.purpose === "allow-run") {
                 const r = win.pendingRunRow
                 win.pendingRunRow = -1
                 if (r < 0) return
-                const err = dirModel.run_row(r)
+                const err = confirm.purpose === "allow-run" ? dirModel.allow_and_run(r)
+                                                            : dirModel.run_row(r)
+                // Said as a message: the reload after a permission change
+                // puts "N items" back in the status before it can be read.
                 if (err !== "") win.alertText = err
+                else hints.message = dirModel.status
                 win.qaDump("run")
                 return
             }
@@ -3711,7 +3713,7 @@ Window {
             if (confirm.purpose === "tailnetkey") {
                 // Cancel: nothing recorded, nothing connected.
                 win.pendingTailnet = null
-                connectPanel.showFeedback(qsTr("Not connected"), qsTr("No SSH key was trusted and no connection was started."), false)
+                connectPanel.showFeedback(qsTr("Not connected"), qsTr("Nothing was trusted."), false)
                 hints.message = qsTr("Not connected")
                 win.qaDump("tailnet-key-cancelled")
                 return
@@ -3737,7 +3739,7 @@ Window {
             }
             if (confirm.purpose === "closewait") {
                 confirm.purpose = "trash"
-                hints.message = qsTr("Still stopping — the window closes by itself once everything has stopped")
+                hints.message = qsTr("Still stopping…")
                 win.qaDump("close-keep-waiting")
                 win.focusList()
                 return
@@ -3835,6 +3837,7 @@ Window {
                 return out
             })(),
             quickLookOpen: quickLook.open,
+            quickLookProgram: quickLook.open ? quickLook.program : "",
             quickLookHash: quickLook.hash,
             keyMapOpen: keyMapPanel.open,
             breadcrumbText: crumbs.shownText(),

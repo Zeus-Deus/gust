@@ -73,7 +73,7 @@ Item {
         // operation and destination are never a surprise.
         onDropMovedOver: (r) => {
             if (!pane.model) return
-            const t = rowsView.dragRight ? qsTr("Release to choose: Copy, Move or Link here")
+            const t = rowsView.dragRight ? qsTr("Release for Copy, Move or Link")
                                     : pane.model.drag_preview(r, pane.dragMode(rowsView))
             ghost.action = t
             pane.dropPreview(t)
@@ -101,7 +101,7 @@ Item {
         }
         onDropMovedOver: (r) => {
             if (!pane.model) return
-            const t = gridView.dragRight ? qsTr("Release to choose: Copy, Move or Link here")
+            const t = gridView.dragRight ? qsTr("Release for Copy, Move or Link")
                                     : pane.model.drag_preview(r, pane.dragMode(gridView))
             ghost.action = t
             pane.dropPreview(t)
@@ -129,7 +129,7 @@ Item {
         }
         onDropMovedOver: (r) => {
             if (!pane.model) return
-            const t = columnsView.dragRight ? qsTr("Release to choose: Copy, Move or Link here")
+            const t = columnsView.dragRight ? qsTr("Release for Copy, Move or Link")
                                     : pane.model.drag_preview(r, pane.dragMode(columnsView))
             ghost.action = t
             pane.dropPreview(t)
