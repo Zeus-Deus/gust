@@ -2222,7 +2222,16 @@ Bridge contract (APP over `gust_ops::attrs`):
   is the status-line sentence ("Permissions changed on N items … · Ctrl+Z
   puts them back"); `partial` is true when some targets were refused. It
   uses the existing `set_modes` outcome, `last_modes` undo (dev+inode+mtime
-  and mode checks) and Ctrl+Z wording.
+  and mode checks) and Ctrl+Z wording. A worker panic reports an `error`
+  saying some items may already have changed without an undo.
+- `permissions_running() -> bool` is true from an accepted apply until its
+  outcome, `last_modes` undo and `permissions_done` have all been handled on
+  the GUI thread; a failed worker start releases the claim. `set_modes` has no
+  cancel, so closing the window or the tab that started it waits, like
+  archive work ("Close when finished"); only the existing explicit "Close
+  without waiting" may quit sooner, and it says permissions may be left
+  part-way with no undo. `work_on_place` answers `"permissions"` while the
+  change touches that place, and disconnect is refused until it finishes.
 
 Card behaviour: a mixed bit shows a partial checkbox and cycles mixed → on
 → off → mixed. Apply changes is disabled until something differs; Escape and

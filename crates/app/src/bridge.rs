@@ -790,9 +790,14 @@ pub mod qobject {
         /// Compress or extract work this tab started that is still running.
         #[qinvokable]
         fn archive_running(self: &DirModel) -> bool;
+        /// A permissions change this tab applied whose outcome has not been
+        /// handled yet. It cannot be stopped part-way (DESIGN §6.26).
+        #[qinvokable]
+        fn permissions_running(self: &DirModel) -> bool;
         /// What this tab is still doing inside a connected place (`kind` is
         /// "ssh", "tailnet" or "cloud"): "transfer", "stopping", "archive",
-        /// or "" for nothing. In memory only; never touches the place.
+        /// "permissions", or "" for nothing. In memory only; never touches
+        /// the place.
         #[qinvokable]
         fn work_on_place(self: &DirModel, kind: QString, name: QString) -> QString;
 
@@ -1061,7 +1066,9 @@ pub struct DirModelRust {
     /// an Apply for that token changes (DESIGN §6.26).
     perms_token: i32,
     perms_paths: Vec<PathBuf>,
-    perms_busy: bool,
+    /// An applied change until its outcome, undo and report are handled.
+    /// Same shape as archive work: no cancel, released on drop.
+    perms_work: crate::place_work::ArchiveWork,
     /// Undo for links dropped, owners changed, images pasted.
     last_extra: UndoExtra,
     /// What Ctrl+C / Ctrl+X marked, as paths, so rows can show it.
@@ -1368,7 +1375,7 @@ impl DirModelRust {
             last_modes: Vec::new(),
             perms_token: 0,
             perms_paths: Vec::new(),
-            perms_busy: false,
+            perms_work: Default::default(),
             last_extra: UndoExtra::None,
             clip_set: Default::default(),
             clipboard: None,
@@ -8183,6 +8190,10 @@ impl qobject::DirModel {
         self.archive_work.is_running()
     }
 
+    fn permissions_running(&self) -> bool {
+        self.perms_work.is_running()
+    }
+
     fn work_on_place(&self, kind: QString, name: QString) -> QString {
         let name = name.to_string();
         // Each of these is a path computed from the runtime directory; none
@@ -8215,6 +8226,9 @@ impl qobject::DirModel {
         }
         if self.archive_work.touches(&mount) {
             return QString::from("archive");
+        }
+        if self.perms_work.touches(&mount) {
+            return QString::from("permissions");
         }
         QString::default()
     }
@@ -9279,8 +9293,8 @@ impl qobject::DirModel {
         QString::default()
     }
 
-    fn permissions_apply(mut self: Pin<&mut Self>, token: i32, add: i32, remove: i32) -> QString {
-        if self.as_ref().perms_busy {
+    fn permissions_apply(self: Pin<&mut Self>, token: i32, add: i32, remove: i32) -> QString {
+        if self.as_ref().permissions_running() {
             return QString::from("Still applying the last change");
         }
         if token == 0 || token != self.as_ref().perms_token || self.as_ref().perms_paths.is_empty()
@@ -9296,29 +9310,48 @@ impl qobject::DirModel {
             return QString::from("Permissions cannot be changed here");
         };
         let paths = self.as_ref().perms_paths.clone();
-        self.as_mut().rust_mut().perms_busy = true;
+        // Held until the outcome below has been handled, so a window or tab
+        // close waits for the report and its undo instead of dropping them.
+        // A worker that never starts drops it with its closure.
+        let claim = self.as_ref().perms_work.claim(paths.clone());
         let spawned = std::thread::Builder::new()
             .name("gust-perms".into())
             .spawn(move || {
-                let out = gust_ops::attrs::set_modes(&paths, spec);
+                let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    gust_ops::attrs::set_modes(&paths, spec)
+                }));
                 let _ = thread.queue(move |mut model| {
-                    model.as_mut().rust_mut().perms_busy = false;
-                    let partial = !out.failed.is_empty();
-                    let err = model.as_mut().finish_mode_change(out);
-                    // The status line gives way to the relisting at once;
-                    // the card hands the sentence on to the window.
-                    let message = if err.is_empty() {
-                        model.as_ref().status().clone()
-                    } else {
-                        QString::default()
+                    let (err, message, partial) = match out {
+                        Ok(out) => {
+                            let partial = !out.failed.is_empty();
+                            let err = model.as_mut().finish_mode_change(out);
+                            // The status line gives way to the relisting at
+                            // once; the card hands the sentence on to the
+                            // window.
+                            let message = if err.is_empty() {
+                                model.as_ref().status().clone()
+                            } else {
+                                QString::default()
+                            };
+                            (err, message, partial)
+                        }
+                        Err(_) => (
+                            QString::from(
+                                "The permissions change stopped unexpectedly. Some items may \
+                                 already have changed and Ctrl+Z cannot put them back; check \
+                                 them before trying again.",
+                            ),
+                            QString::default(),
+                            true,
+                        ),
                     };
                     model
                         .as_mut()
                         .permissions_done(token, err, message, partial);
+                    drop(claim);
                 });
             });
         if spawned.is_err() {
-            self.as_mut().rust_mut().perms_busy = false;
             return QString::from("Permissions could not be changed just now");
         }
         QString::default()

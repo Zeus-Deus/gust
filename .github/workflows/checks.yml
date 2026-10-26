@@ -76,6 +76,10 @@ jobs:
         run: python3 tests/release-gates.py --gate model-seams --required --output "$RUNNER_TEMP/gust-model-seams"
       - name: Permissions dialog controls and scaling (system Qt)
         run: python3 crates/app/tests/permissions_dialog_regressions.py --source . --output "$RUNNER_TEMP/gust-permissions-dialog"
+      - name: Permissions worker and window/tab close guards (system Qt)
+        run: |
+          python3 crates/app/tests/permissions_worker_regressions.py --source . --output "$RUNNER_TEMP/gust-permissions-worker"
+          python3 crates/app/tests/work_guard_regressions.py --source . --output "$RUNNER_TEMP/gust-work-guard"
       - name: Grid thumbnail decoding and geometry (system Qt)
         run: |
           python3 tests/grid-thumbnail.py

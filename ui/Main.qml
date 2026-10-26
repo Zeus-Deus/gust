@@ -98,12 +98,14 @@ Window {
     }
 
     /// Every tab still holding files open: a transfer (running or still
-    /// stopping) or archive work. Archive work cannot be stopped part-way.
+    /// stopping), archive work or a permissions change. The last two cannot
+    /// be stopped part-way; a permissions change also still owes its undo.
     function busyModels() {
         const out = []
         for (let i = 0; i < tabList.count; i++) {
             const m = tabs.objectAt(i)
-            if (m && (m.job_running() || m.archive_running() || m.sharing_busy)) out.push(m)
+            if (m && (m.job_running() || m.archive_running() || m.permissions_running() || m.sharing_busy))
+                out.push(m)
         }
         return out
     }
@@ -126,13 +128,17 @@ Window {
                      + "The window closes by itself once it has stopped; Cancel keeps waiting.\n\n"
                      + "If you close now, items already finished stay as they are. The one in progress is not finished, "
                      + "and temporary files from it may stay at the destination. "
-                     + "Compressing or extracting may be left incomplete. Check the destination before running it again."),
+                     + "Compressing or extracting may be left incomplete. Check the destination before running it again.")
+                    + (busy.some(m => m.permissions_running())
+                       ? qsTr(" A permissions change may be left part-way, and Ctrl+Z cannot put it back.") : ""),
                 qsTr("Close without waiting"),
                 true)
             win.qaDump("close-still-stopping")
             return
         }
         const running = busy.filter(m => m.job_running() || m.sharing_busy)
+        const archiving = busy.some(m => m.archive_running())
+        const permissions = busy.some(m => m.permissions_running())
         confirm.purpose = "close"
         if (busy.some(m => m.sharing_busy)) {
             confirm.open(qsTr("File sharing is still running"),
@@ -142,11 +148,25 @@ Window {
             return
         }
         if (running.length === 0) {
-            confirm.open(qsTr("Archive work is still running"),
-                qsTr("Gust cannot stop compressing or extracting part-way. "
-                     + "The window closes once it has finished."),
-                qsTr("Close when finished"),
-                false)
+            // Neither can be stopped part-way: say so, and only wait.
+            if (archiving && permissions)
+                confirm.open(qsTr("Archive work and a permissions change are still running"),
+                    qsTr("Gust cannot stop compressing, extracting or changing permissions part-way. "
+                         + "The window closes once they have finished."),
+                    qsTr("Close when finished"),
+                    false)
+            else if (permissions)
+                confirm.open(qsTr("Permissions are still being changed"),
+                    qsTr("Gust cannot stop a permissions change part-way. "
+                         + "The window closes once it has finished."),
+                    qsTr("Close when finished"),
+                    false)
+            else
+                confirm.open(qsTr("Archive work is still running"),
+                    qsTr("Gust cannot stop compressing or extracting part-way. "
+                         + "The window closes once it has finished."),
+                    qsTr("Close when finished"),
+                    false)
             win.qaDump("close-blocked")
             return
         }
@@ -154,8 +174,10 @@ Window {
             ? qsTr("%1 transfers are running in different tabs. ").arg(running.length)
             : (win.job && win.job.message && running[0] === dirModel) ? win.job.message + ". "
             : qsTr("A transfer is running in another tab. ")
-        const archive = busy.length > running.length
-            ? qsTr(" Archive work cannot be stopped part-way; the window also waits for it.") : ""
+        const archive = (archiving
+            ? qsTr(" Archive work cannot be stopped part-way; the window also waits for it.") : "")
+            + (permissions
+            ? qsTr(" A permissions change cannot be stopped part-way; the window also waits for it.") : "")
         confirm.open(
             running.length > 1 ? qsTr("Transfers are still running") : qsTr("A transfer is still running"),
             detail + qsTr("Closing asks it to stop. Items already finished stay as they are; the one in progress "
@@ -875,7 +897,7 @@ Window {
     function placeWorkBlocker(kind, name) {
         // A stopping transfer is named first: it is the one the user may
         // already be waiting on.
-        const rank = ["", "archive", "transfer", "stopping"]
+        const rank = ["", "archive", "permissions", "transfer", "stopping"]
         let found = ""
         for (let i = 0; i < tabList.count; i++) {
             const m = tabs.objectAt(i)
@@ -887,6 +909,8 @@ Window {
                         + "Disconnect once it has stopped.").arg(name)
         if (found === "transfer")
             return qsTr("A transfer using %1 is still running. Let it finish or cancel it, then disconnect.").arg(name)
+        if (found === "permissions")
+            return qsTr("Permissions on %1 are still being changed. Disconnect once the change has finished.").arg(name)
         if (found === "archive")
             return qsTr("Archive work using %1 is still running. Disconnect once it has finished.").arg(name)
         return ""
@@ -1233,7 +1257,7 @@ Window {
             win.qaDump("tab-close-waiting")
             return
         }
-        if (m && (m.job_running() || m.archive_running() || m.sharing_busy)) {
+        if (m && (m.job_running() || m.archive_running() || m.permissions_running() || m.sharing_busy)) {
             // Work belongs to the tab that started it. Closing it asks
             // first, exactly as closing the window does.
             win.pendingCloseTab = i
@@ -1248,6 +1272,16 @@ Window {
                                   + "the one in progress is not finished, and temporary files from it may remain. "
                                   + "The tab closes once the transfer has stopped."),
                              qsTr("Stop and close"), true)
+            else if (m.permissions_running() && !m.archive_running())
+                confirm.open(qsTr("Permissions are still being changed"),
+                             qsTr("Gust cannot stop a permissions change part-way. "
+                                  + "The tab closes once it has finished."),
+                             qsTr("Close when finished"), false)
+            else if (m.permissions_running())
+                confirm.open(qsTr("Archive work and a permissions change are still running"),
+                             qsTr("Gust cannot stop compressing, extracting or changing permissions part-way. "
+                                  + "The tab closes once they have finished."),
+                             qsTr("Close when finished"), false)
             else
                 confirm.open(qsTr("Archive work is still running"),
                              qsTr("Gust cannot stop compressing or extracting part-way. "
@@ -4066,7 +4100,8 @@ Window {
             start()
         }
         onTriggered: {
-            const done = models.filter(m => !m.job_running() && !m.archive_running() && !m.sharing_busy)
+            const done = models.filter(m => !m.job_running() && !m.archive_running()
+                                            && !m.permissions_running() && !m.sharing_busy)
             models = models.filter(m => done.indexOf(m) < 0)
             if (models.length === 0) stop()
             // Off the waiting list first, so closeTab removes it for real.
