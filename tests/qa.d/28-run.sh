@@ -56,7 +56,7 @@ typ "plain"; sleep 1.0
 expect "cursor on plain.sh" "d['model']['cursor_name']" "plain.sh"
 palette_run "Run program"; sleep 0.8
 expect "no confirmation for a non-executable" "d['confirmOpen']" "False"
-expect_contains "and it says why" "d['alertText']" "not executable"
+expect_contains "and it says why, in the card's words" "d['alertText']" "turn on Run in Permissions"
 [[ ! -e "$marker" ]] && ok "nothing ran" || bad "a non-executable file was run"
 key Escape
 unset QA_PATH_PREPEND

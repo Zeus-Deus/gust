@@ -508,13 +508,35 @@ pub mod qobject {
         fn run_row(self: Pin<&mut DirModel>, row: i32) -> QString;
         #[qinvokable]
         fn make_link(self: Pin<&mut DirModel>) -> QString;
-        /// Change permissions of the targets ("644", "u+x", "go-w").
-        /// Ctrl+Z puts every mode back where the file is unchanged since.
+        /// Read the targets' permissions on a worker for the permissions
+        /// card (DESIGN §6.26). "" when started, else why not; the facts
+        /// arrive as `permissions_ready`.
         #[qinvokable]
-        fn set_mode(self: Pin<&mut DirModel>, spec: &QString) -> QString;
-        /// The cursor row's rwx and octal, e.g. "rw-r--r--  644".
+        fn permissions_load(self: Pin<&mut DirModel>) -> QString;
+        /// Give `add` and take away `remove` (rwx bits only) on exactly the
+        /// items read for `token`, on a worker. "" when started, else why
+        /// not; `permissions_done` reports. Ctrl+Z puts them back.
         #[qinvokable]
-        fn mode_text(self: &DirModel) -> QString;
+        fn permissions_apply(
+            self: Pin<&mut DirModel>,
+            token: i32,
+            add: i32,
+            remove: i32,
+        ) -> QString;
+        /// The facts for the permissions card, as JSON (DESIGN §6.26).
+        #[qsignal]
+        fn permissions_ready(self: Pin<&mut DirModel>, token: i32, json: QString);
+        /// A permissions change finished: `error` is why nothing changed
+        /// (else ""); otherwise `message` says what changed and how to undo
+        /// it, and `partial` is true when some items were refused.
+        #[qsignal]
+        fn permissions_done(
+            self: Pin<&mut DirModel>,
+            token: i32,
+            error: QString,
+            message: QString,
+            partial: bool,
+        );
         /// Change owner and/or group of the targets ("bob", ":media",
         /// "bob:media"). Ctrl+Z puts every owner back where unchanged since.
         #[qinvokable]
@@ -1035,6 +1057,11 @@ pub struct DirModelRust {
     last_link: Option<gust_ops::attrs::LinkMade>,
     /// The newest permissions change, for Ctrl+Z.
     last_modes: Vec<gust_ops::attrs::ModeChanged>,
+    /// The permissions card's latest read: its token, and the exact items
+    /// an Apply for that token changes (DESIGN §6.26).
+    perms_token: i32,
+    perms_paths: Vec<PathBuf>,
+    perms_busy: bool,
     /// Undo for links dropped, owners changed, images pasted.
     last_extra: UndoExtra,
     /// What Ctrl+C / Ctrl+X marked, as paths, so rows can show it.
@@ -1339,6 +1366,9 @@ impl DirModelRust {
             last_bulk_rename: Vec::new(),
             last_link: None,
             last_modes: Vec::new(),
+            perms_token: 0,
+            perms_paths: Vec::new(),
+            perms_busy: false,
             last_extra: UndoExtra::None,
             clip_set: Default::default(),
             clipboard: None,
@@ -1519,6 +1549,84 @@ fn clip_label(paths: &[std::path::PathBuf]) -> String {
         1 => display_file_name(&paths[0]),
         n => count_items(n),
     }
+}
+
+/// The folder the permissions card names: the folder being shown when every
+/// item is in it, another single shared folder by its path, else "".
+fn shared_parent_label(
+    read: &gust_ops::attrs::ModeTargets,
+    here: Option<&std::path::Path>,
+    here_shown: &str,
+) -> String {
+    let mut parents = read.targets.iter().map(|t| t.path.parent());
+    let Some(Some(first)) = parents.next() else {
+        return String::new();
+    };
+    if !parents.all(|p| p == Some(first)) {
+        return String::new();
+    }
+    if here == Some(first) {
+        return here_shown.to_string();
+    }
+    gust_core::location::escape_for_display(first.as_os_str())
+}
+
+/// The permissions card's facts (DESIGN §6.26). Pure: the caller has done
+/// every read. Names come only from the user databases given; an id they do
+/// not list is reported without a name rather than given one.
+fn permissions_json(
+    token: i32,
+    read: &gust_ops::attrs::ModeTargets,
+    place: &str,
+    (euid, groups): (u32, Vec<u32>),
+    passwd: &str,
+    group: &str,
+) -> serde_json::Value {
+    use gust_core::properties::lookup_name;
+    let t = &read.targets;
+    if t.is_empty() {
+        let error = if !read.missing.is_empty() {
+            read.missing.join("; ")
+        } else if read.links > 0 {
+            "A link has no permissions of its own. Change the item it points to instead".to_string()
+        } else {
+            "Nothing to change here".to_string()
+        };
+        return serde_json::json!({"ok": false, "token": token, "error": error});
+    }
+    let same = |f: fn(&gust_ops::attrs::ModeTarget) -> u32| t.iter().all(|x| f(x) == f(&t[0]));
+    let owner_same = same(|x| x.uid);
+    let group_same = same(|x| x.gid);
+    let bits: Vec<usize> = (0..9)
+        .map(|i| t.iter().filter(|x| x.mode & (0o400 >> i) != 0).count())
+        .collect();
+    let name = (t.len() == 1 && read.links == 0 && read.missing.is_empty()).then(|| {
+        gust_core::location::escape_for_display(t[0].path.file_name().unwrap_or_default())
+    });
+    serde_json::json!({
+        "ok": true,
+        "token": token,
+        "total": t.len(),
+        "files": t.iter().filter(|x| !x.is_dir).count(),
+        "dirs": t.iter().filter(|x| x.is_dir).count(),
+        "links": read.links,
+        "missing": read.missing,
+        "name": name,
+        "place": place,
+        "owner": {
+            "same": owner_same,
+            "name": if owner_same { lookup_name(passwd, t[0].uid) } else { None },
+            "you": t.iter().all(|x| x.uid == euid),
+        },
+        "group": {
+            "same": group_same,
+            "name": if group_same { lookup_name(group, t[0].gid) } else { None },
+            "member": group_same && groups.contains(&t[0].gid),
+        },
+        "owned": t.iter().filter(|x| x.changeable_by(euid)).count(),
+        "special": t.iter().filter(|x| x.mode & 0o7000 != 0).count(),
+        "bits": bits,
+    })
 }
 
 /// Name shown to the user for a path. Never panics on non-UTF-8.
@@ -9091,16 +9199,9 @@ impl qobject::DirModel {
         }
     }
 
-    fn set_mode(mut self: Pin<&mut Self>, spec: &QString) -> QString {
-        let spec = match gust_ops::attrs::ModeSpec::parse(&spec.to_string()) {
-            Ok(s) => s,
-            Err(e) => return QString::from(&e),
-        };
-        let targets = self.as_ref().target_paths();
-        if targets.is_empty() {
-            return QString::from("nothing to change");
-        }
-        let out = gust_ops::attrs::set_modes(&targets, spec);
+    /// Record a permissions outcome for Ctrl+Z and say what happened in the
+    /// status line. "" unless nothing changed because every item failed.
+    fn finish_mode_change(mut self: Pin<&mut Self>, out: gust_ops::attrs::ModeOutcome) -> QString {
         let n = out.changed.len();
         if n > 0 {
             let mut r = self.as_mut().rust_mut();
@@ -9136,22 +9237,91 @@ impl qobject::DirModel {
         QString::default()
     }
 
-    fn mode_text(&self) -> QString {
-        use std::os::unix::fs::MetadataExt;
-        let Some(p) = self.target_paths().into_iter().next() else {
-            return QString::default();
-        };
-        match p.symlink_metadata() {
-            Ok(m) => {
-                let mode = m.mode() & 0o777;
-                QString::from(&format!(
-                    "{}  {:03o}",
-                    gust_ops::attrs::rwx_string(mode),
-                    mode
-                ))
-            }
-            Err(_) => QString::default(),
+    fn permissions_load(mut self: Pin<&mut Self>) -> QString {
+        let paths = self.as_ref().target_paths();
+        if paths.is_empty() {
+            return QString::from("Nothing to change here");
         }
+        let Some(thread) = self.as_ref().qt_thread_handle() else {
+            return QString::from("Permissions cannot be read here");
+        };
+        let token = {
+            let mut r = self.as_mut().rust_mut();
+            r.perms_token = r.perms_token.wrapping_add(1).max(1);
+            r.perms_paths.clear();
+            r.perms_token
+        };
+        let here = self.as_ref().key.as_path().map(|p| p.to_path_buf());
+        let here_shown = self.as_ref().location_display().to_string();
+        let spawned = std::thread::Builder::new()
+            .name("gust-perms".into())
+            .spawn(move || {
+                let read = gust_ops::attrs::read_modes(&paths);
+                let passwd = std::fs::read_to_string("/etc/passwd").unwrap_or_default();
+                let group = std::fs::read_to_string("/etc/group").unwrap_or_default();
+                let viewer = gust_ops::attrs::viewer_ids();
+                let place = shared_parent_label(&read, here.as_deref(), &here_shown);
+                let json = permissions_json(token, &read, &place, viewer, &passwd, &group);
+                let kept: Vec<PathBuf> = read.targets.into_iter().map(|t| t.path).collect();
+                let _ = thread.queue(move |mut model| {
+                    if model.as_ref().perms_token != token {
+                        return;
+                    }
+                    model.as_mut().rust_mut().perms_paths = kept;
+                    model
+                        .as_mut()
+                        .permissions_ready(token, QString::from(&json.to_string()));
+                });
+            });
+        if spawned.is_err() {
+            return QString::from("Permissions could not be read just now");
+        }
+        QString::default()
+    }
+
+    fn permissions_apply(mut self: Pin<&mut Self>, token: i32, add: i32, remove: i32) -> QString {
+        if self.as_ref().perms_busy {
+            return QString::from("Still applying the last change");
+        }
+        if token == 0 || token != self.as_ref().perms_token || self.as_ref().perms_paths.is_empty()
+        {
+            return QString::from("These permissions are out of date. Open Permissions again");
+        }
+        // A negative mask becomes a huge one here and is refused with it.
+        let spec = match gust_ops::attrs::ModeSpec::change(add as u32, remove as u32) {
+            Ok(s) => s,
+            Err(e) => return QString::from(&e),
+        };
+        let Some(thread) = self.as_ref().qt_thread_handle() else {
+            return QString::from("Permissions cannot be changed here");
+        };
+        let paths = self.as_ref().perms_paths.clone();
+        self.as_mut().rust_mut().perms_busy = true;
+        let spawned = std::thread::Builder::new()
+            .name("gust-perms".into())
+            .spawn(move || {
+                let out = gust_ops::attrs::set_modes(&paths, spec);
+                let _ = thread.queue(move |mut model| {
+                    model.as_mut().rust_mut().perms_busy = false;
+                    let partial = !out.failed.is_empty();
+                    let err = model.as_mut().finish_mode_change(out);
+                    // The status line gives way to the relisting at once;
+                    // the card hands the sentence on to the window.
+                    let message = if err.is_empty() {
+                        model.as_ref().status().clone()
+                    } else {
+                        QString::default()
+                    };
+                    model
+                        .as_mut()
+                        .permissions_done(token, err, message, partial);
+                });
+            });
+        if spawned.is_err() {
+            self.as_mut().rust_mut().perms_busy = false;
+            return QString::from("Permissions could not be changed just now");
+        }
+        QString::default()
     }
 
     fn target_paths(&self) -> Vec<PathBuf> {
@@ -9699,6 +9869,126 @@ mod delete_total_tests {
         assert_eq!(
             s(1, 500_000, 1024, false),
             "1 folder with at least 500,000 files · 1.0 KB"
+        );
+    }
+}
+
+#[cfg(test)]
+mod permissions_json_tests {
+    use super::{permissions_json, shared_parent_label};
+    use gust_ops::attrs::{ModeTarget, ModeTargets};
+    use std::path::{Path, PathBuf};
+
+    const PASSWD: &str = "root:x:0:0::/root:/bin/sh\nalice:x:1000:1000::/home/alice:/bin/sh\n";
+    const GROUP: &str = "root:x:0:\nalice:x:1000:\n";
+
+    fn target(path: &str, is_dir: bool, mode: u32, uid: u32, gid: u32) -> ModeTarget {
+        ModeTarget {
+            path: PathBuf::from(path),
+            is_dir,
+            mode,
+            uid,
+            gid,
+        }
+    }
+
+    #[test]
+    fn mixed_bits_are_counted_not_flattened() {
+        let read = ModeTargets {
+            targets: vec![
+                target("/d/a.sh", false, 0o4755, 1000, 1000),
+                target("/d/b.txt", false, 0o640, 1000, 1000),
+                target("/d/sub", true, 0o1750, 1000, 1000),
+            ],
+            links: 1,
+            missing: vec![],
+        };
+        let j = permissions_json(7, &read, "~/d", (1000, vec![1000]), PASSWD, GROUP);
+        assert_eq!(j["ok"], true);
+        assert_eq!(j["token"], 7);
+        assert_eq!(j["bits"], serde_json::json!([3, 3, 2, 3, 0, 2, 1, 0, 1]));
+        assert_eq!(
+            (j["files"].as_u64(), j["dirs"].as_u64()),
+            (Some(2), Some(1))
+        );
+        assert_eq!(j["links"], 1);
+        assert_eq!(j["special"], 2);
+        assert_eq!(
+            j["name"],
+            serde_json::Value::Null,
+            "several items have no single name"
+        );
+        assert_eq!(j["owner"]["name"], "alice");
+        assert_eq!(j["owner"]["you"], true);
+        assert_eq!(j["group"]["member"], true);
+        assert_eq!(j["owned"], 3);
+    }
+
+    #[test]
+    fn an_unlisted_owner_is_not_given_a_name() {
+        let read = ModeTargets {
+            targets: vec![target("/d/f", false, 0o644, 4242, 4343)],
+            ..Default::default()
+        };
+        let j = permissions_json(1, &read, "", (1000, vec![1000]), PASSWD, GROUP);
+        assert_eq!(j["name"], "f");
+        assert_eq!(j["owner"]["name"], serde_json::Value::Null);
+        assert_eq!(j["owner"]["you"], false);
+        assert_eq!(j["group"]["name"], serde_json::Value::Null);
+        assert_eq!(j["group"]["member"], false);
+        assert_eq!(j["owned"], 0, "only the owner or root may change it");
+    }
+
+    #[test]
+    fn different_owners_are_not_summarised_as_one() {
+        let read = ModeTargets {
+            targets: vec![
+                target("/d/a", false, 0o644, 1000, 1000),
+                target("/e/b", false, 0o644, 0, 0),
+            ],
+            ..Default::default()
+        };
+        let j = permissions_json(1, &read, "", (1000, vec![1000]), PASSWD, GROUP);
+        assert_eq!(j["owner"]["same"], false);
+        assert_eq!(j["owner"]["name"], serde_json::Value::Null);
+        assert_eq!(j["owned"], 1);
+        assert_eq!(
+            shared_parent_label(&read, Some(Path::new("/d")), "Docs"),
+            ""
+        );
+    }
+
+    #[test]
+    fn nothing_changeable_is_an_error_not_a_default() {
+        let links = ModeTargets {
+            links: 2,
+            ..Default::default()
+        };
+        let j = permissions_json(1, &links, "", (1000, vec![]), PASSWD, GROUP);
+        assert_eq!(j["ok"], false);
+        assert!(j["error"].as_str().unwrap().contains("link"));
+        let gone = ModeTargets {
+            missing: vec!["x: no longer there".into()],
+            ..Default::default()
+        };
+        let j = permissions_json(1, &gone, "", (1000, vec![]), PASSWD, GROUP);
+        assert_eq!(j["error"], "x: no longer there");
+        assert!(j.get("bits").is_none());
+    }
+
+    #[test]
+    fn the_shown_folder_is_named_as_shown() {
+        let read = ModeTargets {
+            targets: vec![target("/m/nas/a", false, 0o644, 1000, 1000)],
+            ..Default::default()
+        };
+        assert_eq!(
+            shared_parent_label(&read, Some(Path::new("/m/nas")), "nas"),
+            "nas"
+        );
+        assert_eq!(
+            shared_parent_label(&read, Some(Path::new("/x")), "x"),
+            "/m/nas"
         );
     }
 }

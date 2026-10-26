@@ -159,19 +159,22 @@ fn libc_time() -> i64 {
 
 /// `user : group` by name, falling back to the numbers.
 pub fn owner_names(uid: u32, gid: u32, passwd: &str, group: &str) -> String {
-    let lookup = |db: &str, id: u32| {
-        db.lines()
-            .filter_map(|l| {
-                let mut f = l.split(':');
-                let name = f.next()?;
-                let _pw = f.next()?;
-                let n: u32 = f.next()?.parse().ok()?;
-                (n == id).then(|| name.to_string())
-            })
-            .next()
-            .unwrap_or_else(|| id.to_string())
-    };
+    let lookup = |db: &str, id: u32| lookup_name(db, id).unwrap_or_else(|| id.to_string());
     format!("{} : {}", lookup(passwd, uid), lookup(group, gid))
+}
+
+/// The name for `id` in an `/etc/passwd` or `/etc/group` text, or `None`
+/// when that database does not list it.
+pub fn lookup_name(db: &str, id: u32) -> Option<String> {
+    db.lines()
+        .filter_map(|l| {
+            let mut f = l.split(':');
+            let name = f.next()?;
+            let _pw = f.next()?;
+            let n: u32 = f.next()?.parse().ok()?;
+            (n == id && !name.is_empty()).then(|| name.to_string())
+        })
+        .next()
 }
 
 /// The list's Modified column: "today 16:49", "yesterday 23:50", or the date.

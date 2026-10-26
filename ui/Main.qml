@@ -756,7 +756,7 @@ Window {
         // The Connections picker remains available when a suggestion is deferred.
         if (recovery !== "" && !confirm.visible && !connectionRecovery.visible && !prompt.visible && !prompt.claimingFocus
             && !connectPanel.open && !palette.visible && !quickLook.open && !conflictDialog.visible
-            && !contextMenu.open && !settingsPanel.open && !renameCard.open && !trashPanel.open
+            && !contextMenu.open && !settingsPanel.open && !renameCard.open && !permissionsDialog.open && !trashPanel.open
             && !recentPanel.open && !filterInput.activeFocus && !searchInput.activeFocus
             && win.runningJobModels().length === 0) {
             connectionRecovery.routeKey = recovery
@@ -1412,7 +1412,8 @@ Window {
         // could not be typed into.
         if (palette.visible || confirm.visible || connectionRecovery.visible || contextMenu.open
             || conflictDialog.visible || settingsPanel.open || trashPanel.open || recentPanel.open || connectPanel.open
-            || prompt.visible || prompt.claimingFocus || renameCard.open || deviceSharing.open)
+            || prompt.visible || prompt.claimingFocus || renameCard.open || permissionsDialog.open
+            || deviceSharing.open)
             return
         listFocus.forceActiveFocus()
     }
@@ -1576,14 +1577,12 @@ Window {
         win.qaDump("keymap")
     }
 
+    /// The permissions card reads the same targets every dialog names
+    /// (D46) on a worker, then shows them as checkboxes (DESIGN §6.26).
     function askPermissions() {
-        const n = dirModel.sel_count()
-        prompt.mode = "permissions"
-        prompt.openWith(n > 1 ? qsTr("Permissions for ") + n + qsTr(" items") : qsTr("Permissions"),
-                        n > 1 ? "" : dirModel.mode_text().split("  ")[1],
-                        qsTr("Now: ") + dirModel.mode_text()
-                            + qsTr("  ·  a number (644, 755) or a change (u+x, go-w, +x).  Ctrl+Z undoes it."), -1)
-        win.qaDump("prompt")
+        win.alertText = ""
+        permissionsDialog.openFor(dirModel)
+        win.qaDump("permissions")
     }
 
     /// The safe prompt before running a program: names the file; Cancel has
@@ -3390,10 +3389,6 @@ Window {
                 err = dirModel.set_owner(text)
                 if (err === "") { prompt.close(); win.qaDump("prompt-ok"); return }
             }
-            else if (prompt.mode === "permissions") {
-                err = dirModel.set_mode(text)
-                if (err === "") { prompt.close(); win.qaDump("prompt-ok"); return }
-            }
 
             if (err === "") {
                 hints.message = prompt.mode === "rename"
@@ -3541,6 +3536,25 @@ Window {
         onChosen: (a) => win.runAction(a)
         onHighlightMoved: win.qaDump("context-menu")
         onClosed: { win.focusList(); win.qaDump("context-menu") }
+    }
+
+    PermissionsDialog {
+        id: permissionsDialog
+        objectName: "permissionsDialog"
+        onOpenChanged: win.qaDump("permissions")
+        onLoadingChanged: win.qaDump("permissions")
+        onDraftChanged: win.qaDump("permissions")
+        onErrorTextChanged: win.qaDump("permissions")
+        onExplainingChanged: win.qaDump("permissions")
+        // What changed and that Ctrl+Z puts it back, as other actions say
+        // it, over the count of the very items it changed; items the system
+        // refused must be read, so they alert.
+        onFinished: (message, partial) => {
+            if (partial) win.alertText = message
+            else { hints.message = message; hints.messageAboutSelection = true }
+            win.qaDump("permissions-done")
+        }
+        onClosed: win.focusList()
     }
 
     RenameCard {
@@ -3959,6 +3973,9 @@ Window {
             jobSpeed: win.job ? (win.job.speed || "") : "",
             jobEta: win.job ? (win.job.eta || "") : "",
             conflictName: conflictDialog.clash ? conflictDialog.clash.name : "",
+            permissionsOpen: permissionsDialog.open,
+            permissions: permissionsDialog.open ? permissionsDialog.qaState() : null,
+            permissionsPoints: permissionsDialog.open && permissionsDialog.ready ? permissionsDialog.points() : null,
             renameCardOpen: renameCard.open,
             renameCardBad: renameCard.open ? renameCard.badLines() : 0,
             renameCardOk: renameCard.open ? renameCard.check.ok : false,

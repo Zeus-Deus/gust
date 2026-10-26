@@ -74,6 +74,8 @@ jobs:
       # selecting the SDK so its libraries/imports cannot mix with system Qt.
       - name: Required portable model seams (system Qt)
         run: python3 tests/release-gates.py --gate model-seams --required --output "$RUNNER_TEMP/gust-model-seams"
+      - name: Permissions dialog controls and scaling (system Qt)
+        run: python3 crates/app/tests/permissions_dialog_regressions.py --source . --output "$RUNNER_TEMP/gust-permissions-dialog"
       - name: Grid thumbnail decoding and geometry (system Qt)
         run: |
           python3 tests/grid-thumbnail.py
