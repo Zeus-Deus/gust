@@ -757,7 +757,11 @@ introduce a second kind of state.
 2. **A second pane is opened deliberately** and closed the same way. Closing
    a pane moves its tabs into the surviving pane rather than discarding them
    — a pane is a layout, and closing a layout must not lose a location, still
-   less a running job.
+   less a running job. One exception: when splitting a single-tab window
+   created a tab only to fill the new pane, and the split closes with that
+   tab untouched and idle (the same model, no job, archive or sharing
+   work), that tab closes with it. Otherwise F3 on, F3 off would leave a
+   tab the user never asked for.
 3. **The single-pane window is unchanged.** With one pane there is no
    splitter, no pane border, and no hint that panes exist. Chrome that earns
    nothing is not shown.
@@ -779,6 +783,28 @@ introduce a second kind of state.
    destinations and breadcrumbs must use that mode for both preview and
    execution, not reset it to the unmodified default. Across processes the
    existing private MIME value carries the same choice.
+
+### Snapping a folder into a pane
+
+A folder can be put into a pane without a tab or a keyboard step:
+
+- **Hold one folder to the right edge** of a single-pane window and release:
+  it opens in a new right pane. A thin accent line on that edge appears as
+  soon as one folder is held, so the target is discoverable. Over the edge
+  band the drop is a split, never a move, so the folder stays where it is.
+- **Hold a sidebar place or bookmark** over the left or right third of the
+  pane area (the same thirds as §6.20). With one pane, the left third shows
+  it in this pane and the right third opens a second pane. With two panes,
+  each third shows it in that pane.
+- **Right-click one folder → Open in new pane** (or **Open in other pane**
+  when split) does the same without dragging.
+
+The preview shown while held is the exact rectangle the pane takes after the
+drop, with the same border width as the active pane, not an inset or an
+animated approximation. A preview that differs from the result reads as a
+different target. The content of the existing pane does not reflow during
+the hover; shrinking a view under the pointer mid-drag would turn the drag
+into an outward platform handoff.
 
 ### What is deliberately not in this version
 

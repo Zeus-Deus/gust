@@ -14,6 +14,46 @@ Rectangle {
 
     color: Tokens.backgroundDark
 
+    // --- dragging a place onto the file area (DESIGN §6.7) ----------------
+    //
+    // A place or bookmark held and dragged over the file area opens in the
+    // left or right pane; Main owns the zones. A few pixels before a press
+    // becomes a drag, the same threshold the tabs use, so a click stays a
+    // click.
+    signal placeDragMoved(string path, string label, real x, real y)
+    signal placeDragDropped(string path, real x, real y)
+    signal placeDragEnded()
+    property point placePressAt: Qt.point(0, 0)
+    property bool placeDragging: false
+    /// The release just ended a drag: the click that follows is not a click.
+    property bool placeSwallowClick: false
+    function placePressed(mouse) {
+        root.placePressAt = Qt.point(mouse.x, mouse.y)
+        root.placeDragging = false
+        root.placeSwallowClick = false
+    }
+    function placeMoved(area, mouse, path, label) {
+        if (!(mouse.buttons & Qt.LeftButton) || path === "") return
+        const dx = mouse.x - root.placePressAt.x
+        const dy = mouse.y - root.placePressAt.y
+        if (!root.placeDragging && Math.abs(dx) + Math.abs(dy) < 8) return
+        root.placeDragging = true
+        const p = area.mapToItem(null, mouse.x, mouse.y)
+        root.placeDragMoved(path, label, p.x, p.y)
+    }
+    function placeReleased(area, mouse, path) {
+        if (!root.placeDragging) return
+        root.placeDragging = false
+        root.placeSwallowClick = true
+        const p = area.mapToItem(null, mouse.x, mouse.y)
+        root.placeDragDropped(path, p.x, p.y)
+    }
+    function placeCanceled() {
+        if (!root.placeDragging) return
+        root.placeDragging = false
+        root.placeDragEnded()
+    }
+
     Rectangle {
         anchors.right: parent.right
         width: Tokens.borderWidth
@@ -157,9 +197,18 @@ Rectangle {
                 }
 
                 MouseArea {
+                    id: placeMouse
                     anchors.fill: parent
                     cursorShape: Qt.PointingHandCursor
-                    onClicked: root.placeChosen(model.path)
+                    preventStealing: true
+                    onPressed: (mouse) => root.placePressed(mouse)
+                    onPositionChanged: (mouse) => root.placeMoved(placeMouse, mouse, model.path, model.label)
+                    onReleased: (mouse) => root.placeReleased(placeMouse, mouse, model.path)
+                    onCanceled: root.placeCanceled()
+                    onClicked: {
+                        if (root.placeSwallowClick) { root.placeSwallowClick = false; return }
+                        root.placeChosen(model.path)
+                    }
                 }
                 DragTarget {
                     receiver: root.model
@@ -273,7 +322,13 @@ Rectangle {
                     hoverEnabled: true
                     cursorShape: Qt.PointingHandCursor
                     acceptedButtons: Qt.LeftButton | Qt.RightButton
+                    preventStealing: true
+                    onPressed: (mouse) => root.placePressed(mouse)
+                    onPositionChanged: (mouse) => root.placeMoved(bmMouse, mouse, modelData.exists ? modelData.path : "", modelData.label)
+                    onReleased: (mouse) => root.placeReleased(bmMouse, mouse, modelData.path)
+                    onCanceled: root.placeCanceled()
                     onClicked: (mouse) => {
+                        if (root.placeSwallowClick) { root.placeSwallowClick = false; return }
                         if (mouse.button === Qt.RightButton) {
                             const g = mapToItem(null, mouse.x, mouse.y)
                             root.bookmarkMenu(modelData.path, g.x, g.y)
