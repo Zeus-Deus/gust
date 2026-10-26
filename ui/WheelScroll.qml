@@ -10,6 +10,11 @@ WheelHandler {
     acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
     acceptedModifiers: Qt.NoModifier
 
+    // Match GTK's Wayland surface-unit conversion (GtkScrolledWindow's
+    // MAGIC_SCROLL_FACTOR), used by Omarchy's Nautilus. The compositor has
+    // already applied the user's touchpad scroll factor to these deltas.
+    readonly property real touchpadScale: 2.5
+
     property real scrollPosition: 0
     property bool applyingScroll: false
 
@@ -53,24 +58,30 @@ WheelHandler {
         // otherwise keep every wheel event on the same angular scale.
         const continuous = event.phase !== Qt.NoScrollPhase
                         || event.angleDelta.y === 0
-        const pixels = continuous ? event.pixelDelta.y : 0
-        const dy = pixels !== 0 ? pixels
+        const dy = continuous ? event.pixelDelta.y * touchpadScale
                  : event.angleDelta.y / 120 * Tokens.rowHeight * 3
         if (dy === 0) {
-            event.accepted = false
+            // Keep subpixel gestures on the pixel path: Qt carries their
+            // rounding error into later frames. Cancel pending wheel travel
+            // for vertical gestures and their begin/end frames as well.
+            if (continuous && (event.angleDelta.y !== 0
+                    || (event.pixelDelta.x === 0 && event.angleDelta.x === 0))) {
+                scrollAnimation.stop()
+                v.cancelFlick()
+            }
             return
         }
         // Accumulate against the destination, not the last animation frame.
         // On reversal, start at the visible position for an immediate response.
         const continuing = scrollAnimation.running
                          && (scrollAnimation.to - v.contentY) * dy < 0
-        const base = pixels === 0 && continuing ? scrollAnimation.to : v.contentY
+        const base = !continuous && continuing ? scrollAnimation.to : v.contentY
         scrollAnimation.stop()
         v.cancelFlick()
         const top = v.originY
         const bottom = top + Math.max(0, v.contentHeight - v.height)
         const destination = Math.max(top, Math.min(base - dy, bottom))
-        if (pixels !== 0) {
+        if (continuous) {
             v.contentY = destination
         } else {
             scrollPosition = v.contentY
