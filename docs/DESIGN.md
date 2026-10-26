@@ -2305,7 +2305,20 @@ first, rather than a fixed prefix of the directory. Navigation and live changes
 cancel the previous pass; queued results also check cancellation before publish.
 An unchanged viewport does not restart its pass. Live changes revalidate all
 requested source versions on a worker while retaining unchanged displayed URLs.
-Cache hits are published before any missing thumbnail is generated. Each pass
+Local cache hits are published before any missing thumbnail is generated.
+Typed remote navigation clears the old rows and delegates reachability and
+directory validation to the listing worker, without a duplicate GUI-thread
+probe. A failed request remains an explicit location/error with Back available;
+cancelled or superseded probes cannot overwrite the new location's feedback.
+Remote/FUSE name and kind listings settle without the initial 256-row metadata
+or thumbnail-cache scan; their visible rows request details and previews
+independently. Metadata patches stream in bounded batches, and scrolling or
+navigation cancels obsolete metadata work before admitting the newest viewport.
+Remote thumbnail passes check and render small batches in viewport order, so
+the first image does not wait for source-version checks for the entire margin.
+Every cache hit still validates its source version; no stale listing or image
+becomes authority for file operations. Size/date sorts still require metadata
+for the full listing before settling. Each pass
 has at most two render workers; a process-wide admission gate permits at most
 two grid-thumbnail helpers across all models. Cancellation kills/reaps only the
 request's owned helper group before releasing admission. Each model admits only
