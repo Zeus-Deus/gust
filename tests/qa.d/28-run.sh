@@ -90,6 +90,33 @@ expect "x again stops it, and the switch stays" "d['quickLookProgram']" "allow"
 [[ "$(stat -c %a "$d28/plain.sh")" == 644 ]] && ok "back to 644" || bad "x off left mode $(stat -c %a "$d28/plain.sh")"
 key Escape; sleep 0.4
 [[ ! -e "$marker" ]] && ok "the switch ran nothing" || bad "the Properties switch ran the program"
+# The switch acts on the file shown, by path: a reload that moves rows
+# under the open panel must not retarget it (review of #49).
+printf '#!/bin/sh\n' > "$d28/aa-shift.sh"; chmod 644 "$d28/aa-shift.sh"
+typ "plain"; sleep 1.0
+key space; sleep 0.8
+touch "$d28/a0-new.txt"; chmod 644 "$d28/a0-new.txt"; sleep 1.5
+key x; sleep 2.0
+key x; sleep 1.0
+[[ "$(stat -c %a "$d28/plain.sh")" == 644 && "$(stat -c %a "$d28/a0-new.txt")" == 644 \
+   && "$(stat -c %a "$d28/aa-shift.sh")" == 644 ]] \
+  && ok "toggles after a row shift still change only plain.sh" \
+  || bad "a row shift retargeted the switch: $(stat -c '%n %a' "$d28"/*)"
+# Another tab is another folder: Quick Look closes, x changes nothing there.
+ctrl t; sleep 1.0
+goto "$FIXTURE" || bad "could not open $FIXTURE in a second tab"
+ctrl Tab; sleep 1.0
+typ "plain"; sleep 1.0
+key space; sleep 0.8
+expect "Quick Look is open on plain.sh" "d['quickLookProgram']" "allow"
+ctrl Tab; sleep 1.0
+expect "switching tabs closes it" "d['quickLookOpen']" "False"
+before="$(find "$FIXTURE" -maxdepth 1 -type f -printf '%m %p\n' | sort)"
+key x; sleep 0.8
+[[ "$(find "$FIXTURE" -maxdepth 1 -type f -printf '%m %p\n' | sort)" == "$before" \
+   && "$(stat -c %a "$d28/plain.sh")" == 644 ]] \
+  && ok "x after Ctrl+Tab changed no file" || bad "x after Ctrl+Tab changed a mode"
+ctrl w; sleep 0.8
 typ "words"; sleep 1.0
 expect "cursor on words.txt" "d['model']['cursor_name']" "words.txt"
 palette_run "Run program"; sleep 0.8

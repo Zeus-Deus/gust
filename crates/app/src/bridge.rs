@@ -466,6 +466,9 @@ pub mod qobject {
         /// (DESIGN §6.9).
         #[qinvokable]
         fn peek_row(self: &DirModel, row: i32) -> QString;
+        /// peek_row for a file of this folder named by its path.
+        #[qinvokable]
+        fn peek_path(self: &DirModel, path: &QString) -> QString;
         /// Adjacent previewable file in the visible order, without filesystem I/O.
         #[qinvokable]
         fn preview_neighbor(self: &DirModel, row: i32, delta: i32) -> i32;
@@ -510,10 +513,15 @@ pub mod qobject {
         /// program not allowed to run yet) or "" (content; it opens).
         #[qinvokable]
         fn program_state(self: &DirModel, row: i32) -> QString;
-        /// Allow (u+x) or stop (a-x) the row running as a program. Only this
-        /// row, never the selection. Ctrl+Z puts the mode back. "" or why not.
+        /// program_state for a file of this folder named by its path, which
+        /// Quick Look holds: a row index can move under an open preview.
         #[qinvokable]
-        fn set_runnable(self: Pin<&mut DirModel>, row: i32, on: bool) -> QString;
+        fn program_state_of(self: &DirModel, path: &QString) -> QString;
+        /// Allow (u+x) or stop (a-x) one file running as a program, named by
+        /// path, never the selection. Only a regular file directly in this
+        /// folder. Ctrl+Z puts the mode back. "" or why not.
+        #[qinvokable]
+        fn set_runnable(self: Pin<&mut DirModel>, path: &QString, on: bool) -> QString;
         /// Give the row u+x, then run it as run_row does. Only ever called
         /// after the user confirmed a dialog naming the file. "" or why not.
         #[qinvokable]
@@ -5107,7 +5115,25 @@ impl qobject::DirModel {
         let Some(path) = self.path_of_row(row) else {
             return QString::from(r#"{"ok":false}"#);
         };
-        let p = gust_core::peek::peek(&path);
+        self.peek_json(&path)
+    }
+
+    fn peek_path(&self, path: &QString) -> QString {
+        match self.in_this_folder(path) {
+            Some(path) => self.peek_json(&path),
+            None => QString::from(r#"{"ok":false}"#),
+        }
+    }
+
+    /// A path from QML that names an entry directly in this folder, or None.
+    fn in_this_folder(&self, path: &QString) -> Option<PathBuf> {
+        let path = PathBuf::from(path.to_string());
+        let folder = self.key.as_path()?;
+        (path.is_absolute() && path.parent() == Some(folder)).then_some(path)
+    }
+
+    fn peek_json(&self, path: &std::path::Path) -> QString {
+        let p = gust_core::peek::peek(path);
         let mut lines = String::from("[");
         for (i, l) in p.text.iter().enumerate() {
             if i > 0 {
@@ -5117,7 +5143,7 @@ impl qobject::DirModel {
         }
         lines.push(']');
         // Properties: facts about the item, from lstat only.
-        let mut facts: Vec<String> = gust_core::properties::describe(&path)
+        let mut facts: Vec<String> = gust_core::properties::describe(path)
             .into_iter()
             .map(|f| format!("[{},{}]", Self::json_str(f.label), Self::json_str(&f.value)))
             .collect();
@@ -8584,16 +8610,27 @@ impl qobject::DirModel {
     }
 
     fn program_state(&self, row: i32) -> QString {
+        match self.path_of_row(row) {
+            Some(path) => Self::program_state_at(&path),
+            None => QString::default(),
+        }
+    }
+
+    fn program_state_of(&self, path: &QString) -> QString {
+        match self.in_this_folder(path) {
+            Some(path) => Self::program_state_at(&path),
+            None => QString::default(),
+        }
+    }
+
+    fn program_state_at(path: &std::path::Path) -> QString {
         use gust_core::open::ProgramState;
         use std::os::unix::fs::MetadataExt;
-        let Some(path) = self.path_of_row(row) else {
-            return QString::default();
-        };
         let Ok(md) = path.symlink_metadata() else {
             return QString::default();
         };
         QString::from(
-            match gust_core::open::program_state(&path, md.mode(), md.is_file()) {
+            match gust_core::open::program_state(path, md.mode(), md.is_file()) {
                 ProgramState::Runnable => "run",
                 ProgramState::NeedsPermission => "allow",
                 ProgramState::NotAProgram => "",
@@ -8601,17 +8638,25 @@ impl qobject::DirModel {
         )
     }
 
-    fn set_runnable(mut self: Pin<&mut Self>, row: i32, on: bool) -> QString {
-        let Some(path) = self.as_ref().path_of_row(row) else {
-            return QString::from("nothing to change here");
+    fn set_runnable(mut self: Pin<&mut Self>, path: &QString, on: bool) -> QString {
+        // Named by path, checked here: never a folder (a-x would take its
+        // search permission), a link, or a file outside the folder shown.
+        let Some(path) = self.as_ref().in_this_folder(path) else {
+            return QString::from("that file is no longer shown here");
         };
+        if !path.symlink_metadata().is_ok_and(|m| m.is_file()) {
+            return QString::from("only an ordinary file can run");
+        }
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
         let spec = if on { "u+x" } else { "a-x" };
         let spec = gust_ops::attrs::ModeSpec::parse(spec).expect("a fixed, valid mode spec");
         let err = self.as_mut().apply_mode(vec![path], spec);
         if !err.is_empty() {
             return err;
         }
-        let name = self.as_ref().entry_name(row).to_string();
         self.as_mut().set_status(QString::from(&if on {
             format!("{name} can run  ·  Ctrl+Z undoes")
         } else {

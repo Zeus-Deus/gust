@@ -3530,7 +3530,11 @@ Window {
         onAudioChanged: win.qaDump("quicklook-audio")
         onHashChanged: win.qaDump("hash")
         onProgramChanged: win.qaDump("quicklook-program")
-        onRunRequested: (row) => { quickLook.hide(); win.askRun(row) }
+        onRunRequested: (row) => {
+            quickLook.hide()
+            if (row >= 0) win.askRun(row)
+            else win.alertText = qsTr("That file moved; choose it again")
+        }
         onClosed: win.focusList()
     }
 

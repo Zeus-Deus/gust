@@ -24,14 +24,25 @@ Item {
     readonly property bool hashable: root.info !== null && root.info.kind.toLowerCase() !== "folder"
 
     signal closed()
-    /// Run… was chosen for the row; the window asks before anything starts.
+    /// Run… was chosen for the file shown; the window asks before anything
+    /// starts. -1 when the file is no longer at the cursor.
     signal runRequested(int row)
+    function requestRun() {
+        const c = root.model ? root.model.cursor : -1
+        root.runRequested(c >= 0 && root.model.entry_path(c) === root.path ? c : -1)
+    }
     /// The row shown, so h can hash it.
     property int row: -1
+    /// The file shown, by path. Permission changes go by this, never by
+    /// row: a reload after one can move rows under the open panel.
+    property string path: ""
     property real imageZoom: 1
 
     /// The model, so the panel can ask for and receive its visual preview.
     property var model: null
+    // The panel belongs to the folder it was opened in. Another tab means
+    // another model whose rows are different files: close, never act on them.
+    onModelChanged: if (root.open) root.hide()
     /// Image path or archive listing, rendered on a worker (sandboxed).
     readonly property var visual: {
         const s = root.model && root.open ? root.model.peek_visual : ""
@@ -47,16 +58,16 @@ Item {
     property bool programSeen: false
     property string programError: ""
     function refreshProgram() {
-        root.program = root.open && root.model && root.row >= 0 ? root.model.program_state(root.row) : ""
+        root.program = root.open && root.model && root.path !== "" ? root.model.program_state_of(root.path) : ""
         if (root.program !== "") root.programSeen = true
     }
     /// The Properties switch: allow (u+x) or stop (a-x) this one file.
     function setRunnable(on) {
-        if (!root.open || !root.model || root.row < 0) return
-        root.programError = root.model.set_runnable(root.row, on)
+        if (!root.open || !root.model || root.path === "") return
+        root.programError = root.model.set_runnable(root.path, on)
         // The mode line and the Permissions fact change with it.
         try {
-            const fresh = JSON.parse(root.model.peek_row(root.row))
+            const fresh = JSON.parse(root.model.peek_path(root.path))
             if (fresh.ok) root.info = fresh
         } catch (e) {}
         root.refreshProgram()
@@ -75,6 +86,7 @@ Item {
         }
         root.open = root.info !== null && root.info.ok
         root.row = row === undefined ? -1 : row
+        root.path = root.open && root.model && root.row >= 0 ? root.model.entry_path(root.row) : ""
         root.audio = null
         root.imageZoom = 1
         root.programSeen = false
@@ -180,6 +192,7 @@ Item {
         root.audio = null
         root.open = false
         root.info = null
+        root.path = ""
         root.program = ""
         root.programSeen = false
         root.closed()
@@ -381,7 +394,7 @@ Item {
                             anchors.fill: parent
                             hoverEnabled: true
                             cursorShape: Qt.PointingHandCursor
-                            onClicked: root.runRequested(root.row)
+                            onClicked: root.requestRun()
                         }
                         Accessible.role: Accessible.Button
                         Accessible.name: runLabel.text
