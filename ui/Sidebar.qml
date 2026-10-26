@@ -30,7 +30,7 @@ Rectangle {
         for (let i = 0; i < places.count; i++) consider(places.get(i).path, "place:" + i)
         for (let i = 0; i < bookmarks.length; i++) consider(bookmarks[i].path, "bookmark:" + i)
         for (let i = 0; i < devices.length; i++) {
-            if (devices[i].mounted) consider(devices[i].path, "device:" + i)
+            if (devices[i].mounted) consider(devices[i].mountPoint, "device:" + i)
         }
         for (let i = 0; i < remotePlaces.length; i++) consider(remotePlaces[i].path, "remote:" + i)
         return key
