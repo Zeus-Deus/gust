@@ -6,6 +6,54 @@ import com.gust.app
 Rectangle {
     id: root
     property var model
+    property string activePanel: ""
+    readonly property string currentKey: { return root.currentPlace() }
+
+    // Follow the displayed model, including history and tab/pane changes.
+    // Prefer the most specific containing folder and only mark one row when
+    // a standard place is also bookmarked. Never inspect the filesystem here.
+    function currentPlace() {
+        if (activePanel !== "") return activePanel
+        const location = root.model ? root.model.location : ""
+        if (!location) return ""
+        let key = ""
+        let longest = -1
+        function consider(path, candidate) {
+            if (!path) return
+            while (path.length > 1 && path.endsWith("/")) path = path.slice(0, -1)
+            const prefix = path === "/" ? path : path + "/"
+            if (path.length > longest && (location === path || location.startsWith(prefix))) {
+                key = candidate
+                longest = path.length
+            }
+        }
+        for (let i = 0; i < places.count; i++) consider(places.get(i).path, "place:" + i)
+        for (let i = 0; i < bookmarks.length; i++) consider(bookmarks[i].path, "bookmark:" + i)
+        for (let i = 0; i < devices.length; i++) {
+            if (devices[i].mounted) consider(devices[i].path, "device:" + i)
+        }
+        for (let i = 0; i < remotePlaces.length; i++) consider(remotePlaces[i].path, "remote:" + i)
+        return key
+    }
+
+    component PlaceRow: Rectangle {
+        property string placeKey
+        property bool hovered: false
+        readonly property bool current: root.currentKey === placeKey
+        objectName: "sidebar:" + placeKey
+        color: current ? Tokens.withAlpha(Tokens.accent, 0.18)
+                       : hovered ? Tokens.withAlpha(Tokens.foreground, 0.06) : "transparent"
+        Accessible.selected: current
+
+        Rectangle {
+            anchors.left: parent.left
+            width: Tokens.borderWidth * 2
+            height: parent.height
+            color: Tokens.accent
+            visible: parent.current
+        }
+    }
+
     signal placeChosen(string path)
     /// A drag is over a place: what releasing would do ("" = left).
     signal dragHover(string text)
@@ -137,10 +185,11 @@ Rectangle {
         Repeater {
             id: placeRepeater
             model: places
-            delegate: Rectangle {
+            delegate: PlaceRow {
+                placeKey: "place:" + index
                 width: column.width
                 height: Tokens.rowHeight
-                color: hover.hovered ? Tokens.withAlpha(Tokens.foreground, 0.06) : "transparent"
+                hovered: hover.hovered
 
                 HoverHandler { id: hover }
 
@@ -175,10 +224,11 @@ Rectangle {
         }
 
         // Recent files, from the desktop's own list.
-        Rectangle {
+        PlaceRow {
+            placeKey: "recent"
             width: column.width
             height: Tokens.rowHeight
-            color: recentHover.hovered ? Tokens.withAlpha(Tokens.foreground, 0.06) : "transparent"
+            hovered: recentHover.hovered
             HoverHandler { id: recentHover }
             Text {
                 textFormat: Text.PlainText
@@ -199,10 +249,11 @@ Rectangle {
         }
 
         // Trash: what was deleted, and a way back.
-        Rectangle {
+        PlaceRow {
+            placeKey: "trash"
             width: column.width
             height: Tokens.rowHeight
-            color: trashHover.hovered ? Tokens.withAlpha(Tokens.foreground, 0.06) : "transparent"
+            hovered: trashHover.hovered
             HoverHandler { id: trashHover }
             Text {
                 textFormat: Text.PlainText
@@ -241,11 +292,13 @@ Rectangle {
         Repeater {
             id: bookmarkRepeater
             model: root.bookmarks
-            delegate: Rectangle {
+            delegate: PlaceRow {
+                required property int index
                 required property var modelData
+                placeKey: "bookmark:" + index
                 width: column.width
                 height: Tokens.rowHeight
-                color: bmMouse.containsMouse ? Tokens.withAlpha(Tokens.foreground, 0.06) : "transparent"
+                hovered: bmMouse.containsMouse
                 Text {
                     textFormat: Text.PlainText
                     anchors.verticalCenter: parent.verticalCenter
@@ -315,13 +368,13 @@ Rectangle {
         Repeater {
             id: deviceRepeater
             model: root.devices
-            delegate: Rectangle {
+            delegate: PlaceRow {
+                required property int index
                 required property var modelData
+                placeKey: "device:" + index
                 width: column.width
                 height: Tokens.rowHeight
-                color: deviceMouse.containsMouse
-                       ? Tokens.withAlpha(Tokens.foreground, 0.06)
-                       : "transparent"
+                hovered: deviceMouse.containsMouse
 
                 Column {
                     anchors.verticalCenter: parent.verticalCenter
@@ -455,11 +508,13 @@ Rectangle {
         Repeater {
             id: remoteRepeater
             model: root.remotePlaces
-            delegate: Rectangle {
+            delegate: PlaceRow {
+                required property int index
                 required property var modelData
+                placeKey: "remote:" + index
                 width: column.width
                 height: Tokens.rowHeight
-                color: remoteMouse.containsMouse ? Tokens.withAlpha(Tokens.foreground, 0.06) : "transparent"
+                hovered: remoteMouse.containsMouse
                 Text {
                     anchors.verticalCenter: parent.verticalCenter
                     leftPadding: Tokens.rowPaddingX
