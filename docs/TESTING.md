@@ -186,6 +186,24 @@ some global process termination. Do not use them on a shared/human desktop or
 as the native release gate. Their old evidence does not qualify a new artifact.
 No native/theme or benchmark acceptance is run automatically on public hosted CI.
 
+### Focused remote listing state journey
+
+```sh
+python3 tests/qa-remote-state.py --binary target/debug/gust --output /tmp/gust-remote-state-fresh
+```
+
+This native Rust/CXX/QML journey requires a C compiler, FUSE 3 development
+headers, unprivileged `/dev/fuse`, Pillow and the private labwc tools described
+above. Its private FUSE fixture identifies as SSHFS to exercise remote-path
+admission, but serves only two synthetic text files and opens no network socket.
+It injects a failed listing, retries the identical path after recovery, and
+holds tag metadata until the initial Grid delegates exist. Pixel checks verify
+that the existing tagged delegate gains its dot without navigation, scrolling
+or a sort change. HOME/XDG, D-Bus, compositor, mount and screenshots are private;
+cleanup stops only owned PIDs and the owned mount. Prerequisites are exit 77 and
+a busy QA lease is exit 75. This qualifies focused remote UI state, not a live
+SSH server, provider account or full release.
+
 ### Focused personal-device sharing journey
 
 ```sh

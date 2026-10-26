@@ -47,9 +47,10 @@ pub fn run(
     cancel: &CancelToken,
     publish: impl FnMut(Vec<(OsString, String)>),
 ) {
-    run_with(
+    run_batches(
         want,
         cancel,
+        gust_core::stall::needs_probe(dir),
         |(name, _)| {
             gust_thumbs::render::cached_thumbnail(&dir.join(name), gust_thumbs::ThumbSize::Normal)
                 .map(|t| t.url())
@@ -66,6 +67,26 @@ pub fn run(
         },
         publish,
     );
+}
+
+fn run_batches(
+    want: Vec<(OsString, &'static str)>,
+    cancel: &CancelToken,
+    remote: bool,
+    cached: impl Fn(&(OsString, &'static str)) -> Option<String>,
+    render: impl Fn(&(OsString, &'static str)) -> Option<String> + Sync,
+    mut publish: impl FnMut(Vec<(OsString, String)>),
+) {
+    // A remote cache lookup still stats the source over the network. Do not
+    // make the first render wait for every tile's version check. Keep local
+    // cache-first delivery, and the same two-helper bound, within each batch.
+    let batch_size = if remote { 4 } else { want.len().max(1) };
+    for batch in want.chunks(batch_size) {
+        if cancel.is_cancelled() {
+            break;
+        }
+        run_with(batch.to_vec(), cancel, &cached, &render, &mut publish);
+    }
 }
 
 fn run_with(
@@ -218,9 +239,10 @@ mod tests {
             .map(|i| (OsString::from(i.to_string()), "image/jpeg"))
             .collect();
         let mut delivered = Vec::new();
-        run_with(
+        run_batches(
             want,
             &CancelToken::new(),
+            false,
             |(name, _)| (name == "11").then(|| "cached".into()),
             |_| {
                 assert!(hit_published.load(Ordering::SeqCst));
@@ -252,6 +274,60 @@ mod tests {
             |_| panic!("render after cancellation"),
             |_| panic!("publish after cancellation"),
         );
+    }
+
+    #[test]
+    fn remote_first_image_does_not_wait_for_the_whole_viewports_source_checks() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let checked = AtomicUsize::new(0);
+        let first_render = AtomicUsize::new(0);
+        let want = (0..100)
+            .map(|i| (OsString::from(i.to_string()), "image/jpeg"))
+            .collect();
+        let mut rendered = 0;
+        run_batches(
+            want,
+            &CancelToken::new(),
+            true,
+            |_| {
+                checked.fetch_add(1, Ordering::SeqCst);
+                None
+            },
+            |_| {
+                let _ = first_render.compare_exchange(
+                    0,
+                    checked.load(Ordering::SeqCst),
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                );
+                Some("rendered".into())
+            },
+            |batch| rendered += batch.iter().filter(|(_, url)| !url.is_empty()).count(),
+        );
+        assert!(first_render.load(Ordering::SeqCst) < checked.load(Ordering::SeqCst));
+        assert_eq!(rendered, 100);
+    }
+
+    #[test]
+    fn remote_navigation_cancellation_stops_later_batches() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let checked = AtomicUsize::new(0);
+        let cancel = CancelToken::new();
+        let want = (0..100)
+            .map(|i| (OsString::from(i.to_string()), "image/jpeg"))
+            .collect();
+        run_batches(
+            want,
+            &cancel,
+            true,
+            |_| {
+                checked.fetch_add(1, Ordering::SeqCst);
+                Some("cached".into())
+            },
+            |_| panic!("cached rows should not render"),
+            |_| cancel.cancel(),
+        );
+        assert!((1..100).contains(&checked.load(Ordering::SeqCst)));
     }
 
     #[test]

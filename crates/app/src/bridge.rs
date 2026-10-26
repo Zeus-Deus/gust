@@ -1129,6 +1129,7 @@ pub struct DirModelRust {
     last_job: Option<gust_ops::journal::Job>,
     /// A worker is reading details for rows that scrolled into view.
     meta_busy: bool,
+    meta_cancel: CancelToken,
     meta_rev: i32,
     /// The newest request that arrived while it was busy (first, count).
     meta_again: Option<(i32, i32)>,
@@ -1398,6 +1399,7 @@ impl DirModelRust {
             selection: gust_core::selection::Selection::new(),
             last_job: None,
             meta_busy: false,
+            meta_cancel: CancelToken::new(),
             meta_rev: 0,
             meta_again: None,
             view_rows: (0, 0),
@@ -1718,6 +1720,8 @@ impl qobject::DirModel {
 
         // Cancel whatever the previous navigation was still doing.
         self.as_mut().rust_mut().load_cancel.cancel();
+        self.as_mut().rust_mut().meta_cancel.cancel();
+        self.as_mut().rust_mut().meta_again = None;
         let cancel = CancelToken::new();
         self.as_mut().rust_mut().load_cancel = cancel.clone();
         self.as_mut().rust_mut().thumb_cancel.cancel();
@@ -1765,6 +1769,14 @@ impl qobject::DirModel {
             })
             .unwrap_or_else(|| display.clone());
         self.as_mut().set_location_display(QString::from(&shown));
+        // Retrying a failed listing retires its notice, while unrelated
+        // capability notices remain visible.
+        let previous_notice = self.as_ref().notice.to_string();
+        if !previous_notice.is_empty()
+            && self.as_ref().empty_reason.to_string() == empty_reason_for(&previous_notice)
+        {
+            self.as_mut().set_notice(QString::default());
+        }
         self.as_mut().set_status(QString::from("reading…"));
         self.as_mut().set_settled(false);
 
@@ -1792,10 +1804,16 @@ impl qobject::DirModel {
                     if !reach.is_responsive() {
                         let place = gust_core::stall::place_name_for(dir);
                         let msg = reach.message(&place);
+                        let failed_cancel = cancel.clone();
                         let _ = thread.queue(move |mut model| {
-                            // The window stays on the folder it could reach.
-                            // Moving the user somewhere else because a remote
-                            // hung would lose their place for them.
+                            if failed_cancel.is_cancelled() || model.as_ref().generation != gen {
+                                return;
+                            }
+                            // Failed is distinct from empty, and lets another
+                            // navigation to this same location retry it.
+                            model.as_mut().publish_empty_reason(
+                                &gust_core::entry::Completeness::Failed { error: msg.clone() },
+                            );
                             model.as_mut().set_settled(true);
                             model.as_mut().set_status(QString::from("Not responding"));
                             model.as_mut().set_notice(QString::from(&msg));
@@ -1849,11 +1867,18 @@ impl qobject::DirModel {
                 // stats instead of 100 000.
                 let slow = key.as_path().is_some_and(gust_core::stall::needs_probe);
                 if slow {
-                    // One stat per row is a network round trip: names first.
-                    let names = snap.clone();
-                    let _ = thread.queue(move |model| {
-                        Self::apply_snapshot(model, names, false);
+                    // The order is already final. Details and previews for
+                    // the viewport must not wait for 256 network stat calls.
+                    let _ = thread.queue(move |mut model| {
+                        Self::apply_snapshot(model.as_mut(), snap, true);
+                        if model.as_ref().generation == gen {
+                            let (first, count) = model.as_ref().view_rows;
+                            model
+                                .as_mut()
+                                .want_rows(first, if count > 0 { count } else { 60 });
+                        }
                     });
+                    return;
                 }
                 let shown = visible_indices(&snap.entries, &filter_now, hidden_now);
                 let focus_row = focus_now
@@ -1890,6 +1915,9 @@ impl qobject::DirModel {
         let Some(dir) = snap.key.as_path() else {
             return Vec::new();
         };
+        if gust_core::stall::needs_probe(dir) {
+            return Vec::new();
+        }
         let shown = visible_indices(&snap.entries, filter, hidden);
         let window = first_window(&shown, None, FIRST_WINDOW);
         let names = window
@@ -5840,12 +5868,18 @@ impl qobject::DirModel {
     }
 
     fn want_rows(mut self: Pin<&mut Self>, first: i32, count: i32) {
-        self.as_mut().rust_mut().view_rows = (first, count);
-        // Rows that scrolled into view get their folder sizes now.
-        if self.as_ref().settled {
-            self.as_mut().start_dir_sizes();
-            self.as_mut().start_thumbnails();
+        if self.as_ref().view_rows != (first, count) {
+            self.as_mut().rust_mut().meta_cancel.cancel();
+            self.as_mut().rust_mut().meta_again = None;
         }
+        self.as_mut().rust_mut().view_rows = (first, count);
+        // Until publication, all/visible may still describe the previous
+        // folder. Never read those names against the new location.
+        if !self.as_ref().settled {
+            return;
+        }
+        self.as_mut().start_dir_sizes();
+        self.as_mut().start_thumbnails();
         let n = self.as_ref().visible.len();
         if n == 0 || count <= 0 {
             return;
@@ -5887,22 +5921,36 @@ impl qobject::DirModel {
             return;
         };
         let gen = self.as_ref().generation;
-        let cancel = self.as_ref().load_cancel.clone();
+        let cancel = CancelToken::new();
+        self.as_mut().rust_mut().meta_cancel = cancel.clone();
         self.as_mut().rust_mut().meta_busy = true;
-        std::thread::Builder::new()
+        let spawned = std::thread::Builder::new()
             .name("gust-meta".into())
             .spawn(move || {
                 let mut got = Vec::with_capacity(missing.len());
+                let mut last_patch = std::time::Instant::now();
                 for (i, name, kind) in missing {
                     if cancel.is_cancelled() {
                         break;
                     }
                     let meta = stat_entry(&dir, &name, kind);
                     got.push((i, name, meta));
+                    if got.len() >= 16
+                        || last_patch.elapsed() >= std::time::Duration::from_millis(100)
+                    {
+                        let patch = std::mem::take(&mut got);
+                        let _ = thread.queue(move |model| {
+                            Self::apply_row_meta(model, gen, lo, hi, patch, false)
+                        });
+                        last_patch = std::time::Instant::now();
+                    }
                 }
-                let _ = thread.queue(move |model| Self::apply_row_meta(model, gen, lo, hi, got));
-            })
-            .ok();
+                let _ =
+                    thread.queue(move |model| Self::apply_row_meta(model, gen, lo, hi, got, true));
+            });
+        if spawned.is_err() {
+            self.as_mut().rust_mut().meta_busy = false;
+        }
     }
 
     /// Install details read for rows that scrolled into view. GUI thread.
@@ -5916,11 +5964,18 @@ impl qobject::DirModel {
             std::ffi::OsString,
             Option<gust_core::entry::Metadata>,
         )>,
+        finished: bool,
     ) {
-        self.as_mut().rust_mut().meta_busy = false;
+        if finished {
+            self.as_mut().rust_mut().meta_busy = false;
+        }
         if gen != self.as_ref().generation {
             // The folder changed; that request described rows that are gone.
-            self.as_mut().rust_mut().meta_again = None;
+            if finished {
+                if let Some((first, count)) = self.as_mut().rust_mut().meta_again.take() {
+                    self.as_mut().want_rows(first, count);
+                }
+            }
             return;
         }
         {
@@ -5948,6 +6003,7 @@ impl qobject::DirModel {
             // come from the details just read.
             roles.append(ROLE_ICON_KEY);
             roles.append(ROLE_EMBLEMS);
+            roles.append(ROLE_TAGS);
             // Safety: GUI thread, inside a queued model callback.
             unsafe {
                 let top = self.as_ref().index(lo as i32, 0, &root);
@@ -5957,8 +6013,10 @@ impl qobject::DirModel {
         }
         let rev = self.as_ref().meta_rev.wrapping_add(1);
         self.as_mut().set_meta_rev(rev);
-        if let Some((f, c)) = self.as_mut().rust_mut().meta_again.take() {
-            self.as_mut().want_rows(f, c);
+        if finished {
+            if let Some((f, c)) = self.as_mut().rust_mut().meta_again.take() {
+                self.as_mut().want_rows(f, c);
+            }
         }
     }
 
@@ -6048,21 +6106,10 @@ impl qobject::DirModel {
         {
             return;
         }
-        // `is_dir()` is a stat, and a stat on a stalled mount blocks the UI
-        // thread with no way back. A killable child answers first.
-        {
-            use gust_core::stall::{
-                place_name_for, probe_if_risky, Reachability, DEFAULT_PROBE_MS,
-            };
-            let reach = probe_if_risky(&p, std::time::Duration::from_millis(DEFAULT_PROBE_MS));
-            if let Reachability::Stalled { .. } = reach {
-                let msg = reach.message(&place_name_for(&p));
-                self.as_mut().set_notice(QString::from(&msg));
-                self.as_mut().set_status(QString::from("Not responding"));
-                return;
-            }
-        }
-        if !p.is_dir() {
+        // The listing worker owns the remote probe and directory validation.
+        // Waiting for its child here still froze input for the whole timeout.
+        let remote = gust_core::stall::needs_probe(&p);
+        if !remote && !p.is_dir() {
             self.as_mut()
                 .set_status(QString::from(&format!("not a directory: {}", p.display())));
             return;
@@ -6083,6 +6130,18 @@ impl qobject::DirModel {
             r.type_ahead.clear();
             // A stale selection over a different directory is dangerous.
             r.selection.clear();
+        }
+        if remote {
+            // While the probe runs, old names must not be actionable against
+            // the newly selected remote path.
+            unsafe { self.as_mut().begin_reset_model() };
+            {
+                let mut r = self.as_mut().rust_mut();
+                r.all.clear();
+                r.visible.clear();
+            }
+            unsafe { self.as_mut().end_reset_model() };
+            self.as_mut().set_count(0);
         }
         self.load_current();
     }
