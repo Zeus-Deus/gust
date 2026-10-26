@@ -1769,6 +1769,14 @@ impl qobject::DirModel {
             })
             .unwrap_or_else(|| display.clone());
         self.as_mut().set_location_display(QString::from(&shown));
+        // Retrying a failed listing retires its notice, while unrelated
+        // capability notices remain visible.
+        let previous_notice = self.as_ref().notice.to_string();
+        if !previous_notice.is_empty()
+            && self.as_ref().empty_reason.to_string() == empty_reason_for(&previous_notice)
+        {
+            self.as_mut().set_notice(QString::default());
+        }
         self.as_mut().set_status(QString::from("reading…"));
         self.as_mut().set_settled(false);
 
@@ -1801,9 +1809,11 @@ impl qobject::DirModel {
                             if failed_cancel.is_cancelled() || model.as_ref().generation != gen {
                                 return;
                             }
-                            // The window stays on the folder it could reach.
-                            // Moving the user somewhere else because a remote
-                            // hung would lose their place for them.
+                            // Failed is distinct from empty, and lets another
+                            // navigation to this same location retry it.
+                            model.as_mut().publish_empty_reason(
+                                &gust_core::entry::Completeness::Failed { error: msg.clone() },
+                            );
                             model.as_mut().set_settled(true);
                             model.as_mut().set_status(QString::from("Not responding"));
                             model.as_mut().set_notice(QString::from(&msg));
@@ -5993,6 +6003,7 @@ impl qobject::DirModel {
             // come from the details just read.
             roles.append(ROLE_ICON_KEY);
             roles.append(ROLE_EMBLEMS);
+            roles.append(ROLE_TAGS);
             // Safety: GUI thread, inside a queued model callback.
             unsafe {
                 let top = self.as_ref().index(lo as i32, 0, &root);
