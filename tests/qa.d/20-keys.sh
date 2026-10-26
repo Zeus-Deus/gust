@@ -76,6 +76,13 @@ expect "F3 splits" "d['paneCount']" "2"
 key F3; sleep 0.8
 expect "F3 again unsplits" "d['paneCount']" "1"
 expect "and leaves no stray tab" "d['tabCount']" "1"
+key F3; sleep 0.8
+typ "Pro"; key Return
+wait_for "d['paneLocations'][1]" "$FIXTURE/Projects" 10 >/dev/null
+key F3; sleep 0.8
+expect "a split tab the user moved stays as a tab" "d['tabCount']" "2"
+ctrl w; key BackSpace
+wait_for "d['model']['location']" "$FIXTURE" 10 >/dev/null
 
 say "20g · middle-click a folder opens it in a new tab (real mouse)"
 if [[ "$MOUSE_OK" == 1 ]]; then

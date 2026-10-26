@@ -46,6 +46,7 @@ Window {
                     hints.message = qsTr("Paste cancelled")
                 }
                 sessionSaveTimer.restart()
+                win.noteSplitTabMoved(tabModel)
             }
             // Mounts and connections finish on a worker; every tab reports
             // here, so a result still lands if the user switched tabs.
@@ -1075,20 +1076,38 @@ Window {
         win.activePane = 1
         win.activeTab = win.paneTab[1]
         win.activateTab(win.activeTab)
+        win.armSplitTab()
         win.refreshPaneTabCount()
         win.qaDump("pane-split")
     }
 
     /// The tab the split itself opened (single-tab split, folder or place
     /// dropped on the right). The user never asked for it as a tab, so
-    /// closing the pane takes it away again (DESIGN §6.7 rule 2).
+    /// closing the pane takes it away again (DESIGN §6.7 rule 2), but only
+    /// while it is untouched: once it goes somewhere else or starts work it
+    /// is the user's tab for good.
     property var splitMadeModel: null
+    onSplitMadeModelChanged: splitMadeAt = ""
+    /// Where that tab opened; going anywhere else makes the tab the user's.
+    property string splitMadeAt: ""
 
-    /// Is tab `i` that tab, with nothing running in it?
+    /// Called once the tab has been opened at its folder. Its model starts
+    /// elsewhere (the startup folder), so earlier moves are not the user's.
+    function armSplitTab() {
+        win.splitMadeAt = win.splitMadeModel ? win.splitMadeModel.location : ""
+    }
+
+    function noteSplitTabMoved(m) {
+        if (m === win.splitMadeModel && win.splitMadeAt !== "" && m.location !== win.splitMadeAt)
+            win.splitMadeModel = null
+    }
+
+    /// Is tab `i` that tab, untouched and with nothing running or undoable?
     function isSplitScratch(i) {
         const m = win.tabModelAt(i)
         return !!m && m === win.splitMadeModel
             && !m.job_running() && !m.archive_running() && !m.sharing_busy
+            && m.undo_label() === ""
             && closeTabAfterCancel.models.indexOf(m) < 0
     }
 
@@ -1119,6 +1138,7 @@ Window {
         win.activePane = 1
         win.activeTab = at
         win.activateTab(at)
+        win.armSplitTab()
         win.refreshPaneTabCount()
         win.focusList()
         win.qaDump("pane-split")
@@ -3515,6 +3535,9 @@ Window {
             for (let i = 0; i < tabList.count; i++) {
                 const o = tabs.objectAt(i)
                 if (o && o !== dirModel && o.job_running()) o.poll_job()
+                // A transfer makes the split's own tab the user's, even
+                // after it finishes and is undone.
+                if (o && o === win.splitMadeModel && o.job_running()) win.splitMadeModel = null
             }
             const raw = dirModel.poll_job()
             if (raw === "") {

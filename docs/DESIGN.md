@@ -759,9 +759,10 @@ introduce a second kind of state.
    — a pane is a layout, and closing a layout must not lose a location, still
    less a running job. One exception: when splitting a single-tab window
    created a tab only to fill the new pane, and the split closes with that
-   tab untouched and idle (the same model, no job, archive or sharing
-   work), that tab closes with it. Otherwise F3 on, F3 off would leave a
-   tab the user never asked for.
+   tab untouched, that tab closes with it. Untouched means it never left
+   the folder it opened at, never ran a transfer, and has nothing to undo,
+   archive or share. Otherwise F3 on, F3 off would leave a tab the user
+   never asked for.
 3. **The single-pane window is unchanged.** With one pane there is no
    splitter, no pane border, and no hint that panes exist. Chrome that earns
    nothing is not shown.
