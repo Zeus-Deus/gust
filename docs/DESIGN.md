@@ -1864,14 +1864,31 @@ Copy stays to a title and one line ("Only run programs you trust.").
   that already looks like a program by name (`.AppImage`, `.sh`, `.run`…).
   Browsers save downloads without the x bit, so this is the usual state of
   a new AppImage. "Allow <name> to run?" → "Allow and run", which sets
-  `u+x` on that path (undoable, Ctrl+Z) and then runs it, resolving the path
-  before the chmod so a reload cannot retarget the row. This runs on the same
+  `u+x` on that path (undoable, Ctrl+Z) and then runs it. This runs on the same
   claimed permissions worker as the editor. The worker checks Run after the
   change; the GUI records the undo before launching and reporting token 0.
   A failed permission change never launches the program.
 - `NotAProgram`: content keeps opening in its application. An extensionless
   file without the bit is indistinguishable from data and is never offered
   the permission.
+
+The Run prompt captures its **originating model** and a single-use model token
+at opening, never a row to resolve on acceptance. `run_prepare(row)` captures
+the byte-exact path, escaped name and listing identity (dev, inode, size and
+mtime) from cached metadata, and returns `{token, name, state}` or `{error}`.
+`run_confirm(token, allow)` consumes that target on the original model. A
+permission completion may reload/reorder the listing while the prompt is open;
+this cannot redirect either chmod or launch. Missing metadata requires a fresh
+listing, not a guessed target. Cancel discards the token.
+
+Both Run variants use the claimed worker, which checks the captured identity
+and regular-file kind before changing permissions or preparing launch argv,
+and again after a permission change. Missing files and changed identity
+stamps are refused; a concurrent chmod of the same file is allowed (mode/ctime are not
+identity). These are snapshot checks, not an atomic executable-descriptor
+launch guarantee. Paths and terminal arguments retain OS bytes, including the
+working directory; display labels never become operation paths. No filesystem
+check for prompt preparation or acceptance runs on the UI thread.
 
 ### The list comes from the desktop database, not from a command's output
 

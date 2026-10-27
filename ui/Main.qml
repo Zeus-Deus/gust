@@ -1615,20 +1615,21 @@ Window {
     /// the focus, so Enter cancels. A program that arrived without its run
     /// permission (a downloaded AppImage) is offered that permission here,
     /// in the same deliberate step, rather than sent to Permissions….
-    property int pendingRunRow: -1
+    property var pendingRunModel: null
+    property int pendingRunToken: 0
     function askRun(row) {
-        const state = dirModel.program_state(row)
-        if (state === "") {
-            const why = dirModel.run_check(row)
-            win.alertText = why !== "" ? why : qsTr("this file opens in an app, not as a program")
+        const model = dirModel
+        const target = JSON.parse(model.run_prepare(row))
+        if (target.error) {
+            win.alertText = target.error
             win.qaDump("run-refused")
             return
         }
-        const name = dirModel.entry_name(row)
-        const allow = state === "allow"
-        win.pendingRunRow = row
+        const allow = target.state === "allow"
+        win.pendingRunModel = model
+        win.pendingRunToken = target.token
         confirm.purpose = allow ? "allow-run" : "run"
-        confirm.open(allow ? qsTr("Allow %1 to run?").arg(name) : qsTr("Run %1?").arg(name),
+        confirm.open(allow ? qsTr("Allow %1 to run?").arg(target.name) : qsTr("Run %1?").arg(target.name),
                      qsTr("Only run programs you trust."),
                      allow ? qsTr("Allow and run") : qsTr("Run"), true)
         win.qaDump("run-confirm-open")
@@ -3669,15 +3670,16 @@ Window {
         onClosed: { if (connectPanel.open) connectPanel.refocus(); else win.focusList() }
         onAccepted: {
             if (confirm.purpose === "run" || confirm.purpose === "allow-run") {
-                const r = win.pendingRunRow
-                win.pendingRunRow = -1
-                if (r < 0) return
-                const err = confirm.purpose === "allow-run" ? dirModel.allow_and_run(r)
-                                                            : dirModel.run_row(r)
+                const model = win.pendingRunModel
+                const token = win.pendingRunToken
+                win.pendingRunModel = null
+                win.pendingRunToken = 0
+                if (!model || token <= 0) return
+                const err = model.run_confirm(token, confirm.purpose === "allow-run")
                 // Said as a message: the reload after a permission change
                 // puts "N items" back in the status before it can be read.
                 if (err !== "") win.alertText = err
-                else hints.message = dirModel.status
+                else hints.message = model.status
                 win.qaDump("run")
                 return
             }
@@ -3758,6 +3760,13 @@ Window {
             win.qaDump("trashed")
         }
         onRejected: {
+            if (confirm.purpose === "run" || confirm.purpose === "allow-run") {
+                if (win.pendingRunModel) win.pendingRunModel.run_discard(win.pendingRunToken)
+                win.pendingRunModel = null
+                win.pendingRunToken = 0
+                win.qaDump("run-cancelled")
+                return
+            }
             // Cancel means CANCEL. This handler used to carry a copy of the
             // accept branches, so cancelling "disconnect anyway?" force-
             // disconnected and cancelling "close this tab?" closed it —

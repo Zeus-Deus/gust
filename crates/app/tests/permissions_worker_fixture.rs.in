@@ -1,9 +1,10 @@
-//! Exact `permissions_apply`, `start_mode_change`, `permissions_running` and the place-work claim
+//! Exact permissions worker, finish/reload, Run prompt methods and place-work claim
 //! (inserted by permissions_worker_regressions.py) against a fake model.
 //! The Qt queue is a channel the test drains on its own thread, standing in
 //! for the GUI thread; `set_modes` is held until the test lets it finish.
 #![allow(dead_code)]
 use std::path::PathBuf;
+use gust_core::entry::{Entry, EntryKind};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Mutex};
@@ -29,6 +30,7 @@ impl From<&String> for QString {
 
 static HOLD: Mutex<Option<mpsc::Receiver<()>>> = Mutex::new(None);
 static PANIC: AtomicBool = AtomicBool::new(false);
+static REAL_IO: AtomicBool = AtomicBool::new(false);
 static FAIL: AtomicBool = AtomicBool::new(false);
 
 mod place_work {
@@ -38,38 +40,12 @@ mod place_work {
 @PLACE_WORK@
 }
 
-mod gust_core {
-    pub mod open {
-        #[derive(PartialEq)]
-        pub enum ProgramState { Runnable, NotAProgram }
-        pub fn program_state(_: &std::path::Path, _: u32, _: bool) -> ProgramState {
-            ProgramState::Runnable
-        }
-        pub fn run_argv(_: &std::path::Path, _: u32, _: bool) -> Result<Vec<String>, String> {
-            Ok(vec!["fixture-terminal".into()])
-        }
-    }
-}
-
 mod gust_ops {
     pub mod attrs {
         use std::path::PathBuf;
-        pub struct ModeSpec;
-        impl ModeSpec {
-            pub fn change(add: u32, remove: u32) -> Result<ModeSpec, String> {
-                if add & remove != 0 || (add | remove) & !0o777 != 0 {
-                    return Err("Those permissions cannot be changed together".into());
-                }
-                Ok(ModeSpec)
-            }
-        }
-        pub struct ModeOutcome {
-            pub changed: Vec<PathBuf>,
-            pub failed: Vec<String>,
-            pub unchanged: usize,
-        }
+        pub use actual_ops::attrs::{ModeSpec, ModeOutcome, ModeChanged, Ident};
         /// A held write: blocks until the test sends on its gate.
-        pub fn set_modes(paths: &[PathBuf], _: ModeSpec) -> ModeOutcome {
+        pub fn set_modes(paths: &[PathBuf], spec: ModeSpec) -> ModeOutcome {
             let gate = crate::HOLD.lock().unwrap().take();
             if let Some(gate) = gate {
                 let _ = gate.recv();
@@ -80,7 +56,13 @@ mod gust_ops {
             if crate::FAIL.load(std::sync::atomic::Ordering::SeqCst) {
                 return ModeOutcome { changed: Vec::new(), failed: vec!["fixture refusal".into()], unchanged: 0 };
             }
-            ModeOutcome { changed: paths.to_vec(), failed: Vec::new(), unchanged: 0 }
+            if crate::REAL_IO.load(std::sync::atomic::Ordering::SeqCst) {
+                return actual_ops::attrs::set_modes(paths, spec);
+            }
+            ModeOutcome { changed: paths.iter().map(|path| ModeChanged {
+                path: path.clone(), old: 0o644, new: 0o744,
+                ident: Ident { dev: 0, ino: 0, mtime: 0, mtime_nsec: 0 },
+            }).collect(), failed: Vec::new(), unchanged: 0 }
         }
     }
 }
@@ -94,12 +76,34 @@ impl Thread {
     }
 }
 
+enum UndoExtra { None }
+const ADMIN_REFUSAL: &str = "admin refusal";
+fn admin_session() -> bool { false }
+fn target(path: &std::path::Path) -> gust_core::open::RunTarget {
+    use std::os::unix::fs::MetadataExt;
+    let md = path.symlink_metadata().unwrap();
+    gust_core::open::RunTarget::from_snapshot(path.to_owned(), gust_core::entry::Metadata {
+        dev: md.dev(), ino: md.ino(), size: md.len(), mtime: md.mtime(), mode: md.mode(),
+        ..Default::default()
+    })
+}
 struct Model {
     perms_token: i32,
     perms_paths: Vec<PathBuf>,
     perms_work: crate::place_work::ArchiveWork,
     status: QString,
-    last_modes: Vec<PathBuf>,
+    last_modes: Vec<gust_ops::attrs::ModeChanged>,
+    last_extra: UndoExtra,
+    last_link: Option<()>,
+    last_job: Option<()>,
+    last_bulk_rename: Vec<()>,
+    last_trashed_batch: Vec<()>,
+    run_token: i32,
+    pending_run: Option<(gust_core::open::RunTarget, String)>,
+    directory: Option<PathBuf>,
+    entries: Vec<Entry>,
+    live_hold: bool,
+    launched: Vec<PathBuf>,
     thread: Thread,
     /// What ran on the "GUI thread", and whether the change still counted
     /// as running when it did.
@@ -114,17 +118,29 @@ impl Model {
     fn status(&self) -> &QString {
         &self.status
     }
-    /// Seam for the real one: records the undo and the status sentence.
-    fn finish_mode_change(mut self: Pin<&mut Self>, out: gust_ops::attrs::ModeOutcome) -> QString {
-        let running = self.permissions_running();
-        self.events.push(("outcome+undo", running));
-        if out.changed.is_empty() && !out.failed.is_empty() {
-            return QString::from("fixture refusal");
-        }
-        self.status = QString(format!("Permissions changed on {} items", out.changed.len()));
-        self.last_modes = out.changed;
-        QString::default()
+    fn rust_mut(self: Pin<&mut Self>) -> Pin<&mut Self> { self }
+    fn set_status(mut self: Pin<&mut Self>, status: QString) {
+        if self.permissions_running() { self.events.push(("outcome+undo", true)); }
+        self.status = status;
     }
+    // Synchronous publication seam. The native journey additionally exercises
+    // real load_current_cached -> apply_snapshot, including liveHold bypass.
+    fn load_current_cached(mut self: Pin<&mut Self>, _: bool) {
+        if let Some(dir) = &self.directory {
+            let cancel = gust_core::lister::CancelToken::new();
+            let mut snap = gust_core::lister::list_names(&gust_core::location::LocationKey::local(dir), 1, &cancel, |_| {});
+            gust_core::lister::fill_metadata(&mut snap, &cancel);
+            snap.sort_entries();
+            self.entries = snap.entries;
+        }
+    }
+    fn entry_at(&self, row: i32) -> Option<&Entry> { self.entries.get(usize::try_from(row).ok()?) }
+    fn path_of_row(&self, row: i32) -> Option<PathBuf> { Some(self.directory.as_ref()?.join(&self.entry_at(row)?.name)) }
+@FINISH_MODE_CHANGE@
+@RELOAD@
+@RUN_PREPARE@
+@RUN_CONFIRM@
+@RUN_DISCARD@
     fn permissions_done(mut self: Pin<&mut Self>, token: i32, err: QString, message: QString, partial: bool) {
         let running = self.permissions_running();
         self.events.push(("permissions_done", running));
@@ -136,15 +152,20 @@ impl Model {
 
 @MODE_WORKER@
 
-    fn spawn_run(mut self: Pin<&mut Self>, _: Vec<String>, _: &str) -> QString {
+    fn spawn_run(mut self: Pin<&mut Self>, argv: Vec<std::ffi::OsString>, _: &str) -> QString {
         let running = self.permissions_running();
-        assert!(!self.last_modes.is_empty(), "undo must be published before launch");
+        if REAL_IO.load(Ordering::SeqCst) {
+            self.launched.push(PathBuf::from(argv.last().unwrap()));
+        } else {
+            assert!(!self.last_modes.is_empty(), "undo must be published before launch");
+        }
         self.events.push(("spawn_run", running));
         QString::default()
     }
 }
 
 fn model() -> (Model, mpsc::Receiver<Reply>) {
+    REAL_IO.store(false, Ordering::SeqCst);
     PANIC.store(false, Ordering::SeqCst);
     FAIL.store(false, Ordering::SeqCst);
     *HOLD.lock().unwrap() = None;
@@ -155,6 +176,10 @@ fn model() -> (Model, mpsc::Receiver<Reply>) {
         perms_work: Default::default(),
         status: QString::default(),
         last_modes: Vec::new(),
+        last_extra: UndoExtra::None, last_link: None, last_job: None,
+        last_bulk_rename: Vec::new(), last_trashed_batch: Vec::new(),
+        run_token: 0, pending_run: None, directory: None, entries: Vec::new(),
+        live_hold: false, launched: Vec::new(),
         thread: Thread(tx),
         events: Vec::new(),
         done: Vec::new(),
@@ -196,7 +221,7 @@ fn a_held_write_counts_as_running_until_its_outcome_and_undo_are_handled() {
     assert_eq!(m.last_modes.len(), 2);
     assert_eq!(m.done[0].0, 7);
     assert!(m.done[0].1.is_empty());
-    assert_eq!(m.done[0].2, QString::from("Permissions changed on 2 items"));
+    assert_eq!(m.done[0].2, QString::from("Permissions changed on 2 items  ·  Ctrl+Z puts them back"));
     assert!(!m.permissions_running());
     assert!(!m.perms_work.touches(std::path::Path::new("/places/nas")));
 }
@@ -245,8 +270,8 @@ fn program_permission_and_launch_share_the_editor_claim_until_undo_and_report() 
     // launch remain the fixture seams, so no host file is changed or run.
     let path = PathBuf::from("/bin/sh").canonicalize().unwrap();
     let spec = gust_ops::attrs::ModeSpec::change(0o100, 0).unwrap();
-    assert!(Pin::new(&mut m).start_mode_change(0, vec![path.clone()], spec,
-        Some((path, "fixture".into()))).is_empty());
+    assert!(Pin::new(&mut m).start_mode_change(0, vec![path.clone()], Some(spec),
+        Some((target(&path), "fixture".into()))).is_empty());
     assert!(m.permissions_running());
     assert!(!Pin::new(&mut m).permissions_apply(7, 0o100, 0).is_empty());
     assert!(replies.recv_timeout(Duration::from_millis(200)).is_err());
@@ -265,8 +290,8 @@ fn a_program_request_on_a_directory_never_changes_or_launches_it() {
     let (mut m, replies) = model();
     let path = std::env::temp_dir();
     let spec = gust_ops::attrs::ModeSpec::change(0o100, 0).unwrap();
-    assert!(Pin::new(&mut m).start_mode_change(0, vec![path.clone()], spec,
-        Some((path, "folder".into()))).is_empty());
+    assert!(Pin::new(&mut m).start_mode_change(0, vec![path.clone()], Some(spec),
+        Some((target(&path), "folder".into()))).is_empty());
     replies.recv_timeout(Duration::from_secs(5)).unwrap()(Pin::new(&mut m));
     assert_eq!(m.events, vec![("permissions_done", true)]);
     assert!(m.done[0].1.0.contains("ordinary file"));
@@ -279,11 +304,152 @@ fn a_refused_program_permission_change_never_launches() {
     FAIL.store(true, Ordering::SeqCst);
     let path = PathBuf::from("/bin/sh").canonicalize().unwrap();
     let spec = gust_ops::attrs::ModeSpec::change(0o100, 0).unwrap();
-    assert!(Pin::new(&mut m).start_mode_change(0, vec![path.clone()], spec,
-        Some((path, "fixture".into()))).is_empty());
+    assert!(Pin::new(&mut m).start_mode_change(0, vec![path.clone()], Some(spec),
+        Some((target(&path), "fixture".into()))).is_empty());
     replies.recv_timeout(Duration::from_secs(5)).unwrap()(Pin::new(&mut m));
-    assert_eq!(m.events, vec![("outcome+undo", true), ("permissions_done", true)]);
+    assert_eq!(m.events, vec![("permissions_done", true)]);
     assert!(!m.done[0].1.is_empty());
     assert!(m.last_modes.is_empty());
     assert!(!m.permissions_running());
+}
+
+// These regressions use real file metadata, chmod, undo and listing. Only the
+// GUI publication/queue and terminal spawn are substituted.
+struct Fixture(PathBuf);
+impl Fixture {
+    fn new() -> Self {
+        let dir = std::env::temp_dir().join(format!("run-prompt-{}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        Self(dir)
+    }
+    fn script(&self, name: &str, mode: u32) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = self.0.join(name);
+        std::fs::write(&path, b"#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+        path
+    }
+}
+impl Drop for Fixture { fn drop(&mut self) { std::fs::remove_dir_all(&self.0).unwrap(); } }
+fn mode(path: &std::path::Path) -> u32 {
+    use std::os::unix::fs::MetadataExt;
+    path.symlink_metadata().unwrap().mode() & 0o777
+}
+fn prepared(m: &mut Model, row: i32) -> (i32, String) {
+    let response = Pin::new(m).run_prepare(row);
+    let value: serde_json::Value = serde_json::from_str(&response.0).unwrap();
+    (value["token"].as_i64().unwrap() as i32, value["name"].as_str().unwrap().into())
+}
+
+#[test]
+fn prompt_survives_held_permission_completion_and_insertion_for_both_run_variants() {
+    for allow in [false, true] {
+        let f = Fixture::new();
+        let (mut m, replies) = model();
+        REAL_IO.store(true, Ordering::SeqCst);
+        f.script("a.sh", 0o644);
+        let initial_mode = if allow { 0o644 } else { 0o744 };
+        let b = f.script("b.sh", initial_mode);
+        m.directory = Some(f.0.clone());
+        Pin::new(&mut m).reload();
+        assert_eq!(m.path_of_row(1), Some(b.clone()));
+        m.live_hold = true; // Quick Look's watcher hold is still active.
+        let release = hold();
+        let spec = gust_ops::attrs::ModeSpec::change(if allow { 0o100 } else { 0o010 }, 0).unwrap();
+        assert!(Pin::new(&mut m).start_mode_change(0, vec![b.clone()], Some(spec), None).is_empty());
+        let aa = f.script("aa.sh", 0o644);
+        let (token, name) = prepared(&mut m, 1);
+        assert_eq!(name, "b.sh");
+        assert!(replies.recv_timeout(Duration::from_millis(100)).is_err());
+        release.send(()).unwrap();
+        replies.recv_timeout(Duration::from_secs(5)).unwrap()(Pin::new(&mut m));
+        assert!(m.live_hold);
+        assert_eq!(m.path_of_row(1), Some(aa.clone()), "real finish_mode_change must actually reload");
+        assert!(Pin::new(&mut m).run_confirm(token, allow).is_empty());
+        replies.recv_timeout(Duration::from_secs(5)).unwrap()(Pin::new(&mut m));
+        assert_eq!(m.launched, vec![b.clone()], "only the program named by the prompt can launch");
+        assert_eq!(mode(&aa), 0o644, "the inserted row must never be given execute permission");
+        assert_eq!(actual_ops::attrs::undo_modes(&m.last_modes).0, 1);
+        assert_eq!(mode(&b), initial_mode, "the original worker's undo is preserved");
+        assert!(!Pin::new(&mut m).run_confirm(token, allow).is_empty(), "single-use target");
+    }
+}
+
+#[test]
+fn replaced_missing_and_symlink_prompt_targets_are_refused_without_chmod_or_launch() {
+    for replacement in ["file", "symlink", "missing", "edited"] {
+        for allow in [false, true] {
+            let f = Fixture::new();
+            let (mut m, replies) = model();
+            REAL_IO.store(true, Ordering::SeqCst);
+            let b = f.script("b.sh", 0o744);
+            m.directory = Some(f.0.clone());
+            Pin::new(&mut m).reload();
+            let (token, _) = prepared(&mut m, 0);
+            let old = f.0.join("old.sh");
+            if replacement == "edited" {
+                std::fs::write(&b, b"changed content with a different size").unwrap();
+            } else {
+                std::fs::rename(&b, &old).unwrap();
+                match replacement {
+                    "file" => { f.script("b.sh", 0o644); },
+                    "symlink" => std::os::unix::fs::symlink(&old, &b).unwrap(),
+                    _ => (),
+                }
+            }
+            assert!(Pin::new(&mut m).run_confirm(token, allow).is_empty());
+            replies.recv_timeout(Duration::from_secs(5)).unwrap()(Pin::new(&mut m));
+            assert!(!m.done.last().unwrap().1.is_empty(), "{replacement} must be refused");
+            assert!(m.launched.is_empty());
+            assert!(m.last_modes.is_empty());
+            if replacement == "file" { assert_eq!(mode(&b), 0o644); }
+        }
+    }
+}
+
+#[test]
+fn cancel_stale_token_and_other_model_cannot_authorize_a_run() {
+    let f = Fixture::new();
+    let (mut origin, _replies) = model();
+    f.script("b.sh", 0o744);
+    origin.directory = Some(f.0.clone());
+    Pin::new(&mut origin).reload();
+    let (first, _) = prepared(&mut origin, 0);
+    let (second, _) = prepared(&mut origin, 0);
+    assert!(!Pin::new(&mut origin).run_confirm(first, true).is_empty());
+    let (mut other, _) = model();
+    assert!(!Pin::new(&mut other).run_confirm(second, true).is_empty());
+    Pin::new(&mut origin).run_discard(second);
+    assert!(!Pin::new(&mut origin).run_confirm(second, true).is_empty());
+    assert!(!origin.permissions_running());
+}
+
+#[test]
+fn escaped_lookalikes_and_non_utf8_run_targets_keep_their_original_bytes() {
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new();
+    let (mut m, replies) = model();
+    REAL_IO.store(true, Ordering::SeqCst);
+    let names: [&[u8]; 3] = [b"tool\n.sh", b"tool<U+000A>.sh", b"tool\xff.sh"];
+    for name in names {
+        let path = f.0.join(std::ffi::OsString::from_vec(name.to_vec()));
+        std::fs::write(&path, b"#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+    m.directory = Some(f.0.clone());
+    Pin::new(&mut m).reload();
+    for name in names {
+        let row = m.entries.iter().position(|entry| entry.name.as_bytes() == name).unwrap();
+        let original = m.path_of_row(row as i32).unwrap();
+        let (token, _) = prepared(&mut m, row as i32);
+        assert!(Pin::new(&mut m).run_confirm(token, true).is_empty());
+        replies.recv_timeout(Duration::from_secs(5)).unwrap()(Pin::new(&mut m));
+        assert_eq!(m.launched.last(), Some(&original));
+        for other in names {
+            assert_eq!(mode(&f.0.join(std::ffi::OsString::from_vec(other.to_vec()))),
+                       if other == name { 0o744 } else { 0o644 });
+        }
+        assert_eq!(actual_ops::attrs::undo_modes(&m.last_modes).0, 1);
+    }
 }

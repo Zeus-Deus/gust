@@ -504,13 +504,15 @@ pub mod qobject {
         /// "" or why not.
         #[qinvokable]
         fn run_custom_action(self: Pin<&mut DirModel>, id: &QString) -> QString;
-        /// Can the row be run? "" when yes, otherwise why not.
+        /// Capture the Run prompt from cached metadata. JSON {token,name,state}
+        /// or {error}; the model retains the byte-exact target, never QML.
         #[qinvokable]
-        fn run_check(self: &DirModel, row: i32) -> QString;
-        /// Run the row's executable in the default terminal. Only ever called
-        /// after the user confirmed a dialog naming the file. "" or why not.
+        fn run_prepare(self: Pin<&mut DirModel>, row: i32) -> QString;
+        /// Consume the original prompt's target, checking it on the worker.
         #[qinvokable]
-        fn run_row(self: Pin<&mut DirModel>, row: i32) -> QString;
+        fn run_confirm(self: Pin<&mut DirModel>, token: i32, allow: bool) -> QString;
+        #[qinvokable]
+        fn run_discard(self: Pin<&mut DirModel>, token: i32);
         /// The row as a program: "run" (Run… can start it), "allow" (a
         /// program not allowed to run yet) or "" (content; it opens).
         #[qinvokable]
@@ -530,10 +532,6 @@ pub mod qobject {
         /// Ctrl+Z puts the mode back. "" or why not.
         #[qinvokable]
         fn set_runnable(self: Pin<&mut DirModel>, on: bool) -> QString;
-        /// Give the row u+x, then run it as run_row does. Only ever called
-        /// after the user confirmed a dialog naming the file. "" or why not.
-        #[qinvokable]
-        fn allow_and_run(self: Pin<&mut DirModel>, row: i32) -> QString;
         #[qinvokable]
         fn make_link(self: Pin<&mut DirModel>) -> QString;
         /// Read the targets' permissions on a worker for the permissions
@@ -1056,6 +1054,8 @@ pub struct DirModelRust {
     /// The file Quick Look shows, byte-exact. Rows move under an open
     /// preview (a chmod reloads the folder); this does not.
     preview_target: Option<std::path::PathBuf>,
+    run_token: i32,
+    pending_run: Option<(gust_core::open::RunTarget, String)>,
     /// The sound Quick Look is playing, if any. Dropping it stops it.
     peek_player: Option<gust_thumbs::audio::Player>,
     delete_total: QString,
@@ -1391,6 +1391,8 @@ impl DirModelRust {
             peek_visual: QString::from(""),
             peek_gen: 0,
             preview_target: None,
+            run_token: 0,
+            pending_run: None,
             peek_player: None,
             delete_total: QString::from(""),
             delete_gen: 0,
@@ -8831,34 +8833,63 @@ impl qobject::DirModel {
         QString::default()
     }
 
-    fn run_argv_for(&self, row: i32) -> Result<Vec<String>, String> {
-        use std::os::unix::fs::MetadataExt;
-        let path = self
-            .path_of_row(row)
-            .ok_or_else(|| "nothing to run here".to_string())?;
-        let md = path
-            .symlink_metadata()
-            .map_err(|_| "that file is gone".to_string())?;
-        gust_core::open::run_argv(&path, md.mode(), md.is_file())
+    fn run_prepare(mut self: Pin<&mut Self>, row: i32) -> QString {
+        self.as_mut().rust_mut().pending_run = None;
+        let captured = (|| {
+            let model = self.as_ref();
+            let entry = model.entry_at(row).ok_or("nothing to run here")?;
+            let md = entry.meta.ok_or("file details are still loading")?;
+            let path = self
+                .as_ref()
+                .path_of_row(row)
+                .ok_or("nothing to run here")?;
+            let state =
+                match gust_core::open::program_state(&path, md.mode, entry.kind == EntryKind::File)
+                {
+                    gust_core::open::ProgramState::Runnable => "run",
+                    gust_core::open::ProgramState::NeedsPermission => "allow",
+                    gust_core::open::ProgramState::NotAProgram => {
+                        return Err("this file opens in an application — use Open instead of Run")
+                    }
+                };
+            Ok((
+                gust_core::open::RunTarget::from_snapshot(path, md),
+                entry.display_name(),
+                state,
+            ))
+        })();
+        let (target, name, state) = match captured {
+            Ok(value) => value,
+            Err(error) => return QString::from(&serde_json::json!({"error": error}).to_string()),
+        };
+        let token = self.as_ref().run_token.checked_add(1).unwrap_or(1);
+        let reply = serde_json::json!({"token": token, "name": name, "state": state});
+        let mut r = self.as_mut().rust_mut();
+        r.run_token = token;
+        r.pending_run = Some((target, name));
+        QString::from(&reply.to_string())
     }
 
-    fn run_check(&self, row: i32) -> QString {
-        match self.run_argv_for(row) {
-            Ok(_) => QString::default(),
-            Err(e) => QString::from(&e),
+    fn run_discard(mut self: Pin<&mut Self>, token: i32) {
+        if token == self.as_ref().run_token {
+            self.as_mut().rust_mut().pending_run = None;
         }
     }
 
-    fn run_row(mut self: Pin<&mut Self>, row: i32) -> QString {
+    fn run_confirm(mut self: Pin<&mut Self>, token: i32, allow: bool) -> QString {
         if admin_session() {
             return QString::from(ADMIN_REFUSAL);
         }
-        let argv = match self.as_ref().run_argv_for(row) {
-            Ok(v) => v,
-            Err(e) => return QString::from(&e),
+        if token != self.as_ref().run_token {
+            return QString::from("choose Run again");
+        }
+        let Some((target, name)) = self.as_mut().rust_mut().pending_run.take() else {
+            return QString::from("choose Run again");
         };
-        let name = self.as_ref().entry_name(row).to_string();
-        self.as_mut().spawn_run(argv, &name)
+        let spec = allow.then(|| {
+            gust_ops::attrs::ModeSpec::change(0o100, 0).expect("a fixed, valid mode spec")
+        });
+        self.start_mode_change(0, vec![target.path.clone()], spec, Some((target, name)))
     }
 
     fn program_state(&self, row: i32) -> QString {
@@ -8900,25 +8931,12 @@ impl qobject::DirModel {
             if on { 0 } else { 0o111 },
         )
         .expect("a fixed, valid mode spec");
-        self.start_mode_change(0, vec![path], spec, None)
-    }
-
-    fn allow_and_run(self: Pin<&mut Self>, row: i32) -> QString {
-        if admin_session() {
-            return QString::from(ADMIN_REFUSAL);
-        }
-        // Capture before the worker starts: its reload must never retarget Run.
-        let Some(path) = self.as_ref().path_of_row(row) else {
-            return QString::from("nothing to run here");
-        };
-        let name = self.as_ref().entry_name(row).to_string();
-        let spec = gust_ops::attrs::ModeSpec::change(0o100, 0).expect("a fixed, valid mode spec");
-        self.start_mode_change(0, vec![path.clone()], spec, Some((path, name)))
+        self.start_mode_change(0, vec![path], Some(spec), None)
     }
 
     /// Start a checked Run argv, detached, and say so in the status line.
-    fn spawn_run(mut self: Pin<&mut Self>, argv: Vec<String>, name: &str) -> QString {
-        if gust_core::open::which(&argv[0]).is_none() {
+    fn spawn_run(mut self: Pin<&mut Self>, argv: Vec<std::ffi::OsString>, name: &str) -> QString {
+        if gust_core::open::which("xdg-terminal-exec").is_none() {
             return QString::from("no terminal launcher (xdg-terminal-exec) is installed");
         }
         match std::process::Command::new(&argv[0])
@@ -9564,7 +9582,7 @@ impl qobject::DirModel {
             Err(e) => return QString::from(&e),
         };
         let paths = self.as_ref().perms_paths.clone();
-        self.start_mode_change(token, paths, spec, None)
+        self.start_mode_change(token, paths, Some(spec), None)
     }
 
     /// Editor and program controls share one worker and lifecycle claim. Token
@@ -9573,8 +9591,8 @@ impl qobject::DirModel {
         self: Pin<&mut Self>,
         token: i32,
         paths: Vec<PathBuf>,
-        spec: gust_ops::attrs::ModeSpec,
-        run_after: Option<(PathBuf, String)>,
+        spec: Option<gust_ops::attrs::ModeSpec>,
+        run_after: Option<(gust_core::open::RunTarget, String)>,
     ) -> QString {
         if self.as_ref().permissions_running() {
             return QString::from("Still applying the last change");
@@ -9593,38 +9611,36 @@ impl qobject::DirModel {
                         let path = paths.first().ok_or("nothing to change")?;
                         let md = path.symlink_metadata().map_err(|_| "that file is gone")?;
                         if !md.is_file() {
-                            return Err("only an ordinary file can run");
+                            return Err("only an ordinary file can run".to_string());
                         }
                         if run_after.is_some()
                             && gust_core::open::program_state(path, md.mode(), md.is_file())
                                 == gust_core::open::ProgramState::NotAProgram
                         {
                             return Err(
-                                "this file opens in an application — use Open instead of Run",
+                                "this file opens in an application — use Open instead of Run"
+                                    .to_string(),
                             );
                         }
                     }
-                    let out = gust_ops::attrs::set_modes(&paths, spec);
-                    // Check the captured path on the worker, only after a
-                    // successful change. Never resolve the old row again.
+                    if let Some((target, _)) = &run_after {
+                        target.metadata()?;
+                    }
+                    let out = spec.map(|spec| gust_ops::attrs::set_modes(&paths, spec));
+                    // The listing can reload while the prompt or worker waits.
+                    // Only the captured byte path + identity authorize this run.
                     let run = run_after
-                        .filter(|_| out.failed.is_empty())
-                        .map(|(path, name)| {
-                            let argv = path
-                                .symlink_metadata()
-                                .map_err(|_| "that file is gone".to_string())
-                                .and_then(|md| {
-                                    gust_core::open::run_argv(&path, md.mode(), md.is_file())
-                                });
-                            (argv, name)
-                        });
+                        .filter(|_| out.as_ref().is_none_or(|out| out.failed.is_empty()))
+                        .map(|(target, name)| (target.argv(), name));
                     Ok((out, run))
                 }));
                 let _ = thread.queue(move |mut model| {
                     let (err, message, partial) = match out {
                         Ok(Ok((out, run))) => {
-                            let partial = !out.failed.is_empty();
-                            let mut err = model.as_mut().finish_mode_change(out);
+                            let partial = out.as_ref().is_some_and(|out| !out.failed.is_empty());
+                            let mut err = out
+                                .map(|out| model.as_mut().finish_mode_change(out))
+                                .unwrap_or_default();
                             // Publish the undo before launching the program.
                             if err.is_empty() {
                                 if let Some((argv, name)) = run {
@@ -9641,7 +9657,7 @@ impl qobject::DirModel {
                             };
                             (err, message, partial)
                         }
-                        Ok(Err(error)) => (QString::from(error), QString::default(), false),
+                        Ok(Err(error)) => (QString::from(&error), QString::default(), false),
                         Err(_) => (
                             QString::from(
                                 "The permissions change stopped unexpectedly. Some items may \
