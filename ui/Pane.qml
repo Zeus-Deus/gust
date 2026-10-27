@@ -31,6 +31,20 @@ Item {
     signal openInNewTab(int row)
     /// A right-button drag was released: offer Copy, Move or Link here.
     signal dropMenu(int row, real x, real y)
+    /// A single folder was dropped on the right-edge strip: show it in a
+    /// second pane (DESIGN §6.7).
+    signal openInSplit(string path)
+
+    /// Whether the right-edge strip is offered. The window allows it only
+    /// while there is one pane, so a drop on the other pane always stays a
+    /// copy or move.
+    property bool canEdgeSplit: false
+    /// The folder being dragged, when the drag is exactly one folder.
+    property string dragFolder: ""
+    property string dragFolderName: ""
+    /// The pointer is over the strip right now.
+    property bool overEdge: false
+    readonly property real edgeWidth: Math.round(Math.max(Tokens.rowHeight * 4, pane.width * 0.12))
 
     /// The view the user is looking at, for focus and page-step maths.
     function currentView() {
@@ -65,6 +79,7 @@ Item {
         onDragStarted: (r) => {
             rowsView.dragActive = true
             if (pane.model) pane.model.drag_begin(r)
+            pane.beginEdge(r)
             outward.handedOff = false
             ghost.begin(r)
             pane.dragBegan()
@@ -80,7 +95,7 @@ Item {
         }
         onDropReleased: (r) => pane.finishDrop(r)
         onDropMenuRequested: (r, x, y) => pane.requestDropMenu(r, x, y)
-        onDragMovedTo: (x, y) => { ghost.follow(rowsView, x, y); pane.maybeHandOff(rowsView, x, y) }
+        onDragMovedTo: (x, y) => { ghost.follow(rowsView, x, y); pane.trackEdge(rowsView, x, y); pane.maybeHandOff(rowsView, x, y) }
         onContextRequested: (r, x, y) => pane.contextRequested(r, x, y)
         onMiddleClicked: (r) => pane.openInNewTab(r)
     }
@@ -95,6 +110,7 @@ Item {
         onDragStarted: (r) => {
             gridView.dragActive = true
             if (pane.model) pane.model.drag_begin(r)
+            pane.beginEdge(r)
             outward.handedOff = false
             ghost.begin(r)
             pane.dragBegan()
@@ -108,7 +124,7 @@ Item {
         }
         onDropReleased: (r) => pane.finishDrop(r)
         onDropMenuRequested: (r, x, y) => pane.requestDropMenu(r, x, y)
-        onDragMovedTo: (x, y) => { ghost.follow(gridView, x, y); pane.maybeHandOff(gridView, x, y) }
+        onDragMovedTo: (x, y) => { ghost.follow(gridView, x, y); pane.trackEdge(gridView, x, y); pane.maybeHandOff(gridView, x, y) }
         onContextRequested: (r, x, y) => pane.contextRequested(r, x, y)
         onMiddleClicked: (r) => pane.openInNewTab(r)
     }
@@ -123,6 +139,7 @@ Item {
         onDragStarted: (r) => {
             columnsView.dragActive = true
             if (pane.model) pane.model.drag_begin(r)
+            pane.beginEdge(r)
             outward.handedOff = false
             ghost.begin(r)
             pane.dragBegan()
@@ -136,7 +153,7 @@ Item {
         }
         onDropReleased: (r) => pane.finishDrop(r)
         onDropMenuRequested: (r, x, y) => pane.requestDropMenu(r, x, y)
-        onDragMovedTo: (x, y) => { ghost.follow(columnsView, x, y); pane.maybeHandOff(columnsView, x, y) }
+        onDragMovedTo: (x, y) => { ghost.follow(columnsView, x, y); pane.trackEdge(columnsView, x, y); pane.maybeHandOff(columnsView, x, y) }
         onContextRequested: (r, x, y) => pane.contextRequested(r, x, y)
         onMiddleClicked: (r) => pane.openInNewTab(r)
     }
@@ -145,7 +162,47 @@ Item {
     /// other (DESIGN §6.1). A refusal is reported, never swallowed.
     function requestDropMenu(row, x, y) {
         if (outward.handedOff) { outward.handedOff = false; return }
+        if (pane.takeEdgeDrop()) return
         pane.dropMenu(row, x, y)
+    }
+
+    // --- a folder dropped on the right edge opens beside -----------------
+    //
+    // While there is one pane, dragging exactly one folder shows a strip on
+    // the right edge; releasing there opens that folder in a second pane
+    // instead of moving it anywhere. Narrow on purpose: the rest of the view
+    // keeps meaning "drop into this folder".
+    function beginEdge(row) {
+        pane.overEdge = false
+        const one = !!pane.model && pane.model.drag_count() === 1 && pane.model.is_dir(row)
+        pane.dragFolder = one ? pane.model.entry_path(row) : ""
+        pane.dragFolderName = one ? pane.model.entry_name(row) : ""
+    }
+    function trackEdge(view, x, y) {
+        if (!pane.canEdgeSplit || pane.dragFolder === "") return
+        const p = view.mapToItem(pane, x, y)
+        const over = p.x >= pane.width - pane.edgeWidth && p.x < pane.width
+                     && p.y >= 0 && p.y < pane.height
+        if (over) {
+            // Over the strip no folder in the view takes the drop.
+            view.dropRow = -1
+            const t = qsTr("Release to open %1 in a new pane").arg(pane.dragFolderName)
+            ghost.action = t
+            pane.dropPreview(t)
+        }
+        // Off the strip, the view's own move has already said what a drop does.
+        pane.overEdge = over
+    }
+    /// A release over the strip: open the folder beside, move nothing.
+    function takeEdgeDrop() {
+        const path = pane.overEdge ? pane.dragFolder : ""
+        pane.overEdge = false
+        pane.dragFolder = ""
+        if (path === "") return false
+        if (pane.model) pane.model.drag_end()
+        pane.dropPreview("")
+        pane.openInSplit(path)
+        return true
     }
     function rowPoints() {
         const v = currentView()
@@ -174,6 +231,8 @@ Item {
     function finishDrop(row) {
         if (!pane.model) return
         if (outward.handedOff) { outward.handedOff = false; return }
+        if (pane.takeEdgeDrop()) return
+        pane.dragFolder = ""
         const err = pane.model.drag_drop_on_row(row, pane.dragMode(pane.currentView()))
         pane.model.drag_end()
         if (err !== "") pane.dropFailed(pane.model, err)
@@ -185,11 +244,28 @@ Item {
     // A held file follows the pointer: its icon, its name and how many
     // items travel with it, so a drag is unmistakable before anything is
     // dropped. Drawn above the views; it never takes the mouse.
+    // Where to let go: a line on the right edge while a folder is held.
+    // Only a line, not a box — the area that lights up on hover is the
+    // pane itself (Main's snap preview), and a second rectangle of another
+    // size would contradict it.
+    Rectangle {
+        id: edgeLine
+        z: 50
+        enabled: false
+        visible: pane.canEdgeSplit && pane.dragFolder !== ""
+                 && pane.currentView().dragActive && !outward.handedOff && !pane.overEdge
+        anchors.right: parent.right
+        width: Math.max(2, Tokens.borderWidth * 2)
+        height: pane.height
+        color: Tokens.accent
+    }
+
     Rectangle {
         id: ghost
         objectName: "dragGhost"
         z: 100
-        visible: pane.currentView().dragActive && !outward.handedOff
+        // Over the edge strip the window's snap preview names the folder.
+        visible: pane.currentView().dragActive && !outward.handedOff && !pane.overEdge
         enabled: false
         property string name: ""
         property string look: ""
@@ -271,6 +347,8 @@ Item {
         const mode = pane.dragMode(viewItem)
         outward.transferMode = mode
         outward.handedOff = true
+        pane.overEdge = false
+        pane.dragFolder = ""
         rowsView.dragActive = false
         gridView.dragActive = false
         columnsView.dragActive = false

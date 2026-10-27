@@ -46,6 +46,7 @@ Window {
                     hints.message = qsTr("Paste cancelled")
                 }
                 sessionSaveTimer.restart()
+                win.noteSplitTabMoved(tabModel)
             }
             // Mounts and connections finish on a worker; every tab reports
             // here, so a result still lands if the user switched tabs.
@@ -556,6 +557,60 @@ Window {
         }
     }
 
+    // --- dragging a sidebar place onto the file area (DESIGN §6.7) -------
+    //
+    // The same left and right thirds as a dragged tab. Left shows the place
+    // in the left pane (the only pane, when there is one); right shows it in
+    // the right pane, opening the split if needed. The middle does nothing.
+    /// The place being dragged, by name, while a drag is up.
+    property string placeDragLabel: ""
+    property point placeDragAt: Qt.point(0, 0)
+
+    // --- one snap preview for every drag that opens or fills a pane ------
+    //
+    // "" (none), "left", "right" or "full" (the only pane). A folder held
+    // over the right-edge strip, a place, and a tab all draw the same
+    // preview, over the area the result will actually take.
+    readonly property bool snapFromEdge: paneA.overEdge
+    readonly property string snapZone: win.snapFromEdge ? "right"
+        : (win.placeDragLabel !== "" && win.paneCount < 2 && win.tabDropZone === "left") ? "full"
+        : (win.tabDropZone === "left" || win.tabDropZone === "right") ? win.tabDropZone
+        : ""
+    readonly property string snapTitle: win.snapFromEdge ? paneA.dragFolderName
+        : win.placeDragLabel !== "" ? win.placeDragLabel
+        : (win.tabDragIndex >= 0 && win.tabDragIndex < tabList.count) ? tabList.get(win.tabDragIndex).label
+        : ""
+    readonly property string snapCaption: win.snapZone === "full" ? qsTr("Opens here")
+        : (win.snapZone === "right" && win.paneCount < 2) ? qsTr("Opens in a new pane")
+        : win.snapZone === "left" ? qsTr("Left pane")
+        : win.snapZone === "right" ? qsTr("Right pane")
+        : ""
+
+    function placeDragMoved(label, x, y) {
+        win.placeDragLabel = label
+        win.placeDragAt = Qt.point(x, y)
+        let zone = win.tabZoneAt(x, y)
+        if (zone === "outside") zone = ""
+        if (zone !== win.tabDropZone) {
+            win.tabDropZone = zone
+            hints.message = zone === "" ? ""
+                : qsTr("Release to open %1 in the %2 pane").arg(label).arg(zone)
+            win.qaDump("place-drag")
+        }
+    }
+    function placeDragEnded() {
+        win.placeDragLabel = ""
+        win.tabDropZone = ""
+        hints.message = ""
+    }
+    function placeDragDropped(path, x, y) {
+        const zone = win.tabZoneAt(x, y)
+        win.placeDragEnded()
+        if (zone === "left") win.openPathInPane(path, 0)
+        else if (zone === "right") win.openPathInPane(path, 1)
+        win.qaDump("place-drop")
+    }
+
     // --- bulk rename (DESIGN §6.16) --------------------------------------
     property string bulkPattern: ""
     property string bulkLines: ""
@@ -1032,31 +1087,127 @@ Window {
             // split shows something immediately rather than an empty half.
             const here = win.dirModel ? win.dirModel.location : ""
             tabList.append({ startPath: here, label: "…", pane: 1 })
-            tabViews.push("rows")
+            tabViews.push(win.paneViewMode(0))
             win.paneTab = [win.paneTab[0], tabList.count - 1]
+            win.splitMadeModel = win.tabModelAt(tabList.count - 1)
         }
         win.activePane = 1
         win.activeTab = win.paneTab[1]
         win.activateTab(win.activeTab)
+        win.armSplitTab()
         win.refreshPaneTabCount()
         win.qaDump("pane-split")
     }
 
+    /// The tab the split itself opened (single-tab split, folder or place
+    /// dropped on the right). The user never asked for it as a tab, so
+    /// closing the pane takes it away again (DESIGN §6.7 rule 2), but only
+    /// while it is untouched: once it goes somewhere else or starts work it
+    /// is the user's tab for good.
+    property var splitMadeModel: null
+    onSplitMadeModelChanged: splitMadeAt = ""
+    /// Where that tab opened; going anywhere else makes the tab the user's.
+    property string splitMadeAt: ""
+
+    /// Called once the tab has been opened at its folder. Its model starts
+    /// elsewhere (the startup folder), so earlier moves are not the user's.
+    function armSplitTab() {
+        win.splitMadeAt = win.splitMadeModel ? win.splitMadeModel.location : ""
+    }
+
+    /// A transfer makes the split's own tab the user's, even after it
+    /// finishes, fails or is undone. Call before polling: the poll that sees
+    /// a job end also forgets it.
+    function noteSplitTabWork(m) {
+        if (m === win.splitMadeModel && m.job_running()) win.splitMadeModel = null
+    }
+
+    function noteSplitTabMoved(m) {
+        if (m === win.splitMadeModel && win.splitMadeAt !== "" && m.location !== win.splitMadeAt)
+            win.splitMadeModel = null
+    }
+
+    /// Is tab `i` that tab, untouched and with nothing running or undoable?
+    function isSplitScratch(i) {
+        const m = win.tabModelAt(i)
+        return !!m && m === win.splitMadeModel
+            && !m.job_running() && !m.archive_running() && !m.sharing_busy
+            && m.undo_label() === ""
+            && closeTabAfterCancel.models.indexOf(m) < 0
+    }
+
+    /// Show `path` in pane `side` (0 left, 1 right). With one pane, the
+    /// left is the pane already open and the right opens the split.
+    function openPathInPane(path, side) {
+        if (!path || path === "") return
+        if (side === 0 && win.paneCount < 2) {
+            win.dirModel.navigate(path)
+            win.focusList()
+            win.qaDump("pane-open-path")
+            return
+        }
+        if (win.paneCount > 1) {
+            const m = win.paneModel(side)
+            win.focusPane(side)
+            if (m) m.navigate(path)
+            win.focusList()
+            win.qaDump("pane-open-path")
+            return
+        }
+        tabList.append({ startPath: path, label: win.lastSegment(path), pane: 1 })
+        tabViews.push(win.paneViewMode(0))
+        const at = tabList.count - 1
+        win.paneCount = 2
+        win.paneTab = [win.paneTab[0], at]
+        win.splitMadeModel = win.tabModelAt(at)
+        win.activePane = 1
+        win.activeTab = at
+        win.activateTab(at)
+        win.armSplitTab()
+        win.refreshPaneTabCount()
+        win.focusList()
+        win.qaDump("pane-split")
+    }
+
+    /// The pane holding nothing but the split's own idle tab, or -1.
+    function scratchPane() {
+        for (let q = 0; q < win.paneCount; q++) {
+            const t = win.paneTabs(q)
+            if (t.length === 1 && win.isSplitScratch(t[0])) return q
+        }
+        return -1
+    }
+
     /// Close a pane. Its tabs move to the survivor rather than being
     /// discarded: a pane is a layout, and closing a layout must not lose a
-    /// location, still less a running job (DESIGN §6.7 rule 2).
+    /// location, still less a running job (DESIGN §6.7 rule 2). The one
+    /// exception is the tab the split opened by itself: while it is still
+    /// its pane's only tab and idle, turning the split off closes that pane
+    /// and the tab with it, whichever pane had the focus.
     function closePane(p) {
         if (win.paneCount < 2) {
             hints.message = qsTr("This is the only pane")
             return
         }
+        // A pane that already emptied itself (its last tab closed) is the
+        // one to close; otherwise the split's own pane goes first.
+        const s = win.scratchPane()
+        if (s >= 0 && win.paneTabs(p).length > 0) p = s
         const keep = p === 0 ? 1 : 0
+        const mine = win.paneTabs(p)
+        const scratch = mine.length === 1 && win.isSplitScratch(mine[0]) ? mine[0] : -1
+        win.splitMadeModel = null
         for (let i = 0; i < tabList.count; i++)
             if (tabList.get(i).pane === p) tabList.setProperty(i, "pane", keep)
         win.paneCount = 1
         // Everything is pane 0 again once there is only one pane.
         for (let j = 0; j < tabList.count; j++) tabList.setProperty(j, "pane", 0)
-        const showing = win.paneTab[keep]
+        let showing = win.paneTab[keep]
+        if (scratch >= 0) {
+            tabList.remove(scratch)
+            tabViews.splice(scratch, 1)
+            if (showing > scratch) showing -= 1
+        }
         win.paneTab = [showing >= 0 ? showing : 0, -1]
         win.activePane = 0
         win.activeTab = win.paneTab[0]
@@ -1723,6 +1874,8 @@ Window {
         }
         else if (a === "open-with") { palette.openWith("open with "); return }
         else if (a === "open-tab") win.newTab(dirModel.entry_path(dirModel.cursor))
+        else if (a === "open-other-pane")
+            win.openPathInPane(dirModel.entry_path(dirModel.cursor), win.paneCount > 1 && win.activePane === 1 ? 0 : 1)
         else if (a === "copy-path") hints.message = dirModel.copy_path(dirModel.cursor)
         else if (a === "copy-path-folder") hints.message = dirModel.copy_path(-1)
         else if (a === "paste-into") {
@@ -1935,6 +2088,8 @@ Window {
         if (many) list.push({ label: qsTr("Open ") + dirModel.sel_count() + qsTr(" items"), hint: "Enter", action: "open" })
         else list.push({ label: qsTr("Open"), hint: "Enter", action: "open" })
         if (!many && dir) list.push({ label: qsTr("Open in new tab"), hint: "", action: "open-tab" })
+        if (!many && dir) list.push({ label: win.paneCount > 1 ? qsTr("Open in other pane") : qsTr("Open in new pane"),
+                                      hint: "", action: "open-other-pane" })
         if (!many && dir) list.push({ label: qsTr("Let devices open this folder…"), hint: "", action: "device-share-folder" })
         if (many || !dir) list.push({ label: qsTr("Send a copy to a device…"), hint: "", action: "device-send" })
         if (!many && dir) {
@@ -2625,6 +2780,9 @@ Window {
                 model: dirModel
                 activePanel: trashPanel.open ? "trash" : recentPanel.open ? "recent" : ""
                 onPlaceChosen: (p) => { dirModel.navigate(p); win.focusList() }
+                onPlaceDragMoved: (path, label, x, y) => win.placeDragMoved(label, x, y)
+                onPlaceDragDropped: (path, x, y) => win.placeDragDropped(path, x, y)
+                onPlaceDragEnded: win.placeDragEnded()
                 onDragHover: (t) => { hints.message = t; win.qaDump("drag-hover") }
                 onDragLanded: (m, e) => { hints.message = ""; win.transferStarted(m, e, "drop") }
                 remotePlaces: win.connectedPlaces
@@ -2709,6 +2867,8 @@ Window {
                     onDropMenu: (r, x, y) => { win.focusPane(0); win.openDropMenu(win.paneAModel, r, x, y) }
                     onDropDone: (owner) => { win.transferStarted(owner, "", "drop") }
                     onContextRequested: (r, x, y) => { win.focusPane(0); win.openContextMenu(r, x, y) }
+                    canEdgeSplit: win.paneCount < 2
+                    onOpenInSplit: (path) => win.openPathInPane(path, 1)
                 }
 
                 // The divider. It is a visible seam, not a decoration: the
@@ -2748,30 +2908,101 @@ Window {
                     }
                 }
 
-                // Where a dragged tab would land. Shown only while dragging
-                // over a real target: a highlight with no drop behind it
-                // would promise something that does not happen.
+                // Where a drag would land, drawn over the WHOLE area the
+                // result will occupy — the half a new pane opens in, the pane
+                // a tab or place goes to — the way a window snaps to a
+                // screen edge. Shown only over a real target: a highlight with
+                // no drop behind it would promise something that does not
+                // happen.
                 Rectangle {
+                    id: snapPreview
                     z: 20
-                    visible: win.tabDropZone === "left"
-                             || win.tabDropZone === "right"
-                    x: win.tabDropZone === "right"
-                       ? Math.round(paneArea.width * 0.67) : 0
+                    enabled: false
+                    /// The last real zone, so the rectangle fades out where it
+                    /// was instead of jumping to nowhere first.
+                    property string zone: ""
+                    readonly property string live: win.snapZone
+                    onLiveChanged: if (live !== "") zone = live
+                    // The exact rectangle the pane will occupy, computed the
+                    // way paneA / paneSplit / paneBLoader lay themselves out,
+                    // so what lights up is pixel for pixel what you get.
+                    readonly property real splitW: Math.max(1, Tokens.borderWidth)
+                    readonly property real leftW: win.paneCount > 1
+                        ? paneA.width
+                        : Math.round((paneArea.width - splitW) * win.paneRatio)
+                    readonly property real rightX: leftW + splitW
+                    x: zone === "right" ? rightX : 0
                     y: 0
-                    width: Math.round(paneArea.width * 0.33)
+                    width: zone === "full" ? paneArea.width
+                         : zone === "right" ? paneArea.width - rightX
+                         : leftW
                     height: paneArea.height
-                    color: Tokens.withAlpha(Tokens.accent, 0.12)
+                    opacity: live !== "" ? 1 : 0
+                    visible: opacity > 0
+                    // Opaque like a pane: it stands in for the pane that will
+                    // be there, bordered the way the active pane is.
+                    color: Tokens.background
                     border.width: Math.max(1, Tokens.borderWidth)
                     border.color: Tokens.accent
+                    radius: Tokens.radius
+                    Behavior on opacity { NumberAnimation { duration: Tokens.animFast } }
+                    Rectangle {
+                        anchors.fill: parent
+                        anchors.margins: parent.border.width
+                        color: Tokens.withAlpha(Tokens.accent, 0.06)
+                    }
 
-                    Text {
-                        textFormat: Text.PlainText
+                    Column {
                         anchors.centerIn: parent
-                        text: win.tabDropZone === "left" ? qsTr("Left pane")
-                                                         : qsTr("Right pane")
+                        width: parent.width - Tokens.spaceXxl * 2
+                        spacing: Tokens.spaceMd
+                        Text {
+                            textFormat: Text.PlainText
+                            width: parent.width
+                            horizontalAlignment: Text.AlignHCenter
+                            elide: Text.ElideMiddle
+                            text: win.snapTitle
+                            color: Tokens.foregroundBright
+                            font.family: Tokens.fontFamily
+                            font.pixelSize: Tokens.fontHeading
+                            font.bold: true
+                        }
+                        Text {
+                            textFormat: Text.PlainText
+                            width: parent.width
+                            horizontalAlignment: Text.AlignHCenter
+                            text: win.snapCaption
+                            color: Tokens.foregroundDim
+                            font.family: Tokens.fontFamily
+                            font.pixelSize: Tokens.fontBody
+                        }
+                    }
+                }
+
+                // The place being dragged follows the pointer, so the drag
+                // reads as a drag before any zone lights up.
+                Rectangle {
+                    parent: win.contentItem
+                    z: 1000
+                    enabled: false
+                    // Over a target the snap preview names the place instead.
+                    visible: win.placeDragLabel !== "" && win.snapZone === ""
+                    x: Math.min(win.placeDragAt.x + Tokens.spaceLg, win.width - width)
+                    y: Math.min(win.placeDragAt.y + Tokens.spaceLg, win.height - height)
+                    width: placeChip.implicitWidth + Tokens.spaceLg * 2
+                    height: placeChip.implicitHeight + Tokens.spaceSm * 2
+                    radius: Tokens.radius
+                    color: Tokens.withAlpha(Tokens.backgroundDark, 0.92)
+                    border.width: Math.max(1, Tokens.borderWidth)
+                    border.color: Tokens.accent
+                    Text {
+                        id: placeChip
+                        anchors.centerIn: parent
+                        textFormat: Text.PlainText
+                        text: win.placeDragLabel
                         color: Tokens.foregroundBright
                         font.family: Tokens.fontFamily
-                        font.pixelSize: Tokens.fontBody
+                        font.pixelSize: Tokens.fontSmall
                     }
                 }
 
@@ -2923,6 +3154,7 @@ Window {
             model: dirModel
             job: win.job
             onRequestPause: {
+                win.noteSplitTabWork(dirModel)
                 dirModel.pause_job()
                 hints.message = qsTr("Paused · Resume carries on, Cancel stops")
                 const raw = dirModel.poll_job()
@@ -2930,6 +3162,7 @@ Window {
                 win.qaDump("job-pause")
             }
             onRequestResume: {
+                win.noteSplitTabWork(dirModel)
                 dirModel.resume_job()
                 hints.message = qsTr("Resumed")
                 const raw = dirModel.poll_job()
@@ -2937,6 +3170,7 @@ Window {
                 win.qaDump("job-resume")
             }
             onRequestCancel: {
+                win.noteSplitTabWork(dirModel)
                 dirModel.cancel_job()
                 // Show "Stopping" now, not on the next poll.
                 const raw = dirModel.poll_job()
@@ -3345,6 +3579,7 @@ Window {
             // there as "running" until its tab was shown again.
             for (let i = 0; i < tabList.count; i++) {
                 const o = tabs.objectAt(i)
+                if (o) win.noteSplitTabWork(o)
                 if (o && o !== dirModel && o.job_running()) o.poll_job()
             }
             const raw = dirModel.poll_job()
