@@ -38,6 +38,7 @@ fn main() {
         "ui/DeviceSharingPanel.qml",
         "ui/SharingButton.qml",
         "ui/RenameCard.qml",
+        "ui/PermissionsDialog.qml",
         "ui/TagDots.qml",
     ];
 

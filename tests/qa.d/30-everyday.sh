@@ -262,8 +262,11 @@ expect_contains "the Trash question names the selected folder" "d['confirmBody']
 shot 30i-trash-names-selection
 key Escape; sleep 0.5
 [[ -d "$d30i/keep" && -f "$d30i/notes.txt" ]] && ok "Cancel changed nothing" || bad "something moved"
-palette_run "Permissions…"; sleep 0.8
-expect_contains "Permissions shows the selected folder's mode" "d['promptHint']" "Now: rwxr-xr-x"
+palette_run "Permissions…"
+wait_for "d['permissions'] and d['permissions']['ready']" "True" 10 >/dev/null
+keep_bits="$(python3 -c "m=0o$(stat -c %a "$d30i/keep"); print([2 if m & (256 >> i) else 0 for i in range(9)])")"
+expect "Permissions shows the selected folder's own boxes" "d['permissions']['orig']" "$keep_bits"
+expect_contains "and names it, not the cursor row" "d['permissions']['context']" "keep"
 key Escape; sleep 0.4
 # Leave the folder before removing it: the next step acts on the folder shown.
 goto "$FIXTURE" || bad "could not return to $FIXTURE"

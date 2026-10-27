@@ -74,7 +74,8 @@ expect "the owner prompt is open" "d['promptMode']" "owner"
 shot vp-dialog-owner
 key Escape; sleep 0.4
 palette_run "Permissions…"; sleep 0.8
-expect "the permissions prompt is open" "d['promptOpen']" "True"
+wait_for "d['permissions'] and d['permissions']['ready']" "True" 10 >/dev/null
+expect "the permissions card is open" "d['permissionsOpen']" "True"
 shot vp-dialog-permissions
 key Escape; sleep 0.4
 # A name clash: copy notes.txt into dest, which has a notes.txt.

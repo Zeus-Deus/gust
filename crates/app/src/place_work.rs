@@ -40,7 +40,7 @@ type Claims = Arc<Mutex<Vec<(u64, Vec<PathBuf>)>>>;
 ///
 /// Compress and extract run on their own threads with no job handle, so
 /// without this the window and its tabs forgot about them the moment they
-/// started.
+/// started. A permissions change has the same shape and is held the same way.
 #[derive(Clone, Default)]
 pub struct ArchiveWork {
     running: Claims,

@@ -2206,6 +2206,70 @@ Gust writes the list back.
   same disk or another; a destination that cannot hold them still gets the
   bytes and says nothing.
 
+## 6.26 Permissions editor
+
+Permissions… opens a native card, not a typed mode. Three audience rows
+(owner, group, other users) by three columns: Read / Edit / Run for files,
+List files / Add or remove / Access for folders, Read / Change / Run / Access
+for files and folders together. No octal or symbolic text is shown or
+accepted.
+
+Bridge contract (APP over `gust_ops::attrs`):
+
+- `permissions_load() -> QString` captures `target_paths()` in memory,
+  starts a `gust-perms` worker and returns "" or why not. The worker reads
+  each target with `attrs::read_modes` (no-follow `lstat`; links and vanished
+  names are counted, never followed), plus `/etc/passwd`, `/etc/group`, the
+  effective uid and the process's groups. It emits
+  `permissions_ready(token, json)`; a newer load supersedes an older one.
+- The JSON is facts only. When nothing can be changed it is
+  `{ok: false, token, error}`. Otherwise `ok: true`, `token`, `total`
+  (targets read), `files`, `dirs`, `links` (left out), `missing` (left out,
+  with why), `name` (single target only, else null), `place` (the shared
+  folder as shown, else ""), `owner {same, name, you}`,
+  `group {same, name, member}`, `owned` (targets the viewer may change),
+  `special` (targets with setuid/setgid/sticky) and `bits`: nine counts of
+  targets that have each rwx bit, owner-read first.
+- Names come only from the user databases. A uid or gid they do not list is
+  `name: null`, never invented: the owner row then reads "Owner · An account
+  not named on this computer" and the group row "A group not named on this
+  computer". Owners or groups that differ across the targets read "Each
+  item's own owner" / "Each item's own group"; the viewer's own items read
+  "You", with the account name when it is listed.
+- `permissions_apply(token, add, remove) -> QString` applies
+  `ModeSpec::Change { add, remove }` to exactly the paths captured for that
+  token, on a worker; "" when started, else why not (out of date, already
+  applying, bad masks). Only bits the user explicitly changed are in the
+  masks, so each file keeps every bit nobody touched (a mixed bit stays
+  mixed) and its special bits. Masks outside 0o777 or overlapping refuse.
+  The result arrives as `permissions_done(token, error, message, partial)`:
+  `error` is why nothing changed (every target refused), else ""; `message`
+  is the status-line sentence ("Permissions changed on N items … · Ctrl+Z
+  puts them back"); `partial` is true when some targets were refused. It
+  uses the existing `set_modes` outcome, `last_modes` undo (dev+inode+mtime
+  and mode checks) and Ctrl+Z wording. A worker panic reports an `error`
+  saying some items may already have changed without an undo.
+- `permissions_running() -> bool` is true from an accepted apply until its
+  outcome, `last_modes` undo and `permissions_done` have all been handled on
+  the GUI thread; a failed worker start releases the claim. `set_modes` has no
+  cancel, so closing the window or the tab that started it waits, like
+  archive work ("Close when finished"); only the existing explicit "Close
+  without waiting" may quit sooner, and it says permissions may be left
+  part-way with no undo. `work_on_place` answers `"permissions"` while the
+  change touches that place, and disconnect is refused until it finishes.
+
+Card behaviour: a mixed bit shows a partial checkbox and cycles mixed → on
+→ off → mixed. Apply changes is disabled until something differs; Escape and
+Cancel close without writing. A folder change applies to that folder only,
+never its contents. Links are left out and said to be; targets owned by
+someone else are listed as ones the system will refuse; a load failure or
+an all-refused apply stays in the card as text, recoverable by Cancel. On
+success the card closes and the hint strip shows `message` ahead of the
+selection count it is about, until the selection, the message or the
+folder changes; a partial result is an alert. In a small or zoomed window
+the choices scroll and their columns narrow and wrap; Cancel and Apply
+stay pinned below them, and the focused box is scrolled into view.
+
 ## 7. Undo journal
 
 An undo entry records, per affected path: the expected identity
