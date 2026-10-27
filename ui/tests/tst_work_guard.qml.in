@@ -13,17 +13,21 @@ TestCase {
         property bool stopping: false
         property bool archive: false
         property bool sharing_busy: false
+        // A permissions change: no cancel, held until its outcome and undo
+        // have been handled (DirModel::permissions_running).
+        property bool perms: false
         property string place: ""
         property int cancels: 0
         function job_running() { return running }
         function archive_running() { return archive }
+        function permissions_running() { return perms }
         // Cancel is a REQUEST: the worker keeps running until the test says
         // its remote call returned.
         function cancel_job() { cancels += 1; if (running || sharing_busy) stopping = true }
         function work_on_place(kind, name) {
             if (name !== place) return ""
             if (running) return stopping ? "stopping" : "transfer"
-            return archive ? "archive" : ""
+            return archive ? "archive" : perms ? "permissions" : ""
         }
     }
 
@@ -100,7 +104,8 @@ TestCase {
 
     function init() {
         for (const m of win.models) {
-            m.running = false; m.stopping = false; m.archive = false; m.sharing_busy = false; m.place = ""; m.cancels = 0
+            m.running = false; m.stopping = false; m.archive = false; m.sharing_busy = false; m.perms = false
+            m.place = ""; m.cancels = 0
         }
         closeAfterCancel.stop(); closeAfterCancel.ticks = 0
         closeTabAfterCancel.stop(); closeTabAfterCancel.models = []
@@ -314,6 +319,134 @@ TestCase {
         verify(win.placeWorkBlocker("ssh", "nas").indexOf("Archive work") === 0)
         modelA.archive = false
         compare(win.placeWorkBlocker("ssh", "nas"), "")
+        verify(!win.refuseBusyDisconnect("ssh", "nas"))
+    }
+
+    function test_window_waits_for_a_permissions_change_it_cannot_stop() {
+        modelB.perms = true
+        const close = {accepted: true}
+        win.handleClosing(close)
+        compare(close.accepted, false, "a held permissions write must not be dropped by a close")
+        compare(confirm.title, "Permissions are still being changed")
+        compare(confirm.confirmText, "Close when finished")
+        verify(!confirm.dangerous)
+        verify(confirm.body.indexOf("cannot stop") >= 0, confirm.body)
+        win.confirmAccepted()
+        compare(modelB.cancels, 0, "a permissions change has no cancel to call")
+        tickWindow(200)
+        compare(win.quitCalls, 0, "the window waits for the outcome and its undo")
+
+        // Closing again is the existing explicit choice, with its cost named.
+        const again = {accepted: true}
+        win.handleClosing(again)
+        compare(again.accepted, false)
+        compare(confirm.purpose, "closewait")
+        verify(confirm.body.indexOf("Ctrl+Z cannot put it back") >= 0, confirm.body)
+        win.confirmRejected()
+        tickWindow(50)
+        compare(win.quitCalls, 0)
+
+        modelB.perms = false
+        tickWindow(1)
+        compare(win.quitCalls, 1)
+    }
+
+    function test_background_tab_keeps_its_permissions_change_until_handled() {
+        // The change belongs to tab 2 while tab 0 is on screen.
+        win.activeTab = 0
+        modelC.perms = true
+        win.closeTab(2)
+        compare(tabList.count, 3)
+        compare(confirm.purpose, "closetab")
+        compare(confirm.title, "Permissions are still being changed")
+        compare(confirm.confirmText, "Close when finished")
+        verify(!confirm.dangerous)
+        win.confirmAccepted()
+        compare(modelC.cancels, 0)
+        tickTabs(100)
+        compare(tabList.count, 3, "the tab owns the change; removing it drops the report and the undo")
+
+        // A repeated close neither re-asks nor skips the wait.
+        const opens = confirm.opens
+        win.closeTab(2)
+        compare(confirm.opens, opens)
+        compare(tabList.count, 3)
+
+        modelC.perms = false
+        tickTabs(1)
+        compare(tabList.count, 2)
+        compare(win.tabModelAt(1), modelB)
+        verify(!closeTabAfterCancel.running)
+    }
+
+    function test_tabs_finish_independently_while_other_permissions_are_pending() {
+        modelB.perms = true
+        modelC.perms = true
+        win.closeTab(1)
+        win.confirmAccepted()
+        win.closeTab(2)
+        win.confirmAccepted()
+        tickTabs(100)
+        compare(tabList.count, 3)
+        compare(closeTabAfterCancel.models.length, 2)
+
+        modelB.perms = false
+        tickTabs(1)
+        compare(tabList.count, 2)
+        compare(win.tabModelAt(1), modelC, "the other waiting tab shifts with the list")
+        compare(closeTabAfterCancel.models.length, 1)
+        compare(closeTabAfterCancel.models[0], modelC)
+        verify(closeTabAfterCancel.running)
+        tickTabs(100)
+        compare(tabList.count, 2, "finishing one tab must not release the other's work")
+
+        modelC.perms = false
+        tickTabs(1)
+        compare(tabList.count, 1)
+        compare(win.tabModelAt(0), modelA)
+        compare(closeTabAfterCancel.models.length, 0)
+        verify(!closeTabAfterCancel.running)
+    }
+
+    function test_window_close_beside_a_transfer_also_waits_for_permissions() {
+        modelA.running = true
+        modelB.perms = true
+        const close = {accepted: true}
+        win.handleClosing(close)
+        compare(close.accepted, false)
+        compare(confirm.purpose, "close")
+        verify(confirm.body.indexOf("permissions change cannot be stopped") >= 0, confirm.body)
+        verify(confirm.body.indexOf("Archive work") < 0, "no archive is running: " + confirm.body)
+        win.confirmAccepted()
+        compare(modelA.cancels, 1)
+        compare(modelB.cancels, 0)
+        modelA.running = false
+        tickWindow(20)
+        compare(win.quitCalls, 0, "the stopped transfer is not the whole window's work")
+        modelB.perms = false
+        tickWindow(1)
+        compare(win.quitCalls, 1)
+    }
+
+    function test_archive_and_permissions_together_are_both_named() {
+        modelC.archive = true
+        modelC.perms = true
+        win.handleClosing({accepted: true})
+        compare(confirm.title, "Archive work and a permissions change are still running")
+        modelC.archive = false
+        win.closeTab(2)
+        compare(confirm.title, "Permissions are still being changed")
+    }
+
+    function test_disconnect_waits_for_a_permissions_change_on_the_place() {
+        modelB.perms = true
+        modelB.place = "nas"
+        const why = win.placeWorkBlocker("ssh", "nas")
+        verify(why.indexOf("Permissions on nas are still being changed") === 0, why)
+        compare(win.placeWorkBlocker("ssh", "other"), "")
+        verify(win.refuseBusyDisconnect("ssh", "nas"))
+        compare(win.alertText, why)
+        modelB.perms = false
         verify(!win.refuseBusyDisconnect("ssh", "nas"))
     }
 }

@@ -151,9 +151,7 @@ pub fn run_argv(path: &Path, mode: u32, is_regular: bool) -> Result<Vec<String>,
         return Err("only an ordinary file can be run".into());
     }
     if mode & 0o111 == 0 {
-        return Err(
-            "this file is not executable — give it the x permission first (Permissions…)".into(),
-        );
+        return Err("this file is not allowed to run — turn on Run in Permissions… first".into());
     }
     if !is_runnable(path, Some(mode)) {
         return Err("this file opens in an application — use Open instead of Run".into());
@@ -510,7 +508,7 @@ mod tests {
     fn run_argv_refuses_what_is_not_an_executable_file() {
         assert!(run_argv(Path::new("/tmp/x.sh"), 0o644, true)
             .unwrap_err()
-            .contains("not executable"));
+            .contains("turn on Run in Permissions"));
         assert!(run_argv(Path::new("/tmp/d"), 0o755, false).is_err());
         assert!(run_argv(Path::new("rel.sh"), 0o755, true).is_err());
     }

@@ -106,7 +106,7 @@ def main():
         "QT_QPA_PLATFORM": "offscreen", "QT_QUICK_BACKEND": "software",
         "QT_FORCE_STDERR_LOGGING": "1", "QT_ASSUME_STDERR_HAS_CONSOLE": "1",
     }
-    argv = ["/usr/lib/qt6/bin/qmltestrunner", "-import", str(output), "-input", str(output)]
+    argv = ["/usr/lib/qt6/bin/qmltestrunner", "-import", str(output), "-input", str(output), "-v1"]
     p = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=60)
     log = p.stdout + p.stderr
     (output / "run.log").write_text(log)

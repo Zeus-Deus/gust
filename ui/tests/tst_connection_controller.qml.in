@@ -23,6 +23,7 @@ Item {
         property var contextMenu: ({open: false})
         property var settingsPanel: ({open: false})
         property var renameCard: ({open: false})
+        property var permissionsDialog: ({open: false})
         property var trashPanel: ({open: false})
         property var recentPanel: ({open: false})
         property var filterInput: ({activeFocus: false})

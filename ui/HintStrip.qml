@@ -11,6 +11,12 @@ Rectangle {
     /// What the last action said. Outranks `status` until the model says
     /// something newer or the folder changes.
     property string message: ""
+    /// `message` says what an action just did to the selection itself
+    /// ("Permissions changed on 3 items"), so it outranks the selection
+    /// count, which it is about, until either of them changes.
+    property bool messageAboutSelection: false
+    onMessageChanged: messageAboutSelection = false
+    onSelectionChanged: messageAboutSelection = false
     /// Live selection summary. Non-empty means a selection exists.
     property string selection: ""
     /// A message the user must actually read: a refusal, a failure, a reason
@@ -33,6 +39,7 @@ Rectangle {
 
     readonly property string displayText:
         root.alert !== "" ? root.alert
+        : root.messageAboutSelection && root.message !== "" ? root.message
         : (root.selection !== "" ? root.selection
            : (root.message !== "" ? root.message : root.status))
 

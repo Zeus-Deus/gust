@@ -493,6 +493,8 @@ pub mod qobject {
         /// jump_completion as "<typed>\n<completed>".
         #[qinvokable]
         fn jump_complete(self: Pin<&mut DirModel>, typed: &QString);
+        #[qinvokable]
+        fn jump_stop(self: Pin<&mut DirModel>);
         /// The user's custom actions that fit the current targets, as JSON
         /// {"actions":[{id,name}], "problems":[...]}. Reads the user's own
         /// config folder only.
@@ -534,13 +536,35 @@ pub mod qobject {
         fn allow_and_run(self: Pin<&mut DirModel>, row: i32) -> QString;
         #[qinvokable]
         fn make_link(self: Pin<&mut DirModel>) -> QString;
-        /// Change permissions of the targets ("644", "u+x", "go-w").
-        /// Ctrl+Z puts every mode back where the file is unchanged since.
+        /// Read the targets' permissions on a worker for the permissions
+        /// card (DESIGN §6.26). "" when started, else why not; the facts
+        /// arrive as `permissions_ready`.
         #[qinvokable]
-        fn set_mode(self: Pin<&mut DirModel>, spec: &QString) -> QString;
-        /// The cursor row's rwx and octal, e.g. "rw-r--r--  644".
+        fn permissions_load(self: Pin<&mut DirModel>) -> QString;
+        /// Give `add` and take away `remove` (rwx bits only) on exactly the
+        /// items read for `token`, on a worker. "" when started, else why
+        /// not; `permissions_done` reports. Ctrl+Z puts them back.
         #[qinvokable]
-        fn mode_text(self: &DirModel) -> QString;
+        fn permissions_apply(
+            self: Pin<&mut DirModel>,
+            token: i32,
+            add: i32,
+            remove: i32,
+        ) -> QString;
+        /// The facts for the permissions card, as JSON (DESIGN §6.26).
+        #[qsignal]
+        fn permissions_ready(self: Pin<&mut DirModel>, token: i32, json: QString);
+        /// A permissions change finished: `error` is why nothing changed
+        /// (else ""); otherwise `message` says what changed and how to undo
+        /// it, and `partial` is true when some items were refused.
+        #[qsignal]
+        fn permissions_done(
+            self: Pin<&mut DirModel>,
+            token: i32,
+            error: QString,
+            message: QString,
+            partial: bool,
+        );
         /// Change owner and/or group of the targets ("bob", ":media",
         /// "bob:media"). Ctrl+Z puts every owner back where unchanged since.
         #[qinvokable]
@@ -794,9 +818,14 @@ pub mod qobject {
         /// Compress or extract work this tab started that is still running.
         #[qinvokable]
         fn archive_running(self: &DirModel) -> bool;
+        /// A permissions change this tab applied whose outcome has not been
+        /// handled yet. It cannot be stopped part-way (DESIGN §6.26).
+        #[qinvokable]
+        fn permissions_running(self: &DirModel) -> bool;
         /// What this tab is still doing inside a connected place (`kind` is
         /// "ssh", "tailnet" or "cloud"): "transfer", "stopping", "archive",
-        /// or "" for nothing. In memory only; never touches the place.
+        /// "permissions", or "" for nothing. In memory only; never touches
+        /// the place.
         #[qinvokable]
         fn work_on_place(self: &DirModel, kind: QString, name: QString) -> QString;
 
@@ -1064,6 +1093,13 @@ pub struct DirModelRust {
     last_link: Option<gust_ops::attrs::LinkMade>,
     /// The newest permissions change, for Ctrl+Z.
     last_modes: Vec<gust_ops::attrs::ModeChanged>,
+    /// The permissions card's latest read: its token, and the exact items
+    /// an Apply for that token changes (DESIGN §6.26).
+    perms_token: i32,
+    perms_paths: Vec<PathBuf>,
+    /// An applied change until its outcome, undo and report are handled.
+    /// Same shape as archive work: no cancel, released on drop.
+    perms_work: crate::place_work::ArchiveWork,
     /// Undo for links dropped, owners changed, images pasted.
     last_extra: UndoExtra,
     /// What Ctrl+C / Ctrl+X marked, as paths, so rows can show it.
@@ -1135,6 +1171,9 @@ pub struct DirModelRust {
     places_refreshing: bool,
     places_again: bool,
     jump_cands: Vec<gust_core::jump::Candidate>,
+    jump_context: crate::folder_jump::Context,
+    jump_request: u64,
+    jump_cancel: CancelToken,
     /// Cancels a running hash (Quick Look closed, another file asked).
     hash_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Cancels a running find. Escape, a new find, or navigating away.
@@ -1158,6 +1197,7 @@ pub struct DirModelRust {
     last_job: Option<gust_ops::journal::Job>,
     /// A worker is reading details for rows that scrolled into view.
     meta_busy: bool,
+    meta_cancel: CancelToken,
     meta_rev: i32,
     /// The newest request that arrived while it was busy (first, count).
     meta_again: Option<(i32, i32)>,
@@ -1369,6 +1409,9 @@ impl DirModelRust {
             last_bulk_rename: Vec::new(),
             last_link: None,
             last_modes: Vec::new(),
+            perms_token: 0,
+            perms_paths: Vec::new(),
+            perms_work: Default::default(),
             last_extra: UndoExtra::None,
             clip_set: Default::default(),
             clipboard: None,
@@ -1414,6 +1457,9 @@ impl DirModelRust {
             places_refreshing: false,
             places_again: false,
             jump_cands: Vec::new(),
+            jump_context: crate::folder_jump::Context::default(),
+            jump_request: 0,
+            jump_cancel: CancelToken::new(),
             hash_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             find_cancel: CancelToken::new(),
             find_origin: None,
@@ -1428,6 +1474,7 @@ impl DirModelRust {
             selection: gust_core::selection::Selection::new(),
             last_job: None,
             meta_busy: false,
+            meta_cancel: CancelToken::new(),
             meta_rev: 0,
             meta_again: None,
             view_rows: (0, 0),
@@ -1549,6 +1596,84 @@ fn clip_label(paths: &[std::path::PathBuf]) -> String {
         1 => display_file_name(&paths[0]),
         n => count_items(n),
     }
+}
+
+/// The folder the permissions card names: the folder being shown when every
+/// item is in it, another single shared folder by its path, else "".
+fn shared_parent_label(
+    read: &gust_ops::attrs::ModeTargets,
+    here: Option<&std::path::Path>,
+    here_shown: &str,
+) -> String {
+    let mut parents = read.targets.iter().map(|t| t.path.parent());
+    let Some(Some(first)) = parents.next() else {
+        return String::new();
+    };
+    if !parents.all(|p| p == Some(first)) {
+        return String::new();
+    }
+    if here == Some(first) {
+        return here_shown.to_string();
+    }
+    gust_core::location::escape_for_display(first.as_os_str())
+}
+
+/// The permissions card's facts (DESIGN §6.26). Pure: the caller has done
+/// every read. Names come only from the user databases given; an id they do
+/// not list is reported without a name rather than given one.
+fn permissions_json(
+    token: i32,
+    read: &gust_ops::attrs::ModeTargets,
+    place: &str,
+    (euid, groups): (u32, Vec<u32>),
+    passwd: &str,
+    group: &str,
+) -> serde_json::Value {
+    use gust_core::properties::lookup_name;
+    let t = &read.targets;
+    if t.is_empty() {
+        let error = if !read.missing.is_empty() {
+            read.missing.join("; ")
+        } else if read.links > 0 {
+            "A link has no permissions of its own. Change the item it points to instead".to_string()
+        } else {
+            "Nothing to change here".to_string()
+        };
+        return serde_json::json!({"ok": false, "token": token, "error": error});
+    }
+    let same = |f: fn(&gust_ops::attrs::ModeTarget) -> u32| t.iter().all(|x| f(x) == f(&t[0]));
+    let owner_same = same(|x| x.uid);
+    let group_same = same(|x| x.gid);
+    let bits: Vec<usize> = (0..9)
+        .map(|i| t.iter().filter(|x| x.mode & (0o400 >> i) != 0).count())
+        .collect();
+    let name = (t.len() == 1 && read.links == 0 && read.missing.is_empty()).then(|| {
+        gust_core::location::escape_for_display(t[0].path.file_name().unwrap_or_default())
+    });
+    serde_json::json!({
+        "ok": true,
+        "token": token,
+        "total": t.len(),
+        "files": t.iter().filter(|x| !x.is_dir).count(),
+        "dirs": t.iter().filter(|x| x.is_dir).count(),
+        "links": read.links,
+        "missing": read.missing,
+        "name": name,
+        "place": place,
+        "owner": {
+            "same": owner_same,
+            "name": if owner_same { lookup_name(passwd, t[0].uid) } else { None },
+            "you": t.iter().all(|x| x.uid == euid),
+        },
+        "group": {
+            "same": group_same,
+            "name": if group_same { lookup_name(group, t[0].gid) } else { None },
+            "member": group_same && groups.contains(&t[0].gid),
+        },
+        "owned": t.iter().filter(|x| x.changeable_by(euid)).count(),
+        "special": t.iter().filter(|x| x.mode & 0o7000 != 0).count(),
+        "bits": bits,
+    })
 }
 
 /// Name shown to the user for a path. Never panics on non-UTF-8.
@@ -1749,7 +1874,10 @@ impl qobject::DirModel {
         self.as_mut().rust_mut().generation = gen;
 
         // Cancel whatever the previous navigation was still doing.
+        self.as_ref().jump_cancel.cancel();
         self.as_mut().rust_mut().load_cancel.cancel();
+        self.as_mut().rust_mut().meta_cancel.cancel();
+        self.as_mut().rust_mut().meta_again = None;
         let cancel = CancelToken::new();
         self.as_mut().rust_mut().load_cancel = cancel.clone();
         self.as_mut().rust_mut().thumb_cancel.cancel();
@@ -1797,6 +1925,14 @@ impl qobject::DirModel {
             })
             .unwrap_or_else(|| display.clone());
         self.as_mut().set_location_display(QString::from(&shown));
+        // Retrying a failed listing retires its notice, while unrelated
+        // capability notices remain visible.
+        let previous_notice = self.as_ref().notice.to_string();
+        if !previous_notice.is_empty()
+            && self.as_ref().empty_reason.to_string() == empty_reason_for(&previous_notice)
+        {
+            self.as_mut().set_notice(QString::default());
+        }
         self.as_mut().set_status(QString::from("reading…"));
         self.as_mut().set_settled(false);
 
@@ -1824,10 +1960,16 @@ impl qobject::DirModel {
                     if !reach.is_responsive() {
                         let place = gust_core::stall::place_name_for(dir);
                         let msg = reach.message(&place);
+                        let failed_cancel = cancel.clone();
                         let _ = thread.queue(move |mut model| {
-                            // The window stays on the folder it could reach.
-                            // Moving the user somewhere else because a remote
-                            // hung would lose their place for them.
+                            if failed_cancel.is_cancelled() || model.as_ref().generation != gen {
+                                return;
+                            }
+                            // Failed is distinct from empty, and lets another
+                            // navigation to this same location retry it.
+                            model.as_mut().publish_empty_reason(
+                                &gust_core::entry::Completeness::Failed { error: msg.clone() },
+                            );
                             model.as_mut().set_settled(true);
                             model.as_mut().set_status(QString::from("Not responding"));
                             model.as_mut().set_notice(QString::from(&msg));
@@ -1881,11 +2023,18 @@ impl qobject::DirModel {
                 // stats instead of 100 000.
                 let slow = key.as_path().is_some_and(gust_core::stall::needs_probe);
                 if slow {
-                    // One stat per row is a network round trip: names first.
-                    let names = snap.clone();
-                    let _ = thread.queue(move |model| {
-                        Self::apply_snapshot(model, names, false);
+                    // The order is already final. Details and previews for
+                    // the viewport must not wait for 256 network stat calls.
+                    let _ = thread.queue(move |mut model| {
+                        Self::apply_snapshot(model.as_mut(), snap, true);
+                        if model.as_ref().generation == gen {
+                            let (first, count) = model.as_ref().view_rows;
+                            model
+                                .as_mut()
+                                .want_rows(first, if count > 0 { count } else { 60 });
+                        }
                     });
+                    return;
                 }
                 let shown = visible_indices(&snap.entries, &filter_now, hidden_now);
                 let focus_row = focus_now
@@ -1922,6 +2071,9 @@ impl qobject::DirModel {
         let Some(dir) = snap.key.as_path() else {
             return Vec::new();
         };
+        if gust_core::stall::needs_probe(dir) {
+            return Vec::new();
+        }
         let shown = visible_indices(&snap.entries, filter, hidden);
         let window = first_window(&shown, None, FIRST_WINDOW);
         let names = window
@@ -5576,6 +5728,11 @@ impl qobject::DirModel {
         self.as_mut().set_status(QString::from(&status));
 
         if settled && snap.settled {
+            if !self.as_ref().finding {
+                if let Some(root) = self.as_ref().key.as_path() {
+                    crate::folder_jump::remember(root, &self.as_ref().all);
+                }
+            }
             self.as_mut().start_thumbnails();
             self.as_mut().start_cloud_notice();
             self.as_mut().ensure_watch();
@@ -5943,12 +6100,18 @@ impl qobject::DirModel {
     }
 
     fn want_rows(mut self: Pin<&mut Self>, first: i32, count: i32) {
-        self.as_mut().rust_mut().view_rows = (first, count);
-        // Rows that scrolled into view get their folder sizes now.
-        if self.as_ref().settled {
-            self.as_mut().start_dir_sizes();
-            self.as_mut().start_thumbnails();
+        if self.as_ref().view_rows != (first, count) {
+            self.as_mut().rust_mut().meta_cancel.cancel();
+            self.as_mut().rust_mut().meta_again = None;
         }
+        self.as_mut().rust_mut().view_rows = (first, count);
+        // Until publication, all/visible may still describe the previous
+        // folder. Never read those names against the new location.
+        if !self.as_ref().settled {
+            return;
+        }
+        self.as_mut().start_dir_sizes();
+        self.as_mut().start_thumbnails();
         let n = self.as_ref().visible.len();
         if n == 0 || count <= 0 {
             return;
@@ -5990,22 +6153,36 @@ impl qobject::DirModel {
             return;
         };
         let gen = self.as_ref().generation;
-        let cancel = self.as_ref().load_cancel.clone();
+        let cancel = CancelToken::new();
+        self.as_mut().rust_mut().meta_cancel = cancel.clone();
         self.as_mut().rust_mut().meta_busy = true;
-        std::thread::Builder::new()
+        let spawned = std::thread::Builder::new()
             .name("gust-meta".into())
             .spawn(move || {
                 let mut got = Vec::with_capacity(missing.len());
+                let mut last_patch = std::time::Instant::now();
                 for (i, name, kind) in missing {
                     if cancel.is_cancelled() {
                         break;
                     }
                     let meta = stat_entry(&dir, &name, kind);
                     got.push((i, name, meta));
+                    if got.len() >= 16
+                        || last_patch.elapsed() >= std::time::Duration::from_millis(100)
+                    {
+                        let patch = std::mem::take(&mut got);
+                        let _ = thread.queue(move |model| {
+                            Self::apply_row_meta(model, gen, lo, hi, patch, false)
+                        });
+                        last_patch = std::time::Instant::now();
+                    }
                 }
-                let _ = thread.queue(move |model| Self::apply_row_meta(model, gen, lo, hi, got));
-            })
-            .ok();
+                let _ =
+                    thread.queue(move |model| Self::apply_row_meta(model, gen, lo, hi, got, true));
+            });
+        if spawned.is_err() {
+            self.as_mut().rust_mut().meta_busy = false;
+        }
     }
 
     /// Install details read for rows that scrolled into view. GUI thread.
@@ -6019,11 +6196,18 @@ impl qobject::DirModel {
             std::ffi::OsString,
             Option<gust_core::entry::Metadata>,
         )>,
+        finished: bool,
     ) {
-        self.as_mut().rust_mut().meta_busy = false;
+        if finished {
+            self.as_mut().rust_mut().meta_busy = false;
+        }
         if gen != self.as_ref().generation {
             // The folder changed; that request described rows that are gone.
-            self.as_mut().rust_mut().meta_again = None;
+            if finished {
+                if let Some((first, count)) = self.as_mut().rust_mut().meta_again.take() {
+                    self.as_mut().want_rows(first, count);
+                }
+            }
             return;
         }
         {
@@ -6051,6 +6235,7 @@ impl qobject::DirModel {
             // come from the details just read.
             roles.append(ROLE_ICON_KEY);
             roles.append(ROLE_EMBLEMS);
+            roles.append(ROLE_TAGS);
             // Safety: GUI thread, inside a queued model callback.
             unsafe {
                 let top = self.as_ref().index(lo as i32, 0, &root);
@@ -6060,8 +6245,10 @@ impl qobject::DirModel {
         }
         let rev = self.as_ref().meta_rev.wrapping_add(1);
         self.as_mut().set_meta_rev(rev);
-        if let Some((f, c)) = self.as_mut().rust_mut().meta_again.take() {
-            self.as_mut().want_rows(f, c);
+        if finished {
+            if let Some((f, c)) = self.as_mut().rust_mut().meta_again.take() {
+                self.as_mut().want_rows(f, c);
+            }
         }
     }
 
@@ -6151,21 +6338,10 @@ impl qobject::DirModel {
         {
             return;
         }
-        // `is_dir()` is a stat, and a stat on a stalled mount blocks the UI
-        // thread with no way back. A killable child answers first.
-        {
-            use gust_core::stall::{
-                place_name_for, probe_if_risky, Reachability, DEFAULT_PROBE_MS,
-            };
-            let reach = probe_if_risky(&p, std::time::Duration::from_millis(DEFAULT_PROBE_MS));
-            if let Reachability::Stalled { .. } = reach {
-                let msg = reach.message(&place_name_for(&p));
-                self.as_mut().set_notice(QString::from(&msg));
-                self.as_mut().set_status(QString::from("Not responding"));
-                return;
-            }
-        }
-        if !p.is_dir() {
+        // The listing worker owns the remote probe and directory validation.
+        // Waiting for its child here still froze input for the whole timeout.
+        let remote = gust_core::stall::needs_probe(&p);
+        if !remote && !p.is_dir() {
             self.as_mut()
                 .set_status(QString::from(&format!("not a directory: {}", p.display())));
             return;
@@ -6186,6 +6362,18 @@ impl qobject::DirModel {
             r.type_ahead.clear();
             // A stale selection over a different directory is dangerous.
             r.selection.clear();
+        }
+        if remote {
+            // While the probe runs, old names must not be actionable against
+            // the newly selected remote path.
+            unsafe { self.as_mut().begin_reset_model() };
+            {
+                let mut r = self.as_mut().rust_mut();
+                r.all.clear();
+                r.visible.clear();
+            }
+            unsafe { self.as_mut().end_reset_model() };
+            self.as_mut().set_count(0);
         }
         self.load_current();
     }
@@ -8173,6 +8361,10 @@ impl qobject::DirModel {
         self.archive_work.is_running()
     }
 
+    fn permissions_running(&self) -> bool {
+        self.perms_work.is_running()
+    }
+
     fn work_on_place(&self, kind: QString, name: QString) -> QString {
         let name = name.to_string();
         // Each of these is a path computed from the runtime directory; none
@@ -8205,6 +8397,9 @@ impl qobject::DirModel {
         }
         if self.archive_work.touches(&mount) {
             return QString::from("archive");
+        }
+        if self.perms_work.touches(&mount) {
+            return QString::from("permissions");
         }
         QString::default()
     }
@@ -8421,28 +8616,39 @@ impl qobject::DirModel {
         QString::from(&self.selection.summary(bytes))
     }
 
-    /// The paths a command should act on.
-    ///
-    /// The selection when there is one, otherwise the cursor row. Resolved
-    /// ONCE, when the command is issued (DESIGN.md §4.1).
-    fn jump_prepare(self: Pin<&mut Self>) {
+    /// Prepare folder suggestions for this location without probing remotes.
+    fn jump_prepare(mut self: Pin<&mut Self>) {
+        self.as_ref().jump_cancel.cancel();
+        let Some(current) = self.as_ref().key.as_path().map(PathBuf::from) else {
+            return;
+        };
+        let gen = self.as_ref().generation;
+        let places = self.as_ref().places_json.to_string();
+        self.as_mut().rust_mut().jump_request += 1;
+        let request = self.as_ref().jump_request;
+        self.as_mut().rust_mut().jump_cands.clear();
         let Some(thread) = self.as_ref().qt_thread_handle() else {
             return;
         };
         std::thread::Builder::new()
             .name("gust-jump".into())
             .spawn(move || {
+                let context = crate::folder_jump::Context::load(&current, &places);
                 let bookmarks: Vec<PathBuf> = gust_core::bookmarks::default_path()
                     .map(|f| gust_core::bookmarks::load(&f))
                     .unwrap_or_default()
                     .into_iter()
                     .filter(|b| b.uri.is_none())
                     .map(|b| b.path)
-                    .filter(|p| !gust_core::stall::needs_probe(p))
                     .collect();
-                let cands = gust_core::jump::gather(&bookmarks);
+                let mut cands = gust_core::jump::gather_with(&bookmarks, &|p| context.admit(p));
+                context.augment(&mut cands);
                 let _ = thread.queue(move |mut model| {
+                    if model.as_ref().generation != gen || model.as_ref().jump_request != request {
+                        return;
+                    }
                     model.as_mut().rust_mut().jump_cands = cands;
+                    model.as_mut().rust_mut().jump_context = context;
                     let r = model.as_ref().jump_rev + 1;
                     model.as_mut().set_jump_rev(r);
                 });
@@ -8453,27 +8659,22 @@ impl qobject::DirModel {
     fn jump_query(&self, query: &QString, limit: i32) -> QString {
         let q = query.to_string();
         let home = std::env::var_os("HOME").map(PathBuf::from);
-        let rows: Vec<String> = gust_core::jump::rank(&q, &self.jump_cands, limit.max(0) as usize)
-            .into_iter()
-            .map(|c| {
-                let full = c.path.to_string_lossy().into_owned();
-                let shown = match home.as_ref().and_then(|h| c.path.strip_prefix(h).ok()) {
-                    Some(rest) if rest.as_os_str().is_empty() => "~".to_string(),
-                    Some(rest) => format!("~/{}", rest.to_string_lossy()),
-                    None => full.clone(),
-                };
-                format!(
-                    "{{\"path\":{},\"shown\":{},\"source\":{}}}",
-                    Self::json_str(&full),
-                    Self::json_str(&shown),
-                    Self::json_str(c.source.label())
-                )
-            })
-            .collect();
-        QString::from(&format!("[{}]", rows.join(",")))
+        QString::from(self.jump_context.query(
+            &q,
+            &self.jump_cands,
+            limit.max(0) as usize,
+            home.as_deref(),
+        ))
     }
 
-    fn jump_complete(self: Pin<&mut Self>, typed: &QString) {
+    fn jump_stop(self: Pin<&mut Self>) {
+        self.as_ref().jump_cancel.cancel();
+    }
+
+    fn jump_complete(mut self: Pin<&mut Self>, typed: &QString) {
+        self.as_ref().jump_cancel.cancel();
+        let cancel = CancelToken::new();
+        self.as_mut().rust_mut().jump_cancel = cancel.clone();
         let typed = typed.to_string();
         let Some(thread) = self.as_ref().qt_thread_handle() else {
             return;
@@ -8487,13 +8688,18 @@ impl qobject::DirModel {
                 let Some(dir) = gust_core::jump::completion_dir(&typed, &home) else {
                     return;
                 };
-                // A stalled network mount must not be listed from here.
-                if gust_core::stall::needs_probe(&dir) {
+                // Tab explicitly asks for this path. Probe on the worker so
+                // connected folders complete too, without blocking the UI.
+                if cancel.is_cancelled()
+                    || !gust_core::stall::probe_if_risky(&dir, std::time::Duration::from_secs(4))
+                        .is_responsive()
+                {
                     return;
                 }
                 let kids: Vec<String> = std::fs::read_dir(&dir)
                     .map(|rd| {
-                        rd.flatten()
+                        rd.take_while(|_| !cancel.is_cancelled())
+                            .flatten()
                             .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
                             .map(|e| e.file_name().to_string_lossy().into_owned())
                             .take(5000)
@@ -8502,6 +8708,9 @@ impl qobject::DirModel {
                     .unwrap_or_default();
                 let done = gust_core::jump::complete(&typed, &kids).unwrap_or_default();
                 let _ = thread.queue(move |mut model| {
+                    if cancel.is_cancelled() {
+                        return;
+                    }
                     model
                         .as_mut()
                         .set_jump_completion(QString::from(&format!("{typed}\n{done}")));
@@ -8511,12 +8720,26 @@ impl qobject::DirModel {
     }
 
     fn custom_targets(&self) -> Vec<gust_core::actions::Target> {
-        self.target_paths()
-            .into_iter()
-            .map(|p| {
-                let is_dir = p.symlink_metadata().map(|m| m.is_dir()).unwrap_or(false);
-                gust_core::actions::Target { path: p, is_dir }
+        // The palette asks this on every keystroke. Use the listing's kinds;
+        // statting the cursor here would freeze typing on a lost connection.
+        let target = |entry: &Entry| {
+            let path = self.key.join(&entry.name).as_path()?.to_path_buf();
+            Some(gust_core::actions::Target {
+                path,
+                is_dir: entry.kind == EntryKind::Dir,
             })
+        };
+        if self.selection.is_empty() {
+            return self
+                .entry_at(self.cursor)
+                .and_then(target)
+                .into_iter()
+                .collect();
+        }
+        self.visible_entries()
+            .into_iter()
+            .filter(|entry| self.selection.contains(&entry.name))
+            .filter_map(target)
             .collect()
     }
 
@@ -8667,67 +8890,30 @@ impl qobject::DirModel {
         )
     }
 
-    fn set_runnable(mut self: Pin<&mut Self>, on: bool) -> QString {
-        // The tracked file, checked here: never a folder (a-x would take its
-        // search permission), a link, or a file outside the folder shown.
+    fn set_runnable(self: Pin<&mut Self>, on: bool) -> QString {
+        // The model retains the original OS bytes across reloads and row shifts.
         let Some(path) = self.as_ref().preview_path() else {
             return QString::from("that file is no longer shown here");
         };
-        if !path.symlink_metadata().is_ok_and(|m| m.is_file()) {
-            return QString::from("only an ordinary file can run");
-        }
-        let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let spec = if on { "u+x" } else { "a-x" };
-        let spec = gust_ops::attrs::ModeSpec::parse(spec).expect("a fixed, valid mode spec");
-        let err = self.as_mut().apply_mode(vec![path], spec);
-        if !err.is_empty() {
-            return err;
-        }
-        self.as_mut().set_status(QString::from(&if on {
-            format!("{name} can run  ·  Ctrl+Z undoes")
-        } else {
-            format!("{name} can no longer run  ·  Ctrl+Z undoes")
-        }));
-        QString::default()
+        let spec = gust_ops::attrs::ModeSpec::change(
+            if on { 0o100 } else { 0 },
+            if on { 0 } else { 0o111 },
+        )
+        .expect("a fixed, valid mode spec");
+        self.start_mode_change(0, vec![path], spec, None)
     }
 
-    fn allow_and_run(mut self: Pin<&mut Self>, row: i32) -> QString {
-        use gust_core::open::ProgramState;
-        use std::os::unix::fs::MetadataExt;
+    fn allow_and_run(self: Pin<&mut Self>, row: i32) -> QString {
         if admin_session() {
             return QString::from(ADMIN_REFUSAL);
         }
-        // The row may move once the folder reloads after the chmod; the path
-        // and name are captured first and used for everything after it.
+        // Capture before the worker starts: its reload must never retarget Run.
         let Some(path) = self.as_ref().path_of_row(row) else {
             return QString::from("nothing to run here");
         };
         let name = self.as_ref().entry_name(row).to_string();
-        let Ok(md) = path.symlink_metadata() else {
-            return QString::from("that file is gone");
-        };
-        if gust_core::open::program_state(&path, md.mode(), md.is_file())
-            == ProgramState::NotAProgram
-        {
-            return QString::from("this file opens in an application — use Open instead of Run");
-        }
-        let spec = gust_ops::attrs::ModeSpec::parse("u+x").expect("a fixed, valid mode spec");
-        let err = self.as_mut().apply_mode(vec![path.clone()], spec);
-        if !err.is_empty() {
-            return err;
-        }
-        let argv = match path
-            .symlink_metadata()
-            .map_err(|_| "that file is gone".to_string())
-            .and_then(|md| gust_core::open::run_argv(&path, md.mode(), md.is_file()))
-        {
-            Ok(v) => v,
-            Err(e) => return QString::from(&e),
-        };
-        self.as_mut().spawn_run(argv, &name)
+        let spec = gust_ops::attrs::ModeSpec::change(0o100, 0).expect("a fixed, valid mode spec");
+        self.start_mode_change(0, vec![path.clone()], spec, Some((path, name)))
     }
 
     /// Start a checked Run argv, detached, and say so in the status line.
@@ -9284,25 +9470,9 @@ impl qobject::DirModel {
         }
     }
 
-    fn set_mode(self: Pin<&mut Self>, spec: &QString) -> QString {
-        let spec = match gust_ops::attrs::ModeSpec::parse(&spec.to_string()) {
-            Ok(s) => s,
-            Err(e) => return QString::from(&e),
-        };
-        let targets = self.as_ref().target_paths();
-        if targets.is_empty() {
-            return QString::from("nothing to change");
-        }
-        self.apply_mode(targets, spec)
-    }
-
-    /// Change modes, remember them for Ctrl+Z and report it in the status.
-    fn apply_mode(
-        mut self: Pin<&mut Self>,
-        targets: Vec<PathBuf>,
-        spec: gust_ops::attrs::ModeSpec,
-    ) -> QString {
-        let out = gust_ops::attrs::set_modes(&targets, spec);
+    /// Record a permissions outcome for Ctrl+Z and say what happened in the
+    /// status line. "" unless nothing changed because every item failed.
+    fn finish_mode_change(mut self: Pin<&mut Self>, out: gust_ops::attrs::ModeOutcome) -> QString {
         let n = out.changed.len();
         if n > 0 {
             let mut r = self.as_mut().rust_mut();
@@ -9338,22 +9508,160 @@ impl qobject::DirModel {
         QString::default()
     }
 
-    fn mode_text(&self) -> QString {
-        use std::os::unix::fs::MetadataExt;
-        let Some(p) = self.target_paths().into_iter().next() else {
-            return QString::default();
-        };
-        match p.symlink_metadata() {
-            Ok(m) => {
-                let mode = m.mode() & 0o777;
-                QString::from(&format!(
-                    "{}  {:03o}",
-                    gust_ops::attrs::rwx_string(mode),
-                    mode
-                ))
-            }
-            Err(_) => QString::default(),
+    fn permissions_load(mut self: Pin<&mut Self>) -> QString {
+        let paths = self.as_ref().target_paths();
+        if paths.is_empty() {
+            return QString::from("Nothing to change here");
         }
+        let Some(thread) = self.as_ref().qt_thread_handle() else {
+            return QString::from("Permissions cannot be read here");
+        };
+        let token = {
+            let mut r = self.as_mut().rust_mut();
+            r.perms_token = r.perms_token.wrapping_add(1).max(1);
+            r.perms_paths.clear();
+            r.perms_token
+        };
+        let here = self.as_ref().key.as_path().map(|p| p.to_path_buf());
+        let here_shown = self.as_ref().location_display().to_string();
+        let spawned = std::thread::Builder::new()
+            .name("gust-perms".into())
+            .spawn(move || {
+                let read = gust_ops::attrs::read_modes(&paths);
+                let passwd = std::fs::read_to_string("/etc/passwd").unwrap_or_default();
+                let group = std::fs::read_to_string("/etc/group").unwrap_or_default();
+                let viewer = gust_ops::attrs::viewer_ids();
+                let place = shared_parent_label(&read, here.as_deref(), &here_shown);
+                let json = permissions_json(token, &read, &place, viewer, &passwd, &group);
+                let kept: Vec<PathBuf> = read.targets.into_iter().map(|t| t.path).collect();
+                let _ = thread.queue(move |mut model| {
+                    if model.as_ref().perms_token != token {
+                        return;
+                    }
+                    model.as_mut().rust_mut().perms_paths = kept;
+                    model
+                        .as_mut()
+                        .permissions_ready(token, QString::from(&json.to_string()));
+                });
+            });
+        if spawned.is_err() {
+            return QString::from("Permissions could not be read just now");
+        }
+        QString::default()
+    }
+
+    fn permissions_apply(self: Pin<&mut Self>, token: i32, add: i32, remove: i32) -> QString {
+        if self.as_ref().permissions_running() {
+            return QString::from("Still applying the last change");
+        }
+        if token == 0 || token != self.as_ref().perms_token || self.as_ref().perms_paths.is_empty()
+        {
+            return QString::from("These permissions are out of date. Open Permissions again");
+        }
+        // A negative mask becomes a huge one here and is refused with it.
+        let spec = match gust_ops::attrs::ModeSpec::change(add as u32, remove as u32) {
+            Ok(s) => s,
+            Err(e) => return QString::from(&e),
+        };
+        let paths = self.as_ref().perms_paths.clone();
+        self.start_mode_change(token, paths, spec, None)
+    }
+
+    /// Editor and program controls share one worker and lifecycle claim. Token
+    /// zero belongs to program controls; editor loads always use positive tokens.
+    fn start_mode_change(
+        self: Pin<&mut Self>,
+        token: i32,
+        paths: Vec<PathBuf>,
+        spec: gust_ops::attrs::ModeSpec,
+        run_after: Option<(PathBuf, String)>,
+    ) -> QString {
+        if self.as_ref().permissions_running() {
+            return QString::from("Still applying the last change");
+        }
+        let Some(thread) = self.as_ref().qt_thread_handle() else {
+            return QString::from("Permissions cannot be changed here");
+        };
+        // Retain the claim through GUI-side undo, launch and completion handling.
+        let claim = self.as_ref().perms_work.claim(paths.clone());
+        let spawned = std::thread::Builder::new()
+            .name("gust-perms".into())
+            .spawn(move || {
+                let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    use std::os::unix::fs::MetadataExt;
+                    if token == 0 {
+                        let path = paths.first().ok_or("nothing to change")?;
+                        let md = path.symlink_metadata().map_err(|_| "that file is gone")?;
+                        if !md.is_file() {
+                            return Err("only an ordinary file can run");
+                        }
+                        if run_after.is_some()
+                            && gust_core::open::program_state(path, md.mode(), md.is_file())
+                                == gust_core::open::ProgramState::NotAProgram
+                        {
+                            return Err(
+                                "this file opens in an application — use Open instead of Run",
+                            );
+                        }
+                    }
+                    let out = gust_ops::attrs::set_modes(&paths, spec);
+                    // Check the captured path on the worker, only after a
+                    // successful change. Never resolve the old row again.
+                    let run = run_after
+                        .filter(|_| out.failed.is_empty())
+                        .map(|(path, name)| {
+                            let argv = path
+                                .symlink_metadata()
+                                .map_err(|_| "that file is gone".to_string())
+                                .and_then(|md| {
+                                    gust_core::open::run_argv(&path, md.mode(), md.is_file())
+                                });
+                            (argv, name)
+                        });
+                    Ok((out, run))
+                }));
+                let _ = thread.queue(move |mut model| {
+                    let (err, message, partial) = match out {
+                        Ok(Ok((out, run))) => {
+                            let partial = !out.failed.is_empty();
+                            let mut err = model.as_mut().finish_mode_change(out);
+                            // Publish the undo before launching the program.
+                            if err.is_empty() {
+                                if let Some((argv, name)) = run {
+                                    err = match argv {
+                                        Ok(argv) => model.as_mut().spawn_run(argv, &name),
+                                        Err(error) => QString::from(&error),
+                                    };
+                                }
+                            }
+                            let message = if err.is_empty() {
+                                model.as_ref().status().clone()
+                            } else {
+                                QString::default()
+                            };
+                            (err, message, partial)
+                        }
+                        Ok(Err(error)) => (QString::from(error), QString::default(), false),
+                        Err(_) => (
+                            QString::from(
+                                "The permissions change stopped unexpectedly. Some items may \
+                                 already have changed and Ctrl+Z cannot put them back; check \
+                                 them before trying again.",
+                            ),
+                            QString::default(),
+                            true,
+                        ),
+                    };
+                    model
+                        .as_mut()
+                        .permissions_done(token, err, message, partial);
+                    drop(claim);
+                });
+            });
+        if spawned.is_err() {
+            return QString::from("Permissions could not be changed just now");
+        }
+        QString::default()
     }
 
     fn target_paths(&self) -> Vec<PathBuf> {
@@ -9901,6 +10209,126 @@ mod delete_total_tests {
         assert_eq!(
             s(1, 500_000, 1024, false),
             "1 folder with at least 500,000 files · 1.0 KB"
+        );
+    }
+}
+
+#[cfg(test)]
+mod permissions_json_tests {
+    use super::{permissions_json, shared_parent_label};
+    use gust_ops::attrs::{ModeTarget, ModeTargets};
+    use std::path::{Path, PathBuf};
+
+    const PASSWD: &str = "root:x:0:0::/root:/bin/sh\nalice:x:1000:1000::/home/alice:/bin/sh\n";
+    const GROUP: &str = "root:x:0:\nalice:x:1000:\n";
+
+    fn target(path: &str, is_dir: bool, mode: u32, uid: u32, gid: u32) -> ModeTarget {
+        ModeTarget {
+            path: PathBuf::from(path),
+            is_dir,
+            mode,
+            uid,
+            gid,
+        }
+    }
+
+    #[test]
+    fn mixed_bits_are_counted_not_flattened() {
+        let read = ModeTargets {
+            targets: vec![
+                target("/d/a.sh", false, 0o4755, 1000, 1000),
+                target("/d/b.txt", false, 0o640, 1000, 1000),
+                target("/d/sub", true, 0o1750, 1000, 1000),
+            ],
+            links: 1,
+            missing: vec![],
+        };
+        let j = permissions_json(7, &read, "~/d", (1000, vec![1000]), PASSWD, GROUP);
+        assert_eq!(j["ok"], true);
+        assert_eq!(j["token"], 7);
+        assert_eq!(j["bits"], serde_json::json!([3, 3, 2, 3, 0, 2, 1, 0, 1]));
+        assert_eq!(
+            (j["files"].as_u64(), j["dirs"].as_u64()),
+            (Some(2), Some(1))
+        );
+        assert_eq!(j["links"], 1);
+        assert_eq!(j["special"], 2);
+        assert_eq!(
+            j["name"],
+            serde_json::Value::Null,
+            "several items have no single name"
+        );
+        assert_eq!(j["owner"]["name"], "alice");
+        assert_eq!(j["owner"]["you"], true);
+        assert_eq!(j["group"]["member"], true);
+        assert_eq!(j["owned"], 3);
+    }
+
+    #[test]
+    fn an_unlisted_owner_is_not_given_a_name() {
+        let read = ModeTargets {
+            targets: vec![target("/d/f", false, 0o644, 4242, 4343)],
+            ..Default::default()
+        };
+        let j = permissions_json(1, &read, "", (1000, vec![1000]), PASSWD, GROUP);
+        assert_eq!(j["name"], "f");
+        assert_eq!(j["owner"]["name"], serde_json::Value::Null);
+        assert_eq!(j["owner"]["you"], false);
+        assert_eq!(j["group"]["name"], serde_json::Value::Null);
+        assert_eq!(j["group"]["member"], false);
+        assert_eq!(j["owned"], 0, "only the owner or root may change it");
+    }
+
+    #[test]
+    fn different_owners_are_not_summarised_as_one() {
+        let read = ModeTargets {
+            targets: vec![
+                target("/d/a", false, 0o644, 1000, 1000),
+                target("/e/b", false, 0o644, 0, 0),
+            ],
+            ..Default::default()
+        };
+        let j = permissions_json(1, &read, "", (1000, vec![1000]), PASSWD, GROUP);
+        assert_eq!(j["owner"]["same"], false);
+        assert_eq!(j["owner"]["name"], serde_json::Value::Null);
+        assert_eq!(j["owned"], 1);
+        assert_eq!(
+            shared_parent_label(&read, Some(Path::new("/d")), "Docs"),
+            ""
+        );
+    }
+
+    #[test]
+    fn nothing_changeable_is_an_error_not_a_default() {
+        let links = ModeTargets {
+            links: 2,
+            ..Default::default()
+        };
+        let j = permissions_json(1, &links, "", (1000, vec![]), PASSWD, GROUP);
+        assert_eq!(j["ok"], false);
+        assert!(j["error"].as_str().unwrap().contains("link"));
+        let gone = ModeTargets {
+            missing: vec!["x: no longer there".into()],
+            ..Default::default()
+        };
+        let j = permissions_json(1, &gone, "", (1000, vec![]), PASSWD, GROUP);
+        assert_eq!(j["error"], "x: no longer there");
+        assert!(j.get("bits").is_none());
+    }
+
+    #[test]
+    fn the_shown_folder_is_named_as_shown() {
+        let read = ModeTargets {
+            targets: vec![target("/m/nas/a", false, 0o644, 1000, 1000)],
+            ..Default::default()
+        };
+        assert_eq!(
+            shared_parent_label(&read, Some(Path::new("/m/nas")), "nas"),
+            "nas"
+        );
+        assert_eq!(
+            shared_parent_label(&read, Some(Path::new("/x")), "x"),
+            "/m/nas"
         );
     }
 }

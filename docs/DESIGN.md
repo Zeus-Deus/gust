@@ -929,7 +929,10 @@ close`); the SHA-256 line appears only once asked for.
    `program_state_preview` and `peek_preview` act on that file; on any row
    reset the panel re-finds its row (`preview_row`) so `h`, pages and browsing
    follow the same file, and closes if it is gone. The bridge accepts only a
-   regular file directly in the folder shown, and Quick Look closes when its
+   regular file directly in the folder shown. Program switches use the same
+   claimed permissions worker as the editor; their `permissions_done` token
+   is 0 (editor tokens are positive). The panel refreshes facts after that
+   completion, not when the worker starts. Quick Look closes when its
    model changes (another tab). Run… never starts anything
    itself: it closes the preview and opens the Run prompt.
 
@@ -1862,7 +1865,10 @@ Copy stays to a title and one line ("Only run programs you trust.").
   Browsers save downloads without the x bit, so this is the usual state of
   a new AppImage. "Allow <name> to run?" → "Allow and run", which sets
   `u+x` on that path (undoable, Ctrl+Z) and then runs it, resolving the path
-  before the chmod so a reload cannot retarget the row.
+  before the chmod so a reload cannot retarget the row. This runs on the same
+  claimed permissions worker as the editor. The worker checks Run after the
+  change; the GUI records the undo before launching and reporting token 0.
+  A failed permission change never launches the program.
 - `NotAProgram`: content keeps opening in its application. An extensionless
   file without the bit is indistinguishable from data and is never offered
   the permission.
@@ -2152,7 +2158,15 @@ Quattro surfaces rather than like Nautilus.
   (two thirds of `animFast`), preserving distance during a free spin. Reversing
   discards the pending movement in the old direction. External scrolling,
   dragging, or layout changes stop the transition so navigation owns its
-  position. Touchpad/continuous gesture pixel deltas pass straight through;
+  position. Touchpad/continuous gesture pixel deltas use GTK's 2.5 surface-unit
+  conversion, matching the scrolling containers used by Omarchy's Nautilus.
+  Hyprland applies the user's scroll factor before delivery; Gust does not
+  read, invert, or override that setting. Gesture movement stays immediate,
+  including momentum events. Frames rounded to zero pixels never fall back
+  to angular wheel movement, and begin/end frames stop pending wheel travel.
+  Horizontal-only gestures do not move the vertical list. The conversion follows
+  GTK's `MAGIC_SCROLL_FACTOR` in `gtk/gtkscrolledwindow.c` and its Wayland surface
+  events (`gdk/wayland/gdkseat-wayland.c`), as of GTK 4.24.1;
   mouse wheels use angular rotation even when Wayland also supplies pixels
   and Qt labels the device as a touchpad. Gesture phases distinguish the two.
   Modified wheels are left alone. No additional wheel inertia or acceleration
@@ -2170,6 +2184,23 @@ Quattro surfaces rather than like Nautilus.
   remembered per folder (D31).
 
 ## 6.23 Personal places
+
+### Folder suggestions in `:` and Ctrl+L
+
+Folder lookup ranks the active computer/connection before other places, then
+uses the existing fuzzy name/source ranking within each group. Rows identify
+their computer or connection; remote display paths are relative to its mount.
+The navigation payload remains the actual path, never the displayed label.
+Candidates include bookmarks, recent/zoxide folders, connected mount roots and
+a bounded process-local cache of folders already listed. Opening the palette
+does not connect, stat a remote candidate or recursively crawl any connection.
+Local candidate validation stays on a worker; `jump::gather_with` accepts the
+caller's admission predicate so mounted remote candidates need no stat.
+Results from a previous folder or superseded preparation are discarded. Tab
+on a suggestion enters its actual path; explicit completion on a remote path
+uses a worker-side responsiveness probe. No folder cache is written to disk.
+
+### Home destinations
 
 Home and its sidebar destinations come from the process's configured `HOME`,
 not from the folder passed on the command line or a remote mount path. The
@@ -2233,6 +2264,70 @@ Gust writes the list back.
 - A copy carries its tags (on the staged file, before it has its name),
   same disk or another; a destination that cannot hold them still gets the
   bytes and says nothing.
+
+## 6.26 Permissions editor
+
+Permissions… opens a native card, not a typed mode. Three audience rows
+(owner, group, other users) by three columns: Read / Edit / Run for files,
+List files / Add or remove / Access for folders, Read / Change / Run / Access
+for files and folders together. No octal or symbolic text is shown or
+accepted.
+
+Bridge contract (APP over `gust_ops::attrs`):
+
+- `permissions_load() -> QString` captures `target_paths()` in memory,
+  starts a `gust-perms` worker and returns "" or why not. The worker reads
+  each target with `attrs::read_modes` (no-follow `lstat`; links and vanished
+  names are counted, never followed), plus `/etc/passwd`, `/etc/group`, the
+  effective uid and the process's groups. It emits
+  `permissions_ready(token, json)`; a newer load supersedes an older one.
+- The JSON is facts only. When nothing can be changed it is
+  `{ok: false, token, error}`. Otherwise `ok: true`, `token`, `total`
+  (targets read), `files`, `dirs`, `links` (left out), `missing` (left out,
+  with why), `name` (single target only, else null), `place` (the shared
+  folder as shown, else ""), `owner {same, name, you}`,
+  `group {same, name, member}`, `owned` (targets the viewer may change),
+  `special` (targets with setuid/setgid/sticky) and `bits`: nine counts of
+  targets that have each rwx bit, owner-read first.
+- Names come only from the user databases. A uid or gid they do not list is
+  `name: null`, never invented: the owner row then reads "Owner · An account
+  not named on this computer" and the group row "A group not named on this
+  computer". Owners or groups that differ across the targets read "Each
+  item's own owner" / "Each item's own group"; the viewer's own items read
+  "You", with the account name when it is listed.
+- `permissions_apply(token, add, remove) -> QString` applies
+  `ModeSpec::Change { add, remove }` to exactly the paths captured for that
+  token, on a worker; "" when started, else why not (out of date, already
+  applying, bad masks). Only bits the user explicitly changed are in the
+  masks, so each file keeps every bit nobody touched (a mixed bit stays
+  mixed) and its special bits. Masks outside 0o777 or overlapping refuse.
+  The result arrives as `permissions_done(token, error, message, partial)`:
+  `error` is why nothing changed (every target refused), else ""; `message`
+  is the status-line sentence ("Permissions changed on N items … · Ctrl+Z
+  puts them back"); `partial` is true when some targets were refused. It
+  uses the existing `set_modes` outcome, `last_modes` undo (dev+inode+mtime
+  and mode checks) and Ctrl+Z wording. A worker panic reports an `error`
+  saying some items may already have changed without an undo.
+- `permissions_running() -> bool` is true from an accepted apply until its
+  outcome, `last_modes` undo and `permissions_done` have all been handled on
+  the GUI thread; a failed worker start releases the claim. `set_modes` has no
+  cancel, so closing the window or the tab that started it waits, like
+  archive work ("Close when finished"); only the existing explicit "Close
+  without waiting" may quit sooner, and it says permissions may be left
+  part-way with no undo. `work_on_place` answers `"permissions"` while the
+  change touches that place, and disconnect is refused until it finishes.
+
+Card behaviour: a mixed bit shows a partial checkbox and cycles mixed → on
+→ off → mixed. Apply changes is disabled until something differs; Escape and
+Cancel close without writing. A folder change applies to that folder only,
+never its contents. Links are left out and said to be; targets owned by
+someone else are listed as ones the system will refuse; a load failure or
+an all-refused apply stays in the card as text, recoverable by Cancel. On
+success the card closes and the hint strip shows `message` ahead of the
+selection count it is about, until the selection, the message or the
+folder changes; a partial result is an alert. In a small or zoomed window
+the choices scroll and their columns narrow and wrap; Cancel and Apply
+stay pinned below them, and the focused box is scrolled into view.
 
 ## 7. Undo journal
 
@@ -2358,7 +2453,20 @@ first, rather than a fixed prefix of the directory. Navigation and live changes
 cancel the previous pass; queued results also check cancellation before publish.
 An unchanged viewport does not restart its pass. Live changes revalidate all
 requested source versions on a worker while retaining unchanged displayed URLs.
-Cache hits are published before any missing thumbnail is generated. Each pass
+Local cache hits are published before any missing thumbnail is generated.
+Typed remote navigation clears the old rows and delegates reachability and
+directory validation to the listing worker, without a duplicate GUI-thread
+probe. A failed request remains an explicit location/error with Back available;
+cancelled or superseded probes cannot overwrite the new location's feedback.
+Remote/FUSE name and kind listings settle without the initial 256-row metadata
+or thumbnail-cache scan; their visible rows request details and previews
+independently. Metadata patches stream in bounded batches, and scrolling or
+navigation cancels obsolete metadata work before admitting the newest viewport.
+Remote thumbnail passes check and render small batches in viewport order, so
+the first image does not wait for source-version checks for the entire margin.
+Every cache hit still validates its source version; no stale listing or image
+becomes authority for file operations. Size/date sorts still require metadata
+for the full listing before settling. Each pass
 has at most two render workers; a process-wide admission gate permits at most
 two grid-thumbnail helpers across all models. Cancellation kills/reaps only the
 request's owned helper group before releasing admission. Each model admits only

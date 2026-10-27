@@ -449,6 +449,88 @@ pub fn undo_modes(changes: &[ModeChanged]) -> (usize, Vec<String>) {
     (back, refused)
 }
 
+impl ModeSpec {
+    /// Give exactly `add` and take away exactly `remove`, as the permissions
+    /// card asks (DESIGN §6.26). A bit in neither mask is left as each file
+    /// has it, so a mixed selection is never flattened to one mode.
+    pub fn change(add: u32, remove: u32) -> Result<ModeSpec, String> {
+        if (add | remove) & !RWX != 0 {
+            return Err("setuid, setgid and sticky are not changed from here".into());
+        }
+        if add & remove != 0 {
+            return Err("a permission cannot be given and taken away at once".into());
+        }
+        if add | remove == 0 {
+            return Err("nothing to change".into());
+        }
+        Ok(ModeSpec::Change { add, remove })
+    }
+}
+
+/// One item as the permissions card shows it, read without following links.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModeTarget {
+    pub path: PathBuf,
+    pub is_dir: bool,
+    /// Permission and special bits (0o7777).
+    pub mode: u32,
+    pub uid: u32,
+    pub gid: u32,
+}
+
+impl ModeTarget {
+    /// Can `euid` change this mode? The owner can, and root can.
+    pub fn changeable_by(&self, euid: u32) -> bool {
+        euid == 0 || self.uid == euid
+    }
+}
+
+/// What `read_modes` found: the items that have permissions of their own,
+/// the links left out, and the names that could not be read.
+#[derive(Debug, Default, Clone)]
+pub struct ModeTargets {
+    pub targets: Vec<ModeTarget>,
+    pub links: usize,
+    pub missing: Vec<String>,
+}
+
+/// Read each path's mode and owner for the permissions card. Blocking: call
+/// it on a worker. A link is counted and left out, exactly as `set_modes`
+/// would skip it; a name that cannot be read says why.
+pub fn read_modes(paths: &[PathBuf]) -> ModeTargets {
+    let mut out = ModeTargets::default();
+    for p in paths {
+        match p.symlink_metadata() {
+            Ok(md) if md.file_type().is_symlink() => out.links += 1,
+            Ok(md) => out.targets.push(ModeTarget {
+                path: p.clone(),
+                is_dir: md.is_dir(),
+                mode: md.mode() & 0o7777,
+                uid: md.uid(),
+                gid: md.gid(),
+            }),
+            Err(e) => {
+                let name = p
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                out.missing
+                    .push(format!("{name}: {}", crate::engine::plain_io_message(&e)));
+            }
+        }
+    }
+    out
+}
+
+/// The effective uid and every group this process acts with.
+pub fn viewer_ids() -> (u32, Vec<u32>) {
+    let mut groups: Vec<u32> = rustix::process::getgroups()
+        .map(|g| g.into_iter().map(|g| g.as_raw()).collect())
+        .unwrap_or_default();
+    groups.push(rustix::process::getegid().as_raw());
+    (rustix::process::geteuid().as_raw(), groups)
+}
+
 // ------------------------------------------------------------- ownership
 
 /// A requested owner change: `user`, `user:group` or `:group`, by name or
@@ -979,6 +1061,82 @@ mod tests {
         assert_eq!(back, 0);
         assert!(refused[0].contains("changed again"), "{refused:?}");
         assert_eq!(mode(&a), 0o640);
+        fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn a_card_change_touches_only_the_bits_it_names() {
+        // Group write given, other read taken away; nothing else decided.
+        let spec = ModeSpec::change(0o020, 0o004).unwrap();
+        assert_eq!(spec.apply(0o644), 0o660);
+        // A mixed owner-execute bit stays as each file had it.
+        assert_eq!(spec.apply(0o755), 0o771);
+        // Special bits survive.
+        assert_eq!(spec.apply(0o4755), 0o4771);
+        assert_eq!(spec.apply(0o1777), 0o1773);
+        assert!(ModeSpec::change(0o4000, 0).is_err(), "setuid refused");
+        assert!(ModeSpec::change(0, 0o1000).is_err(), "sticky refused");
+        assert!(
+            ModeSpec::change(0o100, 0o100).is_err(),
+            "contradiction refused"
+        );
+        assert!(ModeSpec::change(0, 0).is_err(), "no change refused");
+    }
+
+    #[test]
+    fn a_mixed_selection_keeps_its_own_modes_and_undoes() {
+        let d = tmp("mixed");
+        let a = d.join("a.sh");
+        let b = d.join("b.txt");
+        let dir = d.join("folder");
+        fs::write(&a, b"#!/bin/sh\n").unwrap();
+        fs::write(&b, b"text").unwrap();
+        fs::create_dir(&dir).unwrap();
+        fs::write(dir.join("inside"), b"x").unwrap();
+        fs::set_permissions(&a, fs::Permissions::from_mode(0o2754)).unwrap();
+        fs::set_permissions(&b, fs::Permissions::from_mode(0o640)).unwrap();
+        fs::set_permissions(dir.join("inside"), fs::Permissions::from_mode(0o600)).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o1750)).unwrap();
+        // Give group write; owner execute was mixed and is not named.
+        let spec = ModeSpec::change(0o020, 0).unwrap();
+        let out = set_modes(&[a.clone(), b.clone(), dir.clone()], spec);
+        assert_eq!(out.changed.len(), 3, "{:?}", out.failed);
+        assert_eq!(mode(&a), 0o2774, "setgid and owner execute kept");
+        assert_eq!(mode(&b), 0o660, "no execute appears");
+        assert_eq!(mode(&dir), 0o1770, "sticky kept");
+        assert_eq!(
+            mode(&dir.join("inside")),
+            0o600,
+            "folder contents untouched"
+        );
+        let (back, refused) = undo_modes(&out.changed);
+        assert_eq!((back, refused.len()), (3, 0));
+        assert_eq!(mode(&a), 0o2754);
+        assert_eq!(mode(&b), 0o640);
+        assert_eq!(mode(&dir), 0o1750);
+        fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn read_modes_leaves_links_out_and_says_what_is_gone() {
+        let d = tmp("read");
+        let f = d.join("f");
+        let sub = d.join("sub");
+        fs::write(&f, b"x").unwrap();
+        fs::set_permissions(&f, fs::Permissions::from_mode(0o4750)).unwrap();
+        fs::create_dir(&sub).unwrap();
+        std::os::unix::fs::symlink(&f, d.join("link")).unwrap();
+        let got = read_modes(&[f.clone(), sub.clone(), d.join("link"), d.join("gone")]);
+        assert_eq!(got.targets.len(), 2);
+        assert_eq!(got.targets[0].mode, 0o4750);
+        assert!(!got.targets[0].is_dir);
+        assert!(got.targets[1].is_dir);
+        assert_eq!(got.links, 1);
+        assert_eq!(got.missing.len(), 1);
+        assert!(got.missing[0].starts_with("gone: "), "{:?}", got.missing);
+        let (euid, _) = viewer_ids();
+        assert!(got.targets[0].changeable_by(euid));
+        assert!(got.targets[0].changeable_by(0));
         fs::remove_dir_all(&d).ok();
     }
 

@@ -233,12 +233,18 @@ pub fn completion_dir(typed: &str, home: &Path) -> Option<PathBuf> {
 /// Runs zoxide with a 2 s limit; a missing or slow zoxide just contributes
 /// nothing. Worker thread only.
 pub fn gather(bookmarks: &[PathBuf]) -> Vec<Candidate> {
+    gather_with(bookmarks, &|p| !crate::stall::needs_probe(p) && p.is_dir())
+}
+
+/// Gather with worker-owned candidate admission. The caller may admit known
+/// mounted paths without touching a remote filesystem just to rank a row.
+pub fn gather_with(bookmarks: &[PathBuf], admit: &dyn Fn(&Path) -> bool) -> Vec<Candidate> {
     let recent: Vec<PathBuf> = crate::recent::load(300)
         .into_iter()
         .map(|r| r.path)
         .collect();
     let zoxide = run_zoxide().unwrap_or_default();
-    merge(bookmarks, &zoxide, &recent, &|p| p.is_dir())
+    merge(bookmarks, &zoxide, &recent, admit)
 }
 
 fn run_zoxide() -> Option<Vec<PathBuf>> {

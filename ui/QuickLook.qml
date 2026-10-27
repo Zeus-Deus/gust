@@ -47,6 +47,11 @@ Item {
         function onModelReset() { root.followFile() }
         function onRowsInserted() { root.followFile() }
         function onRowsRemoved() { root.followFile() }
+        function onPermissions_done(token, error, message, partial) {
+            if (token !== 0 || !root.open) return
+            root.programError = error
+            root.refreshProgramFacts()
+        }
     }
     function followFile() {
         if (!root.open || !root.model) return
@@ -79,7 +84,10 @@ Item {
     function setRunnable(on) {
         if (!root.open || !root.model) return
         root.programError = root.model.set_runnable(on)
-        // The mode line and the Permissions fact change with it.
+    }
+    function refreshProgramFacts() {
+        if (!root.open || !root.model) return
+        // The worker has finished; facts now describe the resulting mode.
         try {
             const fresh = JSON.parse(root.model.peek_preview())
             if (fresh.ok) root.info = fresh
