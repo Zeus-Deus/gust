@@ -26,32 +26,32 @@ Item {
         { key: "key_preset", title: qsTr("Keys"),
           options: [["standard", qsTr("Standard")], ["vim", qsTr("Vim")],
                     ["mac", qsTr("Mac")], ["windows", qsTr("Windows")]],
-          note: qsTr("Press ? for every key in the preset you pick") },
+          note: qsTr("? shows every key") },
         { key: "density", title: qsTr("Density"),
           options: [["compact", qsTr("Compact")], ["normal", qsTr("Normal")], ["roomy", qsTr("Roomy")]],
           note: qsTr("Row height and spacing") },
         { key: "show_hidden", title: qsTr("Hidden files"),
           options: [["false", qsTr("Hide")], ["true", qsTr("Show")]],
-          note: qsTr("When a folder opens. Ctrl+H toggles per tab") },
+          note: qsTr("Ctrl+H per tab") },
         { key: "sidebar", title: qsTr("Sidebar"),
           options: [["true", qsTr("Show")], ["false", qsTr("Hide")]],
           note: "" },
         { key: "restore_tabs", title: qsTr("Tabs at start"),
           options: [["false", qsTr("Fresh")], ["true", qsTr("Reopen last")]],
-          note: qsTr("When Gust starts without a folder") },
+          note: "" },
         { key: "renderer", title: qsTr("Drawing"),
           options: [["auto", qsTr("Automatic")], ["software", qsTr("Software")], ["gpu", qsTr("GPU")]],
           note: qsTr("Next start. Now: ") + (root.s.renderer_now === "software" ? qsTr("software") : qsTr("GPU")) },
         { key: "default", title: qsTr("Default app"),
           options: [["true", qsTr("Use Gust")], ["false", qsTr("Previous app")]],
-          note: qsTr("Opening folders and \"Show in folder\" from other apps") },
+          note: qsTr("For folders opened by other apps") },
         { key: "file_dialogs", title: qsTr("Open/Save"),
           options: [["true", qsTr("Gust")], ["false", qsTr("Previous")]],
           note: qsTr("Other apps' file dialogs") },
         { key: "omarchy_keys", title: qsTr("Super+Shift+F"),
           options: [["true", qsTr("Gust")], ["false", qsTr("Omarchy default")]],
-          note: root.s.is_omarchy ? qsTr("Edits ~/.config/hypr/bindings.lua, reversibly")
-                                  : qsTr("Needs Omarchy's ~/.config/hypr/bindings.lua") }
+          note: root.s.is_omarchy ? qsTr("Reversible")
+                                  : qsTr("Needs Omarchy") }
     ]
 
     function show(json) {
@@ -220,7 +220,7 @@ Item {
                 textFormat: Text.PlainText
                 width: col.width
                 horizontalAlignment: Text.AlignRight
-                text: qsTr("↑↓ choose · ←→ change · Escape to close")
+                text: qsTr("↑↓ choose · ←→ change · Esc close")
                 color: Tokens.foregroundDim
                 font.family: Tokens.fontFamily
                 font.pixelSize: Tokens.fontCaption

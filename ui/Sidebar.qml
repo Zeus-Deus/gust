@@ -561,7 +561,7 @@ Rectangle {
             leftPadding: Tokens.rowPaddingX
             rightPadding: Tokens.rowPaddingX
             width: column.width
-            text: qsTr("Nothing connected. Connect… lists your computers, Tailscale devices and cloud storage.")
+            text: qsTr("Nothing connected")
             color: Tokens.foregroundDim
             font.family: Tokens.fontFamily
             font.pixelSize: Tokens.fontCaption

@@ -76,7 +76,7 @@ def main():
     text = (source / "ui/Main.qml").read_text()
     confirm = text[text.index("        id: confirm\n"):]
     functions = [block(text, "function " + n + "(") for n in
-                 ["busyModels", "runningJobModels", "closeTab", "placeWorkBlocker", "refuseBusyDisconnect"]]
+                 ["busyModels", "runningJobModels", "closeTab", "placeWorkBlocker", "refuseBusyDisconnect", "askRun"]]
     timers = [block(text, "Timer {\n        id: " + n + "\n") for n in ["closeAfterCancel", "closeTabAfterCancel"]]
     fixture = (source / "ui/tests/tst_work_guard.qml.in").read_text()
     fixture = replace_once(fixture, "@CLOSING_HANDLER@", body(text, "onClosing: (close) =>"))

@@ -130,7 +130,7 @@ Rectangle {
                 // files. A card that still said "Copying…" invited a second
                 // Cancel; one that said "Cancelled" would be a lie.
                 text: !root.active ? ""
-                      : root.stopping ? qsTr("Stop requested — the current read or write must return before the transfer can stop")
+                      : root.stopping ? qsTr("Waiting for the drive to answer…")
                       : root.job.message
                 color: Tokens.foreground
                 font.family: Tokens.fontFamily

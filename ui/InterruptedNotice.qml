@@ -16,8 +16,7 @@ Rectangle {
     property var items: []
     /// What to do next. No claim about cleanup: the journal records what
     /// was attempted, not what is left at the destination.
-    readonly property string guidance: qsTr("It may have left temporary files, and some items may already be complete "
-                                            + "at the destination. Check the destination before running it again.")
+    readonly property string guidance: qsTr("Some items may already be complete and temporary files may remain. Check the destination before running it again.")
     readonly property bool shown: items.length > 0
 
     signal openDestination(string path)
@@ -42,8 +41,8 @@ Rectangle {
         Text {
             textFormat: Text.PlainText
             text: root.items.length === 1
-                  ? qsTr("Gust closed unexpectedly while it was working")
-                  : qsTr("Gust closed unexpectedly while %1 operations were running").arg(root.items.length)
+                  ? qsTr("Gust closed during an operation")
+                  : qsTr("Gust closed during %1 operations").arg(root.items.length)
             color: Tokens.warn
             font.family: Tokens.fontFamily
             font.pixelSize: Tokens.fontBody

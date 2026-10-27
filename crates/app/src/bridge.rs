@@ -466,6 +466,9 @@ pub mod qobject {
         /// (DESIGN §6.9).
         #[qinvokable]
         fn peek_row(self: &DirModel, row: i32) -> QString;
+        /// peek_row for the tracked file.
+        #[qinvokable]
+        fn peek_preview(self: &DirModel) -> QString;
         /// Adjacent previewable file in the visible order, without filesystem I/O.
         #[qinvokable]
         fn preview_neighbor(self: &DirModel, row: i32, delta: i32) -> i32;
@@ -501,13 +504,34 @@ pub mod qobject {
         /// "" or why not.
         #[qinvokable]
         fn run_custom_action(self: Pin<&mut DirModel>, id: &QString) -> QString;
-        /// Can the row be run? "" when yes, otherwise why not.
+        /// Capture the Run prompt from cached metadata. JSON {token,name,state}
+        /// or {error}; the model retains the byte-exact target, never QML.
         #[qinvokable]
-        fn run_check(self: &DirModel, row: i32) -> QString;
-        /// Run the row's executable in the default terminal. Only ever called
-        /// after the user confirmed a dialog naming the file. "" or why not.
+        fn run_prepare(self: Pin<&mut DirModel>, row: i32) -> QString;
+        /// Consume the original prompt's target, checking it on the worker.
         #[qinvokable]
-        fn run_row(self: Pin<&mut DirModel>, row: i32) -> QString;
+        fn run_confirm(self: Pin<&mut DirModel>, token: i32, allow: bool) -> QString;
+        #[qinvokable]
+        fn run_discard(self: Pin<&mut DirModel>, token: i32);
+        /// The row as a program: "run" (Run… can start it), "allow" (a
+        /// program not allowed to run yet) or "" (content; it opens).
+        #[qinvokable]
+        fn program_state(self: &DirModel, row: i32) -> QString;
+        /// Quick Look opened on `row` (or closed, -1): remember that file
+        /// byte-exact, so the preview's actions follow it, not the row.
+        #[qinvokable]
+        fn preview_track(self: Pin<&mut DirModel>, row: i32);
+        /// The tracked file's row now, or -1 if it is no longer listed.
+        #[qinvokable]
+        fn preview_row(self: &DirModel) -> i32;
+        /// program_state for the tracked file.
+        #[qinvokable]
+        fn program_state_preview(self: &DirModel) -> QString;
+        /// Allow (u+x) or stop (a-x) the tracked file running as a program,
+        /// never the selection. Only a regular file directly in this folder.
+        /// Ctrl+Z puts the mode back. "" or why not.
+        #[qinvokable]
+        fn set_runnable(self: Pin<&mut DirModel>, on: bool) -> QString;
         #[qinvokable]
         fn make_link(self: Pin<&mut DirModel>) -> QString;
         /// Read the targets' permissions on a worker for the permissions
@@ -1027,6 +1051,11 @@ pub struct DirModelRust {
     columns_gen: u64,
     peek_visual: QString,
     peek_gen: u64,
+    /// The file Quick Look shows, byte-exact. Rows move under an open
+    /// preview (a chmod reloads the folder); this does not.
+    preview_target: Option<std::path::PathBuf>,
+    run_token: i32,
+    pending_run: Option<(gust_core::open::RunTarget, String)>,
     /// The sound Quick Look is playing, if any. Dropping it stops it.
     peek_player: Option<gust_thumbs::audio::Player>,
     delete_total: QString,
@@ -1361,6 +1390,9 @@ impl DirModelRust {
             columns_gen: 0,
             peek_visual: QString::from(""),
             peek_gen: 0,
+            preview_target: None,
+            run_token: 0,
+            pending_run: None,
             peek_player: None,
             delete_total: QString::from(""),
             delete_gen: 0,
@@ -1732,7 +1764,9 @@ impl qobject::DirModel {
                 let outcome = match run_place_work(work) {
                     Ok(outcome) => outcome,
                     Err(_) => {
-                        let message = "The connection worker stopped unexpectedly. Its outcome is unknown. Choose Check again before retrying.".to_string();
+                        let message =
+                            "The connection stopped unexpectedly; its outcome is unknown. Check again before retrying."
+                                .to_string();
                         if op == "phone-open" {
                             Self::set_phone_state(
                                 &name,
@@ -2408,6 +2442,18 @@ impl qobject::DirModel {
             .ok();
     }
 
+    /// Will `visual_json` have something for this name? Name-only, so Quick
+    /// Look can size itself before the worker answers.
+    fn expects_visual(name: &std::ffi::OsStr) -> bool {
+        use gust_core::mime::{category_for_name, Category};
+        let lower = name.to_string_lossy().to_lowercase();
+        matches!(category_for_name(name), Category::Pdf | Category::Audio)
+            || lower.ends_with(".md")
+            || lower.ends_with(".markdown")
+            || gust_core::mime::thumbnail_mime(name).is_some()
+            || gust_ops::archive::io::looks_like_archive(&lower)
+    }
+
     /// The visual for one file, as JSON. Runs on a worker.
     fn visual_json(path: &std::path::Path, name: &std::ffi::OsStr, page: u32) -> Option<String> {
         use gust_core::mime::{category_for_name, Category};
@@ -2690,9 +2736,9 @@ impl qobject::DirModel {
                 self.as_mut().reload();
                 QString::default()
             }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => QString::from(
-                "Something with that name is there now. Rename or move it first; nothing was overwritten.",
-            ),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                QString::from("Something with that name is there now; nothing was overwritten.")
+            }
             Err(e) => QString::from(&e.to_string()),
         }
     }
@@ -3365,7 +3411,7 @@ impl qobject::DirModel {
             return QString::from("That item is no longer there.");
         };
         let Some(mime) = Self::mime_of(&path) else {
-            return QString::from("Gust could not tell what kind of file that is.");
+            return QString::from("Unknown file type.");
         };
         let wanted = id.to_string();
 
@@ -3947,9 +3993,7 @@ impl qobject::DirModel {
                     return PlaceOutcome::Failed("That device is no longer there.".into());
                 };
                 if found.is_locked() {
-                    return PlaceOutcome::Failed(
-                        "That drive is encrypted. Click it to type its passphrase.".into(),
-                    );
+                    return PlaceOutcome::Failed("Encrypted — click it to unlock".into());
                 }
                 Self::mount_and_open(found.mount_target())
             },
@@ -3987,9 +4031,7 @@ impl qobject::DirModel {
                 }
                 // Mounted, but the path could not be read back: say so rather
                 // than claiming to have gone somewhere.
-                PlaceOutcome::Failed(
-                    "Mounted, but Gust could not tell where. Check the sidebar.".into(),
-                )
+                PlaceOutcome::Failed("Mounted, but its folder is unknown".into())
             }
         }
     }
@@ -4060,10 +4102,11 @@ impl qobject::DirModel {
                     }
                     match unlocked_as(&String::from_utf8_lossy(&out.stdout)) {
                         Some(c) => c,
-                        None => return PlaceOutcome::Failed(
-                            "Unlocked, but Gust could not tell where. Click the drive to open it."
-                                .into(),
-                        ),
+                        None => {
+                            return PlaceOutcome::Failed(
+                                "Unlocked — click the drive to open it".into(),
+                            )
+                        }
                     }
                 };
                 Self::mount_and_open(&cleartext)
@@ -4307,18 +4350,24 @@ impl qobject::DirModel {
         };
         let rc = Self::cloud_rc_addr(&name);
         let label = name.clone();
-        self.place_op("cloud-disconnect", name.clone(), format!("Disconnecting {name}…"), move || {
-            if !gust_remote::mount::is_mounted(&mp) {
-                return PlaceOutcome::Failed(format!("{name} is not connected."));
-            }
-            // Never lazy-unmount a dirty mount (plan §9). Ask first, and say
-            // how much work is outstanding.
-            //
-            // A query that did not answer is NOT an empty queue: unknown
-            // state is refused, not assumed safe (gust_remote::disconnect).
-            if !force {
-                let report =
-                    match gust_remote::cloud::vfs_pending(&rc, std::time::Duration::from_secs(3)) {
+        self.place_op(
+            "cloud-disconnect",
+            name.clone(),
+            format!("Disconnecting {name}…"),
+            move || {
+                if !gust_remote::mount::is_mounted(&mp) {
+                    return PlaceOutcome::Failed(format!("{name} is not connected."));
+                }
+                // Never lazy-unmount a dirty mount (plan §9). Ask first, and say
+                // how much work is outstanding.
+                //
+                // A query that did not answer is NOT an empty queue: unknown
+                // state is refused, not assumed safe (gust_remote::disconnect).
+                if !force {
+                    let report = match gust_remote::cloud::vfs_pending(
+                        &rc,
+                        std::time::Duration::from_secs(3),
+                    ) {
                         Ok(p) => gust_remote::disconnect::PendingReport::Known {
                             queued: p.queued,
                             in_progress: p.in_progress,
@@ -4326,51 +4375,69 @@ impl qobject::DirModel {
                         },
                         Err(e) => gust_remote::disconnect::PendingReport::Unknown(e.message()),
                     };
-                let guard = Self::cloud_tracker().lock();
-                let tracker = guard.as_ref().ok().map(|g| &**g);
-                match gust_remote::disconnect::verdict_for(&name, &report, tracker, Some(&mp), false) {
-                    gust_remote::disconnect::DisconnectVerdict::Safe => {}
-                    // Answerable: the user may choose to go ahead.
-                    gust_remote::disconnect::DisconnectVerdict::Ask(msg) => {
-                        return PlaceOutcome::Failed(format!("ASK:{msg}"));
-                    }
-                    // Not a yes/no question: offering a button that can only
-                    // lose data is worse than refusing (DESIGN §6.8).
-                    gust_remote::disconnect::DisconnectVerdict::Refuse(msg) => {
-                        return PlaceOutcome::Failed(msg);
+                    let guard = Self::cloud_tracker().lock();
+                    let tracker = guard.as_ref().ok().map(|g| &**g);
+                    match gust_remote::disconnect::verdict_for(
+                        &name,
+                        &report,
+                        tracker,
+                        Some(&mp),
+                        false,
+                    ) {
+                        gust_remote::disconnect::DisconnectVerdict::Safe => {}
+                        // Answerable: the user may choose to go ahead.
+                        gust_remote::disconnect::DisconnectVerdict::Ask(msg) => {
+                            return PlaceOutcome::Failed(format!("ASK:{msg}"));
+                        }
+                        // Not a yes/no question: offering a button that can only
+                        // lose data is worse than refusing (DESIGN §6.8).
+                        gust_remote::disconnect::DisconnectVerdict::Refuse(msg) => {
+                            return PlaceOutcome::Failed(msg);
+                        }
                     }
                 }
-            }
-            PlaceOutcome::Then(Box::new(move |mut model| {
-                // If the user is inside the mount, leave before pulling it.
-                model.as_mut().leave_if_inside(&mp);
-                model.place_op("cloud-disconnect", label.clone(), format!("Disconnecting {label}…"), move || {
-                    // Navigating away is not instant: the listing worker can
-                    // still hold the directory open for a moment, and
-                    // fusermount3 then reports "busy" for a mount nobody is
-                    // really using.
-                    let mut last = String::new();
-                    for attempt in 0..8 {
-                        if attempt > 0 {
-                            std::thread::sleep(std::time::Duration::from_millis(400));
-                        }
-                        match std::process::Command::new("fusermount3").arg("-u").arg(&mp).output() {
-                            Ok(o) if o.status.success() => {
-                                // Only a directory Gust created, under the runtime dir.
-                                let _ = std::fs::remove_dir(&mp);
-                                return PlaceOutcome::Done(format!("Disconnected {label}"));
+                PlaceOutcome::Then(Box::new(move |mut model| {
+                    // If the user is inside the mount, leave before pulling it.
+                    model.as_mut().leave_if_inside(&mp);
+                    model.place_op(
+                        "cloud-disconnect",
+                        label.clone(),
+                        format!("Disconnecting {label}…"),
+                        move || {
+                            // Navigating away is not instant: the listing worker can
+                            // still hold the directory open for a moment, and
+                            // fusermount3 then reports "busy" for a mount nobody is
+                            // really using.
+                            let mut last = String::new();
+                            for attempt in 0..8 {
+                                if attempt > 0 {
+                                    std::thread::sleep(std::time::Duration::from_millis(400));
+                                }
+                                match std::process::Command::new("fusermount3")
+                                    .arg("-u")
+                                    .arg(&mp)
+                                    .output()
+                                {
+                                    Ok(o) if o.status.success() => {
+                                        // Only a directory Gust created, under the runtime dir.
+                                        let _ = std::fs::remove_dir(&mp);
+                                        return PlaceOutcome::Done(format!("Disconnected {label}"));
+                                    }
+                                    Ok(o) => {
+                                        last = String::from_utf8_lossy(&o.stderr).trim().to_string()
+                                    }
+                                    Err(e) => last = e.to_string(),
+                                }
                             }
-                            Ok(o) => last = String::from_utf8_lossy(&o.stderr).trim().to_string(),
-                            Err(e) => last = e.to_string(),
-                        }
-                    }
-                    // Never lazy-unmount to paper over this (plan §9).
-                    PlaceOutcome::Failed(format!(
-                        "Could not disconnect {label}: {last}. Close anything using those files and try again."
+                            // Never lazy-unmount to paper over this (plan §9).
+                            PlaceOutcome::Failed(format!(
+                        "Could not disconnect {label}: {last}. Close what uses it and try again."
                     ))
-                });
-            }))
-        });
+                        },
+                    );
+                }))
+            },
+        );
         QString::default()
     }
 
@@ -4611,7 +4678,7 @@ impl qobject::DirModel {
                 return QString::from("That folder identity is invalid. Choose the folder again.");
             };
             if token.as_path().to_str().is_none() {
-                return QString::from("Tailscale folder sharing needs a UTF-8 folder path. Choose another folder; no name was changed.");
+                return QString::from("Taildrive needs a UTF-8 folder path");
             }
             Some(token.as_path().to_path_buf())
         } else {
@@ -4635,29 +4702,29 @@ impl qobject::DirModel {
                     "send" => {
                         sharing::eligible_target(&value, &CallContext { cancel: &cancel, timeout: std::time::Duration::from_secs(5) }).map_err(|e| e.message)?;
                         match gust_remote::send::taildrop(&value, &paths, &ctx) {
-                            Ok(receipt) => Ok((format!("{} file(s) accepted by the receiving device. Your originals stay here. Open Tailscale on the device to finish saving them.", receipt.accepted_files), PathBuf::new())),
+                            Ok(receipt) => Ok((format!("{} file(s) sent. Open Tailscale on the device to save them.", receipt.accepted_files), PathBuf::new())),
                             Err(failure) => Err(format!("{} {} file(s) were already accepted. {}", failure.error.message,
-                                failure.accepted_files, if failure.delivery_uncertain { "Other files may also have arrived. Check the receiver before retrying." } else { "Your originals stay here." })),
+                                failure.accepted_files, if failure.delivery_uncertain { "Others may also have arrived." } else { "Your originals stay here." })),
                         }
                     }
                     "receive" => {
                         let received = sharing::receive(&home, &ctx).map_err(|e| e.message)?;
-                        Ok((if received.files == 0 { "No files are waiting. On your phone or tablet, select a file or photo, tap Share, choose Tailscale, then choose this computer.".into() }
-                            else { format!("{} file(s) received in Gust Inbox. Nothing was opened automatically.", received.files) }, received.path))
+                        Ok((if received.files == 0 { "No files waiting. On the device: Share → Tailscale → this computer.".into() }
+                            else { format!("{} file(s) received in Gust Inbox.", received.files) }, received.path))
                     }
                     "publish" => {
                         let path = folder.as_ref().ok_or("No folder was selected.")?;
                         sharing::publish(&home, path, &CallContext { cancel: &cancel, timeout: std::time::Duration::from_secs(15) }).map_err(|e| e.message)?;
-                        Ok(("Devices can open this folder now. In the Files app on your phone or tablet, choose Browse → Tailscale → your network → this computer → gust. Access follows your Tailscale policy.".into(), path.clone()))
+                        Ok(("Devices can open this folder now.".into(), path.clone()))
                     }
                     "unpublish" => {
                         let path = folder.as_ref().and_then(|p| p.to_str()).ok_or("No folder was selected.")?;
                         sharing::unpublish(path, &CallContext { cancel: &cancel, timeout: std::time::Duration::from_secs(15) }).map_err(|e| e.message)?;
-                        Ok(("Devices can no longer open this folder. All files stay on this computer.".into(), PathBuf::new()))
+                        Ok(("Devices can no longer open this folder.".into(), PathBuf::new()))
                     }
                     _ => unreachable!(),
                 }
-            })).unwrap_or_else(|_| Err("The sharing worker stopped unexpectedly. Some work may have completed; check sharing and the receiver before retrying.".into()));
+            })).unwrap_or_else(|_| Err("Sharing stopped unexpectedly. Some files may have arrived.".into()));
             let _ = thread.queue(move |mut model| {
                 model.as_mut().rust_mut().sharing_work.active_paths.clear();
                 model.as_mut().set_sharing_busy(false);
@@ -4672,7 +4739,7 @@ impl qobject::DirModel {
         if spawned.is_err() {
             self.as_mut().rust_mut().sharing_work.active_paths.clear();
             self.as_mut().set_sharing_busy(false);
-            return QString::from("Could not start the sharing worker. Nothing was started.");
+            return QString::from("Could not start sharing.");
         }
         QString::default()
     }
@@ -5212,7 +5279,44 @@ impl qobject::DirModel {
         let Some(path) = self.path_of_row(row) else {
             return QString::from(r#"{"ok":false}"#);
         };
-        let p = gust_core::peek::peek(&path);
+        self.peek_json(&path)
+    }
+
+    fn peek_preview(&self) -> QString {
+        match self.preview_path() {
+            Some(path) => self.peek_json(&path),
+            None => QString::from(r#"{"ok":false}"#),
+        }
+    }
+
+    fn preview_track(mut self: Pin<&mut Self>, row: i32) {
+        let target = self.as_ref().path_of_row(row);
+        self.as_mut().rust_mut().preview_target = target;
+    }
+
+    /// The tracked file, if it is still directly in the folder shown.
+    fn preview_path(&self) -> Option<PathBuf> {
+        let target = self.preview_target.as_ref()?;
+        let folder = self.key.as_path()?;
+        (target.parent() == Some(folder)).then(|| target.clone())
+    }
+
+    fn preview_row(&self) -> i32 {
+        let Some(name) = self
+            .preview_path()
+            .and_then(|p| p.file_name().map(|n| n.to_owned()))
+        else {
+            return -1;
+        };
+        self.visible_entries()
+            .iter()
+            .position(|e| e.name.as_os_str() == name.as_os_str())
+            .and_then(|i| i32::try_from(i).ok())
+            .unwrap_or(-1)
+    }
+
+    fn peek_json(&self, path: &std::path::Path) -> QString {
+        let p = gust_core::peek::peek(path);
         let mut lines = String::from("[");
         for (i, l) in p.text.iter().enumerate() {
             if i > 0 {
@@ -5222,7 +5326,7 @@ impl qobject::DirModel {
         }
         lines.push(']');
         // Properties: facts about the item, from lstat only.
-        let mut facts: Vec<String> = gust_core::properties::describe(&path)
+        let mut facts: Vec<String> = gust_core::properties::describe(path)
             .into_iter()
             .map(|f| format!("[{},{}]", Self::json_str(f.label), Self::json_str(&f.value)))
             .collect();
@@ -5246,7 +5350,7 @@ impl qobject::DirModel {
             }
         }
         QString::from(format!(
-            r#"{{"ok":true,"facts":[{}],"name":{},"kind":{},"kindWords":{},"size":{},"sizeText":{},"mode":{},"lines":{},"truncated":{},"noPreview":{}}}"#,
+            r#"{{"ok":true,"facts":[{}],"name":{},"kind":{},"kindWords":{},"size":{},"sizeText":{},"mode":{},"lines":{},"truncated":{},"noPreview":{},"visualExpected":{}}}"#,
             facts.join(","),
             Self::json_str(&p.name),
             Self::json_str(p.kind.label()),
@@ -5257,6 +5361,7 @@ impl qobject::DirModel {
             lines,
             p.truncated,
             Self::json_str(p.no_preview_reason.as_deref().unwrap_or("")),
+            path.file_name().is_some_and(Self::expects_visual),
         ))
     }
 
@@ -6555,11 +6660,10 @@ impl qobject::DirModel {
             self.as_mut().want_rows(row, 1);
             return QString::from("blocked:reading this file's details — press Enter again");
         }
-        // Executables never launch from a plain activation.
+        // Executables never launch from a plain activation: the window asks
+        // first, naming the file, with Cancel focused.
         if gust_core::mime::needs_trusted_launch(&name, mode) {
-            return QString::from(
-                "blocked:this is a program — use Run… (right-click or the : palette) to start it",
-            );
+            return QString::from("program");
         }
 
         let Some(path) = target.as_path() else {
@@ -6649,9 +6753,9 @@ impl qobject::DirModel {
         let (bin, args) = gust_remote::cloud::config_command();
         match gust_core::open::run_in_terminal(bin, &args) {
             Ok(_) => QString::default(),
-            Err(_) => QString::from(
-                "No terminal found to run rclone config in. Run it yourself, then use :cloud again.",
-            ),
+            Err(_) => {
+                QString::from("No terminal found. Run rclone config yourself, then :cloud again.")
+            }
         }
     }
 
@@ -7245,15 +7349,13 @@ impl qobject::DirModel {
         .is_ok();
         if !shared && std::env::var_os("WAYLAND_DISPLAY").is_some() {
             self.as_mut().clear_clip();
-            return QString::from("Could not copy files to the desktop clipboard. Try Copy again.");
+            return QString::from("Could not copy to the clipboard. Try again.");
         }
         self.as_mut().set_clip(paths, ClipMode::Copy);
         if shared {
-            QString::from(&format!("Copied {label} — paste with Ctrl+V"))
+            QString::from(&format!("Copied {label}"))
         } else {
-            QString::from(&format!(
-                "Copied {label} — paste with Ctrl+V (only inside Gust)"
-            ))
+            QString::from(&format!("Copied {label} (Gust only)"))
         }
     }
 
@@ -7301,15 +7403,13 @@ impl qobject::DirModel {
         .is_ok();
         if !shared && std::env::var_os("WAYLAND_DISPLAY").is_some() {
             self.as_mut().clear_clip();
-            return QString::from("Could not cut files to the desktop clipboard. Try Cut again.");
+            return QString::from("Could not cut to the clipboard. Try again.");
         }
         self.as_mut().set_clip(paths, ClipMode::Cut);
         if shared {
-            QString::from(&format!("Cut {label} — paste with Ctrl+V"))
+            QString::from(&format!("Cut {label}"))
         } else {
-            QString::from(&format!(
-                "Cut {label} — paste with Ctrl+V (only inside Gust)"
-            ))
+            QString::from(&format!("Cut {label} (Gust only)"))
         }
     }
 
@@ -7412,7 +7512,7 @@ impl qobject::DirModel {
             });
         if spawned.is_err() {
             self.as_mut().rust_mut().clipboard_read.cancel();
-            return QString::from("Could not read the clipboard. Try Paste again.");
+            return QString::from("Could not read the clipboard. Try again.");
         }
         QString::from("?clipboard")
     }
@@ -8733,33 +8833,110 @@ impl qobject::DirModel {
         QString::default()
     }
 
-    fn run_argv_for(&self, row: i32) -> Result<Vec<String>, String> {
-        use std::os::unix::fs::MetadataExt;
-        let path = self
-            .path_of_row(row)
-            .ok_or_else(|| "nothing to run here".to_string())?;
-        let md = path
-            .symlink_metadata()
-            .map_err(|_| "that file is gone".to_string())?;
-        gust_core::open::run_argv(&path, md.mode(), md.is_file())
+    fn run_prepare(mut self: Pin<&mut Self>, row: i32) -> QString {
+        self.as_mut().rust_mut().pending_run = None;
+        let captured = (|| {
+            let model = self.as_ref();
+            let entry = model.entry_at(row).ok_or("nothing to run here")?;
+            let md = entry.meta.ok_or("file details are still loading")?;
+            let path = self
+                .as_ref()
+                .path_of_row(row)
+                .ok_or("nothing to run here")?;
+            let state =
+                match gust_core::open::program_state(&path, md.mode, entry.kind == EntryKind::File)
+                {
+                    gust_core::open::ProgramState::Runnable => "run",
+                    gust_core::open::ProgramState::NeedsPermission => "allow",
+                    gust_core::open::ProgramState::NotAProgram => {
+                        return Err("this file opens in an application — use Open instead of Run")
+                    }
+                };
+            Ok((
+                gust_core::open::RunTarget::from_snapshot(path, md),
+                entry.display_name(),
+                state,
+            ))
+        })();
+        let (target, name, state) = match captured {
+            Ok(value) => value,
+            Err(error) => return QString::from(&serde_json::json!({"error": error}).to_string()),
+        };
+        let token = self.as_ref().run_token.checked_add(1).unwrap_or(1);
+        let reply = serde_json::json!({"token": token, "name": name, "state": state});
+        let mut r = self.as_mut().rust_mut();
+        r.run_token = token;
+        r.pending_run = Some((target, name));
+        QString::from(&reply.to_string())
     }
 
-    fn run_check(&self, row: i32) -> QString {
-        match self.run_argv_for(row) {
-            Ok(_) => QString::default(),
-            Err(e) => QString::from(&e),
+    fn run_discard(mut self: Pin<&mut Self>, token: i32) {
+        if token == self.as_ref().run_token {
+            self.as_mut().rust_mut().pending_run = None;
         }
     }
 
-    fn run_row(mut self: Pin<&mut Self>, row: i32) -> QString {
+    fn run_confirm(mut self: Pin<&mut Self>, token: i32, allow: bool) -> QString {
         if admin_session() {
             return QString::from(ADMIN_REFUSAL);
         }
-        let argv = match self.as_ref().run_argv_for(row) {
-            Ok(v) => v,
-            Err(e) => return QString::from(&e),
+        if token != self.as_ref().run_token {
+            return QString::from("choose Run again");
+        }
+        let Some((target, name)) = self.as_mut().rust_mut().pending_run.take() else {
+            return QString::from("choose Run again");
         };
-        if gust_core::open::which(&argv[0]).is_none() {
+        let spec = allow.then(|| {
+            gust_ops::attrs::ModeSpec::change(0o100, 0).expect("a fixed, valid mode spec")
+        });
+        self.start_mode_change(0, vec![target.path.clone()], spec, Some((target, name)))
+    }
+
+    fn program_state(&self, row: i32) -> QString {
+        match self.path_of_row(row) {
+            Some(path) => Self::program_state_at(&path),
+            None => QString::default(),
+        }
+    }
+
+    fn program_state_preview(&self) -> QString {
+        match self.preview_path() {
+            Some(path) => Self::program_state_at(&path),
+            None => QString::default(),
+        }
+    }
+
+    fn program_state_at(path: &std::path::Path) -> QString {
+        use gust_core::open::ProgramState;
+        use std::os::unix::fs::MetadataExt;
+        let Ok(md) = path.symlink_metadata() else {
+            return QString::default();
+        };
+        QString::from(
+            match gust_core::open::program_state(path, md.mode(), md.is_file()) {
+                ProgramState::Runnable => "run",
+                ProgramState::NeedsPermission => "allow",
+                ProgramState::NotAProgram => "",
+            },
+        )
+    }
+
+    fn set_runnable(self: Pin<&mut Self>, on: bool) -> QString {
+        // The model retains the original OS bytes across reloads and row shifts.
+        let Some(path) = self.as_ref().preview_path() else {
+            return QString::from("that file is no longer shown here");
+        };
+        let spec = gust_ops::attrs::ModeSpec::change(
+            if on { 0o100 } else { 0 },
+            if on { 0 } else { 0o111 },
+        )
+        .expect("a fixed, valid mode spec");
+        self.start_mode_change(0, vec![path], Some(spec), None)
+    }
+
+    /// Start a checked Run argv, detached, and say so in the status line.
+    fn spawn_run(mut self: Pin<&mut Self>, argv: Vec<std::ffi::OsString>, name: &str) -> QString {
+        if gust_core::open::which("xdg-terminal-exec").is_none() {
             return QString::from("no terminal launcher (xdg-terminal-exec) is installed");
         }
         match std::process::Command::new(&argv[0])
@@ -8773,9 +8950,8 @@ impl qobject::DirModel {
                 std::thread::spawn(move || {
                     let _ = child.wait();
                 });
-                let name = self.as_ref().entry_name(row).to_string();
                 self.as_mut()
-                    .set_status(QString::from(&format!("Running {name} in a terminal")));
+                    .set_status(QString::from(&format!("Running {name}")));
                 QString::default()
             }
             Err(e) => QString::from(&format!("could not start the terminal: {e}")),
@@ -9135,9 +9311,7 @@ impl qobject::DirModel {
         // The root side refuses a folder that is gone; say so here instead
         // of asking for a password that leads nowhere.
         if !folder.is_dir() {
-            return QString::from(
-                "This folder no longer exists, so it cannot be opened as administrator.",
-            );
+            return QString::from("This folder no longer exists.");
         }
         let Ok(exe) = std::env::current_exe() else {
             return QString::from("Gust could not find its own program file.");
@@ -9407,28 +9581,75 @@ impl qobject::DirModel {
             Ok(s) => s,
             Err(e) => return QString::from(&e),
         };
+        let paths = self.as_ref().perms_paths.clone();
+        self.start_mode_change(token, paths, Some(spec), None)
+    }
+
+    /// Editor and program controls share one worker and lifecycle claim. Token
+    /// zero belongs to program controls; editor loads always use positive tokens.
+    fn start_mode_change(
+        self: Pin<&mut Self>,
+        token: i32,
+        paths: Vec<PathBuf>,
+        spec: Option<gust_ops::attrs::ModeSpec>,
+        run_after: Option<(gust_core::open::RunTarget, String)>,
+    ) -> QString {
+        if self.as_ref().permissions_running() {
+            return QString::from("Still applying the last change");
+        }
         let Some(thread) = self.as_ref().qt_thread_handle() else {
             return QString::from("Permissions cannot be changed here");
         };
-        let paths = self.as_ref().perms_paths.clone();
-        // Held until the outcome below has been handled, so a window or tab
-        // close waits for the report and its undo instead of dropping them.
-        // A worker that never starts drops it with its closure.
+        // Retain the claim through GUI-side undo, launch and completion handling.
         let claim = self.as_ref().perms_work.claim(paths.clone());
         let spawned = std::thread::Builder::new()
             .name("gust-perms".into())
             .spawn(move || {
                 let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    gust_ops::attrs::set_modes(&paths, spec)
+                    use std::os::unix::fs::MetadataExt;
+                    if token == 0 {
+                        let path = paths.first().ok_or("nothing to change")?;
+                        let md = path.symlink_metadata().map_err(|_| "that file is gone")?;
+                        if !md.is_file() {
+                            return Err("only an ordinary file can run".to_string());
+                        }
+                        if run_after.is_some()
+                            && gust_core::open::program_state(path, md.mode(), md.is_file())
+                                == gust_core::open::ProgramState::NotAProgram
+                        {
+                            return Err(
+                                "this file opens in an application — use Open instead of Run"
+                                    .to_string(),
+                            );
+                        }
+                    }
+                    if let Some((target, _)) = &run_after {
+                        target.metadata()?;
+                    }
+                    let out = spec.map(|spec| gust_ops::attrs::set_modes(&paths, spec));
+                    // The listing can reload while the prompt or worker waits.
+                    // Only the captured byte path + identity authorize this run.
+                    let run = run_after
+                        .filter(|_| out.as_ref().is_none_or(|out| out.failed.is_empty()))
+                        .map(|(target, name)| (target.argv(), name));
+                    Ok((out, run))
                 }));
                 let _ = thread.queue(move |mut model| {
                     let (err, message, partial) = match out {
-                        Ok(out) => {
-                            let partial = !out.failed.is_empty();
-                            let err = model.as_mut().finish_mode_change(out);
-                            // The status line gives way to the relisting at
-                            // once; the card hands the sentence on to the
-                            // window.
+                        Ok(Ok((out, run))) => {
+                            let partial = out.as_ref().is_some_and(|out| !out.failed.is_empty());
+                            let mut err = out
+                                .map(|out| model.as_mut().finish_mode_change(out))
+                                .unwrap_or_default();
+                            // Publish the undo before launching the program.
+                            if err.is_empty() {
+                                if let Some((argv, name)) = run {
+                                    err = match argv {
+                                        Ok(argv) => model.as_mut().spawn_run(argv, &name),
+                                        Err(error) => QString::from(&error),
+                                    };
+                                }
+                            }
                             let message = if err.is_empty() {
                                 model.as_ref().status().clone()
                             } else {
@@ -9436,6 +9657,7 @@ impl qobject::DirModel {
                             };
                             (err, message, partial)
                         }
+                        Ok(Err(error)) => (QString::from(&error), QString::default(), false),
                         Err(_) => (
                             QString::from(
                                 "The permissions change stopped unexpectedly. Some items may \

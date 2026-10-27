@@ -23,7 +23,7 @@ TestCase {
         drawer.job = snapshot({stopping: true})
         compare(drawer.stateText, "Stopping")
         const text = message()
-        verify(text.indexOf("Stop requested") === 0, text)
+        verify(text.indexOf("Waiting for the drive") === 0, text)
         verify(!/discard|remov|clean/i.test(text), text)
         verify(!findChild(drawer, "jobCancel").visible, "no second Cancel while stopping")
     }

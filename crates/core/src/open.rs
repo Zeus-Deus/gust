@@ -5,7 +5,7 @@
 //! would, and it does so without a shell so a filename can never become a
 //! command (DESIGN.md §7).
 
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
 #[path = "media.rs"]
@@ -143,7 +143,7 @@ pub fn which(program: &str) -> Option<PathBuf> {
 /// Refused unless the file is a runnable regular file with an executable bit:
 /// a script without +x is not "run" by guessing an interpreter, and content
 /// with synthetic +x permissions still belongs in its desktop application.
-pub fn run_argv(path: &Path, mode: u32, is_regular: bool) -> Result<Vec<String>, String> {
+pub fn run_argv(path: &Path, mode: u32, is_regular: bool) -> Result<Vec<OsString>, String> {
     if !path.is_absolute() {
         return Err("only a full path can be run".into());
     }
@@ -157,13 +157,77 @@ pub fn run_argv(path: &Path, mode: u32, is_regular: bool) -> Result<Vec<String>,
         return Err("this file opens in an application — use Open instead of Run".into());
     }
     let dir = path.parent().unwrap_or(Path::new("/"));
+    let mut working_dir = OsString::from("--dir=");
+    working_dir.push(dir);
     Ok(vec![
         "xdg-terminal-exec".into(),
         "--hold".into(),
-        format!("--dir={}", dir.display()),
+        working_dir,
         "--".into(),
-        path.to_string_lossy().into_owned(),
+        path.as_os_str().to_owned(),
     ])
+}
+
+/// The file named by a Run prompt, captured from the listing without I/O.
+/// Mode is deliberately excluded: a permission worker may finish while the
+/// prompt is open. Call `metadata` on the worker before chmod or launch.
+#[derive(Debug, Clone)]
+pub struct RunTarget {
+    pub path: PathBuf,
+    snapshot: crate::entry::Metadata,
+}
+
+impl RunTarget {
+    pub fn from_snapshot(path: PathBuf, snapshot: crate::entry::Metadata) -> Self {
+        Self { path, snapshot }
+    }
+
+    pub fn metadata(&self) -> Result<std::fs::Metadata, String> {
+        use std::os::unix::fs::MetadataExt;
+        let md = self
+            .path
+            .symlink_metadata()
+            .map_err(|_| "that file is gone")?;
+        let before = &self.snapshot;
+        if !md.is_file()
+            || (md.dev(), md.ino(), md.len(), md.mtime())
+                != (before.dev, before.ino, before.size, before.mtime)
+        {
+            return Err("that file changed; choose Run again".into());
+        }
+        Ok(md)
+    }
+
+    pub fn argv(&self) -> Result<Vec<OsString>, String> {
+        use std::os::unix::fs::MetadataExt;
+        let md = self.metadata()?;
+        run_argv(&self.path, md.mode(), md.is_file())
+    }
+}
+
+/// Where a file stands as a program, for the activation prompt and the
+/// Properties toggle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProgramState {
+    /// Content, a folder, or not a local path: it opens, it is never run.
+    NotAProgram,
+    /// A program with an executable bit: Run… can start it.
+    Runnable,
+    /// A program that is not allowed to run yet — a downloaded AppImage or
+    /// `install.sh` arrives without the x bit. Allowing it adds `u+x`.
+    NeedsPermission,
+}
+
+/// Classify a file for Run. Only something that already looks like a
+/// program is offered the permission; a document is never promoted to one.
+pub fn program_state(path: &Path, mode: u32, is_regular: bool) -> ProgramState {
+    if run_argv(path, mode, is_regular).is_ok() {
+        return ProgramState::Runnable;
+    }
+    if is_regular && path.is_absolute() && mode & 0o111 == 0 && is_runnable(path, Some(mode)) {
+        return ProgramState::NeedsPermission;
+    }
+    ProgramState::NotAProgram
 }
 
 pub fn terminal_command(dir: &Path, have: impl Fn(&str) -> bool) -> Option<Command> {
@@ -339,7 +403,7 @@ mod tests {
             let path = Path::new("/work/bin").join(name);
             assert!(is_runnable(&path, Some(0o100755)), "{name}");
             let argv = run_argv(&path, 0o100755, true).expect(name);
-            assert_eq!(argv.last().map(String::as_str), path.to_str());
+            assert_eq!(argv.last().map(OsString::as_os_str), Some(path.as_os_str()));
         }
         // Phone media with the same synthetic bits still opens normally.
         let photo = Path::new("/phone/DCIM/IMG_0001.JPG");
@@ -480,11 +544,55 @@ mod tests {
     }
 
     #[test]
+    fn run_argv_preserves_non_utf8_directory_and_filename_bytes() {
+        use std::os::unix::ffi::{OsStrExt, OsStringExt};
+        let path = PathBuf::from(OsString::from_vec(b"/tmp/folder\xff/tool\xfe.sh".to_vec()));
+        let argv = run_argv(&path, 0o755, true).unwrap();
+        assert_eq!(argv[2].as_bytes(), b"--dir=/tmp/folder\xff");
+        assert_eq!(argv[4].as_bytes(), path.as_os_str().as_bytes());
+    }
+
+    #[test]
     fn run_argv_refuses_what_is_not_an_executable_file() {
         assert!(run_argv(Path::new("/tmp/x.sh"), 0o644, true)
             .unwrap_err()
             .contains("turn on Run in Permissions"));
         assert!(run_argv(Path::new("/tmp/d"), 0o755, false).is_err());
         assert!(run_argv(Path::new("rel.sh"), 0o755, true).is_err());
+    }
+
+    #[test]
+    fn a_program_without_the_bit_is_offered_the_permission() {
+        let s = |name: &str, mode: u32, regular: bool| {
+            program_state(&Path::new("/home/u/Downloads").join(name), mode, regular)
+        };
+        // Downloaded programs arrive 644: they need permission, not a guess.
+        assert_eq!(
+            s("Synara-1.0.9-x86_64.AppImage", 0o100644, true),
+            ProgramState::NeedsPermission
+        );
+        assert_eq!(
+            s("install.sh", 0o100644, true),
+            ProgramState::NeedsPermission
+        );
+        assert_eq!(s("install.sh", 0o100755, true), ProgramState::Runnable);
+        // An extensionless binary with the bit runs; without it, it is
+        // indistinguishable from data and is not promoted.
+        assert_eq!(s("tool", 0o100755, true), ProgramState::Runnable);
+        assert_eq!(s("tool", 0o100644, true), ProgramState::NotAProgram);
+        // Content stays content, with or without bits.
+        for name in ["report.pdf", "notes.txt", "photo.png", "build.js"] {
+            assert_eq!(s(name, 0o100644, true), ProgramState::NotAProgram, "{name}");
+        }
+        assert_eq!(s("IMG_0001.JPG", 0o100700, true), ProgramState::NotAProgram);
+        // Only regular files at absolute paths.
+        assert_eq!(
+            s("app.AppImage", 0o040755, false),
+            ProgramState::NotAProgram
+        );
+        assert_eq!(
+            program_state(Path::new("rel.AppImage"), 0o100644, true),
+            ProgramState::NotAProgram
+        );
     }
 }
