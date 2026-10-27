@@ -490,6 +490,8 @@ pub mod qobject {
         /// jump_completion as "<typed>\n<completed>".
         #[qinvokable]
         fn jump_complete(self: Pin<&mut DirModel>, typed: &QString);
+        #[qinvokable]
+        fn jump_stop(self: Pin<&mut DirModel>);
         /// The user's custom actions that fit the current targets, as JSON
         /// {"actions":[{id,name}], "problems":[...]}. Reads the user's own
         /// config folder only.
@@ -1106,6 +1108,9 @@ pub struct DirModelRust {
     places_refreshing: bool,
     places_again: bool,
     jump_cands: Vec<gust_core::jump::Candidate>,
+    jump_context: crate::folder_jump::Context,
+    jump_request: u64,
+    jump_cancel: CancelToken,
     /// Cancels a running hash (Quick Look closed, another file asked).
     hash_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Cancels a running find. Escape, a new find, or navigating away.
@@ -1385,6 +1390,9 @@ impl DirModelRust {
             places_refreshing: false,
             places_again: false,
             jump_cands: Vec::new(),
+            jump_context: crate::folder_jump::Context::default(),
+            jump_request: 0,
+            jump_cancel: CancelToken::new(),
             hash_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             find_cancel: CancelToken::new(),
             find_origin: None,
@@ -1719,6 +1727,7 @@ impl qobject::DirModel {
         self.as_mut().rust_mut().generation = gen;
 
         // Cancel whatever the previous navigation was still doing.
+        self.as_ref().jump_cancel.cancel();
         self.as_mut().rust_mut().load_cancel.cancel();
         self.as_mut().rust_mut().meta_cancel.cancel();
         self.as_mut().rust_mut().meta_again = None;
@@ -5501,6 +5510,11 @@ impl qobject::DirModel {
         self.as_mut().set_status(QString::from(&status));
 
         if settled && snap.settled {
+            if !self.as_ref().finding {
+                if let Some(root) = self.as_ref().key.as_path() {
+                    crate::folder_jump::remember(root, &self.as_ref().all);
+                }
+            }
             self.as_mut().start_thumbnails();
             self.as_mut().start_cloud_notice();
             self.as_mut().ensure_watch();
@@ -8382,28 +8396,39 @@ impl qobject::DirModel {
         QString::from(&self.selection.summary(bytes))
     }
 
-    /// The paths a command should act on.
-    ///
-    /// The selection when there is one, otherwise the cursor row. Resolved
-    /// ONCE, when the command is issued (DESIGN.md §4.1).
-    fn jump_prepare(self: Pin<&mut Self>) {
+    /// Prepare folder suggestions for this location without probing remotes.
+    fn jump_prepare(mut self: Pin<&mut Self>) {
+        self.as_ref().jump_cancel.cancel();
+        let Some(current) = self.as_ref().key.as_path().map(PathBuf::from) else {
+            return;
+        };
+        let gen = self.as_ref().generation;
+        let places = self.as_ref().places_json.to_string();
+        self.as_mut().rust_mut().jump_request += 1;
+        let request = self.as_ref().jump_request;
+        self.as_mut().rust_mut().jump_cands.clear();
         let Some(thread) = self.as_ref().qt_thread_handle() else {
             return;
         };
         std::thread::Builder::new()
             .name("gust-jump".into())
             .spawn(move || {
+                let context = crate::folder_jump::Context::load(&current, &places);
                 let bookmarks: Vec<PathBuf> = gust_core::bookmarks::default_path()
                     .map(|f| gust_core::bookmarks::load(&f))
                     .unwrap_or_default()
                     .into_iter()
                     .filter(|b| b.uri.is_none())
                     .map(|b| b.path)
-                    .filter(|p| !gust_core::stall::needs_probe(p))
                     .collect();
-                let cands = gust_core::jump::gather(&bookmarks);
+                let mut cands = gust_core::jump::gather_with(&bookmarks, &|p| context.admit(p));
+                context.augment(&mut cands);
                 let _ = thread.queue(move |mut model| {
+                    if model.as_ref().generation != gen || model.as_ref().jump_request != request {
+                        return;
+                    }
                     model.as_mut().rust_mut().jump_cands = cands;
+                    model.as_mut().rust_mut().jump_context = context;
                     let r = model.as_ref().jump_rev + 1;
                     model.as_mut().set_jump_rev(r);
                 });
@@ -8414,27 +8439,22 @@ impl qobject::DirModel {
     fn jump_query(&self, query: &QString, limit: i32) -> QString {
         let q = query.to_string();
         let home = std::env::var_os("HOME").map(PathBuf::from);
-        let rows: Vec<String> = gust_core::jump::rank(&q, &self.jump_cands, limit.max(0) as usize)
-            .into_iter()
-            .map(|c| {
-                let full = c.path.to_string_lossy().into_owned();
-                let shown = match home.as_ref().and_then(|h| c.path.strip_prefix(h).ok()) {
-                    Some(rest) if rest.as_os_str().is_empty() => "~".to_string(),
-                    Some(rest) => format!("~/{}", rest.to_string_lossy()),
-                    None => full.clone(),
-                };
-                format!(
-                    "{{\"path\":{},\"shown\":{},\"source\":{}}}",
-                    Self::json_str(&full),
-                    Self::json_str(&shown),
-                    Self::json_str(c.source.label())
-                )
-            })
-            .collect();
-        QString::from(&format!("[{}]", rows.join(",")))
+        QString::from(self.jump_context.query(
+            &q,
+            &self.jump_cands,
+            limit.max(0) as usize,
+            home.as_deref(),
+        ))
     }
 
-    fn jump_complete(self: Pin<&mut Self>, typed: &QString) {
+    fn jump_stop(self: Pin<&mut Self>) {
+        self.as_ref().jump_cancel.cancel();
+    }
+
+    fn jump_complete(mut self: Pin<&mut Self>, typed: &QString) {
+        self.as_ref().jump_cancel.cancel();
+        let cancel = CancelToken::new();
+        self.as_mut().rust_mut().jump_cancel = cancel.clone();
         let typed = typed.to_string();
         let Some(thread) = self.as_ref().qt_thread_handle() else {
             return;
@@ -8448,13 +8468,18 @@ impl qobject::DirModel {
                 let Some(dir) = gust_core::jump::completion_dir(&typed, &home) else {
                     return;
                 };
-                // A stalled network mount must not be listed from here.
-                if gust_core::stall::needs_probe(&dir) {
+                // Tab explicitly asks for this path. Probe on the worker so
+                // connected folders complete too, without blocking the UI.
+                if cancel.is_cancelled()
+                    || !gust_core::stall::probe_if_risky(&dir, std::time::Duration::from_secs(4))
+                        .is_responsive()
+                {
                     return;
                 }
                 let kids: Vec<String> = std::fs::read_dir(&dir)
                     .map(|rd| {
-                        rd.flatten()
+                        rd.take_while(|_| !cancel.is_cancelled())
+                            .flatten()
                             .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
                             .map(|e| e.file_name().to_string_lossy().into_owned())
                             .take(5000)
@@ -8463,6 +8488,9 @@ impl qobject::DirModel {
                     .unwrap_or_default();
                 let done = gust_core::jump::complete(&typed, &kids).unwrap_or_default();
                 let _ = thread.queue(move |mut model| {
+                    if cancel.is_cancelled() {
+                        return;
+                    }
                     model
                         .as_mut()
                         .set_jump_completion(QString::from(&format!("{typed}\n{done}")));
@@ -8472,12 +8500,26 @@ impl qobject::DirModel {
     }
 
     fn custom_targets(&self) -> Vec<gust_core::actions::Target> {
-        self.target_paths()
-            .into_iter()
-            .map(|p| {
-                let is_dir = p.symlink_metadata().map(|m| m.is_dir()).unwrap_or(false);
-                gust_core::actions::Target { path: p, is_dir }
+        // The palette asks this on every keystroke. Use the listing's kinds;
+        // statting the cursor here would freeze typing on a lost connection.
+        let target = |entry: &Entry| {
+            let path = self.key.join(&entry.name).as_path()?.to_path_buf();
+            Some(gust_core::actions::Target {
+                path,
+                is_dir: entry.kind == EntryKind::Dir,
             })
+        };
+        if self.selection.is_empty() {
+            return self
+                .entry_at(self.cursor)
+                .and_then(target)
+                .into_iter()
+                .collect();
+        }
+        self.visible_entries()
+            .into_iter()
+            .filter(|entry| self.selection.contains(&entry.name))
+            .filter_map(target)
             .collect()
     }
 

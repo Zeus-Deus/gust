@@ -5,6 +5,7 @@ mod cli;
 mod clipboard;
 mod directory_cache;
 mod fm1;
+mod folder_jump;
 mod folder_sizes;
 mod place_work;
 mod portal;

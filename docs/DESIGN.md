@@ -2126,6 +2126,23 @@ Quattro surfaces rather than like Nautilus.
 
 ## 6.23 Personal places
 
+### Folder suggestions in `:` and Ctrl+L
+
+Folder lookup ranks the active computer/connection before other places, then
+uses the existing fuzzy name/source ranking within each group. Rows identify
+their computer or connection; remote display paths are relative to its mount.
+The navigation payload remains the actual path, never the displayed label.
+Candidates include bookmarks, recent/zoxide folders, connected mount roots and
+a bounded process-local cache of folders already listed. Opening the palette
+does not connect, stat a remote candidate or recursively crawl any connection.
+Local candidate validation stays on a worker; `jump::gather_with` accepts the
+caller's admission predicate so mounted remote candidates need no stat.
+Results from a previous folder or superseded preparation are discarded. Tab
+on a suggestion enters its actual path; explicit completion on a remote path
+uses a worker-side responsiveness probe. No folder cache is written to disk.
+
+### Home destinations
+
 Home and its sidebar destinations come from the process's configured `HOME`,
 not from the folder passed on the command line or a remote mount path. The
 model publishes that fixed root as `home_path`; populating the sidebar reads

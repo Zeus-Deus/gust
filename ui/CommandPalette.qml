@@ -70,6 +70,7 @@ Rectangle {
         rebuildAndAnnounce(query)
     }
     function close() {
+        if (root.model) root.model.jump_stop()
         visible = false
         input.text = ""
         // Give focus back before anyone can type again.
@@ -387,7 +388,10 @@ Rectangle {
                     selectByMouse: true
                     // A text field owns its keys: file shortcuts must not fire
                     // while typing here (plan §8).
-                    onTextChanged: root.rebuildAndAnnounce(text)
+                    onTextChanged: {
+                        if (root.model) root.model.jump_stop()
+                        root.rebuildAndAnnounce(text)
+                    }
                     Keys.onEscapePressed: root.close()
                     // Tab: complete a typed path like a shell; on a folder
                     // row, put its path in the box to keep going deeper.
@@ -401,7 +405,7 @@ Rectangle {
                         if (results.count > 0) {
                             const it = results.get(Math.max(0, list.currentIndex))
                             if (it.kind === "path") {
-                                input.text = it.label.substring(6) + "/"
+                                input.text = it.payload + "/"
                                 input.cursorPosition = input.text.length
                             }
                         }
