@@ -6,8 +6,8 @@
 
 use crate::anchor::{resolve_parent, DirHandle, FileIdentity};
 use crate::engine::{
-    classify, copy_regular_file_with, copy_symlink_with_policy, stage_regular_file, FileClass,
-    OpError, OpResult, Staged,
+    classify, copy_symlink_with_policy, stage_regular_file_cached, FileClass, OpError, OpResult,
+    Staged,
 };
 use crate::journal::ConflictPolicy;
 use gust_core::lister::CancelToken;
@@ -164,6 +164,26 @@ pub fn copy_tree_opts(
     progress: ProgressFn<'_>,
     fat_names: bool,
 ) -> OpResult<Plan> {
+    copy_tree_with_sources(
+        src_root,
+        dst_root,
+        policy,
+        cancel,
+        progress,
+        fat_names,
+        &mut crate::source_read::LocalMounts::default(),
+    )
+}
+
+pub(crate) fn copy_tree_with_sources(
+    src_root: &Path,
+    dst_root: &Path,
+    policy: ConflictPolicy,
+    cancel: &CancelToken,
+    progress: ProgressFn<'_>,
+    fat_names: bool,
+    sources: &mut crate::source_read::LocalMounts,
+) -> OpResult<Plan> {
     let plan = plan_tree(src_root, cancel)?;
     let out = |rel: &Path| -> PathBuf {
         if fat_names {
@@ -224,7 +244,7 @@ pub fn copy_tree_opts(
                 let mut on_bytes =
                     |w: u64| progress(done, total, before.saturating_add(w), plan.total_bytes);
                 if batched {
-                    if let Some(st) = stage_regular_file(
+                    if let Some(st) = stage_regular_file_cached(
                         &sd,
                         &sn,
                         &dd,
@@ -233,6 +253,7 @@ pub fn copy_tree_opts(
                         cancel,
                         &mut on_bytes,
                         false,
+                        sources,
                     )? {
                         batch_bytes = batch_bytes.saturating_add(st.written);
                         batch.push((st, dd, dn));
@@ -242,7 +263,19 @@ pub fn copy_tree_opts(
                         batch_bytes = 0;
                     }
                 } else {
-                    copy_regular_file_with(&sd, &sn, &dd, &dn, policy, cancel, &mut on_bytes)?;
+                    if let Some(st) = stage_regular_file_cached(
+                        &sd,
+                        &sn,
+                        &dd,
+                        &dn,
+                        policy,
+                        cancel,
+                        &mut on_bytes,
+                        true,
+                        sources,
+                    )? {
+                        st.commit(&dd, &dn)?;
+                    }
                 }
                 done += 1;
                 bytes_done = bytes_done.saturating_add(*size);
@@ -275,9 +308,19 @@ pub fn copy_tree_opts(
         match classify(&st) {
             FileClass::Symlink => copy_symlink_with_policy(&sd, &sn, &dd, &dn, policy)?,
             _ => {
-                copy_regular_file_with(&sd, &sn, &dd, &dn, policy, cancel, &mut |w| {
-                    progress(0, total.max(1), w, plan.total_bytes)
-                })?;
+                if let Some(staged) = stage_regular_file_cached(
+                    &sd,
+                    &sn,
+                    &dd,
+                    &dn,
+                    policy,
+                    cancel,
+                    &mut |w| progress(0, total.max(1), w, plan.total_bytes),
+                    true,
+                    sources,
+                )? {
+                    staged.commit(&dd, &dn)?;
+                }
                 bytes_done = st.st_size as u64;
             }
         }
@@ -390,6 +433,26 @@ pub fn move_tree_opts(
     progress: ProgressFn<'_>,
     fat_names: bool,
 ) -> OpResult<()> {
+    move_tree_with_sources(
+        src_root,
+        dst_root,
+        policy,
+        cancel,
+        progress,
+        fat_names,
+        &mut crate::source_read::LocalMounts::default(),
+    )
+}
+
+pub(crate) fn move_tree_with_sources(
+    src_root: &Path,
+    dst_root: &Path,
+    policy: ConflictPolicy,
+    cancel: &CancelToken,
+    progress: ProgressFn<'_>,
+    fat_names: bool,
+    sources: &mut crate::source_read::LocalMounts,
+) -> OpResult<()> {
     let (sd, sn) = resolve_parent(src_root)?;
     let (dd, dn) = resolve_parent(dst_root)?;
     crate::engine::require_move_durability(&dd)?;
@@ -432,7 +495,9 @@ pub fn move_tree_opts(
     // child was copied. Every descendant must be proven unchanged.
     let before = FileIdentity::from_stat(&sd.stat_child(&sn)?);
     let before_tree = crate::undo::snapshot_subtree(src_root);
-    let plan = copy_tree_opts(src_root, dst_root, policy, cancel, progress, fat_names)?;
+    let plan = copy_tree_with_sources(
+        src_root, dst_root, policy, cancel, progress, fat_names, sources,
+    )?;
 
     let after = FileIdentity::from_stat(&sd.stat_child(&sn)?);
     if !before.matches(&after) {

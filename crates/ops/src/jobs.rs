@@ -436,6 +436,7 @@ fn run(
     journal: Option<crate::journal::Journal>,
     trash: Option<crate::trash::TrashDir>,
 ) {
+    let mut source_mounts = crate::source_read::LocalMounts::default();
     // Mutate the in-memory record and immediately persist it. Both must move
     // together: a snapshot and a journal that disagree about success is the
     // bug class this exists to prevent.
@@ -906,14 +907,26 @@ fn run(
         }
 
         let outcome = match req {
-            Request::Copy { .. } | Request::CopyAs { .. } => {
-                recursive::copy_tree_opts(&src, &dst, policy, &cancel, &mut on_progress, fat_names)
-                    .map(Some)
-            }
-            Request::Move { .. } => {
-                recursive::move_tree_opts(&src, &dst, policy, &cancel, &mut on_progress, fat_names)
-                    .map(|_| None)
-            }
+            Request::Copy { .. } | Request::CopyAs { .. } => recursive::copy_tree_with_sources(
+                &src,
+                &dst,
+                policy,
+                &cancel,
+                &mut on_progress,
+                fat_names,
+                &mut source_mounts,
+            )
+            .map(Some),
+            Request::Move { .. } => recursive::move_tree_with_sources(
+                &src,
+                &dst,
+                policy,
+                &cancel,
+                &mut on_progress,
+                fat_names,
+                &mut source_mounts,
+            )
+            .map(|_| None),
         };
 
         // Journal BEFORE judging success: a crash must leave a record of what

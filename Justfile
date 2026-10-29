@@ -31,6 +31,12 @@ test-app:
 test-wheel:
     python3 tests/wheel-scroll.py
 
+# Actual view delegates, cursor binding costs, far jumps and recycled items.
+# Requires PySide6; the native source-read journey is documented in TESTING.md.
+test-navigation:
+    python3 tests/view-navigation.py
+    QT_SCALE_FACTOR=2 python3 tests/view-navigation.py
+
 # Source-only checks and orchestration regression tests, no desktop/build.
 check-release:
     python3 tests/test-release-runners.py
