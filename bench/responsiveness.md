@@ -30,11 +30,14 @@ filesystem results, not physical-device/provider qualification.
 
 Local overhead was checked with 1,000 synthetic 1 KiB files through
 `recursive::copy_tree`, using the same release profile and eight alternating
-baseline/candidate pairs with warm OS caches. Median elapsed times were
-377.8 ms baseline and 386.2 ms candidate (about 2.2% higher), with overlapping
-ranges of 375.1–390.2 and 378.3–388.3 ms. This is an explicit small-file tradeoff,
-not a throughput improvement. An earlier per-file classification draft was
-rejected after measuring substantially greater overhead.
+baseline/candidate pairs with warm OS caches. The final run measured 400.6 ms
+baseline and 401.2 ms candidate medians (about 0.1% higher), with overlapping
+ranges of 383.9–419.8 and 383.0–434.7 ms. A preceding paired run before the
+successful-reader retirement follow-up measured 377.8 versus 386.2 ms (about
+2.2% higher), also with overlapping ranges. These shared-host samples establish
+no throughput improvement or universal zero-overhead guarantee. An earlier
+per-file classification draft was rejected after measuring substantially greater
+overhead.
 
 Cancellation still has no deadline for source open/metadata or destination
 write, durability, close and cleanup calls. A cancelled blocked source worker
