@@ -273,13 +273,13 @@ FocusScope {
                     // must be separately visible.
                     color: isSelected
                            ? Tokens.withAlpha(Tokens.accent, 0.22)
-                           : (index === (root.model ? root.model.cursor : 0)
+                           : (rowItem.ListView.isCurrentItem
                               ? Tokens.withAlpha(Tokens.selectedBackground, Math.max(Tokens.selectedAlpha, 0.14))
                               : (hover.hovered ? Tokens.withAlpha(Tokens.foreground, 0.05) : "transparent"))
 
                     // Focus ring: visible keyboard focus, not colour alone.
                     Rectangle {
-                        visible: index === (root.model ? root.model.cursor : 0)
+                        visible: rowItem.ListView.isCurrentItem
                         anchors.left: parent.left
                         width: Math.max(2, Tokens.borderWidth * 2)
                         height: parent.height
@@ -488,7 +488,7 @@ FocusScope {
                     Accessible.role: Accessible.ListItem
                     Accessible.name: name + (isDir ? ", folder" : ", file")
                     Accessible.selectable: true
-                    Accessible.selected: isSelected || index === (root.model ? root.model.cursor : 0)
+                    Accessible.selected: isSelected || rowItem.ListView.isCurrentItem
                 }
 
                 // Empty state — never a blank void.

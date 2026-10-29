@@ -74,6 +74,11 @@ settled order (the header shows a sorting indicator until settled).
 
 ## 4. Pane / Tab
 
+Cursor decoration in Rows, Grid and the active Columns list uses Qt's attached
+`isCurrentItem` state. The view's `currentIndex` follows the model cursor once;
+individual delegates must not bind to that shared cursor. This keeps a cursor
+step from reevaluating every live row's fill, border and accessibility state.
+
 Each tab owns: location, view mode, sort, selection set, keyboard cursor,
 scroll position and back/forward stack. **Selection set and keyboard cursor are
 different states.** An explicit user view choice is stored per `LocationKey`
@@ -2626,9 +2631,26 @@ Callers retain the worker handle and any transfer/history ownership until they
 consume its actual completion; requesting cancellation grants no recovery or
 disconnect authority. Existing staging claims remain live through cleanup.
 
-Cancellation checkpoints cannot interrupt a blocked FUSE read, write, metadata,
-fsync, close or unlink. An outage can therefore delay both cancellation and
-process reaping until the transport returns or the filesystem reports failure.
+Regular copies read risky or unknown source mounts through a bounded source-only
+worker. Cancellation polls the pending read every 25 ms; the transfer worker can
+then discard its destination staging file while the source read remains held.
+At most four source workers may exist process-wide, including cancelled reads
+that have not returned. A saturated pool or failed spawn refuses the copy before
+creating destination staging; it never falls back to a blocking source read.
+Each worker holds one duplicated source descriptor and one 128 KiB buffer, never
+a destination descriptor, path or mutation authority. Its slot remains occupied
+through source close. Successful EOF readers retire before the next file starts;
+cancelled blocked reads are never joined. Known local sources keep direct reads.
+A transfer may reuse up to four local filesystem classifications, keyed by the verified
+source device ID. Each entry pins that filesystem with a duplicated descriptor,
+so its device ID cannot be recycled for a new remote filesystem. This is only a
+read-isolation decision, never publication, cleanup or Undo authority.
+The descriptors are released on eviction or at the end of that transfer;
+remote and unknown classifications are never cached as local.
+
+Cancellation checkpoints still cannot interrupt a blocked source open/metadata,
+destination write, fsync, close or unlink. An outage can therefore delay cleanup
+and process reaping until the transport returns or the filesystem reports failure.
 Helper deadlines do not impose transfer syscall or reaping deadlines. Neither
 force-unmount nor a synthetic terminal state is a cancellation mechanism.
 
