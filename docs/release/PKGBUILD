@@ -81,6 +81,8 @@ package() {
   fi
   install -Dm644 "packaging/gust.desktop" \
     "$pkgdir/usr/share/applications/gust.desktop"
+  install -Dm644 "packaging/gust-chooser.desktop" \
+    "$pkgdir/usr/share/applications/gust-chooser.desktop"
   install -Dm644 "LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
   # No FileManager1 activation file here: that name belongs to whichever
   # file manager the user chose. `gust --default on` writes a per-user one.

@@ -2373,6 +2373,99 @@ folder changes; a partial result is an alert. In a small or zoomed window
 the choices scroll and their columns narrow and wrap; Cancel and Apply
 stay pinned below them, and the focused box is scrolled into view.
 
+## 6.27 Other apps' Open and Save dialogs
+
+`gust --portal` answers `org.freedesktop.impl.portal.FileChooser`. Every call
+starts one window in chooser mode and waits for it on its own thread. A chooser
+is a dialog: it floats, it is sized like one, and it answers exactly what it
+was asked.
+
+### What the window receives
+
+| Variable | Meaning |
+|---|---|
+| `GUST_CHOOSER` | `open`, `open-many`, `open-folder`, `save`, `save-many` |
+| `GUST_CHOOSER_TITLE` | the app's title |
+| `GUST_CHOOSER_ACCEPT` | the app's button label, mnemonics removed; unset when it sent none |
+| `GUST_CHOOSER_NAME` | suggested name (`save`) |
+| `GUST_CHOOSER_FILES` | names joined by `/`, raw bytes (`save-many`) |
+| `GUST_CHOOSER_FILTERS` | JSON `{"current":n,"filters":[{"name":..,"globs":[..]}]}`; unset when there are none |
+| `GUST_CHOOSER_RESULT` | private result file: NUL-separated absolute paths |
+
+The service expands MIME rules to globs through `shared-mime-info`'s `globs2`
+before it starts the window, so the window never reads files to filter rows.
+
+### The rules
+
+- **The highlighted row never decides.** The cursor is where the keyboard is,
+  not a choice. `open-folder` returns the one selected folder, otherwise the
+  folder on screen. A plain click selects in `open-folder`, because a click
+  is a choice and a cursor is not. The primary button always names what it
+  will return.
+- **Replacing a file is asked about.** `save` and `save-many` check their
+  targets on a worker (`chooser_check`, the UI thread never stats), and any
+  existing target opens a confirmation with Cancel as the focused default. A
+  name that is an existing folder opens that folder; nothing is returned.
+- **Nothing is written here.** The app writes the file after Gust answers, so
+  there is no undo journal entry; the confirmation is the safety.
+- **Filters hide files, never folders.** Links stay in a listing, because a
+  link may be a folder; search results match by file name. Matching ignores
+  ASCII case.
+  The filter set is per process, because a chooser is one window.
+- **Ctrl+Return accepts in every mode.** Return keeps its usual meaning.
+- **The app can cancel.** `Request.Close` on the call's handle ends that window
+  and answers code 2, and only the bus name that made the call may send it. A
+  handle already in use answers code 2 with no window.
+- **A window that cannot start is not a cancel.** A failed spawn, or an exit
+  with an error and nothing picked, answers code 2, not 1.
+- **An app's request is bounded.** Globs, filters and labels have limits, and
+  the filter list is cut down rather than failing to fit one environment string.
+- **Names stay bytes.** `SaveFiles` names reach the answer byte for byte. A
+  name that cannot be used, or two that land on one target, refuse the call,
+  because the answer must match the names one to one.
+- **Links to folders are folders**, from the listing's `link_dir`. Until a
+  link's target is read nothing is decided about it. Entering a row only ever
+  navigates: a link that stopped being a folder shows why, and nothing launches.
+- **The Save field holds exact names.** A name it cannot hold unchanged is not
+  offered, and the name being checked does not change during the check.
+- **A stalled mount cannot pile up workers.** A check stops at its next target
+  once it is stale or forgotten, and at most four run; beyond that the dialog
+  says so.
+
+### The dialog
+
+A chooser is 875x600 unless a compositor rule sizes it, and reads as a dialog,
+not a file manager with a bar added:
+
+- `ChooserBar` on top: Cancel, the app's title, and the primary button. Cancel
+  never moves, and a long name elides inside the button.
+- `ChooserFooter` under the list, only when there is something to hold: the
+  Save name, how many files a `save-many` places, the file type.
+- The strip at the bottom lists the dialog's keys, not the file manager's.
+- Tabs, panes, Settings, Recent, Trash and anything that launches a file are
+  gone, from menus and shortcuts as well as from sight. A dialog never starts
+  a program, and never saves the session of the window it is not.
+- Ctrl+Return is a window shortcut. Under an overlay it is used up and does
+  nothing, because a focused button would otherwise take it as Return; the
+  rename card alone keeps it, for its own apply.
+
+A Save's answer is bound to the name and folder that were checked: leaving the
+folder drops the check, and a name field is read-only while one is out.
+
+### Floating
+
+A chooser window's Wayland app id is `gust-chooser`, never `gust`, so a rule can
+tell a dialog from a file manager window. `gust --file-dialogs on` adds one
+marked block to `~/.config/hypr/windows.lua`, which puts that id in Omarchy's
+own `floating-window` treatment, and `off` removes exactly that block. Without
+that file nothing is written and the dialog tiles like any other window.
+
+### Deliberately not built
+
+- `choices` (app-defined extra controls) and the `current_filter` result.
+- `parent_window`: Qt has no public way to use an xdg-foreign handle, so a
+  chooser is centred by the rule, not attached to its app.
+
 ## 7. Undo journal
 
 An undo entry records, per affected path: the expected identity

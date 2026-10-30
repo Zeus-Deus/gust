@@ -1,0 +1,797 @@
+import QtQuick
+import QtTest
+import com.gust.app
+
+// The exact Main.qml Open/Save dialog flow (inserted by
+// crates/app/tests/chooser_regressions.py) with the actual ChooserBar,
+// ChooserFooter, ConfirmDialog and HintStrip. The model records what it was
+// asked; its worker answers only when a test says so.
+Item {
+    id: top
+    width: 875
+    height: 600
+
+    QtObject {
+        id: fake
+        signal chooser_checked(int token, string status)
+        signal dataChanged()
+        signal modelReset()
+        property int cursor: 0
+        property int count: 3
+        property string location: "/home/a/Downloads"
+        property string selection_text: ""
+        property string tabLabel: "Downloads"
+        property var target: ({ kind: "here", name: "", count: 0 })
+        property int token: 0
+        property int checks: 0
+        property var accepts: []
+        property var navigated: []
+        property var activated: []
+        property var focused: []
+        property string acceptError: ""
+        /// Answer inside the call, as a refused name does.
+        property string answerNow: ""
+        property var dirs: [true, false, false]
+        function chooser_target() { return JSON.stringify(target) }
+        function chooser_check(name) {
+            checks += 1
+            token += 1
+            if (answerNow !== "") chooser_checked(token, answerNow)
+            return token
+        }
+        function chooser_accept(name) { accepts = accepts.concat([name]); return acceptError }
+        function navigate(p) { navigated = navigated.concat([p]); location = p }
+        function is_dir(row) { return dirs[row] === true }
+        property string enterAnswer: ""
+        property var fileNames: ({})
+        property int forgotten: 0
+        function chooser_enter(row) {
+            if (enterAnswer !== "") return enterAnswer
+            if (dirs[row] !== true) return "file"
+            activate(row)
+            return "folder"
+        }
+        function chooser_file_name(row) {
+            return fileNames[row] !== undefined ? fileNames[row] : entry_name(row)
+        }
+        function chooser_forget() { forgotten = forgotten + 1 }
+        function activate(row) { activated = activated.concat([row]); return "dir" }
+        function focus_row(row) { focused = focused.concat([row]) }
+        function entry_name(row) { return "row" + row + ".txt" }
+    }
+    property var dirModel: fake
+
+    // A hidden stand-in for the file list's key handler.
+    Item { id: listFocus; objectName: "listFocus"; focus: true }
+
+    Item {
+        id: win
+        anchors.fill: parent
+        property int quitCalls: 0
+        property bool overlayUp: confirm.visible || fakeOverlay
+        property bool fakeOverlay: false
+        function qaDump(tag) {}
+        function activateRow(row) { win.chooserActivate(row) }
+        function focusList() { if (!win.overlayUp) listFocus.forceActiveFocus() }
+        function openChooserFilterMenu() { filterMenus += 1 }
+        property int filterMenus: 0
+
+@STATE@
+@FUNCTIONS@
+
+        QtObject { id: quickLook; property bool open: false }
+        QtObject { id: keyMapPanel; property bool open: false }
+        QtObject { id: renameCard; property bool open: false }
+
+@WIRING@
+
+        Column {
+            anchors.fill: parent
+@BARS@
+            HintStrip {
+                id: hints
+                width: parent.width
+                pickerKeys: win.chooserHints
+                dialog: confirm.visible
+            }
+        }
+
+        ConfirmDialog {
+            id: confirm
+            objectName: "confirmDialog"
+            property string purpose: "trash"
+            @CONFIRM_CLOSED@
+            onAccepted: {
+                @CONFIRM_ACCEPTED@
+            }
+            onRejected: {
+                @CONFIRM_REJECTED@
+            }
+        }
+    }
+
+    TestCase {
+        name: "ChooserDialog"
+        when: windowShown
+
+        function find(item, name) {
+            for (let i = 0; i < item.children.length; i++) {
+                const c = item.children[i]
+                if (c.objectName === name) return c
+                const hit = find(c, name)
+                if (hit) return hit
+            }
+            return null
+        }
+        function focusName() {
+            const it = top.Window.activeFocusItem
+            return it ? it.objectName : ""
+        }
+
+        function start(mode, target, name) {
+            win.quitCalls = 0
+            win.chooserMode = mode
+            win.chooserTarget = target || ({ kind: "none", name: "", count: 0 })
+            win.chooserToken = 0
+            win.chooserEarly = null
+            win.chooserAsked = null
+            win.chooserAnswered = false
+            win.fakeOverlay = false
+            quickLook.open = false
+            keyMapPanel.open = false
+            renameCard.open = false
+            chooserBar.acceptLabel = ""
+            chooserBar.error = ""
+            chooserFooter.filters = []
+            chooserFooter.filterIndex = 0
+            chooserFooter.fileCount = 0
+            chooserFooter.name = name || ""
+            fake.location = "/home/a/Downloads"
+            fake.target = win.chooserTarget
+            fake.checks = 0
+            fake.accepts = []
+            fake.navigated = []
+            fake.activated = []
+            fake.enterAnswer = ""
+            fake.fileNames = ({})
+            fake.forgotten = 0
+            fake.focused = []
+            fake.acceptError = ""
+            fake.answerNow = ""
+            listFocus.forceActiveFocus()
+            // The bars have just appeared; a click needs them laid out.
+            wait(20)
+        }
+
+        function cleanup() {
+            confirm.visible = false
+            win.chooserMode = ""
+            wait(0)
+        }
+
+        // --- the button's words --------------------------------------------
+
+        function test_01_wording_data() {
+            return [
+                { tag: "folder here", mode: "open-folder", t: { kind: "here", name: "", count: 0 },
+                  verb: "", want: "Choose this folder", can: true },
+                { tag: "folder picked", mode: "open-folder", t: { kind: "folder", name: "invoices", count: 1 },
+                  verb: "", want: "Choose “invoices”", can: true },
+                { tag: "folder here, app verb", mode: "open-folder", t: { kind: "here", name: "", count: 0 },
+                  verb: "Select", want: "Select “Downloads”", can: true },
+                { tag: "folder picked, app verb", mode: "open-folder", t: { kind: "folder", name: "invoices", count: 1 },
+                  verb: "Select", want: "Select “invoices”", can: true },
+                { tag: "one file", mode: "open", t: { kind: "file", name: "clip.mp4", count: 1 },
+                  verb: "", want: "Open “clip.mp4”", can: true },
+                { tag: "open-many one file", mode: "open-many", t: { kind: "file", name: "clip.mp4", count: 1 },
+                  verb: "", want: "Open “clip.mp4”", can: true },
+                { tag: "several files", mode: "open-many", t: { kind: "files", name: "", count: 3 },
+                  verb: "", want: "Open 3 files", can: true },
+                { tag: "several, app verb", mode: "open-many", t: { kind: "files", name: "", count: 3 },
+                  verb: "Attach", want: "Attach 3 files", can: true },
+                { tag: "nothing to open", mode: "open", t: { kind: "none", name: "", count: 0 },
+                  verb: "", want: "Open", can: false },
+                { tag: "nothing, app verb", mode: "open", t: { kind: "none", name: "", count: 0 },
+                  verb: "Import", want: "Import", can: false },
+                { tag: "save", mode: "save", t: { kind: "none", name: "", count: 0 },
+                  verb: "", want: "Save", can: true },
+                { tag: "save, app verb", mode: "save", t: { kind: "none", name: "", count: 0 },
+                  verb: "Export", want: "Export", can: true },
+                { tag: "save-many", mode: "save-many", t: { kind: "none", name: "", count: 0 },
+                  verb: "", want: "Save here", can: true },
+                { tag: "save-many, app verb", mode: "save-many", t: { kind: "none", name: "", count: 0 },
+                  verb: "Export", want: "Export", can: true }
+            ]
+        }
+        function test_01_wording(row) {
+            start(row.mode, row.t, "report.pdf")
+            chooserBar.acceptLabel = row.verb
+            compare(chooserBar.primaryLabel, row.want)
+            compare(chooserBar.canAccept, row.can)
+            compare(find(chooserBar, "chooserAcceptLabel").text, row.want)
+        }
+
+        function test_02_label_is_bound_to_the_target() {
+            start("open", { kind: "file", name: "a.txt", count: 1 })
+            compare(chooserBar.primaryLabel, "Open “a.txt”")
+            win.chooserTarget = { kind: "files", name: "", count: 2 }
+            compare(chooserBar.primaryLabel, "Open 2 files")
+        }
+
+        function test_03_title_falls_back_by_mode() {
+            start("save-many")
+            compare(find(chooserBar, "chooserTitle").text, "Save files")
+            chooserBar.title = "Export pictures"
+            compare(find(chooserBar, "chooserTitle").text, "Export pictures")
+            chooserBar.title = ""
+        }
+
+        function test_04_a_long_name_elides_and_keeps_cancel() {
+            const longName = "a-very-long-name-".repeat(12) + ".png"
+            start("open", { kind: "file", name: longName, count: 1 })
+            const accept = find(chooserBar, "chooserAccept")
+            const cancel = find(chooserBar, "chooserCancel")
+            const label = find(chooserBar, "chooserAcceptLabel")
+            verify(accept.x >= cancel.x + cancel.width, "the primary stops before Cancel")
+            verify(accept.x + accept.width <= chooserBar.width, "the primary stays on the bar")
+            verify(label.truncated, "the name elides")
+            compare(cancel.x, 8)
+            // The narrowest window Gust allows.
+            top.width = 520
+            wait(0)
+            verify(cancel.x + cancel.width <= accept.x)
+            verify(accept.x + accept.width <= chooserBar.width)
+            top.width = 875
+        }
+
+        function test_05_refresh_on_every_change_signal_data() {
+            return [{ tag: "cursor" }, { tag: "count" }, { tag: "location" },
+                    { tag: "data" }, { tag: "reset" }]
+        }
+        function test_05_refresh_on_every_change_signal(row) {
+            start("open", { kind: "none", name: "", count: 0 })
+            fake.target = { kind: "file", name: "b.txt", count: 1 }
+            if (row.tag === "cursor") fake.cursor += 1
+            else if (row.tag === "count") fake.count += 1
+            else if (row.tag === "location") fake.location = "/home/a/Other"
+            else if (row.tag === "data") fake.dataChanged()
+            else fake.modelReset()
+            tryCompare(chooserBar, "primaryLabel", "Open “b.txt”", 1000)
+        }
+
+        function test_06_an_ordinary_window_ignores_the_model() {
+            start("", { kind: "none", name: "", count: 0 })
+            fake.target = { kind: "file", name: "b.txt", count: 1 }
+            fake.dataChanged()
+            wait(0)
+            compare(win.chooserTarget.kind, "none")
+            verify(!chooserBar.visible)
+            compare(chooserBar.height, 0)
+            verify(!chooserFooter.visible)
+            compare(chooserFooter.height, 0)
+            compare(win.chooserHints.length, 0)
+        }
+
+        // --- nothing to return ---------------------------------------------
+
+        function test_10_none_is_inert() {
+            start("open", { kind: "none", name: "", count: 0 })
+            mouseClick(find(chooserBar, "chooserAccept"))
+            win.chooserAccept()
+            compare(fake.accepts.length, 0)
+            compare(win.quitCalls, 0)
+            compare(chooserBar.error, "")
+        }
+
+        function test_11_an_empty_save_name_is_inert() {
+            start("save", null, "   ")
+            verify(!chooserBar.canAccept)
+            win.chooserAccept()
+            compare(fake.checks, 0)
+        }
+
+        function test_12_open_answers_at_once() {
+            start("open", { kind: "file", name: "a.txt", count: 1 })
+            mouseClick(find(chooserBar, "chooserAccept"))
+            compare(fake.checks, 0, "an Open replaces nothing, so nothing is asked")
+            compare(fake.accepts.length, 1)
+            compare(win.quitCalls, 1)
+        }
+
+        function test_13_an_open_error_stays_in_the_bar() {
+            start("open", { kind: "file", name: "a.txt", count: 1 })
+            fake.acceptError = "choose a file"
+            win.chooserAccept()
+            compare(chooserBar.error, "choose a file")
+            verify(find(chooserBar, "chooserError").visible)
+            compare(win.quitCalls, 0)
+        }
+
+        // --- the replace flow ----------------------------------------------
+
+        function askReplace(names) {
+            start("save", null, "report.pdf")
+            win.chooserAccept()
+            verify(win.chooserBusy)
+            fake.chooser_checked(fake.token, JSON.stringify({ state: "replaces", names: names }))
+            verify(!win.chooserBusy)
+        }
+
+        function test_20_clear_answers_once() {
+            start("save", null, "new.pdf")
+            win.chooserAccept()
+            compare(chooserBar.primaryLabel, "Checking…")
+            verify(!chooserBar.canAccept)
+            compare(fake.accepts.length, 0, "no answer until the disk has")
+            fake.chooser_checked(fake.token, '{"state":"clear"}')
+            compare(fake.accepts, ["new.pdf"])
+            compare(win.quitCalls, 1)
+            verify(!confirm.visible)
+        }
+
+        function test_21_replaces_asks_with_cancel_focused() {
+            askReplace(["report.pdf"])
+            verify(confirm.visible)
+            compare(find(confirm, "confirmTitle").text, "Replace “report.pdf”?")
+            verify(confirm.dangerous)
+            compare(focusName(), "cancelButton")
+            compare(fake.accepts.length, 0, "the question is not the answer")
+            compare(hints.shownKeys, "Tab switch button · Enter press it · Esc cancel")
+        }
+
+        function test_22_cancel_returns_to_the_name_without_answering_data() {
+            return [{ tag: "Return on Cancel" }, { tag: "Escape" }, { tag: "click on Cancel" }, { tag: "click outside" }]
+        }
+        function test_22_cancel_returns_to_the_name_without_answering(row) {
+            askReplace(["report.pdf"])
+            if (row.tag === "Return on Cancel") keyClick(Qt.Key_Return)
+            else if (row.tag === "Escape") keyClick(Qt.Key_Escape)
+            else if (row.tag === "click on Cancel") mouseClick(find(confirm, "cancelButton"))
+            else mouseClick(confirm, 2, 2)
+            verify(!confirm.visible)
+            compare(fake.accepts.length, 0)
+            compare(win.quitCalls, 0)
+            compare(focusName(), "chooserName")
+            compare(chooserFooter.name, "report.pdf", "the typed name survives")
+            // And the dialog still works: the next try asks the disk again.
+            win.chooserAccept()
+            compare(fake.checks, 2)
+        }
+
+        function test_23_confirm_answers_once() {
+            askReplace(["report.pdf"])
+            mouseDoubleClickSequence(find(confirm, "confirmButton"))
+            compare(fake.accepts, ["report.pdf"])
+            compare(win.quitCalls, 1)
+            verify(!confirm.visible)
+            win.chooserAnswer("report.pdf")
+            win.chooserAccept()
+            compare(fake.accepts.length, 1, "an answered dialog stays answered")
+        }
+
+        function test_24_keyboard_confirm() {
+            askReplace(["report.pdf"])
+            keyClick(Qt.Key_Tab)
+            compare(focusName(), "confirmButton")
+            keyClick(Qt.Key_Return)
+            compare(fake.accepts, ["report.pdf"])
+            compare(win.quitCalls, 1)
+        }
+
+        function test_25_several_files_are_counted_and_listed() {
+            start("save-many", { kind: "none", name: "", count: 0 })
+            chooserFooter.fileCount = 5
+            compare(find(chooserFooter, "chooserFileCount").text, "5 files go in this folder")
+            win.chooserAccept()
+            fake.chooser_checked(fake.token, JSON.stringify({ state: "replaces", names: ["a", "b", "c", "d", "e"] }))
+            compare(find(confirm, "confirmTitle").text, "Replace 5 files?")
+            const body = find(confirm, "confirmBody").text
+            verify(body.indexOf("a, b, c and 2 more") >= 0, body)
+            compare(focusName(), "cancelButton")
+            confirm.rejected(); confirm.close()
+            compare(focusName(), "listFocus", "a dialog with no name field gives the keyboard to the list")
+        }
+
+        function test_26_two_files_list_without_more() {
+            start("save-many", { kind: "none", name: "", count: 0 })
+            win.chooserAccept()
+            fake.chooser_checked(fake.token, JSON.stringify({ state: "replaces", names: ["a", "b"] }))
+            verify(find(confirm, "confirmBody").text.indexOf("Already in this folder: a, b.") === 0)
+        }
+
+        function test_27_stale_tokens_are_ignored() {
+            start("save", null, "report.pdf")
+            win.chooserAccept()
+            const first = fake.token
+            fake.chooser_checked(first - 1, '{"state":"clear"}')
+            fake.chooser_checked(first + 1, '{"state":"clear"}')
+            fake.chooser_checked(0, '{"state":"clear"}')
+            verify(win.chooserBusy, "still waiting for the newest question")
+            compare(fake.accepts.length, 0)
+            fake.chooser_checked(first, JSON.stringify({ state: "replaces", names: ["report.pdf"] }))
+            verify(confirm.visible)
+            // A late duplicate of an answered question does nothing.
+            fake.chooser_checked(first, '{"state":"clear"}')
+            compare(fake.accepts.length, 0)
+            verify(confirm.visible)
+        }
+
+        function test_28_leaving_the_folder_forgets_the_question() {
+            start("save", null, "report.pdf")
+            win.chooserAccept()
+            const asked = fake.token
+            verify(win.chooserBusy)
+            fake.location = "/home/a/Elsewhere"
+            verify(!win.chooserBusy, "the user is free again")
+            fake.chooser_checked(asked, '{"state":"clear"}')
+            compare(fake.accepts.length, 0, "a check of the old folder cannot bless the new one")
+            compare(win.quitCalls, 0)
+        }
+
+        function test_29_folder_moved_under_the_question() {
+            askReplace(["report.pdf"])
+            fake.location = "/home/a/Elsewhere"
+            mouseClick(find(confirm, "confirmButton"))
+            compare(fake.accepts.length, 0)
+            verify(chooserBar.error !== "")
+            compare(win.quitCalls, 0)
+        }
+
+        function test_30_rapid_accepts_ask_once() {
+            start("save", null, "report.pdf")
+            win.chooserAccept()
+            win.chooserAccept()
+            win.chooserAccept()
+            compare(fake.checks, 1)
+            fake.chooser_checked(fake.token, JSON.stringify({ state: "replaces", names: ["report.pdf"] }))
+            win.chooserAccept()
+            compare(fake.checks, 1, "the question is up; no second one")
+            mouseClick(find(confirm, "confirmButton"))
+            compare(fake.accepts.length, 1)
+        }
+
+        function test_31_a_name_that_is_a_folder_opens_it() {
+            start("save", null, "invoices")
+            win.chooserAccept()
+            fake.chooser_checked(fake.token, '{"state":"folder","path":"/home/a/Downloads/invoices"}')
+            compare(fake.navigated, ["/home/a/Downloads/invoices"])
+            compare(chooserFooter.name, "invoices")
+            compare(fake.accepts.length, 0)
+            compare(win.quitCalls, 0)
+            compare(focusName(), "chooserName")
+        }
+
+        function test_32_error_is_shown_and_clears_on_edit() {
+            start("save", null, "report.pdf")
+            win.chooserAccept()
+            fake.chooser_checked(fake.token, '{"state":"error","message":"Permission denied"}')
+            compare(chooserBar.error, "Permission denied")
+            compare(fake.accepts.length, 0)
+            compare(win.quitCalls, 0)
+            verify(!win.chooserBusy)
+            chooserFooter.name = "other.pdf"
+            compare(chooserBar.error, "")
+        }
+
+        function test_33_a_refusal_inside_the_call_is_not_lost() {
+            start("save", null, "a/b")
+            fake.answerNow = '{"state":"error","message":"a file name cannot contain /"}'
+            win.chooserAccept()
+            compare(chooserBar.error, "a file name cannot contain /")
+            verify(!win.chooserBusy, "not stuck on Checking…")
+        }
+
+        function test_34_cancel_works_while_waiting() {
+            start("save", null, "report.pdf")
+            win.chooserAccept()
+            mouseClick(find(chooserBar, "chooserCancel"))
+            compare(win.quitCalls, 1)
+            compare(fake.accepts.length, 0)
+            // A stalled mount answering after the Cancel changes nothing.
+            fake.chooser_checked(fake.token, '{"state":"clear"}')
+            compare(fake.accepts.length, 0)
+        }
+
+        function test_35_the_name_is_frozen_while_waiting() {
+            start("save", null, "report.pdf")
+            chooserFooter.focusName()
+            win.chooserAccept()
+            keyClick(Qt.Key_X)
+            compare(chooserFooter.name, "report.pdf")
+            fake.chooser_checked(fake.token, '{"state":"error","message":"no"}')
+            keyClick(Qt.Key_End)
+            keyClick(Qt.Key_X)
+            compare(chooserFooter.name, "report.pdfx")
+        }
+
+        // --- keys ----------------------------------------------------------
+
+        function test_40_ctrl_return_accepts_data() {
+            return [
+                { tag: "list, Return", key: Qt.Key_Return, name: false },
+                { tag: "list, keypad Enter", key: Qt.Key_Enter, name: false },
+                { tag: "name field, Return", key: Qt.Key_Return, name: true }
+            ]
+        }
+        function test_40_ctrl_return_accepts(row) {
+            start("save", null, "report.pdf")
+            if (row.name) chooserFooter.focusName()
+            keyClick(row.key, Qt.ControlModifier)
+            compare(fake.checks, 1)
+            fake.chooser_checked(fake.token, '{"state":"clear"}')
+            compare(fake.accepts, ["report.pdf"])
+            compare(win.quitCalls, 1)
+        }
+
+        function test_41_ctrl_return_in_each_open_mode_data() {
+            return [
+                { tag: "open", mode: "open", t: { kind: "file", name: "a", count: 1 } },
+                { tag: "open-many", mode: "open-many", t: { kind: "files", name: "", count: 2 } },
+                { tag: "open-folder", mode: "open-folder", t: { kind: "here", name: "", count: 0 } }
+            ]
+        }
+        function test_41_ctrl_return_in_each_open_mode(row) {
+            start(row.mode, row.t)
+            keyClick(Qt.Key_Return, Qt.ControlModifier)
+            compare(fake.accepts.length, 1)
+            compare(win.quitCalls, 1)
+        }
+
+        function test_42_overlays_own_ctrl_return_data() {
+            return [{ tag: "confirmation" }, { tag: "Quick Look" }, { tag: "key map" },
+                    { tag: "other overlay" }, { tag: "rename card" }]
+        }
+        function test_42_overlays_own_ctrl_return(row) {
+            start("open", { kind: "file", name: "a", count: 1 })
+            if (row.tag === "confirmation") confirm.open("t", "b", "Yes", true)
+            else if (row.tag === "Quick Look") quickLook.open = true
+            else if (row.tag === "key map") keyMapPanel.open = true
+            else if (row.tag === "rename card") { win.fakeOverlay = true; renameCard.open = true }
+            else win.fakeOverlay = true
+            keyClick(Qt.Key_Return, Qt.ControlModifier)
+            compare(fake.accepts.length, 0)
+            compare(win.quitCalls, 0)
+            if (row.tag === "confirmation")
+                verify(confirm.visible, "ignored, not taken as Return on the focused Cancel")
+        }
+
+        function test_42c_chooser_accept_itself_refuses_under_an_overlay() {
+            start("open", { kind: "file", name: "a", count: 1 })
+            quickLook.open = true
+            win.chooserAccept()
+            compare(fake.accepts.length, 0)
+        }
+
+        function test_42d_plain_return_opens_in_every_preset_data() {
+            return [{ tag: "Return", key: Qt.Key_Return, mods: Qt.NoModifier },
+                    { tag: "keypad", key: Qt.Key_Enter, mods: Qt.KeypadModifier }]
+        }
+        function test_42d_plain_return_opens_in_every_preset(row) {
+            start("open", { kind: "file", name: "row1.txt", count: 1 })
+            fake.cursor = 1
+            verify(win.chooserReturn({ key: row.key, modifiers: row.mods }))
+            compare(fake.accepts.length, 1)
+            fake.cursor = 0
+        }
+
+        function test_42e_other_keys_and_ordinary_windows_pass_through() {
+            start("open", { kind: "file", name: "a", count: 1 })
+            verify(!win.chooserReturn({ key: Qt.Key_Down, modifiers: Qt.NoModifier }))
+            verify(!win.chooserReturn({ key: Qt.Key_Return, modifiers: Qt.AltModifier }), "Alt+Enter is Quick Look")
+            verify(!win.chooserReturn({ key: Qt.Key_Return, modifiers: Qt.ControlModifier }), "the shortcut's")
+            win.chooserMode = ""
+            verify(!win.chooserReturn({ key: Qt.Key_Return, modifiers: Qt.NoModifier }))
+        }
+
+        function test_43_plain_return_in_the_name_field_saves() {
+            start("save", null, "report.pdf")
+            chooserFooter.focusName()
+            keyClick(Qt.Key_Return)
+            compare(fake.checks, 1)
+        }
+
+        function test_44_escape_in_the_name_field_cancels() {
+            start("save", null, "report.pdf")
+            chooserFooter.focusName()
+            keyClick(Qt.Key_Escape)
+            compare(win.quitCalls, 1)
+            compare(fake.accepts.length, 0)
+        }
+
+        function test_45_buttons_take_the_keyboard() {
+            start("open", { kind: "file", name: "a", count: 1 })
+            find(chooserBar, "chooserAccept").forceActiveFocus()
+            keyClick(Qt.Key_Space)
+            compare(fake.accepts.length, 1)
+            start("open", { kind: "none", name: "", count: 0 })
+            find(chooserBar, "chooserAccept").forceActiveFocus()
+            keyClick(Qt.Key_Return)
+            compare(fake.accepts.length, 0, "inert from the keyboard too")
+            find(chooserBar, "chooserCancel").forceActiveFocus()
+            keyClick(Qt.Key_Return)
+            compare(win.quitCalls, 1)
+        }
+
+        // --- rows ----------------------------------------------------------
+
+        function test_50_a_folder_opens_in_every_mode_data() {
+            return ["open", "open-many", "open-folder", "save", "save-many"].map(m => ({ tag: m, mode: m }))
+        }
+        function test_50_a_folder_opens_in_every_mode(row) {
+            start(row.mode, { kind: "here", name: "", count: 0 }, "name.txt")
+            win.chooserActivate(0)
+            compare(fake.activated, [0])
+            compare(fake.accepts.length, 0)
+        }
+
+        function test_51_enter_on_a_file() {
+            start("open", { kind: "file", name: "row1.txt", count: 1 })
+            win.chooserActivate(1)
+            compare(fake.focused, [1])
+            compare(fake.accepts.length, 1)
+
+            start("save", null, "old.txt")
+            win.chooserActivate(1)
+            compare(chooserFooter.name, "row1.txt")
+            compare(focusName(), "chooserName")
+            compare(fake.checks, 0, "filling the name is not saving")
+        }
+
+        function test_51a_a_link_not_yet_read_decides_nothing() {
+            start("open", { kind: "none", name: "", count: 0 })
+            fake.enterAnswer = "pending"
+            win.chooserActivate(1)
+            compare(fake.accepts.length, 0, "not answered")
+            compare(fake.focused.length, 0)
+            verify(hints.message !== "", "and the user is told why")
+            hints.message = ""
+        }
+
+        function test_51b_the_name_being_checked_does_not_change() {
+            start("save", null, "old.pdf")
+            win.chooserAccept()
+            verify(win.chooserBusy)
+            win.chooserActivate(1)
+            compare(chooserFooter.name, "old.pdf")
+            fake.chooser_checked(fake.token, '{"state":"clear"}')
+            compare(fake.accepts, ["old.pdf"])
+        }
+
+        function test_51c_a_name_the_field_cannot_hold_is_not_offered() {
+            start("save", null, "old.txt")
+            fake.fileNames = ({ 1: "" })
+            win.chooserActivate(1)
+            compare(chooserFooter.name, "old.txt")
+            verify(hints.message !== "")
+            hints.message = ""
+        }
+
+        function test_51d_forgetting_a_check_tells_the_worker() {
+            start("save", null, "report.pdf")
+            win.chooserAccept()
+            verify(win.chooserBusy)
+            win.chooserForgetCheck()
+            compare(fake.forgotten, 1)
+            win.chooserForgetCheck()
+            compare(fake.forgotten, 1, "nothing to forget the second time")
+        }
+
+        function test_52_no_file_is_launched_or_returned_where_it_is_no_answer_data() {
+            return [{ tag: "open-folder", mode: "open-folder" }, { tag: "save-many", mode: "save-many" }]
+        }
+        function test_52_no_file_is_launched_or_returned_where_it_is_no_answer(row) {
+            start(row.mode, { kind: "here", name: "", count: 0 })
+            win.chooserActivate(1)
+            compare(fake.activated.length, 0)
+            compare(fake.accepts.length, 0)
+            compare(fake.checks, 0)
+            verify(hints.message !== "")
+            hints.message = ""
+        }
+
+        function test_53_an_empty_folder_does_not_wipe_the_name() {
+            start("save", null, "keep.txt")
+            fake.count = 0
+            win.chooserActivate(0)
+            compare(chooserFooter.name, "keep.txt")
+            fake.count = 3
+        }
+
+        // --- file types ----------------------------------------------------
+
+        function test_60_type_control_by_filter_count() {
+            start("open", { kind: "none", name: "", count: 0 })
+            verify(!chooserFooter.visible, "no filters: no foot")
+            compare(chooserFooter.height, 0)
+
+            chooserFooter.filters = ["Images"]
+            verify(chooserFooter.visible)
+            verify(find(chooserFooter, "chooserFilterCaption").visible)
+            verify(!find(chooserFooter, "chooserFilter").visible)
+            compare(find(chooserFooter, "chooserFilterCaption").text, "Images")
+
+            chooserFooter.filters = ["Images", "All files"]
+            chooserFooter.filterIndex = 1
+            verify(!find(chooserFooter, "chooserFilterCaption").visible)
+            verify(find(chooserFooter, "chooserFilter").visible)
+            compare(find(chooserFooter, "chooserFilterLabel").text, "All files ▾")
+        }
+
+        function test_61_type_button_opens_from_keyboard_and_mouse_data() {
+            return [{ tag: "Return", key: Qt.Key_Return }, { tag: "Space", key: Qt.Key_Space },
+                    { tag: "Down", key: Qt.Key_Down }, { tag: "click", key: 0 }]
+        }
+        function test_61_type_button_opens_from_keyboard_and_mouse(row) {
+            start("open", { kind: "none", name: "", count: 0 })
+            chooserFooter.filters = ["Images", "All files"]
+            win.filterMenus = 0
+            wait(20)
+            const button = find(chooserFooter, "chooserFilter")
+            if (row.key === 0) mouseClick(button)
+            else { button.forceActiveFocus(); keyClick(row.key) }
+            compare(win.filterMenus, 1)
+        }
+
+        function test_62_tab_reaches_every_control() {
+            start("save", null, "a.txt")
+            chooserFooter.filters = ["Images", "All files"]
+            chooserFooter.focusName()
+            const seen = [focusName()]
+            for (let i = 0; i < 3; i++) { keyClick(Qt.Key_Tab); seen.push(focusName()) }
+            for (const want of ["chooserName", "chooserFilter", "chooserCancel", "chooserAccept"])
+                verify(seen.indexOf(want) >= 0, want + " in " + seen)
+        }
+
+        // --- hints and menus -----------------------------------------------
+
+        function test_70_hints_fit_the_mode() {
+            start("open-folder", { kind: "here", name: "", count: 0 })
+            compare(hints.shownKeys,
+                    "Enter open folder · Ctrl+Enter choose · Ctrl+Space select · Esc cancel · Ctrl+H hidden files")
+            start("open-many", { kind: "none", name: "", count: 0 })
+            compare(hints.shownKeys,
+                    "Enter open · Ctrl+Enter choose · Ctrl+Space select · Esc cancel · Ctrl+H hidden files")
+            start("save", null, "a.txt")
+            compare(hints.shownKeys,
+                    "Enter open folder · Ctrl+Enter save · Esc cancel · Ctrl+H hidden files")
+            chooserFooter.focusName()
+            compare(hints.shownKeys, "Enter save · Ctrl+Enter save · Esc cancel")
+        }
+
+        function test_71_esc_hint_says_what_esc_does() {
+            start("open", { kind: "file", name: "a", count: 1 })
+            fake.selection_text = "1 selected"
+            verify(hints.shownKeys.indexOf("Esc clear selection") >= 0)
+            fake.selection_text = ""
+            verify(hints.shownKeys.indexOf("Esc cancel") >= 0)
+        }
+
+        function test_72_menus_lose_what_a_dialog_cannot_do() {
+            start("open", { kind: "none", name: "", count: 0 })
+            const sep = { separator: true }
+            const out = win.chooserMenu([
+                { label: "Open", action: "open" },
+                { label: "Open in new tab", action: "open-tab" },
+                sep,
+                { label: "Open with…", action: "open-with" },
+                { label: "Run…", action: "run" },
+                sep,
+                { label: "Rename…", action: "rename" },
+                sep,
+                { label: "Open terminal", action: "terminal" }
+            ])
+            compare(out.map(i => i.separator ? "-" : i.action), ["open", "-", "rename"])
+            win.chooserMode = ""
+            compare(win.chooserMenu([{ label: "t", action: "terminal" }]).length, 1,
+                    "ordinary windows keep every entry")
+            verify(win.chooserFits("settings"))
+            win.chooserMode = "open"
+            verify(!win.chooserFits("settings"))
+            verify(!win.chooserFits("toggle-split"))
+            verify(win.chooserFits("rename"))
+            // These run a program, and the ids are not in any list.
+            verify(!win.chooserFits("openwith:firefox.desktop"))
+            verify(!win.chooserFits("custom:compress"))
+        }
+    }
+}
