@@ -2388,9 +2388,9 @@ was asked.
 | `GUST_CHOOSER_TITLE` | the app's title |
 | `GUST_CHOOSER_ACCEPT` | the app's button label, mnemonics removed; unset when it sent none |
 | `GUST_CHOOSER_NAME` | suggested name (`save`) |
-| `GUST_CHOOSER_FILES` | names joined by `/`, raw bytes (`save-many`) |
+| `GUST_CHOOSER_FILES` | path of a private file of NUL-separated names, raw bytes (`save-many`) |
 | `GUST_CHOOSER_FILTERS` | JSON `{"current":n,"filters":[{"name":..,"globs":[..]}]}`; unset when there are none |
-| `GUST_CHOOSER_RESULT` | private result file: NUL-separated absolute paths |
+| `GUST_CHOOSER_RESULT` | private result file: NUL-separated absolute paths, then `filter:<n>` when there are filters |
 
 The service expands MIME rules to globs through `shared-mime-info`'s `globs2`
 before it starts the window, so the window never reads files to filter rows.
@@ -2408,6 +2408,10 @@ before it starts the window, so the window never reads files to filter rows.
   name that is an existing folder opens that folder; nothing is returned.
 - **Nothing is written here.** The app writes the file after Gust answers, so
   there is no undo journal entry; the confirmation is the safety.
+- **The app learns the file type.** The answer's `current_filter` is the filter
+  showing at accept, exactly as the app sent it, so an export picks its format.
+- **Only the newest question gets an answer.** A check that returns after
+  another overlay took over answers nothing, and the user presses Save again.
 - **Filters hide files, never folders.** Links stay in a listing, because a
   link may be a folder; search results match by file name. Matching ignores
   ASCII case.
@@ -2462,7 +2466,7 @@ that file nothing is written and the dialog tiles like any other window.
 
 ### Deliberately not built
 
-- `choices` (app-defined extra controls) and the `current_filter` result.
+- `choices` (app-defined extra controls).
 - `parent_window`: Qt has no public way to use an xdg-foreign handle, so a
   chooser is centred by the rule, not attached to its app.
 

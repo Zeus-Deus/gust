@@ -102,13 +102,16 @@ fn read_globs2() -> String {
         .join("\n")
 }
 
-/// Run one chooser window to completion; returns the picked paths, or None
-/// when no window could start. That must not read as the user cancelling.
-fn choose(
-    req: gust_core::chooser::Request,
-    title: &str,
-    closed: &AtomicBool,
-) -> Option<Vec<std::path::PathBuf>> {
+/// What one chooser window answered.
+struct Answer {
+    picked: Vec<std::path::PathBuf>,
+    /// Position in the request's filter list when the user accepted.
+    filter: Option<usize>,
+}
+
+/// Run one chooser window to completion. None means no window could start,
+/// which must not read as the user cancelling.
+fn choose(req: gust_core::chooser::Request, title: &str, closed: &AtomicBool) -> Option<Answer> {
     let exe = std::env::current_exe().ok()?;
     let dir = std::env::var_os("XDG_RUNTIME_DIR")
         .map(std::path::PathBuf::from)
@@ -148,15 +151,18 @@ fn choose(
     } else {
         cmd.env("GUST_CHOOSER_FILTERS", req.filters.to_json());
     }
+    let names = result.with_extension("names");
     if req.files.is_empty() {
         cmd.env_remove("GUST_CHOOSER_FILES");
     } else {
-        cmd.env(
-            "GUST_CHOOSER_FILES",
-            gust_core::chooser::files_to_env(&req.files),
-        );
+        gust_core::chooser::write_names(&names, &req.files).ok()?;
+        cmd.env("GUST_CHOOSER_FILES", &names);
     }
-    let mut child = cmd.spawn().ok()?;
+    let spawned = cmd.spawn();
+    if spawned.is_err() {
+        let _ = std::fs::remove_file(&names);
+    }
+    let mut child = spawned.ok()?;
     let status = loop {
         if closed.load(Ordering::SeqCst) {
             // The app gave up on the dialog: the window goes with it, and
@@ -164,7 +170,11 @@ fn choose(
             let _ = child.kill();
             let _ = child.wait();
             let _ = std::fs::remove_file(&result);
-            return Some(Vec::new());
+            let _ = std::fs::remove_file(&names);
+            return Some(Answer {
+                picked: Vec::new(),
+                filter: None,
+            });
         }
         match child.try_wait() {
             Ok(None) => std::thread::sleep(Duration::from_millis(50)),
@@ -173,11 +183,13 @@ fn choose(
         }
     };
     let picked = gust_core::chooser::parse_result(&result);
+    let filter = gust_core::chooser::parse_filter(&result);
     let _ = std::fs::remove_file(&result);
+    let _ = std::fs::remove_file(&names);
     // Cancel is a clean exit with nothing picked. A window that failed to
     // start exits with an error, and that must not read as the user's choice.
     let finished = status.is_some_and(|s| s.success());
-    (finished || !picked.is_empty()).then_some(picked)
+    (finished || !picked.is_empty()).then_some(Answer { picked, filter })
 }
 
 fn handle(msg: &Message, kind: &str, closed: &AtomicBool) -> (u32, PropMap) {
@@ -236,9 +248,13 @@ fn handle(msg: &Message, kind: &str, closed: &AtomicBool) -> (u32, PropMap) {
     } else {
         String::new()
     };
-    req.filters =
+    // The answer names the filter the way the app wrote it, so keep that.
+    let mut as_sent = options.filters.clone();
+    as_sent.extend(options.current_filter.clone());
+    let filters =
         gust_core::chooser::Filters::expand(options.filters, options.current_filter, &globs2);
-    let Some(picked) = choose(req, &title, closed) else {
+    req.filters = filters.clone();
+    let Some(Answer { picked, filter }) = choose(req, &title, closed) else {
         return (2, PropMap::new());
     };
     let mut results = PropMap::new();
@@ -252,6 +268,15 @@ fn handle(msg: &Message, kind: &str, closed: &AtomicBool) -> (u32, PropMap) {
     }
     let uris = gust_core::chooser::answer_uris(&picked);
     results.insert("uris".into(), Variant(Box::new(uris) as Box<dyn RefArg>));
+    let chosen = filter
+        .and_then(|i| filters.items.get(i))
+        .and_then(|f| as_sent.get(f.origin));
+    if let Some(chosen) = chosen {
+        results.insert(
+            "current_filter".into(),
+            Variant(Box::new(chosen.clone()) as Box<dyn RefArg>),
+        );
+    }
     (0, results)
 }
 

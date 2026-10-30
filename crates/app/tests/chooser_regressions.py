@@ -56,7 +56,7 @@ QtObject {
 
 FUNCTIONS = ["refreshChooserTarget", "chooserAccept", "chooserChecked", "chooserForgetCheck",
              "chooserAskReplace", "chooserReplaceConfirmed", "chooserAnswer", "chooserCancel",
-             "chooserActivate", "chooserReturn", "chooserFits", "chooserMenu"]
+             "chooserActivate", "chooserReturn", "chooserFits", "chooserMenu", "chooserFilterPage"]
 
 
 def main():

@@ -52,6 +52,9 @@ pub struct Request {
 pub struct Filter {
     pub name: String,
     pub globs: Vec<String>,
+    /// Where this came from in the app's list (its preferred filter counts
+    /// as one past the end), so the answer can name it the way the app did.
+    pub origin: usize,
 }
 
 /// What the portal sends: `(name, [(0 glob | 1 MIME, pattern)])`.
@@ -74,6 +77,7 @@ const MAX_FILTERS_JSON: usize = 120 * 1024;
 const MAX_FILTER_NAME: usize = 256;
 /// The most any Linux filesystem takes for one name.
 const MAX_NAME_BYTES: usize = 255;
+const MAX_FILES: usize = 4096;
 
 impl Request {
     /// `kind` is "open" or "save"; the rest are the portal's options.
@@ -124,12 +128,16 @@ impl Request {
     /// `SaveFiles`: the answer must match the names one to one, so a name that
     /// cannot be used, or two that land on one target, refuse the whole call.
     pub fn with_files(mut self, files: Vec<Vec<u8>>) -> Option<Request> {
+        if files.len() > MAX_FILES {
+            return None;
+        }
+        let mut seen = std::collections::HashSet::with_capacity(files.len());
         let mut names = Vec::with_capacity(files.len());
         for file in files {
             let path = nul_terminated_path(file);
             let name = path.file_name()?.to_os_string();
             let bytes = name.as_bytes();
-            if bytes.len() > MAX_NAME_BYTES || bytes.contains(&0) || names.contains(&name) {
+            if bytes.len() > MAX_NAME_BYTES || bytes.contains(&0) || !seen.insert(name.clone()) {
                 return None;
             }
             names.push(name);
@@ -142,23 +150,22 @@ impl Request {
     }
 }
 
-/// The names for the window. `/` cannot be in a name and the environment holds
-/// bytes, so this keeps every name exactly.
-pub fn files_to_env(files: &[OsString]) -> OsString {
-    let mut out = OsString::new();
-    for (i, file) in files.iter().enumerate() {
-        if i > 0 {
-            out.push("/");
-        }
-        out.push(file);
+/// Hand `SaveFiles` names to the window: a private file, because a large
+/// batch does not fit one environment string, and NUL-separated, because that
+/// is the only byte a name cannot hold.
+pub fn write_names(out: &Path, names: &[OsString]) -> std::io::Result<()> {
+    let mut bytes = Vec::new();
+    for name in names {
+        bytes.extend_from_slice(name.as_bytes());
+        bytes.push(0);
     }
-    out
+    write_private(out, &bytes)
 }
 
-pub fn files_from_env(value: &OsStr) -> Vec<OsString> {
-    value
-        .as_bytes()
-        .split(|b| *b == b'/')
+pub fn read_names(path: &Path) -> Vec<OsString> {
+    let bytes = std::fs::read(path).unwrap_or_default();
+    bytes
+        .split(|b| *b == 0)
         .filter(|name| !name.is_empty())
         .map(|name| OsStr::from_bytes(name).to_os_string())
         .collect()
@@ -282,7 +289,7 @@ fn globs_for_mime<'a>(pattern: &'a str, globs2: &'a str) -> impl Iterator<Item =
         })
 }
 
-fn expand_filter((name, rules): RawFilter, globs2: &str) -> Filter {
+fn expand_filter((name, rules): RawFilter, origin: usize, globs2: &str) -> Filter {
     let mut globs: Vec<String> = Vec::new();
     let mut used = 0;
     // False once the budget is spent, so a broad MIME type stops scanning.
@@ -311,6 +318,7 @@ fn expand_filter((name, rules): RawFilter, globs2: &str) -> Filter {
     Filter {
         name: name.chars().take(MAX_FILTER_NAME).collect(),
         globs,
+        origin,
     }
 }
 
@@ -319,16 +327,19 @@ impl Filters {
     /// one that is not in the list is added, as GTK does. Names are labels and
     /// may repeat, so the whole filter is compared first.
     pub fn expand(raw: Vec<RawFilter>, current: Option<RawFilter>, globs2: &str) -> Filters {
+        let preferred = raw.len();
         let mut items: Vec<Filter> = raw
             .into_iter()
             .take(MAX_FILTERS)
-            .map(|f| expand_filter(f, globs2))
+            .enumerate()
+            .map(|(i, f)| expand_filter(f, i, globs2))
             .collect();
         let mut index = 0;
-        if let Some(wanted) = current.map(|f| expand_filter(f, globs2)) {
+        if let Some(wanted) = current.map(|f| expand_filter(f, preferred, globs2)) {
+            let same = |f: &Filter| f.name == wanted.name && f.globs == wanted.globs;
             let found = items
                 .iter()
-                .position(|f| *f == wanted)
+                .position(same)
                 .or_else(|| items.iter().position(|f| f.name == wanted.name));
             index = found.unwrap_or_else(|| {
                 items.truncate(MAX_FILTERS - 1);
@@ -361,7 +372,7 @@ impl Filters {
         let filters: Vec<_> = self
             .items
             .iter()
-            .map(|f| serde_json::json!({ "name": f.name, "globs": f.globs }))
+            .map(|f| serde_json::json!({ "name": f.name, "globs": f.globs, "origin": f.origin }))
             .collect();
         serde_json::json!({ "current": self.current, "filters": filters }).to_string()
     }
@@ -384,6 +395,7 @@ impl Filters {
                                     .collect()
                             })
                             .unwrap_or_default(),
+                        origin: f["origin"].as_u64().unwrap_or(0) as usize,
                     })
                     .collect()
             })
@@ -456,8 +468,7 @@ pub fn check_targets(targets: &[PathBuf], wanted: impl Fn() -> bool) -> SaveChec
     }
 }
 
-/// Write what was picked. Private (0600) because paths are personal.
-pub fn write_result(out: &Path, picked: &[PathBuf]) -> std::io::Result<()> {
+fn write_private(out: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
     let mut f = std::fs::OpenOptions::new()
@@ -466,11 +477,35 @@ pub fn write_result(out: &Path, picked: &[PathBuf]) -> std::io::Result<()> {
         .truncate(true)
         .mode(0o600)
         .open(out)?;
-    for p in picked {
-        f.write_all(p.as_os_str().as_bytes())?;
-        f.write_all(b"\0")?;
-    }
+    f.write_all(bytes)?;
     f.sync_all()
+}
+
+/// Write what was picked, and which file type was showing. Private (0600)
+/// because paths are personal.
+pub fn write_answer(out: &Path, picked: &[PathBuf], filter: Option<usize>) -> std::io::Result<()> {
+    let mut bytes = Vec::new();
+    for p in picked {
+        bytes.extend_from_slice(p.as_os_str().as_bytes());
+        bytes.push(0);
+    }
+    if let Some(index) = filter {
+        bytes.extend_from_slice(format!("filter:{index}\0").as_bytes());
+    }
+    write_private(out, &bytes)
+}
+
+pub fn write_result(out: &Path, picked: &[PathBuf]) -> std::io::Result<()> {
+    write_answer(out, picked, None)
+}
+
+/// Which file type the answer was given under.
+pub fn parse_filter(out: &Path) -> Option<usize> {
+    let bytes = std::fs::read(out).ok()?;
+    bytes
+        .split(|b| *b == 0)
+        .find_map(|s| s.strip_prefix(b"filter:"))
+        .and_then(|n| std::str::from_utf8(n).ok()?.parse().ok())
 }
 
 /// Read what was picked; empty means cancelled. Only absolute paths count.

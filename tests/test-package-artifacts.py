@@ -34,6 +34,7 @@ class PackageArtifactTests(unittest.TestCase):
         shutil.copyfile(ROOT / "packaging/runtime-files.json", self.source / "packaging/runtime-files.json")
         # Synthetic ELF header: the checker never executes this fixture.
         elf = b"\x7fELF\x02\x01" + b"\0" * 12 + (62).to_bytes(2, "little") + b"fixture"
+        (self.source / "packaging/gust-chooser.desktop").write_bytes(b"synthetic configuration\n")
         for item in package.runtime_files(self.source):
             built = self.source / item["source"]
             built.parent.mkdir(parents=True, exist_ok=True)
@@ -48,6 +49,11 @@ class PackageArtifactTests(unittest.TestCase):
 
     def test_complete_stage_matches_sources(self):
         self.assertEqual(len(self.verify()), 7)
+
+    def test_a_snapshot_older_than_the_dialog_entry_still_packages(self):
+        (self.source / "packaging/gust-chooser.desktop").unlink()
+        (self.stage / "usr/share/applications/gust-chooser.desktop").unlink()
+        self.assertEqual(len(self.verify()), 6)
 
     def test_missing_runtime_file_and_modified_configuration_fail(self):
         path = self.stage / "usr/share/applications/gust.desktop"

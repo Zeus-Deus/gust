@@ -3,8 +3,9 @@
 //! what the user picked into the portal's answer.
 
 use gust_core::chooser::{
-    answer_uris, check_targets, files_from_env, files_to_env, filter_shows, folder_answer,
-    glob_match, parse_result, plain_label, write_result, Filters, Mode, Request, SaveCheck,
+    answer_uris, check_targets, filter_shows, folder_answer, glob_match, parse_filter,
+    parse_result, plain_label, read_names, write_answer, write_names, write_result, Filters, Mode,
+    Request, SaveCheck,
 };
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -226,7 +227,51 @@ fn two_names_that_only_differ_in_non_utf8_bytes_stay_two_names() {
         .with_files(vec![b"raw\xff\0".to_vec(), b"raw\xfe\0".to_vec()])
         .unwrap();
     assert_ne!(r.files[0], r.files[1]);
-    assert_eq!(files_from_env(&files_to_env(&r.files)), r.files);
+    let d = std::env::temp_dir().join(format!("gust-chooser-names-{}", std::process::id()));
+    write_names(&d, &r.files).unwrap();
+    assert_eq!(read_names(&d), r.files);
+    let _ = std::fs::remove_file(&d);
+}
+
+#[test]
+fn a_large_save_files_batch_survives_the_trip_to_the_window() {
+    // 200 KiB, more than one environment string can hold.
+    let files: Vec<Vec<u8>> = (0..1024)
+        .map(|i| format!("{i:0200}.txt").into_bytes())
+        .collect();
+    let r = Request::new("save-many", false, false, None, None)
+        .with_files(files)
+        .unwrap();
+    let d = std::env::temp_dir().join(format!("gust-chooser-batch-{}", std::process::id()));
+    write_names(&d, &r.files).unwrap();
+    assert_eq!(read_names(&d), r.files);
+    let _ = std::fs::remove_file(&d);
+}
+
+#[test]
+fn the_answer_says_which_file_type_was_showing_and_stays_readable_as_paths() {
+    let d = std::env::temp_dir().join(format!("gust-chooser-filter-{}", std::process::id()));
+    let picked = vec![PathBuf::from("/home/u/a.png")];
+    write_answer(&d, &picked, Some(3)).unwrap();
+    assert_eq!(parse_result(&d), picked);
+    assert_eq!(parse_filter(&d), Some(3));
+    write_result(&d, &picked).unwrap();
+    assert_eq!(parse_filter(&d), None);
+    let _ = std::fs::remove_file(&d);
+}
+
+#[test]
+fn a_filter_remembers_where_it_came_from_in_the_apps_list() {
+    let png = ("PNG".to_string(), vec![(0, "*.png".to_string())]);
+    let jpg = ("JPEG".to_string(), vec![(0, "*.jpg".to_string())]);
+    let pdf = ("PDF".to_string(), vec![(0, "*.pdf".to_string())]);
+    let f = Filters::expand(vec![png, jpg.clone()], Some(jpg), "");
+    assert_eq!(f.items[f.current].origin, 1);
+    let f = Filters::expand(Vec::new(), Some(pdf.clone()), "");
+    assert_eq!(f.items[f.current].origin, 0);
+    let f = Filters::expand(vec![("PNG".to_string(), Vec::new())], Some(pdf), "");
+    assert_eq!(f.items[f.current].origin, 1, "one past the app's list");
+    assert_eq!(Filters::from_json(&f.to_json()), f);
 }
 
 #[test]

@@ -637,6 +637,48 @@ Item {
             compare(fake.checks, 0, "filling the name is not saving")
         }
 
+        function test_51e_a_late_answer_does_not_touch_another_overlay_data() {
+            return [{ tag: "clear", status: '{"state":"clear"}' },
+                    { tag: "replaces", status: '{"state":"replaces","names":["report.pdf"]}' }]
+        }
+        function test_51e_a_late_answer_does_not_touch_another_overlay(row) {
+            start("save", null, "report.pdf")
+            win.chooserAccept()
+            verify(win.chooserBusy)
+            win.fakeOverlay = true
+            fake.chooser_checked(fake.token, row.status)
+            win.fakeOverlay = false
+            compare(fake.accepts.length, 0, "not answered")
+            verify(!confirm.visible, "the other question stays the only one")
+            verify(!win.chooserBusy, "and the user can ask again")
+            verify(hints.message !== "")
+            hints.message = ""
+            win.chooserAccept()
+            fake.chooser_checked(fake.token, '{"state":"clear"}')
+            compare(fake.accepts, ["report.pdf"])
+        }
+
+        function test_51f_a_long_file_type_list_pages_instead_of_leaving_the_window() {
+            const names = []
+            for (let i = 0; i < 64; i++) names.push("type " + i)
+            const first = win.chooserFilterPage(names, 2, 10, 0)
+            compare(first.length, 10, "never taller than the room")
+            compare(first[2].hint, "✓")
+            compare(first[9].action, "chooser-types-page-1")
+            compare(first[9].hint, "1/8")
+            const second = win.chooserFilterPage(names, 2, 10, 1)
+            compare(second[0].action, "chooser-filter-9")
+            let reachable = new Set()
+            for (let page = 0; page < 8; page++) {
+                for (const it of win.chooserFilterPage(names, 2, 10, page))
+                    if (it.action.startsWith("chooser-filter-")) reachable.add(it.action)
+            }
+            compare(reachable.size, 64, "every type can be reached")
+            compare(win.chooserFilterPage(names, 2, 10, 7).pop().action, "chooser-types-page-8")
+            compare(win.chooserFilterPage(names, 2, 10, 8)[0].action, "chooser-filter-0", "and it wraps")
+            compare(win.chooserFilterPage(["a", "b"], 0, 10, 0).length, 2, "a short list has no extra row")
+        }
+
         function test_51a_a_link_not_yet_read_decides_nothing() {
             start("open", { kind: "none", name: "", count: 0 })
             fake.enterAnswer = "pending"

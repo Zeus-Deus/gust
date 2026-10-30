@@ -1680,6 +1680,13 @@ Window {
         try { status = JSON.parse(statusJson) }
         catch (e) { status = { state: "error", message: qsTr("Could not check the name") } }
         const asked = win.chooserAsked
+        // Something else took over while the disk answered. Its question is
+        // the one on screen, so this answer waits for the user to ask again.
+        if (!win.chooserKeysFree) {
+            win.chooserAsked = null
+            hints.message = qsTr("Not saved yet: press Save again")
+            return
+        }
         if (status.state === "clear") {
             win.chooserAsked = null
             win.chooserAnswer(asked.name)
@@ -1808,15 +1815,31 @@ Window {
         return true
     }
 
+    /// One page of the file type list. The menu does not scroll, so a list
+    /// taller than `room` rows ends in a row that opens the next page.
+    function chooserFilterPage(names, ticked, room, page) {
+        const row = (i) => ({
+            label: names[i], hint: i === ticked ? "✓" : "", action: "chooser-filter-" + i })
+        if (names.length <= room) return names.map((name, i) => row(i))
+        const size = Math.max(1, room - 1)
+        const pages = Math.ceil(names.length / size)
+        const shown = ((page % pages) + pages) % pages
+        const out = []
+        for (let i = shown * size; i < Math.min(names.length, (shown + 1) * size); i++) out.push(row(i))
+        out.push({ label: qsTr("More file types…"), hint: (shown + 1) + "/" + pages,
+                   action: "chooser-types-page-" + (shown + 1) })
+        return out
+    }
+
     /// The file type button: the shared menu, with the current type ticked.
-    function openChooserFilterMenu() {
+    function openChooserFilterMenu(page) {
         if (quickLook.open) quickLook.hide()
         // Above its button: below it there is only the hint strip.
         const p = chooserFooter.filterPoint()
-        const tall = contextMenu.padY * 2 + contextMenu.rowH * chooserFooter.filters.length
-        contextMenu.popup(p.x, p.y - tall, chooserFooter.filters.map((name, i) => ({
-            label: name, hint: i === chooserFooter.filterIndex ? "✓" : "",
-            action: "chooser-filter-" + i })))
+        const room = Math.floor((p.y - Tokens.spaceSm - contextMenu.padY * 2) / contextMenu.rowH)
+        const items = win.chooserFilterPage(chooserFooter.filters, chooserFooter.filterIndex,
+                                            room, page || 0)
+        contextMenu.popup(p.x, p.y - contextMenu.padY * 2 - contextMenu.rowH * items.length, items)
         win.qaDump("chooser-filter-menu")
     }
 
@@ -2027,6 +2050,9 @@ Window {
     function runAction(a) {
         if (!win.chooserFits(a)) return
         if (a === "open") win.activateRow(dirModel.cursor)
+        else if (a.startsWith("chooser-types-page-")) {
+            win.openChooserFilterMenu(parseInt(a.substring(19)))
+        }
         else if (a.startsWith("chooser-filter-")) {
             const i = parseInt(a.substring(15))
             dirModel.chooser_set_filter(i)

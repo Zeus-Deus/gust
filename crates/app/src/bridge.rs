@@ -3240,7 +3240,9 @@ impl qobject::DirModel {
                 v
             }
         };
-        match gust_core::chooser::write_result(&out, &picked) {
+        let filter = (!chooser_filters().items.is_empty())
+            .then(|| chooser_filter_slot().load(std::sync::atomic::Ordering::SeqCst));
+        match gust_core::chooser::write_answer(&out, &picked, filter) {
             Ok(()) => QString::default(),
             Err(e) => QString::from(&e.to_string()),
         }
@@ -10352,8 +10354,9 @@ fn chooser_globs() -> &'static [String] {
 fn chooser_files() -> &'static [std::ffi::OsString] {
     static FILES: std::sync::OnceLock<Vec<std::ffi::OsString>> = std::sync::OnceLock::new();
     FILES.get_or_init(|| {
+        // Read once, from the private runtime folder the service wrote it to.
         std::env::var_os("GUST_CHOOSER_FILES")
-            .map(|value| gust_core::chooser::files_from_env(&value))
+            .map(|path| gust_core::chooser::read_names(std::path::Path::new(&path)))
             .unwrap_or_default()
     })
 }
