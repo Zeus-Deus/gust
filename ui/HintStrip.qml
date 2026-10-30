@@ -31,6 +31,9 @@ Rectangle {
         { k: "Enter", d: "press it" },
         { k: "Esc", d: "cancel" }
     ]
+    /// Replaces the preset's list where the general keys do not apply: in an
+    /// Open or Save dialog Enter chooses, and half the list is not there.
+    property var pickerKeys: []
     /// The key labels shown now, for tests.
     readonly property string shownKeys: {
         const m = root.dialog ? root.dialogKeys : hintRep.model
@@ -77,7 +80,9 @@ Rectangle {
 
         Repeater {
             id: hintRep
-            model: root.dialog ? root.dialogKeys : root.preset === "vim"
+            model: root.dialog ? root.dialogKeys
+                : root.pickerKeys.length > 0 ? root.pickerKeys
+                : root.preset === "vim"
                 ? [
                     { k: "j k", d: "move" },
                     { k: "l", d: "open" },

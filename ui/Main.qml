@@ -249,6 +249,7 @@ Window {
     }
     property bool defaultShowHidden: false
     function openSettings() {
+        if (win.chooserMode) return
         settingsPanel.show(dirModel.settings_json())
         win.qaDump("settings")
     }
@@ -1014,6 +1015,26 @@ Window {
     readonly property bool dropAsMove: false
     property bool sidebarVisible: true
 
+    // --- another app's Open or Save dialog (DESIGN §6.27) -----------------
+    /// "" in an ordinary window. Set once at start, never bound: a binding
+    /// here would rewrite the window size on every tab switch.
+    property string chooserMode: ""
+    /// chooser_target(): what accepting returns right now.
+    property var chooserTarget: ({ kind: "none", name: "", count: 0 })
+    /// No overlay owns the keyboard, so accepting cannot reach past one.
+    readonly property bool chooserKeysFree: !win.overlayUp && !quickLook.open && !keyMapPanel.open
+    /// The newest chooser_check still waiting. 0 is none; -1 is the moment
+    /// inside the call, because a refusal is answered before it returns.
+    property int chooserToken: 0
+    readonly property bool chooserBusy: chooserToken !== 0
+    property var chooserEarly: null
+    /// The name and folder a check or a Replace question was about.
+    /// chooser_accept reads the folder on screen, so an answer is only good
+    /// while both still hold.
+    property var chooserAsked: null
+    /// The answer is written. Nothing may write a second one.
+    property bool chooserAnswered: false
+
     // --- tabs ---------------------------------------------------------
     //
     // A tab IS a DirModel: the model already owns location, history,
@@ -1070,6 +1091,7 @@ Window {
     /// Open the second pane, moving the active tab into it when there is
     /// more than one to spare, or opening a fresh tab there when there is not.
     function splitPane() {
+        if (win.chooserMode) return
         if (win.paneCount > 1) {
             hints.message = qsTr("Already two panes")
             return
@@ -1233,6 +1255,7 @@ Window {
     /// (DESIGN §6.7 rule 4); with one pane there is no other side, and
     /// refusing with a reason beats doing nothing.
     function sendToOtherPane(asMove) {
+        if (win.chooserMode) return
         if (win.paneCount < 2) {
             win.alertText = qsTr("Only one pane is open — split first (:split)")
             win.qaDump("pane-send-refused")
@@ -1371,6 +1394,7 @@ Window {
     function tabModelAt(i) { return tabs.objectAt(i) }
 
     function newTab(path) {
+        if (win.chooserMode) return
         const here = path && path !== "" ? path
                    : (dirModel ? dirModel.location : "")
         // Opens BESIDE the active tab, not at the end: "open in new tab"
@@ -1584,13 +1608,14 @@ Window {
         // it opens it does not count as visible. The palette closing in that
         // window used to steal the keyboard, leaving a prompt on screen that
         // could not be typed into.
-        if (palette.visible || confirm.visible || connectionRecovery.visible || contextMenu.open
-            || conflictDialog.visible || settingsPanel.open || trashPanel.open || recentPanel.open || connectPanel.open
-            || prompt.visible || prompt.claimingFocus || renameCard.open || permissionsDialog.open
-            || deviceSharing.open)
-            return
+        if (win.overlayUp) return
         listFocus.forceActiveFocus()
     }
+    readonly property bool overlayUp:
+        palette.visible || confirm.visible || connectionRecovery.visible || contextMenu.open
+        || conflictDialog.visible || settingsPanel.open || trashPanel.open || recentPanel.open || connectPanel.open
+        || prompt.visible || prompt.claimingFocus || renameCard.open || permissionsDialog.open
+        || deviceSharing.open
 
     /// Open Quick Look for the cursor row, or close it if it is already up.
     /// Never launches the file: peek_row reads bytes and metadata only.
@@ -1606,33 +1631,246 @@ Window {
         win.qaDump("quicklook")
     }
 
-    /// Choosing for another app: hand back the pick and close. Nothing is
-    /// opened, copied or changed — the app does what it wants with it.
+    /// Ask the model what accepting would return. The button's words come
+    /// from this, so it runs after every change to the list, never on a timer.
+    function refreshChooserTarget() {
+        if (win.chooserMode === "") return
+        try { win.chooserTarget = JSON.parse(dirModel.chooser_target()) } catch (e) {}
+        win.qaDump("chooser-target")
+    }
+
+    /// Choosing for another app: the primary button, Return in the name
+    /// field and Ctrl+Return all land here. Nothing is opened, copied or
+    /// changed; the app does what it wants with the answer.
     function chooserAccept() {
-        // A Save is never answered by a stray Return meant for the list:
-        // Return in the list opens folders; only the name field or the
-        // Save button accept (DESIGN: dialogs never act on a guess).
-        const err = dirModel.chooser_accept(chooserBar.name)
+        if (win.chooserAnswered || win.chooserBusy || !win.chooserKeysFree) return
+        win.refreshChooserTarget()
+        if (!chooserBar.canAccept) return
+        chooserBar.error = ""
+        const name = chooserFooter.name
+        if (win.chooserMode !== "save" && win.chooserMode !== "save-many") {
+            win.chooserAnswer(name)
+            return
+        }
+        // A Save replaces whatever is there, so the disk is asked first, on
+        // a worker. Cancel keeps working meanwhile: a stalled mount never
+        // traps the user in here.
+        win.chooserAsked = { name: name, location: dirModel.location }
+        win.chooserToken = -1
+        win.chooserEarly = null
+        const token = dirModel.chooser_check(name)
+        win.chooserToken = token
+        const early = win.chooserEarly
+        win.chooserEarly = null
+        if (early && early.token === token) win.chooserChecked(token, early.status)
+        win.qaDump("chooser-check")
+    }
+
+    /// chooser_checked: the disk's answer about the name that was asked.
+    function chooserChecked(token, statusJson) {
+        if (win.chooserToken === -1) {
+            win.chooserEarly = { token: token, status: statusJson }
+            return
+        }
+        // Only the newest question counts. Leaving the folder also drops it
+        // (chooserForgetCheck), so an old "clear" cannot bless a new folder.
+        if (token === 0 || token !== win.chooserToken) return
+        win.chooserToken = 0
+        let status
+        try { status = JSON.parse(statusJson) }
+        catch (e) { status = { state: "error", message: qsTr("Could not check the name") } }
+        const asked = win.chooserAsked
+        // Something else took over while the disk answered. Its question is
+        // the one on screen, so this answer waits for the user to ask again.
+        if (!win.chooserKeysFree) {
+            win.chooserAsked = null
+            hints.message = qsTr("Not saved yet: press Save again")
+            return
+        }
+        if (status.state === "clear") {
+            win.chooserAsked = null
+            win.chooserAnswer(asked.name)
+        } else if (status.state === "replaces") {
+            win.chooserAskReplace(status.names)
+        } else if (status.state === "folder") {
+            // The typed name is a folder: open it and keep the name, which
+            // may be meant for a file inside.
+            win.chooserAsked = null
+            dirModel.navigate(status.path)
+            chooserFooter.focusName()
+        } else {
+            win.chooserAsked = null
+            chooserBar.error = status.message
+        }
+        win.qaDump("chooser-checked")
+    }
+
+    /// The folder changed under a check that had not answered.
+    function chooserForgetCheck() {
+        if (!win.chooserBusy) return
+        dirModel.chooser_forget()
+        win.chooserToken = 0
+        win.chooserAsked = null
+    }
+
+    function chooserAskReplace(names) {
+        const shown = names.slice(0, 3).join(", ")
+        const more = names.length - 3
+        confirm.purpose = "chooser-replace"
+        if (names.length === 1)
+            confirm.open(qsTr("Replace “%1”?").arg(names[0]),
+                qsTr("A file with this name is already in this folder. Replacing it overwrites what it holds."),
+                qsTr("Replace"), true)
+        else
+            confirm.open(qsTr("Replace %1 files?").arg(names.length),
+                (more > 0 ? qsTr("Already in this folder: %1 and %2 more.").arg(shown).arg(more)
+                          : qsTr("Already in this folder: %1.").arg(shown))
+                    + " " + qsTr("Replacing them overwrites what they hold."),
+                qsTr("Replace"), true)
+    }
+
+    function chooserReplaceConfirmed() {
+        const asked = win.chooserAsked
+        win.chooserAsked = null
+        if (!asked) return
+        if (asked.location !== dirModel.location) {
+            chooserBar.error = qsTr("The folder changed. Check the name and save again.")
+            return
+        }
+        win.chooserAnswer(asked.name)
+    }
+
+    /// Write the answer and close. The only path to chooser_accept, and the
+    /// flag makes it the only time.
+    function chooserAnswer(name) {
+        if (win.chooserAnswered) return
+        const err = dirModel.chooser_accept(name)
         chooserBar.error = err
         win.qaDump("chooser-accept")
-        if (err === "") Qt.quit()
+        if (err !== "") return
+        win.chooserAnswered = true
+        Qt.quit()
+    }
+
+    function chooserCancel() {
+        win.chooserForgetCheck()
+        Qt.quit()
+    }
+
+    /// The bottom strip's keys in a dialog. The most useful come first: a
+    /// narrow window drops hints from the end.
+    readonly property var chooserHints: {
+        const m = win.chooserMode
+        if (m === "") return []
+        const saving = m === "save" || m === "save-many"
+        const typing = chooserFooter.nameFocused
+        const list = [
+            { k: "Enter", d: typing ? qsTr("save") : m === "open" || m === "open-many" ? qsTr("open") : qsTr("open folder") },
+            { k: "Ctrl+Enter", d: saving ? qsTr("save") : qsTr("choose") },
+            { k: "Esc", d: dirModel.selection_text !== "" && !typing ? qsTr("clear selection") : qsTr("cancel") }
+        ]
+        if (m === "open-many" || m === "open-folder") list.splice(2, 0, { k: "Ctrl+Space", d: qsTr("select") })
+        if (!typing) list.push({ k: "Ctrl+H", d: qsTr("hidden files") })
+        return list
+    }
+
+    /// Return or a double-click on a row of a dialog. Folders open; no file
+    /// is ever launched from here, and a row is only a choice where the
+    /// dialog is choosing files.
+    function chooserActivate(row) {
+        if (row < 0 || row >= dirModel.count) return
+        const kind = dirModel.chooser_enter(row)
+        if (kind === "folder") {
+            win.qaDump("activate")
+        } else if (kind === "pending") {
+            hints.message = qsTr("Still reading that link: press Enter again")
+        } else if (win.chooserMode === "open" || win.chooserMode === "open-many") {
+            dirModel.focus_row(row)
+            win.chooserAccept()
+        } else if (win.chooserMode === "save") {
+            // The name being checked is the one that gets answered: it does
+            // not change underneath the question.
+            if (win.chooserBusy) return
+            // To replace it the user still presses Save, and is asked.
+            const name = dirModel.chooser_file_name(row)
+            if (name === "") {
+                hints.message = qsTr("This name cannot be typed here")
+                return
+            }
+            chooserFooter.name = name
+            chooserFooter.focusName()
+        } else {
+            hints.message = win.chooserMode === "open-folder"
+                ? qsTr("This dialog chooses a folder") : qsTr("This dialog saves into a folder")
+        }
+    }
+
+    /// Return in the list of a dialog. It means one thing in every preset:
+    /// Mac's Enter-to-rename has no place here, and the hint says "open".
+    function chooserReturn(event) {
+        if (win.chooserMode === "" || (event.key !== Qt.Key_Return && event.key !== Qt.Key_Enter)
+                || (event.modifiers & ~Qt.KeypadModifier) !== Qt.NoModifier)
+            return false
+        win.activateRow(dirModel.cursor)
+        return true
+    }
+
+    /// One page of the file type list. The menu does not scroll, so a list
+    /// taller than `room` rows ends in a row that opens the next page.
+    function chooserFilterPage(names, ticked, room, page) {
+        const row = (i) => ({
+            label: names[i], hint: i === ticked ? "✓" : "", action: "chooser-filter-" + i })
+        if (names.length <= room) return names.map((name, i) => row(i))
+        const size = Math.max(1, room - 1)
+        const pages = Math.ceil(names.length / size)
+        const shown = ((page % pages) + pages) % pages
+        const out = []
+        for (let i = shown * size; i < Math.min(names.length, (shown + 1) * size); i++) out.push(row(i))
+        out.push({ label: qsTr("More file types…"), hint: (shown + 1) + "/" + pages,
+                   action: "chooser-types-page-" + (shown + 1) })
+        return out
+    }
+
+    /// The file type button: the shared menu, with the current type ticked.
+    function openChooserFilterMenu(page) {
+        if (quickLook.open) quickLook.hide()
+        // Above its button: below it there is only the hint strip.
+        const p = chooserFooter.filterPoint()
+        const room = Math.floor((p.y - Tokens.spaceSm - contextMenu.padY * 2) / contextMenu.rowH)
+        const items = win.chooserFilterPage(chooserFooter.filters, chooserFooter.filterIndex,
+                                            room, page || 0)
+        contextMenu.popup(p.x, p.y - contextMenu.padY * 2 - contextMenu.rowH * items.length, items)
+        win.qaDump("chooser-filter-menu")
+    }
+
+    /// What a dialog must not offer: a surface it cannot show (tabs, panes,
+    /// Settings, panels) or a launch, when the job here is to pick.
+    readonly property var chooserRefused: [
+        "settings", "trash-view", "recent", "open-tab", "bm-open-tab", "rp-open-tab",
+        "open-other-pane", "split", "unsplit", "toggle-split", "send-copy", "send-move",
+        "open-with", "run", "terminal", "open-admin", "device-share-here",
+        "device-share-folder", "device-send"
+    ]
+    function chooserFits(a) {
+        if (win.chooserMode === "") return true
+        // Both run a program: an Open with handler, or a user's custom action.
+        if (a.startsWith("openwith:") || a.startsWith("custom:")) return false
+        return win.chooserRefused.indexOf(a) < 0
+    }
+
+    /// A menu's entries that make sense here, without doubled separators.
+    function chooserMenu(items) {
+        const out = []
+        for (const it of items) {
+            if (it.separator ? out.length > 0 && !out[out.length - 1].separator : win.chooserFits(it.action))
+                out.push(it)
+        }
+        if (out.length > 0 && out[out.length - 1].separator) out.pop()
+        return out
     }
 
     function activateRow(row) {
-        // Saving: Enter on a file puts its name in the field (to replace it,
-        // the user still presses Save); folders open as usual.
-        if (chooserBar.active && chooserBar.mode === "save" && !dirModel.is_dir(row)) {
-            chooserBar.name = dirModel.entry_name(row)
-            chooserBar.focusName()
-            return
-        }
-        // In an Open dialog, Enter on a file is "Open"; folders still open.
-        if (chooserBar.active && chooserBar.mode !== "save" && chooserBar.mode !== "open-folder"
-                && !dirModel.is_dir(row)) {
-            dirModel.focus_row(row)
-            win.chooserAccept()
-            return
-        }
+        if (win.chooserMode) { win.chooserActivate(row); return }
         // Several files selected: one viewer showing all of them beats five
         // viewers showing one each (DESIGN §6.18). Returns "" when this is
         // not a multi-file situation, so ordinary activation still runs.
@@ -1675,6 +1913,7 @@ Window {
     }
 
     function runKeyAction(a) {
+        if (!win.chooserFits(a)) return false
         if (a.startsWith("tag-")) {
             win.applyTag(a.substring(4))
             return true
@@ -1769,6 +2008,7 @@ Window {
     property var pendingRunModel: null
     property int pendingRunToken: 0
     function askRun(row) {
+        if (win.chooserMode) return
         const model = dirModel
         const target = JSON.parse(model.run_prepare(row))
         if (target.error) {
@@ -1795,6 +2035,7 @@ Window {
     /// Middle-click on a folder: open it in a new tab behind this one, as a
     /// browser does (Flea #219). Appended, so no other tab index moves.
     function openRowInBackgroundTab(model, row) {
+        if (win.chooserMode) return
         if (!model || !model.is_dir(row)) return
         tabList.append({ startPath: model.entry_path(row), label: model.entry_name(row),
                          pane: win.activePane })
@@ -1807,7 +2048,18 @@ Window {
     /// Every command the palette and the right-click menu can run. One
     /// dispatcher, so a menu entry and its palette twin can never drift.
     function runAction(a) {
+        if (!win.chooserFits(a)) return
         if (a === "open") win.activateRow(dirModel.cursor)
+        else if (a.startsWith("chooser-types-page-")) {
+            win.openChooserFilterMenu(parseInt(a.substring(19)))
+        }
+        else if (a.startsWith("chooser-filter-")) {
+            const i = parseInt(a.substring(15))
+            dirModel.chooser_set_filter(i)
+            chooserFooter.filterIndex = dirModel.chooser_filter_index()
+            win.focusList()
+            win.qaDump("chooser-filter")
+        }
         else if (a === "quicklook") win.toggleQuickLook()
         else if (a === "settings") win.openSettings()
         else if (a === "trash-view") { trashPanel.show(dirModel.trash_list()); win.qaDump("trash-open") }
@@ -2140,7 +2392,7 @@ Window {
         if (!dirModel) return
         if (quickLook.open) quickLook.hide()
         win.alertText = ""
-        contextMenu.popup(x, y, win.contextItems(row))
+        contextMenu.popup(x, y, win.chooserMenu(win.contextItems(row)))
         win.qaDump("context-menu")
     }
 
@@ -2242,7 +2494,8 @@ Window {
     Timer { id: sessionSaveTimer; interval: 600; onTriggered: win.saveSession() }
     onTabCountChanged: sessionSaveTimer.restart()
     function saveSession() {
-        if (win.adminMode) return
+        // A dialog must not replace the tabs of the user's real window.
+        if (win.adminMode || win.chooserMode) return
         const lines = []
         for (let i = 0; i < tabList.count; i++) {
             const m = tabs.objectAt(i)
@@ -2439,6 +2692,19 @@ Window {
             }
             Accessible.role: Accessible.StaticText
             Accessible.name: qsTr("Administrator window")
+        }
+
+        // Another app's Open/Save dialog: Cancel, what it asked, the answer.
+        ChooserBar {
+            id: chooserBar
+            width: parent.width
+            mode: win.chooserMode
+            target: win.chooserTarget
+            busy: win.chooserBusy
+            hereName: dirModel ? dirModel.tabLabel : ""
+            hasName: chooserFooter.hasName
+            onAccepted: win.chooserAccept()
+            onCancelled: win.chooserCancel()
         }
 
         // Tab strip. Hidden with a single tab: one tab is not a choice, and
@@ -2736,11 +3002,12 @@ Window {
                     }
                 }
 
-                Item { width: Tokens.spaceSm; height: 1 }
+                Item { width: Tokens.spaceSm; height: 1; visible: win.chooserMode === "" }
 
                 // Settings: a visible control, never only a shortcut.
                 Rectangle {
                     objectName: "settingsButton"
+                    visible: win.chooserMode === ""
                     width: Tokens.controlHeight
                     height: Tokens.controlHeight
                     color: setHover.hovered ? Tokens.withAlpha(Tokens.foreground, 0.1) : "transparent"
@@ -2770,13 +3037,15 @@ Window {
             id: body
             width: parent.width
             height: parent.height - tabStrip.height - headerBar.height - filterBar.height - adminBanner.height
-                    - chooserBar.height - interruptedNotice.height - jobDrawer.height - hints.height
+                    - chooserBar.height - chooserFooter.height - interruptedNotice.height
+                    - jobDrawer.height - hints.height
 
             Sidebar {
                 id: sidebar
                 width: win.sidebarVisible ? Math.round(180 * Tokens.spacingScale) : 0
                 height: parent.height
                 visible: win.sidebarVisible
+                picker: win.chooserMode !== ""
                 model: dirModel
                 activePanel: trashPanel.open ? "trash" : recentPanel.open ? "recent" : ""
                 onPlaceChosen: (p) => { dirModel.navigate(p); win.focusList() }
@@ -2790,11 +3059,11 @@ Window {
                 onRemoteChosen: (p) => { dirModel.navigate(p); win.focusList() }
                 onRemoteMenu: (kind, name, x, y) => {
                     win.remoteMenuPlace = { kind: kind, name: name }
-                    contextMenu.popup(x, y, [
+                    contextMenu.popup(x, y, win.chooserMenu([
                         { label: qsTr("Open in new tab"), hint: "", action: "rp-open-tab" },
                         { separator: true },
                         { label: qsTr("Disconnect"), hint: "", action: "rp-off" }
-                    ])
+                    ]))
                     win.qaDump("remote-menu")
                 }
                 devices: win.deviceList
@@ -2826,12 +3095,12 @@ Window {
                 onRecentChosen: win.runAction("recent")
                 onBookmarkMenu: (path, x, y) => {
                     win.bookmarkMenuPath = path
-                    contextMenu.popup(x, y, [
+                    contextMenu.popup(x, y, win.chooserMenu([
                         { label: qsTr("Open"), hint: "", action: "bm-open" },
                         { label: qsTr("Open in new tab"), hint: "", action: "bm-open-tab" },
                         { separator: true },
                         { label: qsTr("Remove from Bookmarks"), hint: "", action: "bm-remove" }
-                    ])
+                    ]))
                 }
             }
 
@@ -2846,6 +3115,7 @@ Window {
                 // chrome that earns nothing is not shown (DESIGN §6.7).
                 Pane {
                     id: paneA
+                    clickSelects: win.chooserMode === "open-folder"
                     x: 0
                     y: 0
                     width: win.paneCount > 1
@@ -2867,7 +3137,7 @@ Window {
                     onDropMenu: (r, x, y) => { win.focusPane(0); win.openDropMenu(win.paneAModel, r, x, y) }
                     onDropDone: (owner) => { win.transferStarted(owner, "", "drop") }
                     onContextRequested: (r, x, y) => { win.focusPane(0); win.openContextMenu(r, x, y) }
-                    canEdgeSplit: win.paneCount < 2
+                    canEdgeSplit: win.paneCount < 2 && win.chooserMode === ""
                     onOpenInSplit: (path) => win.openPathInPane(path, 1)
                 }
 
@@ -3126,12 +3396,17 @@ Window {
             }
         }
 
-        // Another app's Open/Save dialog: what it asked, and the answer.
-        ChooserBar {
-            id: chooserBar
+        // The rest of a dialog: the Save name and the file type.
+        ChooserFooter {
+            id: chooserFooter
             width: parent.width
+            mode: win.chooserMode
+            busy: win.chooserBusy
+            onNameChanged: chooserBar.error = ""
             onAccepted: win.chooserAccept()
-            onCancelled: Qt.quit()
+            onCancelled: win.chooserCancel()
+            onFilterMenuRequested: win.openChooserFilterMenu()
+            onListWanted: win.focusList()
         }
 
         InterruptedNotice {
@@ -3183,6 +3458,7 @@ Window {
             id: hints
             width: parent.width
             preset: win.keyPreset
+            pickerKeys: win.chooserHints
             // Bound for good: transient messages go to `message`, which
             // gives way when the folder, tab or pane changes. Writing
             // to `status` here destroyed this binding after the first action
@@ -3213,6 +3489,9 @@ Window {
         anchors.fill: parent
         focus: true
         z: -1
+
+        // Beside the Tab order of a dialog's buttons and fields.
+        activeFocusOnTab: win.chooserMode !== ""
 
         Keys.onPressed: (event) => {
             // A warning is about the action that produced it. The next
@@ -3261,6 +3540,8 @@ Window {
                 if (used) { win.qaDump("quicklook-key"); event.accepted = true; return }
             }
 
+            if (win.chooserReturn(event)) { event.accepted = true; return }
+
             // Preset-aware chords from the shared key table (gust-core
             // keymap.rs), which also renders the ? key map: a shortcut and
             // its documentation cannot drift apart.
@@ -3275,7 +3556,7 @@ Window {
                 filterInput.forceActiveFocus()
                 event.accepted = true; return
             }
-            if (event.text === ":") {
+            if (event.text === ":" && win.chooserMode === "") {
                 palette.open()
                 event.accepted = true; return
             }
@@ -3400,9 +3681,11 @@ Window {
                     win.qaDump("clipboard-cancelled")
                     event.accepted = true; return
                 }
-                if (chooserBar.active && dirModel.sel_count() === 0 && dirModel.filter === "") {
+                if (chooserBar.active && (win.chooserBusy
+                        || (dirModel.sel_count() === 0 && dirModel.filter === ""
+                            && !dirModel.finding && !filterBar.filterActive))) {
                     // Escape in an Open/Save dialog is Cancel, as everywhere.
-                    Qt.quit()
+                    win.chooserCancel()
                     event.accepted = true; return
                 }
                 if (dirModel.finding) {
@@ -3562,6 +3845,33 @@ Window {
                 event.accepted = true
             }
         }
+    }
+
+    // Ctrl+Return accepts from anywhere in a dialog: list, name field, file
+    // type. A window shortcut, so no field has to remember it. It stays on
+    // under an overlay, where chooserAccept refuses: the key must be used up,
+    // because a confirmation's focused button takes Ctrl+Return as Return.
+    // The rename card is the exception, its own Ctrl+Return applies.
+    Shortcut {
+        sequences: ["Ctrl+Return", "Ctrl+Enter"]
+        enabled: win.chooserMode !== "" && !renameCard.open
+        onActivated: win.chooserAccept()
+    }
+
+    // The primary button's words. Selection, cursor, folder and filter each
+    // reach the model differently; dataChanged carries the selection flags,
+    // and a row's own change, so this is every way the answer can change.
+    Connections {
+        target: win.chooserMode !== "" ? dirModel : null
+        function onCursorChanged() { Qt.callLater(win.refreshChooserTarget) }
+        function onCountChanged() { Qt.callLater(win.refreshChooserTarget) }
+        function onDataChanged() { Qt.callLater(win.refreshChooserTarget) }
+        function onModelReset() { Qt.callLater(win.refreshChooserTarget) }
+        function onLocationChanged() {
+            win.chooserForgetCheck()
+            Qt.callLater(win.refreshChooserTarget)
+        }
+        function onChooser_checked(token, status) { win.chooserChecked(token, status) }
     }
 
     // Poll the worker thread. The UI thread never touches the filesystem;
@@ -3902,8 +4212,16 @@ Window {
         // share one handler by accident.
         property string purpose: "trash"
         onVisibleChanged: win.qaDump("confirm")
-        onClosed: { if (connectPanel.open) connectPanel.refocus(); else win.focusList() }
+        onClosed: {
+            if (confirm.purpose === "chooser-replace") chooserFooter.focusName()
+            else if (connectPanel.open) connectPanel.refocus()
+            else win.focusList()
+        }
         onAccepted: {
+            if (confirm.purpose === "chooser-replace") {
+                win.chooserReplaceConfirmed()
+                return
+            }
             if (confirm.purpose === "run" || confirm.purpose === "allow-run") {
                 const model = win.pendingRunModel
                 const token = win.pendingRunToken
@@ -3995,6 +4313,11 @@ Window {
             win.qaDump("trashed")
         }
         onRejected: {
+            if (confirm.purpose === "chooser-replace") {
+                win.chooserAsked = null
+                win.qaDump("chooser-replace-cancelled")
+                return
+            }
             if (confirm.purpose === "run" || confirm.purpose === "allow-run") {
                 if (win.pendingRunModel) win.pendingRunModel.run_discard(win.pendingRunToken)
                 win.pendingRunModel = null
@@ -4246,6 +4569,15 @@ Window {
             canForward: win.canForward,
             chooserMode: chooserBar.mode,
             chooserError: chooserBar.error,
+            chooserLabel: chooserBar.primaryLabel,
+            chooserCanAccept: chooserBar.canAccept,
+            chooserBusy: win.chooserBusy,
+            chooserAnswered: win.chooserAnswered,
+            chooserTarget: win.chooserTarget,
+            chooserName: chooserFooter.name,
+            chooserFilter: chooserFooter.filterIndex,
+            chooserPoints: chooserBar.active
+                ? Object.assign(chooserBar.points(), chooserFooter.points()) : null,
             settingsOpen: settingsPanel.open,
             trashOpen: trashPanel.open,
             recentOpen: recentPanel.open,
@@ -4410,13 +4742,24 @@ Window {
         function onRevisionChanged() { win.qaDump("theme") }
     }
 
+    onActiveFocusItemChanged: if (win.chooserMode !== "") win.qaDump("chooser-focus")
+
     Component.onCompleted: {
+        // A dialog's size, for when no compositor rule sets one (a rule wins,
+        // it resizes the window after this). Omarchy's floating windows are
+        // this size, so a dialog looks the same with and without the rule.
+        win.chooserMode = dirModel.chooser_mode()
+        if (win.chooserMode !== "") {
+            win.width = 875
+            win.height = 600
+        }
         // The model does not list anything until it is told to: construction
         // must not do I/O. This is the one explicit kick at startup — or the
         // first restored tab, when Settings asks for last time's tabs.
         if (!win.restoreSession()) dirModel.reload()
         // After a crash, say what was interrupted — read once, here.
-        try { interruptedNotice.items = JSON.parse(dirModel.interrupted_jobs()) } catch (e) {}
+        if (win.chooserMode === "")
+            try { interruptedNotice.items = JSON.parse(dirModel.interrupted_jobs()) } catch (e) {}
         // The folder Gust opens with gets its remembered view too.
         applyRememberedView()
         // A local read of the kernel's own view: no daemon, no network.
@@ -4425,12 +4768,16 @@ Window {
         win.refreshPlaces()
         win.refreshBookmarks()
         win.applySettings()
-        chooserBar.mode = dirModel.chooser_mode()
         if (chooserBar.active) {
             chooserBar.title = dirModel.chooser_title()
-            chooserBar.name = dirModel.chooser_name()
+            chooserBar.acceptLabel = dirModel.chooser_accept_label()
+            chooserFooter.name = dirModel.chooser_name()
+            chooserFooter.fileCount = dirModel.chooser_file_count()
+            try { chooserFooter.filters = JSON.parse(dirModel.chooser_filter_names()) } catch (e) {}
+            chooserFooter.filterIndex = dirModel.chooser_filter_index()
             win.title = Qt.binding(() => (chooserBar.title || qsTr("Choose")) + " — Gust")
-            if (chooserBar.mode === "save") Qt.callLater(chooserBar.focusName)
+            win.refreshChooserTarget()
+            if (win.chooserMode === "save") Qt.callLater(chooserFooter.focusName)
         }
         if (win.defaultShowHidden && !dirModel.show_hidden) dirModel.toggle_hidden()
         qaStatePath = qaWriter.env_path("GUST_QA_STATE")

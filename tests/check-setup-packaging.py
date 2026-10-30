@@ -73,10 +73,11 @@ def check_no_install_side_effects(source: str) -> None:
     if not match:
         raise AssertionError("missing package function")
     for line in match.group(1).splitlines():
-        # One fixed compatibility condition allows older source snapshots.
-        # It cannot evaluate arbitrary input or execute another command.
+        # Fixed compatibility conditions allow older source snapshots. They
+        # cannot evaluate arbitrary input or execute another command.
         if line.strip() in {
-            'if [[ -f "crates/ops/src/bin/gust-archive-helper.rs" ]]; then', 'fi'
+            'if [[ -f "crates/ops/src/bin/gust-archive-helper.rs" ]]; then',
+            'if [[ -f "packaging/gust-chooser.desktop" ]]; then', 'fi'
         }:
             continue
         tokens = shlex.split(line)
