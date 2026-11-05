@@ -84,6 +84,12 @@ jobs:
         run: |
           python3 tests/grid-thumbnail.py
           QT_SCALE_FACTOR=2 python3 tests/grid-thumbnail.py
+      - name: Cursor dependencies and recycled views (isolated Qt Python)
+        run: |
+          python3 -m venv "$RUNNER_TEMP/gust-view-python"
+          "$RUNNER_TEMP/gust-view-python/bin/pip" install --disable-pip-version-check PySide6==6.11.2
+          "$RUNNER_TEMP/gust-view-python/bin/python" tests/view-navigation.py
+          QT_SCALE_FACTOR=2 "$RUNNER_TEMP/gust-view-python/bin/python" tests/view-navigation.py
       # Older Python can misclassify the official ARM Qt tools 7z as ZIP:
       # https://github.com/miurahr/aqtinstall/issues/1042
       - name: Select pinned SDK installer Python

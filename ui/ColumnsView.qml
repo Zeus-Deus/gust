@@ -241,7 +241,7 @@ FocusScope {
                         property bool iconShown: colIcon.visible
                         width: list.width
                         height: Tokens.rowHeight
-                        color: index === root.model.cursor
+                        color: ListView.isCurrentItem
                                ? Tokens.withAlpha(Tokens.selectedBackground, Math.max(Tokens.selectedAlpha, 0.14))
                                : "transparent"
 

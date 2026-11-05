@@ -144,10 +144,10 @@ FocusScope {
                     anchors.margins: Tokens.spaceXs
                     color: isSelected
                            ? Tokens.withAlpha(Tokens.accent, 0.22)
-                           : (index === (root.model ? root.model.cursor : 0)
+                           : (cell.GridView.isCurrentItem
                               ? Tokens.withAlpha(Tokens.selectedBackground, Math.max(Tokens.selectedAlpha, 0.14))
                               : (hover.hovered ? Tokens.withAlpha(Tokens.foreground, 0.05) : "transparent"))
-                    border.width: (isSelected || index === (root.model ? root.model.cursor : 0))
+                    border.width: (isSelected || cell.GridView.isCurrentItem)
                                   ? Math.max(1, Tokens.borderWidth) : 0
                     border.color: Tokens.accent
                     radius: Tokens.radius
@@ -344,7 +344,7 @@ FocusScope {
 
                 Accessible.role: Accessible.ListItem
                 Accessible.name: name + (isDir ? ", folder" : ", file")
-                Accessible.selected: isSelected || index === (root.model ? root.model.cursor : 0)
+                Accessible.selected: isSelected || cell.GridView.isCurrentItem
             }
 
             Text {

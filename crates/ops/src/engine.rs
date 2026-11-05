@@ -432,6 +432,31 @@ pub(crate) fn stage_regular_file(
     on_bytes: &mut dyn FnMut(u64),
     durable: bool,
 ) -> OpResult<Option<Staged>> {
+    stage_regular_file_cached(
+        src_dir,
+        src_name,
+        dst_dir,
+        dst_name,
+        policy,
+        cancel,
+        on_bytes,
+        durable,
+        &mut crate::source_read::LocalMounts::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn stage_regular_file_cached(
+    src_dir: &DirHandle,
+    src_name: &OsStr,
+    dst_dir: &DirHandle,
+    dst_name: &OsStr,
+    policy: ConflictPolicy,
+    cancel: &CancelToken,
+    on_bytes: &mut dyn FnMut(u64),
+    durable: bool,
+    sources: &mut crate::source_read::LocalMounts,
+) -> OpResult<Option<Staged>> {
     if cancel.checkpoint() {
         return Err(OpError::Cancelled);
     }
@@ -480,6 +505,8 @@ pub(crate) fn stage_regular_file(
     }
     let expected_len = u64::try_from(st.st_size)
         .map_err(|_| OpError::Refused("source reported an invalid file size".into()))?;
+
+    let mut reader = crate::source_read::Reader::new(&src, st.st_dev, sources)?;
 
     let stage = staging_name(dst_name);
     // Record ownership BEFORE the file exists. A staging file with no claim is
@@ -537,7 +564,6 @@ pub(crate) fn stage_regular_file(
 
     let mut written = 0u64;
     let mut reported = 0u64;
-    let mut buf = vec![0u8; 128 * 1024];
 
     // Any failure from here on must remove the staging file. A disk that
     // filled up mid-copy would otherwise leave a partial file consuming the
@@ -558,7 +584,7 @@ pub(crate) fn stage_regular_file(
             let n = if early_eof {
                 0
             } else {
-                rustix::io::read(&src, &mut buf)?
+                reader.read(&src, cancel)?
             };
             if n == 0 {
                 break;
@@ -573,7 +599,7 @@ pub(crate) fn stage_regular_file(
                     n.min(off.saturating_add(publication_tests::WRITE_LIMIT.with(|v| v.get())));
                 #[cfg(not(test))]
                 let end = n;
-                let w = rustix::io::write(&dst, &buf[off..end])?;
+                let w = rustix::io::write(&dst, &reader.buffer[off..end])?;
                 if w == 0 {
                     return Err(OpError::Io(io::Error::new(
                         io::ErrorKind::WriteZero,
@@ -624,6 +650,7 @@ pub(crate) fn stage_regular_file(
             }
             rustix::fs::fsync(&dst)?;
         }
+        reader.finish()?;
         Ok(())
     })();
 
