@@ -115,8 +115,11 @@ fn run_file_dialogs(mode: &str) -> i32 {
     match mode {
         "on" => {
             if text.as_deref().is_some_and(is_claimed) {
+                // Still add the rule: this may be an upgrade from a version
+                // that answered dialogs without floating them.
+                let floated = sync_float_rule(true);
                 println!("gust already answers Open/Save dialogs");
-                return 0;
+                return report_float_rule(floated);
             }
             let (next, previous) = claim(text.as_deref(), &sys);
             if let Some(st) = &state {
@@ -139,8 +142,9 @@ fn run_file_dialogs(mode: &str) -> i32 {
         }
         "off" => {
             let Some(text) = text else {
+                let floated = sync_float_rule(false);
                 println!("gust was not answering Open/Save dialogs; nothing to undo");
-                return 0;
+                return report_float_rule(floated);
             };
             let rec = state
                 .as_ref()
@@ -167,6 +171,7 @@ fn run_file_dialogs(mode: &str) -> i32 {
             return 1;
         }
     }
+    let floated = sync_float_rule(mode == "on");
     // The portal reads its config at start; restart it so the change is
     // live now. Harmless when it is not running under systemd.
     let _ = std::process::Command::new("systemctl")
@@ -179,7 +184,51 @@ fn run_file_dialogs(mode: &str) -> i32 {
     } else {
         println!("Open and Save dialogs are back to the previous chooser");
     }
-    0
+    report_float_rule(floated)
+}
+
+fn report_float_rule(result: Result<(), String>) -> i32 {
+    match result {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("gust: {e}");
+            1
+        }
+    }
+}
+
+/// Add or remove the rule that floats chooser windows, in the file Omarchy
+/// loads after its defaults. No such file means this is not Omarchy: the
+/// dialog then simply tiles, and nothing is written.
+fn sync_float_rule(on: bool) -> Result<(), String> {
+    use gust_core::portal_conf::{add_rule, has_rule, remove_rule, windows_path};
+    let Some(path) = windows_path().filter(|p| p.exists()) else {
+        return Ok(());
+    };
+    let shown = path.display();
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("cannot read {shown}: {e}"))?;
+    if has_rule(&remove_rule(&text)) {
+        return Err(format!(
+            "the gust block in {shown} has lost its end marker; remove it by hand"
+        ));
+    }
+    let next = if on {
+        add_rule(&text)
+    } else {
+        remove_rule(&text)
+    };
+    if next == text {
+        return Ok(());
+    }
+    gust_core::omarchy_keys::write_atomic(&path, &next)
+        .map_err(|e| format!("cannot update {shown}: {e}"))?;
+    // Hyprland picks up the change on reload; harmless if not running.
+    let _ = std::process::Command::new("hyprctl")
+        .arg("reload")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    Ok(())
 }
 
 /// Add or remove Gust's marked block in `~/.config/hypr/bindings.lua`, the
@@ -431,6 +480,11 @@ fn main() {
         std::env::set_var("QT_QUICK_BACKEND", "software");
     }
     let mut app = QGuiApplication::new();
+    // A dialog has its own Wayland app id, so a window rule can float it
+    // without touching Gust's ordinary windows (DESIGN §6.27).
+    if std::env::var_os("GUST_CHOOSER").is_some_and(|mode| !mode.is_empty()) {
+        QGuiApplication::set_desktop_file_name(&QString::from("gust-chooser"));
+    }
     let mut engine = QQmlApplicationEngine::new();
 
     // A failed QML load must be LOUD and must exit non-zero. Silently running

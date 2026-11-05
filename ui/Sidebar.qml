@@ -7,6 +7,9 @@ Rectangle {
     id: root
     property var model
     property string activePanel: ""
+    /// An Open or Save dialog: only places a file can be picked from.
+    /// Recent and Trash are panels that open or restore, not folders.
+    property bool picker: false
     readonly property string currentKey: { return root.currentPlace() }
 
     // Follow the displayed model, including history and tab/pane changes.
@@ -275,6 +278,7 @@ Rectangle {
         // Recent files, from the desktop's own list.
         PlaceRow {
             placeKey: "recent"
+            visible: !root.picker
             width: column.width
             height: Tokens.rowHeight
             hovered: recentHover.hovered
@@ -300,6 +304,7 @@ Rectangle {
         // Trash: what was deleted, and a way back.
         PlaceRow {
             placeKey: "trash"
+            visible: !root.picker
             width: column.width
             height: Tokens.rowHeight
             hovered: trashHover.hovered

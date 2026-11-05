@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Gust
+Comment=Open and Save dialogs for other apps
+Exec=gust
+Icon=system-file-manager
+Terminal=false
+NoDisplay=true
+StartupWMClass=gust-chooser

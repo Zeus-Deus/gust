@@ -202,7 +202,8 @@ pub mod qobject {
         #[qinvokable]
         fn set_default_file_manager(self: &DirModel, on: bool) -> QString;
         /// Chooser mode when another app's Open/Save dialog started this
-        /// window: "", "open", "open-many", "open-folder" or "save".
+        /// window: "", "open", "open-many", "open-folder", "save" or
+        /// "save-many".
         #[qinvokable]
         fn chooser_mode(self: &DirModel) -> QString;
         /// The dialog's title and, for Save, the suggested name.
@@ -210,8 +211,47 @@ pub mod qobject {
         fn chooser_title(self: &DirModel) -> QString;
         #[qinvokable]
         fn chooser_name(self: &DirModel) -> QString;
-        /// Hand the choice back and let the window close. Open modes send
-        /// the selection (or the cursor row); Save sends folder + name.
+        /// The app's words for the primary button, or "".
+        #[qinvokable]
+        fn chooser_accept_label(self: &DirModel) -> QString;
+        /// How many names a Save of several files will place.
+        #[qinvokable]
+        fn chooser_file_count(self: &DirModel) -> i32;
+        /// The file type list as a JSON array of names, and which is active.
+        #[qinvokable]
+        fn chooser_filter_names(self: &DirModel) -> QString;
+        #[qinvokable]
+        fn chooser_filter_index(self: &DirModel) -> i32;
+        /// Return or a double-click on a row: "folder" (now opening; a link
+        /// that stopped being a folder shows why, and nothing is ever
+        /// launched), "file", or "pending" while a link's target is unread.
+        #[qinvokable]
+        fn chooser_enter(self: Pin<&mut DirModel>, row: i32) -> QString;
+        /// The row's exact name for the Save field, or "" when that field
+        /// could not hold it unchanged.
+        #[qinvokable]
+        fn chooser_file_name(self: &DirModel, row: i32) -> QString;
+        /// Nobody wants the running chooser_check any more.
+        #[qinvokable]
+        fn chooser_forget(self: &DirModel);
+        /// Show only what filter `index` allows; folders always stay.
+        #[qinvokable]
+        fn chooser_set_filter(self: Pin<&mut DirModel>, index: i32);
+        /// What accepting now would return, as JSON, so the button can say
+        /// so: {"kind":"here"|"folder"|"file"|"files"|"none","name":..,"count":..}.
+        #[qinvokable]
+        fn chooser_target(self: &DirModel) -> QString;
+        /// Stat the Save targets on a worker. The answer is chooser_checked.
+        #[qinvokable]
+        fn chooser_check(self: Pin<&mut DirModel>, save_name: &QString) -> i32;
+        /// `status` is JSON: {"state":"clear"}, {"state":"replaces","names":[..]},
+        /// {"state":"folder","path":..} or {"state":"error","message":..}.
+        #[qsignal]
+        fn chooser_checked(self: Pin<&mut DirModel>, token: i32, status: QString);
+        /// Hand the choice back and let the window close. Open sends the
+        /// selection (or the cursor row); a folder dialog sends the selected
+        /// folder or the one on screen; Save sends folder + name and must
+        /// already have passed chooser_check.
         /// Returns "" or why it cannot be accepted.
         #[qinvokable]
         fn chooser_accept(self: &DirModel, save_name: &QString) -> QString;
@@ -1138,6 +1178,12 @@ pub struct DirModelRust {
     live_dirty: bool,
     /// A live relist is running; another change waits for it.
     live_busy: bool,
+    /// Newest chooser_check; an older answer is ignored, and its worker
+    /// stops at the next target.
+    chooser_token: std::sync::Arc<std::sync::atomic::AtomicI32>,
+    /// Checks still running. Each may be stuck on a stalled mount, and a
+    /// stat cannot be interrupted, so their number is capped.
+    chooser_checks: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     /// name -> cached thumbnail path, for the rows currently listed.
     thumbs: std::collections::HashMap<std::ffi::OsString, String>,
     /// Cancels the thumbnail pass when the location changes.
@@ -1437,6 +1483,8 @@ impl DirModelRust {
                 .inspect(|_| std::env::remove_var("GUST_SELECT")),
             live_dirty: false,
             live_busy: false,
+            chooser_token: Default::default(),
+            chooser_checks: Default::default(),
             thumbs: std::collections::HashMap::new(),
             thumb_cancel: CancelToken::new(),
             thumb_work: crate::thumbnails::Work::default(),
@@ -1521,6 +1569,26 @@ impl DirModelRust {
             .map(|d| d.join(&e.name))
             .unwrap_or_default();
         gust_core::icons::key_for(&e.name, e.kind, e.meta.as_ref(), &full)
+    }
+
+    /// Where a Save would land, from the name field and the folder on
+    /// screen. Pure: nothing here touches the disk.
+    fn chooser_save_targets(&self, save_name: &str) -> Result<Vec<PathBuf>, String> {
+        let dir = self
+            .key
+            .as_path()
+            .map(|p| p.to_path_buf())
+            .ok_or_else(|| "choose a folder on this computer".to_string())?;
+        if std::env::var("GUST_CHOOSER").as_deref() == Ok("save-many") {
+            return Ok(chooser_files().iter().map(|f| dir.join(f)).collect());
+        }
+        if save_name.contains('/') {
+            return Err("a file name cannot contain /".to_string());
+        }
+        let bare = std::path::Path::new(save_name)
+            .file_name()
+            .ok_or_else(|| "type a file name".to_string())?;
+        Ok(vec![dir.join(bare)])
     }
 
     /// Local filesystem path of a visible row, if it has one.
@@ -2939,6 +3007,198 @@ impl qobject::DirModel {
         QString::from(&std::env::var("GUST_CHOOSER_NAME").unwrap_or_default())
     }
 
+    fn chooser_accept_label(&self) -> QString {
+        QString::from(&std::env::var("GUST_CHOOSER_ACCEPT").unwrap_or_default())
+    }
+
+    fn chooser_file_count(&self) -> i32 {
+        chooser_files().len() as i32
+    }
+
+    fn chooser_enter(mut self: Pin<&mut Self>, row: i32) -> QString {
+        let Some((name, folder)) = self
+            .as_ref()
+            .entry_at(row)
+            .map(|e| (e.name.clone(), chooser_folder_state(e)))
+        else {
+            return QString::default();
+        };
+        match folder {
+            None => {
+                self.as_mut().want_rows(row, 1);
+                QString::from("pending")
+            }
+            Some(false) => QString::from("file"),
+            Some(true) => {
+                let target = self.as_ref().key.join(&name);
+                self.navigate(&QString::from(&target.display_path()));
+                QString::from("folder")
+            }
+        }
+    }
+
+    fn chooser_file_name(&self, row: i32) -> QString {
+        let name = self
+            .entry_at(row)
+            .and_then(|e| e.name.to_str())
+            .filter(|n| !n.contains('/') && !n.chars().any(char::is_control));
+        QString::from(name.unwrap_or(""))
+    }
+
+    fn chooser_forget(&self) {
+        next_chooser_token(&self.chooser_token);
+    }
+
+    fn chooser_filter_names(&self) -> QString {
+        let names: Vec<&str> = chooser_filters()
+            .items
+            .iter()
+            .map(|f| f.name.as_str())
+            .collect();
+        QString::from(&serde_json::to_string(&names).unwrap_or_default())
+    }
+
+    fn chooser_filter_index(&self) -> i32 {
+        chooser_filter_slot().load(std::sync::atomic::Ordering::SeqCst) as i32
+    }
+
+    fn chooser_set_filter(mut self: Pin<&mut Self>, index: i32) {
+        let Ok(index) = usize::try_from(index) else {
+            return;
+        };
+        if index >= chooser_filters().items.len() {
+            return;
+        }
+        chooser_filter_slot().store(index, std::sync::atomic::Ordering::SeqCst);
+        unsafe { self.as_mut().begin_reset_model() };
+        self.as_mut().rust_mut().recompute_visible();
+        {
+            // A file the filter just hid must not stay the silent answer.
+            let mut r = self.as_mut().rust_mut();
+            let names: Vec<std::ffi::OsString> = r
+                .visible
+                .iter()
+                .filter_map(|i| r.all.get(*i))
+                .map(|e| e.name.clone())
+                .collect();
+            r.selection.retain_names(&names);
+            let last = r.visible.len() as i32 - 1;
+            r.cursor = r.cursor.clamp(0, last.max(0));
+        }
+        let n = self.as_ref().visible.len() as i32;
+        self.as_mut().set_count(n);
+        unsafe { self.as_mut().end_reset_model() };
+        self.as_mut().refresh_selection_flags();
+    }
+
+    fn chooser_target(&self) -> QString {
+        let visible = self.visible_entries();
+        let selected = self.selection.resolve(&visible);
+        let mode = std::env::var("GUST_CHOOSER").unwrap_or_default();
+        let fallback = self.entry_at(self.cursor).filter(|_| selected.is_empty());
+        let considered: Vec<&Entry> = selected.iter().copied().chain(fallback).collect();
+        let is_folder = |e: &&&Entry| chooser_folder_state(e) == Some(true);
+        let target = if considered.iter().any(|e| chooser_folder_state(e).is_none()) {
+            serde_json::json!({ "kind": "none", "name": "", "count": 0 })
+        } else if mode == "open-folder" {
+            let folders: Vec<_> = selected.iter().filter(is_folder).collect();
+            match folders.as_slice() {
+                [one] => serde_json::json!({
+                    "kind": "folder",
+                    "name": one.name.to_string_lossy(),
+                    "count": 1,
+                }),
+                _ => serde_json::json!({ "kind": "here", "name": "", "count": 0 }),
+            }
+        } else {
+            let mut files: Vec<_> = considered.iter().filter(|e| !is_folder(e)).collect();
+            if mode != "open-many" {
+                files.truncate(1);
+            }
+            match files.as_slice() {
+                [] => serde_json::json!({ "kind": "none", "name": "", "count": 0 }),
+                [one] => serde_json::json!({
+                    "kind": "file",
+                    "name": one.name.to_string_lossy(),
+                    "count": 1,
+                }),
+                many => serde_json::json!({ "kind": "files", "name": "", "count": many.len() }),
+            }
+        };
+        QString::from(&target.to_string())
+    }
+
+    fn chooser_check(self: Pin<&mut Self>, save_name: &QString) -> i32 {
+        use std::sync::atomic::Ordering;
+        const MAX_CHECKS: usize = 4;
+        let latest = self.as_ref().chooser_token.clone();
+        let running = self.as_ref().chooser_checks.clone();
+        let token = next_chooser_token(&latest);
+        let refuse = |model: Pin<&mut Self>, message: &str| {
+            let status = serde_json::json!({ "state": "error", "message": message });
+            model.chooser_checked(token, QString::from(&status.to_string()));
+            token
+        };
+        let targets = match self.as_ref().chooser_save_targets(&save_name.to_string()) {
+            Ok(targets) => targets,
+            Err(message) => return refuse(self, &message),
+        };
+        if running.load(Ordering::SeqCst) >= MAX_CHECKS {
+            return refuse(self, "this folder is not answering");
+        }
+        let Some(thread) = self.as_ref().qt_thread_handle() else {
+            return token;
+        };
+        let many = std::env::var("GUST_CHOOSER").as_deref() == Ok("save-many");
+        running.fetch_add(1, Ordering::SeqCst);
+        let counted = running.clone();
+        let spawned = std::thread::Builder::new()
+            .name("gust-chooser-check".into())
+            .spawn(move || {
+                use gust_core::chooser::{check_targets, SaveCheck};
+                let check = check_targets(&targets, || latest.load(Ordering::SeqCst) == token);
+                counted.fetch_sub(1, Ordering::SeqCst);
+                let status = match check {
+                    SaveCheck::Clear => serde_json::json!({ "state": "clear" }),
+                    SaveCheck::Replaces(names) => {
+                        serde_json::json!({ "state": "replaces", "names": names })
+                    }
+                    // Only a typed name means "open that folder". Saving
+                    // several files cannot use a folder's name, and `navigate`
+                    // takes text, so a path that is not text cannot be opened.
+                    SaveCheck::Folder(path) => match path.to_str() {
+                        Some(folder) if !many => {
+                            serde_json::json!({ "state": "folder", "path": folder })
+                        }
+                        _ => serde_json::json!({
+                            "state": "error",
+                            "message": format!(
+                                "a folder named {} is already here",
+                                path.file_name().unwrap_or_default().to_string_lossy()
+                            ),
+                        }),
+                    },
+                    SaveCheck::Failed(message) => {
+                        serde_json::json!({ "state": "error", "message": message })
+                    }
+                };
+                let status = status.to_string();
+                let _ = thread.queue(move |mut model| {
+                    let newest = model.as_ref().chooser_token.load(Ordering::SeqCst);
+                    if newest == token {
+                        model
+                            .as_mut()
+                            .chooser_checked(token, QString::from(&status));
+                    }
+                });
+            });
+        if spawned.is_err() {
+            running.fetch_sub(1, Ordering::SeqCst);
+            return refuse(self, "could not check the name");
+        }
+        token
+    }
+
     fn chooser_accept(&self, save_name: &QString) -> QString {
         let Some(out) = std::env::var_os("GUST_CHOOSER_RESULT").map(PathBuf::from) else {
             return QString::from("not choosing for another app");
@@ -2946,23 +3206,24 @@ impl qobject::DirModel {
         let mode = std::env::var("GUST_CHOOSER").unwrap_or_default();
         let here = self.key.as_path().map(|p| p.to_path_buf());
         let picked: Vec<PathBuf> = match mode.as_str() {
-            "save" => {
-                let name = save_name.to_string();
-                let bare = std::path::Path::new(&name)
-                    .file_name()
-                    .map(|n| n.to_owned());
-                let (Some(dir), Some(bare)) = (here, bare) else {
-                    return QString::from("type a file name");
-                };
-                if name.contains('/') {
-                    return QString::from("a file name cannot contain /");
-                }
-                vec![dir.join(bare)]
-            }
+            "save" | "save-many" => match self.chooser_save_targets(&save_name.to_string()) {
+                Ok(targets) => targets,
+                Err(message) => return QString::from(&message),
+            },
             "open-folder" => {
-                // The folder under the cursor if it is one, else this folder.
-                let cur = self.path_of_row(self.cursor).filter(|p| p.is_dir());
-                match cur.or(here) {
+                // The selected folder, else this one. Never the cursor row:
+                // it starts on the first row without the user choosing it.
+                let visible = self.visible_entries();
+                let selected = self.selection.resolve(&visible);
+                if selected.iter().any(|e| chooser_folder_state(e).is_none()) {
+                    return QString::from("still reading that link; try again");
+                }
+                let folders: Vec<PathBuf> = selected
+                    .iter()
+                    .filter(|e| chooser_folder_state(e) == Some(true))
+                    .filter_map(|e| self.key.join(&e.name).as_path().map(|p| p.to_path_buf()))
+                    .collect();
+                match gust_core::chooser::folder_answer(&folders, here) {
                     Some(p) => vec![p],
                     None => return QString::from("choose a folder"),
                 }
@@ -2979,7 +3240,9 @@ impl qobject::DirModel {
                 v
             }
         };
-        match gust_core::chooser::write_result(&out, &picked) {
+        let filter = (!chooser_filters().items.is_empty())
+            .then(|| chooser_filter_slot().load(std::sync::atomic::Ordering::SeqCst));
+        match gust_core::chooser::write_answer(&out, &picked, filter) {
             Ok(()) => QString::default(),
             Err(e) => QString::from(&e.to_string()),
         }
@@ -5396,7 +5659,9 @@ impl qobject::DirModel {
                 Entry::new(label, kind)
             })
             .collect();
-        let n = entries.len();
+        // Every result is shown, except what a dialog's file type excludes.
+        let shown = visible_indices(&entries, "", true);
+        let n = shown.len();
 
         // SAFETY: paired begin/end around the mutation, on the GUI thread —
         // the same contract every other reset in this file follows.
@@ -5405,7 +5670,7 @@ impl qobject::DirModel {
             {
                 let mut m = self.as_mut().rust_mut();
                 m.all = entries;
-                m.visible = (0..n).collect();
+                m.visible = shown;
                 m.cursor = 0;
                 m.selection.clear();
             }
@@ -10060,16 +10325,85 @@ impl qobject::ThemeTokens {
     }
 }
 
+/// The dialog's file type list. A chooser is one window, so this is per
+/// process, and read from the environment once.
+fn chooser_filters() -> &'static gust_core::chooser::Filters {
+    static FILTERS: std::sync::OnceLock<gust_core::chooser::Filters> = std::sync::OnceLock::new();
+    FILTERS.get_or_init(|| {
+        std::env::var("GUST_CHOOSER_FILTERS")
+            .map(|text| gust_core::chooser::Filters::from_json(&text))
+            .unwrap_or_default()
+    })
+}
+
+fn chooser_filter_slot() -> &'static std::sync::atomic::AtomicUsize {
+    static SLOT: std::sync::OnceLock<std::sync::atomic::AtomicUsize> = std::sync::OnceLock::new();
+    SLOT.get_or_init(|| std::sync::atomic::AtomicUsize::new(chooser_filters().current))
+}
+
+/// The active filter's globs; empty shows everything.
+fn chooser_globs() -> &'static [String] {
+    chooser_filters()
+        .items
+        .get(chooser_filter_slot().load(std::sync::atomic::Ordering::SeqCst))
+        .map(|f| f.globs.as_slice())
+        .unwrap_or(&[])
+}
+
+/// `SaveFiles`: the names the app wants placed in the chosen folder.
+fn chooser_files() -> &'static [std::ffi::OsString] {
+    static FILES: std::sync::OnceLock<Vec<std::ffi::OsString>> = std::sync::OnceLock::new();
+    FILES.get_or_init(|| {
+        // Read once, from the private runtime folder the service wrote it to.
+        std::env::var_os("GUST_CHOOSER_FILES")
+            .map(|path| gust_core::chooser::read_names(std::path::Path::new(&path)))
+            .unwrap_or_default()
+    })
+}
+
+/// Is this row a folder? None for a link whose target is not read yet: that
+/// is not an answer, and treating it as one picks the wrong thing.
+fn chooser_folder_state(e: &Entry) -> Option<bool> {
+    match e.kind {
+        EntryKind::Dir => Some(true),
+        EntryKind::Symlink => e.meta.as_ref().map(|m| m.link_dir),
+        _ => Some(false),
+    }
+}
+
+/// The next chooser_check token. Always positive: the window keeps 0 and -1
+/// for "none" and "the call has not returned yet".
+fn next_chooser_token(latest: &std::sync::atomic::AtomicI32) -> i32 {
+    use std::sync::atomic::Ordering;
+    loop {
+        let token = latest.load(Ordering::SeqCst);
+        let next = if token >= i32::MAX - 1 { 1 } else { token + 1 };
+        let swapped = latest.compare_exchange(token, next, Ordering::SeqCst, Ordering::SeqCst);
+        if swapped.is_ok() {
+            return next;
+        }
+    }
+}
+
 /// Which entries are shown, in order, for a filter and the hidden-files
 /// setting. O(n): this used to build a `Vec` of kept pointers and call
 /// `contains` for every entry, which is O(n²) — a 100k directory spent
 /// minutes here. Index arithmetic keeps it linear. Pure — no I/O.
 fn visible_indices(all: &[Entry], needle: &str, show_hidden: bool) -> Vec<usize> {
+    let globs = chooser_globs();
+    let allowed = |e: &Entry| {
+        // Folders stay so the user can get somewhere; a link may be one. A
+        // search result's name is a relative path: the file name decides.
+        let name = std::os::unix::ffi::OsStrExt::as_bytes(e.name.as_os_str());
+        let file = name.rsplit(|b| *b == b'/').next().unwrap_or(name);
+        matches!(e.kind, EntryKind::Dir | EntryKind::Symlink)
+            || gust_core::chooser::filter_shows(globs, file)
+    };
     if needle.is_empty() {
         return all
             .iter()
             .enumerate()
-            .filter(|(_, e)| show_hidden || !e.is_hidden())
+            .filter(|(_, e)| (show_hidden || !e.is_hidden()) && allowed(e))
             .map(|(i, _)| i)
             .collect();
     }
@@ -10078,7 +10412,7 @@ fn visible_indices(all: &[Entry], needle: &str, show_hidden: bool) -> Vec<usize>
     let base = all.as_ptr();
     let mut idx: Vec<usize> = filter_entries(all, needle)
         .into_iter()
-        .filter(|e| show_hidden || !e.is_hidden())
+        .filter(|e| (show_hidden || !e.is_hidden()) && allowed(e))
         .map(|e| {
             // Safety: every element is a reference into `all`, so the
             // offset is in bounds and well defined.

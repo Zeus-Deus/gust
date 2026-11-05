@@ -2,6 +2,7 @@
   {"source": "target/release/gust", "path": "usr/bin/gust", "mode": "0755"},
   {"source": "target/release/gust-archive-helper", "path": "usr/bin/gust-archive-helper", "mode": "0755", "when_source_exists": "crates/ops/src/bin/gust-archive-helper.rs"},
   {"source": "packaging/gust.desktop", "path": "usr/share/applications/gust.desktop", "mode": "0644"},
+  {"source": "packaging/gust-chooser.desktop", "path": "usr/share/applications/gust-chooser.desktop", "mode": "0644", "when_source_exists": "packaging/gust-chooser.desktop"},
   {"source": "packaging/gust.portal", "path": "usr/share/xdg-desktop-portal/portals/gust.portal", "mode": "0644"},
   {"source": "packaging/org.freedesktop.impl.portal.desktop.gust.service", "path": "usr/share/dbus-1/services/org.freedesktop.impl.portal.desktop.gust.service", "mode": "0644"},
   {"source": "LICENSE", "path": "usr/share/licenses/gust/LICENSE", "mode": "0644"},

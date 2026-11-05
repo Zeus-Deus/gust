@@ -34,6 +34,7 @@ class PackageArtifactTests(unittest.TestCase):
         shutil.copyfile(ROOT / "packaging/runtime-files.json", self.source / "packaging/runtime-files.json")
         # Synthetic ELF header: the checker never executes this fixture.
         elf = b"\x7fELF\x02\x01" + b"\0" * 12 + (62).to_bytes(2, "little") + b"fixture"
+        (self.source / "packaging/gust-chooser.desktop").write_bytes(b"synthetic configuration\n")
         for item in package.runtime_files(self.source):
             built = self.source / item["source"]
             built.parent.mkdir(parents=True, exist_ok=True)
@@ -47,6 +48,11 @@ class PackageArtifactTests(unittest.TestCase):
         return package.verify(self.stage, self.source, "x86_64", require_receipt=False)
 
     def test_complete_stage_matches_sources(self):
+        self.assertEqual(len(self.verify()), 7)
+
+    def test_a_snapshot_older_than_the_dialog_entry_still_packages(self):
+        (self.source / "packaging/gust-chooser.desktop").unlink()
+        (self.stage / "usr/share/applications/gust-chooser.desktop").unlink()
         self.assertEqual(len(self.verify()), 6)
 
     def test_missing_runtime_file_and_modified_configuration_fail(self):
@@ -94,7 +100,7 @@ class PackageArtifactTests(unittest.TestCase):
         helper.write_text("// synthetic entrypoint\n")
         with self.assertRaises(OSError):
             self.verify()
-        self.assertEqual(len(package.runtime_files(self.source)), 7)
+        self.assertEqual(len(package.runtime_files(self.source)), 8)
 
     def test_actual_recipe_refuses_missing_helper_then_stages_it_beside_gust(self):
         helper = self.source / "crates/ops/src/bin/gust-archive-helper.rs"
@@ -108,7 +114,7 @@ class PackageArtifactTests(unittest.TestCase):
         complete = self.root / "complete-helper"
         complete.mkdir()
         staged = package.stage(complete, self.source)
-        self.assertEqual(len(package.verify(staged, self.source, "x86_64", require_receipt=False)), 7)
+        self.assertEqual(len(package.verify(staged, self.source, "x86_64", require_receipt=False)), 8)
         self.assertEqual((staged / "usr/bin/gust-archive-helper").stat().st_mode & 0o777, 0o755)
 
     def test_redirected_qml_input_invalidates_real_receipt_check(self):
@@ -124,7 +130,7 @@ class PackageArtifactTests(unittest.TestCase):
                   "executables": {"gust": hashlib.sha256(
                       (self.source / "target/release/gust").read_bytes()).hexdigest()}}
         (self.source / "target/release/gust-build.json").write_text(json.dumps(record))
-        self.assertEqual(len(package.verify(self.stage, self.source, "x86_64")), 6)
+        self.assertEqual(len(package.verify(self.stage, self.source, "x86_64")), 7)
         outside = self.root / "different-qml"
         outside.mkdir()
         (outside / "Main.qml").write_text("// redirected input\n")

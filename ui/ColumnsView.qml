@@ -31,6 +31,9 @@ FocusScope {
         }
         return out
     }
+    /// A plain click selects the row as well as moving the cursor. A folder
+    /// dialog answers with the selection, so there a click has to be a choice.
+    property bool clickSelects: false
     property bool dragActive: false
     /// Keyboard modifiers held during the drag: Ctrl copies, Shift moves.
     property int dragMods: 0
@@ -348,7 +351,8 @@ FocusScope {
                                     root.contextRequested(index, g.x, g.y)
                                     return
                                 }
-                                root.model.focus_row(index)
+                                if (root.clickSelects) root.model.sel_only(index)
+                                else root.model.focus_row(index)
                                 root.selectionTouched()
                             }
                             onDoubleClicked: root.activated(index)
