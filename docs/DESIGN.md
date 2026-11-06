@@ -18,9 +18,11 @@ LocationKey  = provider_id + ":" + opaque_location_bytes
   bytes are never rewritten for display.
 - A row index, a translated label and a temporary mount path are never identity.
 
-`EntryId` = `(dev, ino)` where the provider supplies them, else a hash of the
-location bytes. Metadata and thumbnail results carry `EntryId` + `generation`
-and are dropped if either no longer matches.
+The current `EntryId(pub u64)` is a hash of the entry's raw name bytes within
+a listing. It is neither `(dev, ino)` nor proof of identity across replacements.
+Generation-tagged metadata/thumbnail results must also match the expected row;
+the background projection contract below adds listing/request revisions and
+exact byte-name checks. Operations validate filesystem identity separately.
 
 ### 1.1 Byte tokens at the UI boundary
 
@@ -55,6 +57,468 @@ pub struct Capabilities {
 `Unknown` is distinct from `No`. The UI disables an action for `No`, and for
 `Unknown` it attempts and reports honestly. Capabilities come from probing the
 connected account, never from the provider's marketing name.
+
+## 2.1 Interactive preferences and matching
+
+The preferences service owns one process-local state for settings, remembered
+sorts, remembered views and the tab session. Loads, reconciliation, serialization, staging,
+file sync and publication run on a worker. GUI handlers validate and enqueue
+mutations and read coherent in-memory snapshots; they never perform a disk
+read-modify-write. Pending updates have monotonically ordered revisions and
+compatible pending writes may coalesce without losing an admitted mutation.
+Acknowledgement distinguishes an accepted UI change from a saved revision.
+Failures remain visible, and shutdown requests a bounded asynchronous flush.
+A failed document read retains its last successfully loaded state and all
+accepted optimistic mutations; it never resets live choices to defaults. Fresh
+successful reads, including an intentional deletion, can replace that state.
+Session replacement is idempotent: canonical headers cannot accumulate, and
+known duplicate Gust headers are normalized before bounded session parsing.
+Canonical active/tab records precede preserved unknown content, so saving a
+readable session cannot move its records beyond the parser's bounded prefix.
+Unknown keys retain their relative order; file-size and path checks still apply.
+The same prefix rule applies to bounded sort/view documents: retained recognized
+records must remain readable by their unchanged core parsers. Reconciliation
+checks serialized logical state before publication; it must refuse a save
+rather than acknowledge bytes that cannot represent the admitted choices.
+Operation journals are not preference writes and do not use this coalescing.
+
+External file changes must be reconciled on the worker before publication:
+preserve unrelated fields where the pending mutations can be replayed safely,
+otherwise report a conflict. Atomic staged-file sync and rename retain their
+existing guarantees; a renamed preference is not evidence that a parent
+directory was synced. No helper may weaken path/symlink checks while moving
+these operations off the GUI thread. Admin/chooser restrictions still apply.
+
+The QML boundary exposes readiness, pending/error state and a revision change
+notification. Accepted changes can update the visible controls immediately;
+the UI must not call them saved until the matching worker acknowledgement.
+An external/reconciled update refreshes cached preference controls across
+participating models; it never re-sorts listings on a notification. An explicit
+transient sort remains effective for its location even when persistence is
+suppressed or admission is rejected. Navigation/reload policy must distinguish
+that local choice from the remembered sort without silently replacing it.
+
+Session changes remain dirty across initial preference loading and an expired
+debounce. Once ready, current user tabs are admitted rather than restoring an
+old session over them. The first user close captures the final session even if
+its timer has already fired; a preferences-triggered close does not endlessly
+re-admit an identical session. A later session change during flush extends the
+wait or requires an explicit unsaved-close decision. Window closure keeps the
+event loop responsive and exposes timeout/failure rather than silently dropping
+unadmitted session changes.
+
+Ordinary directory filtering preserves the existing listing order. It prepares
+the query once and returns matching entry indices, without relevance-sorting
+and then sorting back by index. Ranked Find retains its separate scoring
+semantics. Selection reconciliation uses byte names and preserves selected,
+pinned and anchor semantics; it can skip work only when all are untouched.
+Neither a row index nor the current name-hash EntryId grants file-operation
+authority. Asynchronous ordering/publication requires the revision and
+displayed-target contract before it is enabled.
+
+## 2.2 Background listing projection contract
+
+This contract is the prerequisite for enabling asynchronous sort, ordinary
+filter and live-diff preparation. A displayed projection binds its location
+key, location generation, immutable backing-list revision and visible ordering.
+Requested navigation/sort/query state is separate from that projection. Until a
+replacement publishes, activation, clipboard/drag targets, selection gestures
+and operation preparation resolve exact raw names against the displayed key
+and rows. Operation admission still verifies filesystem identity independently.
+The existing name-hash `EntryId` is not a replacement/version identity.
+
+Every worker result carries location generation, listing revision, query/sort
+request revision and selection revision. Publication validates every component,
+not just generation. Metadata patches also carry a request identity, backing
+index and exact byte name; reordering never reinterprets an old index. A stale
+live plan must be prepared again against the actual displayed projection.
+
+Each pane has one running CPU projection, one replaceable latest intent and
+one completion slot. Supersession requests cooperative cancellation throughout
+matching, key preparation, bounded sort runs/merges, diff preparation and large
+selection clone/prune. Record cancellation observation and newest-request start
+latency; bounded queues alone do not prove responsive supersession. Independent
+panes receive fair admission, and CPU projection capacity is separate from
+potentially blocked filesystem work.
+Every admitted load has its own supersession identity, including repeated loads
+of the same location generation. A candidate or completion from an earlier load
+must retire through the existing bounded envelope before replacement I/O can
+wait for its slot. Generation equality alone cannot keep that older load alive.
+Find/grep use a separate search identity: presentation-only sort/filter/hidden
+or clipboard-mark requests do not discard current search output. A still-current
+search result is projected with the latest presentation request; a replaced
+search or navigation rejects its output explicitly.
+Automatic same-origin live/job relists wait while an active search owns that
+origin. They record deferred freshness work rather than silently canceling the
+search while leaving Find active. The same deferral applies to origin refreshes
+after operations on Find/grep hits, including trash, rename and Undo. Hit rows
+can therefore show their pre-operation names until the search is cleared;
+operation success is not a claim that those rows are fresh. Further actions
+still resolve the displayed raw target and use the existing operation admission
+and version checks; a missing target is refused. A displayed search row is not
+proof of an unchanged inode. Clearing Find/grep reloads the origin and applies
+the latest deferred focus name. Explicit Refresh and navigation still supersede
+the search. Incrementally refreshing operated search hits remains later work.
+
+Published row storage is immutable while shared. No GUI `Arc::make_mut`,
+directory-sized clone, name-map rebuild or final large deallocation may hide
+inside publication. Metadata may use a bounded deferred-patch barrier or an
+explicit sidecar; a worker releases shared inputs before completion so deferred
+patches and queued selection intents can proceed under sustained input.
+Selection changes retain exact displayed targets and event order. Results based
+on an older selection revision cannot replace newer user intent. A summary
+prepared on a worker must not trigger an immediate equivalent GUI rescan.
+
+Qt structural signals bracket their corresponding GUI-thread mutations. Sort
+permutations require correct persistent-index remapping if layout notifications
+are used. Membership changes use measured bounded row ranges or a coherent
+reset, preserving byte-name cursor/viewport anchors. `dataChanged` does not
+substitute for structural changes. Every row-moving publication respects the
+existing live-update hold. A reset is preferable to unbounded GUI diff work.
+
+Keep backing-store revisions bounded: the displayed revision, one admitted
+candidate and one retiring predecessor. Rejected results and displaced rows,
+indices and selection storage retire off the GUI thread. Pending navigation
+retains only the latest lightweight intent when a revision slot is unavailable.
+Tests must cover stale/out-of-order completions, selection edits during work,
+metadata across reorder/relist, held publications, navigation with old rows,
+notification consistency and retirement/admission bounds before enabling this
+path. This section defines required behavior, not an implementation claim.
+
+### 2.2.1 Stage 2 implementation boundary
+
+This is the contract for the next implementation; its presence is not evidence
+that workers or the following UI protocol are enabled or qualified.
+
+- Core supplies one comparator shared by entry and index sorting, cancellable
+  index sorting/filtering, and cancellable selection clone/reconciliation.
+  Ordinary filtering walks the requested full permutation; ranked Find keeps
+  its existing semantics. Cancellation checkpoints cover bounded sort runs and
+  merges, matching, map preparation and selection work, not just entry/exit.
+
+  The core boundary is `projection::Cancellation::checkpoint() -> bool`
+  (`true` means cancelled), implemented by `CancelToken` and checkpoint
+  closures. `sort_indices`, `filter_indices` and `map_visible_rows` return
+  checked index vectors or `ProjectionError` (cancelled, invalid index or too
+  many Qt-addressable rows). `Selection::clone_retain_visible` prepares a
+  pruned copy without a full noncancellable clone; `visible_summary` returns
+  selected count, known byte total and missing-metadata count. App owns the
+  presentation text and revision validation. `entry::compare_entries` is the
+  comparator shared with existing entry sorting.
+  Name ordering may prepare fixed-size normalized comparison prefixes once per
+  backing row, with the shared full comparator resolving every equal, truncated
+  or deliberately saturated prefix. This never clones Entry/name ownership.
+  Stable backing-index ties, bounded runs and checkpointed merges remain intact.
+  The proposed 16-byte-prefix record uses 24 B including its index; two buffers
+  permit 48 B/row transient scratch (48 MB at 1M), released before output conversion
+  exceeds that peak. Retention requires exact differential/spec/cancellation and
+  measured allocator-peak checks; ordered input retains the no-prefix fast path.
+  Prefix admission may inspect at most 64 evenly spaced keys on the stack and
+  retain the existing comparator path when at most two distinct prefixes appear.
+  This bounded, cancellable check changes only algorithm choice, never ordering;
+  collision-heavy names still require exact differential and paired timing checks.
+
+  `list_names_unordered` and `fill_metadata_unordered` are worker-input
+  companions to the existing lister APIs, with the same arguments. They perform
+  listing/metadata collection without the legacy final sort, so cancellation
+  and CPU admission are not bypassed inside an I/O helper. Their output is raw
+  input, never a sorted publication; the app prepares and validates its order
+  before setting the displayed settled state. Existing `list_names` and
+  `fill_metadata` remain sorted compatibility wrappers with unchanged behavior.
+
+  Selection companion APIs accept a vacant `SelectionScratch` immediately
+  before the cancellation argument. This opaque movable scratch owns at most
+  two name sets and one anchor, exposes vacancy including retained capacity,
+  and refuses occupied reuse with `ProjectionError::ScratchOccupied`. Failed
+  preparation leaves `self` unchanged and partial storage in caller-owned
+  scratch. A successful gesture moves replaced old storage into scratch;
+  successful clone/prune returns the selection and leaves scratch vacant.
+  App must pre-admit and move scratch into its bounded retirement envelope.
+  Compatibility wrappers may drop local scratch and are not the app worker's
+  responsive path. No core cleanup thread or queue is implied.
+- App owns immutable shared backing entries and index permutations. A backing
+  index plus its listing revision is a listing-local row key, not filesystem
+  identity. Metadata must not obtain uniqueness by cloning a shared listing.
+  Use a bounded patch barrier or an explicit sidecar, with exact byte-name,
+  request and revision validation. Release/apply barriers must prevent metadata
+  or selection starvation during sustained replacement requests.
+  Metadata and cache sidecars may use fixed-size lazily initialized pages with
+  stable references, bounded page construction and off-thread final retirement.
+  Dense, sparse and cache-heavy cases must be measured before retaining a storage
+  change. A name index may store backing indices with randomized hashes and exact
+  borrowed raw-name equality; a hash value alone is never identity.
+  A cache key may retain at most two stable write-once values in separate lazy
+  pages, permitting one renewal after invalidation without invalidating borrowed
+  references or destroying old storage on the GUI thread. Duplicate values and
+  cold misses do not consume renewal capacity. Exhaustion invalidates stale
+  display data and requests a fresh backing through existing bounded admission;
+  an active search defers that refresh. Callback cancellation/request identity
+  must reject stale same-backing publications before either cache cell is used.
+  Page construction remains bounded to 64 cells, including any GUI first touch;
+  final page/value destruction belongs to the backing's retirement owner.
+  Selection-only and clipboard-mark publications reuse immutable row maps.
+  Auxiliary marks have their own coherent publication validation and cannot
+  masquerade as an applied selection event or force a structural model reset.
+  Visible thumbnail reuse across relists requires fresh worker validation against
+  the existing full source-version stamp, never just listing Metadata equality.
+  A bounded cache-only viewport preflight may prepare valid URLs before publication;
+  filesystem checks stay on I/O workers and never on CPU projection or GUI paths.
+- Displayed location and rows are kept together, independently of requested
+  navigation. Every row-derived path, activation, operation, clipboard/drag and
+  thumbnail request uses that displayed pair. A selection gesture resolves its
+  shown targets immediately. If applying it must wait for shared inputs to be
+  released, bounded pending intent is visible and preserves event order;
+  target-changing actions refuse explicitly until that intent is applied.
+  Capacity refusal is visible; toggles cannot silently coalesce away.
+  Drag preview, MIME export and custom-action enumeration also refuse stale
+  targets while selection is pending. QML must not start a drag ghost or an
+  outward platform drag after Rust refuses admission.
+  A context-menu gesture that admits selection may retain one menu intent bound
+  to that model and exact displayed target until the selection barrier completes.
+  It must not refuse its own selection update or open for another row/model.
+  Only equivalent pending rectangle replacements from the same band gesture may
+  coalesce; toggles and other ordered gestures remain distinct. An unchanged
+  rectangle admits nothing. Rectangle geometry holds row-moving publication
+  until release. Closing a right-drag menu releases the drag owner after a chosen
+  action has consumed its payload, including cancel and dismissal paths.
+- CPU admission is process-wide and fair across panes, independently of I/O
+  workers. Per-pane running, latest-pending and completion slots are bounded.
+  Mount/risk classification also runs off the GUI thread or uses an in-memory
+  worker-owned topology snapshot; reading `/proc` in a GUI scheduler is still
+  filesystem work. Known risky calls retain their permits if blocked, and do
+  not consume the reserved fresh-local navigation capacity.
+  Replacement/rejected rows, maps and large selection sets retire off the GUI
+  thread; a final `Arc` drop on that thread is not acceptable retirement.
+  Cancelled algorithm scratch and replaced transactional selection sets also
+  have an explicit caller-owned retirement handoff: observing cancellation
+  quickly is insufficient if returning the error destroys a large name set on
+  the CPU worker. The same bounded retirement admission covers this scratch;
+  core algorithms do not spawn cleanup threads or hide an unbounded queue.
+- The live hold covers all row-dependent overlays, including bulk rename, and
+  active drags. All row-moving publication checks the hold, including sort and
+  filter completion. The hold stays continuous through action target capture,
+  even when an overlay closes before dispatch or hands off to another overlay.
+  A bulk rename's checked line-to-name association cannot change before apply.
+  Stage 2 deliberately uses coherent resets for every membership replacement,
+  including small live edits, with prepared anchors and validated viewport caches.
+  Rust installation swaps prepared ownership without GUI row-diff loops; Qt's
+  reset observers/delegates still have measured callback costs above 8 ms. A
+  measured incremental small-edit policy and the callback budget remain deferred
+  to a later stage; this reset policy does not claim bounded Qt wall-clock work.
+
+The bridge and QML use this publication protocol:
+
+| Surface | Contract |
+| --- | --- |
+| Existing `sort_field`, `sort_ascending`, `filter` | Requested values; stale completion never writes them back. |
+| `sort_pending`, `filter_pending` | True until that requested projection is displayed, including a held result. |
+| `shown_filter` | Query matching the displayed rows; empty-list text uses this value. |
+| `selection_pending` | Accepted selection intent still awaiting application; target-changing operations refuse explicitly. |
+| `rows_replaced(keep: i32)` | After reset or layout sort and cursor publication: 0 start, 1 follow cursor, 2 preserve the previous viewport anchor. |
+| `published_row(old: i32) -> i32` | Read-only constant-time old-to-new row mapping, or -1; valid during `rows_replaced`. Mapping preparation belongs on the worker. |
+
+QML captures only viewport geometry around `modelAboutToBeReset` or
+`layoutAboutToBeChanged`, without calling model invokables from those handlers.
+For keep=2 it uses the prepared
+mapping to restore the cursor's pixel offset when visible, else the top visible
+row's offset, else the normal cursor fallback. It clamps without animation and
+does not change focus or IME state. Hidden views remain inert. Rust announces
+the cursor after reset even if its numerical value did not change.
+The old cursor offset applies only when that row maps to the newly published
+cursor. A deliberate new focus target uses keep=1; keep=2 prioritizes the
+previous viewport and may leave a different chosen cursor off screen.
+
+Sort permutations use Qt layout notifications with persistent-index remapping.
+Qualify `VerticalSortHint` behavior on the selected Qt version; do not assume
+its delegate/scroll behavior from memory. Structural signals bracket mutations
+on the GUI thread. Reset fallback cannot substitute `dataChanged` for structure.
+Columns previews navigate with byte tokens, never appended escaped labels, and
+stale preview responses cannot act as targets for a different displayed row.
+Internal new-tab/split navigation and cross-pane transfer/drop destinations use
+the same rule. `entry_token(row)` and existing `location_token()` expose the
+displayed raw target; `entry_path`/`location` remain presentation or explicit
+user-text interfaces. Tab start paths may use the existing `token:` envelope.
+Cross-pane destinations use explicit `copy_selection_to_token`,
+`move_selection_to_token`, `drag_preview_into_token` and `drag_drop_into_token`
+companions, which validate tokens then reuse the original operation admission,
+confirmation and undo paths. Display strings are never decoded as authority.
+A raw location change still announces location change when its display label
+collides, so session/history/view observers cannot miss it.
+
+Pending marks acknowledge accepted requests independently of status-strip
+messages. They use theme tokens, expose Sorting/Filtering/selection progress to
+accessibility, and do not rebind the active filter editor's IME text. Do not add
+an inline-size threshold until measurement justifies one.
+
+Record GUI callback durations (including installation/merge and `data()` work),
+supersession/cancellation observation and newest-request start latency. Measurements
+use the admitted intent's timestamp: marks have an independent admission time,
+and each ordered selection event retains its own. Neither may substitute the
+age of an unrelated row request or the time of a later queued event.
+Reports must distinguish a callback, a Qt frame-swapped signal, a QA state receipt and
+actual compositor presentation. The 8 ms callback flag at 100k remains an
+investigation trigger, not an OS deadline or an achieved claim. Tests and native
+measurement must precede enabling/claiming this contract complete.
+Publication timing also separates structural installation, property/signal and
+viewport notification, and follow-up admission phases, preserving the overall
+callback measurement. Phase timings attribute work; they are not frame events.
+Additive QA fields expose `publications` reset/layout/selection/marks counters,
+`validated_thumbnail_count` captured before publication, cached `thumbs` count
+and `visible_thumbnails` for at most the first 40 displayed rows. Phase histograms
+are `publish_structural`, `publish_notify` and `publish_followup`; existing fields
+remain compatible. These bounded diagnostics establish no presentation timestamp.
+QA state publication uses one process worker and one latest pending document,
+bounded to 2 MiB; its boolean return acknowledges admission, not disk publication.
+Atomic receipt writes run off the GUI thread. One GUI timer coalesces snapshot
+construction after the signals that request it, retaining only the latest state
+and a bounded tag list. JSON construction and receipt observation still add
+diagnostic overhead and do not measure production frames.
+
+### 2.2.2 Stage 3 scalar-sort preparation
+
+This stage targets only Size and Modified throughput in `sort_indices`; its
+presence is a proposed implementation contract, not evidence of a measured gain.
+The public API, immutable backing ownership, permutation output, scheduler,
+publication/selection/operation protocol and Qt signals remain unchanged.
+Name and Kind behavior remain separate, including Kind's natural extension
+ordering before its full-name tie-break.
+
+Size/Modified may prepare fixed-size scalar, bounded normalized-name-prefix and
+backing-index records. Directory grouping remains independent of direction;
+missing metadata compares as zero; Modified uses signed timestamp ordering.
+Descending reverses the primary/name order without reversing directory grouping.
+Prefix collisions, truncation and saturation defer to the shared exact comparator;
+exact equality retains stable backing order. No Entry or name ownership is cloned,
+and no sort key survives the request. Ordered input keeps its no-key fast path.
+Admission may inspect at most 64 evenly spaced rows on the stack and use the
+original index path when scalar cardinality is high, names differ near their
+start, or longer prefixes mostly collide. This conservative heuristic selects
+only the algorithm; it is never ordering authority and can miss profitable cases.
+The selected compact backing index requires checked `u32` admission; larger
+listings retain the original `usize` path without truncation.
+
+Preparation, bounded runs, merges and output conversion retain cancellation
+checkpoints. Cancellation returns no partial permutation and leaves the backing
+unchanged. Flat scratch destruction, cancellation return and newest-request start
+must be measured separately; checkpoint bounds are not wall-clock deadlines.
+Retain a representation only with differential/spec/cancellation tests and a
+measured transient sort-storage peak of at most 48 bytes per input row, including
+conversion overlap. This permits up to 32 MB extra scratch at 1M versus the
+previous non-Name index buffers, or 64 MB extra with both CPU workers active;
+the parent selects that bounded tradeoff only for substantial measured gain.
+It is not a whole-application memory-budget achievement.
+
+Source-bound paired release comparisons must include retained Stage 2 and legacy,
+low/high-cardinality and equal primaries, ordered/reversed input, long/colliding
+names and raw-byte edge cases. Timings cover the whole API, including preparation
+and conversion, with full-vector equality outside timing. The initial retention
+gate is at least a twofold improvement over Stage 2 on its recorded low-cardinality
+Size/Modified fixtures at 100k and 1M, without material regressions beyond paired
+variation on the wider matrix. Record any remaining legacy gap. Native exact-
+artifact sorting/supersession, target and resource checks follow core qualification;
+core gains alone do not prove a useful-response or presented-frame goal.
+
+### 2.2.3 Publication attribution diagnostics
+
+Stage 4 retained this as an explicitly opt-in diagnostic after a negative
+overhead experiment; causal Qt/QML selection is stopped and overhead is not
+cleared. Before causal reuse, remove repeated QA-dump coupling and qualify
+overhead again. The accepted scope and adverse receipts are in OPTIMIZATION.
+
+This contract precedes the attribution experiment; it is not a measured gain or
+a change to publication policy. Existing model, selection, hold, operation,
+scheduler and retirement behavior remains unchanged. No new QML role, renderer
+default, filesystem call or data-dependent queue is introduced.
+
+An optional per-model recorder is enabled only with `GUST_QA_STATE` and
+`GUST_QA_PUBLICATION_PROBE=1` at process/model construction. Tests may inject an
+explicit local recorder. Disabled recording adds no per-row allocation, clock
+read or atomic update beyond the existing metrics; an inexpensive disabled
+branch and fixed pointer-sized model state are acceptable. Recorder storage is
+allocated only when enabled, and never retains entries, raw names or paths.
+
+Additive `callbacks.publication_events` exposes `enabled`, all-event reset/layout
+counts and duration histograms, plus `worst_end` and `worst_total`, each holding
+at most eight correlated records. Records carry a model-local sequence, reset
+or layout kind, shown request/listing revisions, old/new row counts, cached view
+bounds and keep policy, full callback and synchronous end duration, and completed
+Rust `data()` time/call/name-role deltas within that end window. Per-record
+durations and data sums use nanoseconds; existing histogram fields remain in
+microseconds. Both DisplayRole and the name role must be defined consistently.
+Name-role reads are a binding-work proxy, not a delegate-creation count.
+An enabled recorder also exposes a process-local opaque recorder id, allocated
+only at its construction, so snapshots from different tab models cannot merge
+equal local sequence numbers. This diagnostic id grants no target authority.
+
+Each record binds all its measurements to the same actual row-moving callback.
+The full interval starts at callback entry and ends before final recorder
+insertion, whose bounded overhead remains included in the existing publish
+histogram. Data sums preserve sub-microsecond contributions before conversion;
+they cover Rust bodies, excluding CXX conversion, Qt and other observer costs.
+These are elapsed wall-clock intervals and may include descheduling; a large
+fraction is a profiling clue, not proof of exclusive CPU cost or a cause.
+Qt calls may reenter `data()` and diagnostics: no mutable borrow or lock guard
+may span structural signals or other Qt calls. There is no per-call event log,
+new worker, unbounded timeline or alteration to existing coalesced QA publication
+and its 2 MiB document bound.
+
+Deterministic storage/accounting and real-Qt reentrancy/signal tests precede
+native use. Compare enabled/disabled recording on the same binary and declared
+workloads, with repeated baseline controls and recorded host context. Revise or
+stop if instrumentation materially changes callback tails/resources. Preserve
+the unfavorable samples; independent histogram maxima are never added or assumed
+to describe one event. Correlation and a Rust-data fraction select the next
+experiment, not an automatic claim about delegates or frame cost.
+
+This first experiment adds no frame probe. Callback, QA receipt, Qt client swap
+and compositor presentation remain distinct. Any later swap correlation must
+bind the publication sequence during Qt synchronization and account for skipped
+or coalesced updates; the first swap after a callback may be an older in-flight
+frame. Neither a swap nor these callback diagnostics prove correct pixels were
+presented or meet the original response/frame targets.
+
+Status: publication-recorder overhead was not cleared. Causal Qt/QML use is
+stopped; ordinary checks keep the probe off. Reuse requires addressing QA-dump
+coupling first. See `docs/OPTIMIZATION.md` for the retained adverse observations.
+
+### 2.2.4 Directory-size cache experiment
+
+Stage 5 may specialize only the directory-size cache. This contract precedes
+implementation and measurement; it is not a memory or latency achievement.
+Thumbnail caches keep §2.2.1's two stable borrowed values and exhaustion policy.
+Metadata pages, exact raw-name indexing, immutable backing entries, projection
+validation and retirement admission remain unchanged.
+
+Directory-size reads return a copied `dirsize::Sized`, never a reference or a
+lock guard. The API is first exercised over the existing storage, then a private
+size-specific implementation may hold one synchronized current scalar per key.
+Keep lazy 64-cell first touch and cancellation-owned partial construction. Cold
+and unknown-name reads allocate nothing. Locks protect only scalar reads,
+comparison and replacement; release them before formatting, Qt calls, callbacks,
+cancellation checks or any other cache access. Shared old-cache worker reads and
+GUI writes must remain safe. No caller-supplied closure runs under a lock.
+
+For this scalar cache, duplicate values are unchanged; invalidation hides the
+current value, and any later current value, including a third distinct value,
+may replace it directly. There is no retained scalar history or renewal limit:
+`Sized` is copied and owns no allocation or destructor. This exception does not
+change thumbnail renewal semantics. Existing cancellation, generation, listing
+and exact-name checks still precede publication. Search deferral, operation
+admission, confirmation and Undo remain intact.
+
+`clear()` remains constant-time logical disablement without walking populated
+pages. Final pages/index destruction and cancelled construction stay with the
+existing off-GUI retirement owner; no new queue, thread or ownership overlap is
+introduced. Single-writer publication and concurrent copied reads are the cache
+boundary. Metadata borrowing is unaffected by this size-cache exception.
+
+Retention requires independent scalar-sequence/concurrency/stale-callback tests,
+allocator and complete-copy controls, followed by exact-artifact native folder
+invalidation/Copy/Undo and unchanged thumbnail recovery checks. Compare frozen
+accepted Stage 4 and candidate sources with predeclared samples and budgets.
+Requested component bytes, process PSS/USS, cleanup, callback and response timings
+are separate measurements. Sparse, dense, renewal-heavy and cancellation cases
+must retain all unfavorable results; finite soaks do not prove a plateau.
 
 ## 3. DirectorySnapshot
 

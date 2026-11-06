@@ -1,0 +1,729 @@
+import QtQuick
+import QtQml.Models
+import QtTest
+import com.gust.app
+import com.gust.app as Gust
+
+// Stage 2 UI publication protocol (DESIGN §2.2.1) against the actual
+// RowsView, IconGridView, ColumnsView and Pane files, driven by a bounded
+// fake model whose resets are real QAbstractItemModel resets. Not a native
+// DirModel, renderer or compositor claim.
+Item {
+    id: top
+    width: 900
+    height: 700
+
+    Component { id: listModelC; ListModel {} }
+    Component { id: fakeC; FakeDirModel {} }
+    Component { id: rowsC; Gust.RowsView {} }
+    Component { id: gridC; Gust.IconGridView {} }
+    Component { id: columnsC; Gust.ColumnsView {} }
+    Component { id: paneC; Gust.Pane {} }
+    // Qualification only: a bare view with no ViewportAnchor.
+    Component {
+        id: bareListC
+        ListView {
+            width: 600; height: 400
+            highlightMoveDuration: 0
+            boundsBehavior: Flickable.StopAtBounds
+            delegate: Item { width: 600; height: Tokens.rowHeight }
+        }
+    }
+
+    TextInput {
+        id: editor
+        x: 700; y: 10
+        width: 180
+        height: Tokens.rowHeight
+        text: "query"
+    }
+
+    TestCase {
+        id: test
+        name: "Stage2Views"
+        when: windowShown
+
+        property var made: []
+
+        function cleanup() {
+            for (const o of made) if (o) o.destroy()
+            made = []
+            wait(0)
+        }
+        function keep(o) { made.push(o); return o }
+
+        function makeRows(n, prefix) {
+            const m = keep(listModelC.createObject(top))
+            for (let i = 0; i < n; i++)
+                m.append({ name: prefix + i, isDir: false, isSelected: false, iconKey: "",
+                           clipMark: "", isHidden: false, tagKeys: "", emblems: "",
+                           typeText: "", sizeText: "", modifiedText: "",
+                           isSymlink: false, linkOk: true, thumbUrl: "" })
+            return m
+        }
+        function shift(n, by) {
+            const map = {}
+            for (let i = 0; i < n; i++) map[i] = i + by
+            return map
+        }
+        function views() {
+            return [{ tag: "rows", comp: rowsC, list: "rowsList" },
+                    { tag: "grid", comp: gridC, list: "iconGrid" },
+                    { tag: "columns", comp: columnsC, list: "columnsList" }]
+        }
+        function settle(list) {
+            tryVerify(() => !isPolishScheduled(list), 1000)
+        }
+        function setup(data, n, cursor, opts) {
+            const fake = keep(fakeC.createObject(top))
+            fake.show(makeRows(n, "a"), cursor)
+            const props = Object.assign({ model: fake, width: 600, height: 400 }, opts || {})
+            const v = keep(data.comp.createObject(top, props))
+            const list = findChild(v, data.list)
+            verify(list, "view list " + data.list)
+            settle(list)
+            return { fake: fake, view: v, list: list }
+        }
+        function offsetOf(list, row) {
+            const it = list.itemAtIndex(row)
+            verify(it, "row " + row + " realised")
+            return it.y - list.contentY
+        }
+        function onScreen(list, row) {
+            const it = list.itemAtIndex(row)
+            return !!it && it.y + it.height > list.contentY && it.y < list.contentY + list.height
+        }
+        function scrollTo(list, row, extra) {
+            list.positionViewAtIndex(row, ListView.Beginning)
+            list.contentY += extra
+            settle(list)
+        }
+        function topRow(list) { return list.indexAt(list.contentX, list.contentY) }
+        function steady(list) {
+            const y = list.contentY
+            wait(Tokens.animFast * 2)
+            compare(list.contentY, y, "no animated correction after restore")
+            verify(!list.moving)
+        }
+        function namedCalls(fake, name) { return fake.calls.filter(c => c[0] === name) }
+
+        // --- Qt's own behaviour, measured, so the anchor is not built on memory.
+        function test_00_qt_reset_moves_viewport_and_keeps_bound_cursor() {
+            const fake = keep(fakeC.createObject(top))
+            fake.show(makeRows(1000, "a"), 400)
+            const bare = keep(bareListC.createObject(top, { model: fake }))
+            bare.currentIndex = Qt.binding(() => fake.cursor)
+            settle(bare)
+            bare.positionViewAtIndex(400, ListView.Beginning)
+            settle(bare)
+            verify(bare.contentY > bare.originY)
+            const before = bare.contentY
+            fake.publish(makeRows(1000, "b"), 400, 2, shift(1000, 0))
+            settle(bare)
+            // Measured on Qt 6.12: a reset alone does not keep the scroll
+            // position (10400 -> 10026 here); currentIndex stays bound to the
+            // model's cursor. Hence the anchor.
+            verify(Math.abs(bare.contentY - before) > Tokens.rowHeight, "a reset alone moves the viewport")
+            console.log("qualification: reset contentY", before, "->", bare.contentY,
+                        "originY", bare.originY, "currentIndex", bare.currentIndex)
+            compare(bare.currentIndex, 400)
+        }
+
+        function test_cursor_offset_data() { return views() }
+        function test_cursor_offset(data) {
+            const s = setup(data, 1000, 300)
+            scrollTo(s.list, 290, 7)
+            verify(onScreen(s.list, 300))
+            const before = offsetOf(s.list, 300)
+            s.fake.clearCalls()
+            // 103 rows appear above: the cursor's row moves (and, in a grid,
+            // its column) but it must stay at the same height on screen.
+            s.fake.publish(makeRows(1103, "b"), 403, 2, shift(1000, 103))
+            compare(s.fake.resetCalls, [], "no model invokable during the reset")
+            compare(namedCalls(s.fake, "published_row")[0], ["published_row", 300])
+            settle(s.list)
+            compare(s.list.currentIndex, 403)
+            fuzzyCompare(offsetOf(s.list, 403), before, 0.5)
+            steady(s.list)
+        }
+
+        function test_top_row_offset_data() { return views() }
+        function test_top_row_offset(data) {
+            const s = setup(data, 1000, 0)
+            scrollTo(s.list, 500, 9)
+            verify(!onScreen(s.list, 0))
+            const first = topRow(s.list)
+            verify(first >= 0)
+            const before = offsetOf(s.list, first)
+            s.fake.clearCalls()
+            s.fake.publish(makeRows(1050, "b"), 50, 2, shift(1000, 50))
+            compare(s.fake.resetCalls, [])
+            settle(s.list)
+            fuzzyCompare(offsetOf(s.list, first + 50), before, 0.5)
+            verify(!onScreen(s.list, 50), "an off-screen cursor is not pulled into view")
+            steady(s.list)
+        }
+
+        // A re-sort published as a Qt layout change, not a reset.
+        function test_sort_layout_keeps_cursor_offset_data() { return views() }
+        function test_sort_layout_keeps_cursor_offset(data) {
+            const s = setup(data, 1000, 300)
+            scrollTo(s.list, 290, 7)
+            const name = s.fake.names[300]
+            const before = offsetOf(s.list, 300)
+            s.fake.clearCalls()
+            s.fake.publishSort(true)
+            compare(s.fake.resetCalls, [], "no model invokable inside the layout bracket")
+            settle(s.list)
+            const now = s.fake.names.indexOf(name)
+            verify(now !== 300, "the fixture's sort really moves the cursor's file")
+            compare(s.list.currentIndex, now)
+            fuzzyCompare(offsetOf(s.list, now), before, 0.5)
+            steady(s.list)
+        }
+        function test_sort_layout_keeps_top_row_data() { return views() }
+        function test_sort_layout_keeps_top_row(data) {
+            const s = setup(data, 1000, 0)
+            scrollTo(s.list, 500, 5)
+            const first = topRow(s.list)
+            const name = s.fake.names[first]
+            const before = offsetOf(s.list, first)
+            s.fake.publishSort(false)
+            settle(s.list)
+            fuzzyCompare(offsetOf(s.list, s.fake.names.indexOf(name)), before, 0.5)
+            steady(s.list)
+        }
+
+        // The old cursor row survives, but the publication deliberately chose
+        // another cursor: the old row's height must not be restored over it.
+        function test_reset_chosen_cursor_is_not_overridden_data() { return views() }
+        function test_reset_chosen_cursor_is_not_overridden(data) {
+            const s = setup(data, 1000, 300)
+            scrollTo(s.list, 290, 7)
+            verify(onScreen(s.list, 300))
+            const first = topRow(s.list)
+            const topBefore = offsetOf(s.list, first)
+            editor.forceActiveFocus()
+            const map = shift(1000, 103)
+            map[300] = 900          // old cursor still present, far away
+            s.fake.clearCalls()
+            s.fake.publish(makeRows(1103, "b"), 700, 2, map)
+            compare(s.fake.resetCalls, [])
+            settle(s.list)
+            compare(s.list.currentIndex, 700)
+            compare(namedCalls(s.fake, "published_row").map(c => c[1]), [300, first],
+                    "the cursor anchor is checked, then the top row is used")
+            fuzzyCompare(offsetOf(s.list, first + 103), topBefore, 0.5)
+            verify(!onScreen(s.list, 900), "the old cursor's place is not restored")
+            verify(editor.activeFocus)
+            steady(s.list)
+        }
+        function test_reset_chosen_cursor_shown_when_top_lost_data() { return views() }
+        function test_reset_chosen_cursor_shown_when_top_lost(data) {
+            const s = setup(data, 1000, 300)
+            scrollTo(s.list, 290, 7)
+            const map = {}
+            map[300] = 300          // old cursor kept in place; top row gone
+            s.fake.publish(makeRows(1000, "b"), 700, 2, map)
+            settle(s.list)
+            compare(s.list.currentIndex, 700)
+            verify(onScreen(s.list, 700), "the chosen cursor is brought into view")
+            steady(s.list)
+        }
+        function test_layout_chosen_cursor_is_not_overridden_data() { return views() }
+        function test_layout_chosen_cursor_is_not_overridden(data) {
+            const s = setup(data, 1000, 300)
+            scrollTo(s.list, 290, 7)
+            const oldName = s.fake.names[300]
+            const first = topRow(s.list)
+            const topName = s.fake.names[first]
+            const topBefore = offsetOf(s.list, first)
+            editor.forceActiveFocus()
+            s.fake.clearCalls()
+            s.fake.publishSort(true, 5)
+            compare(s.fake.resetCalls, [], "no model invokable inside the layout bracket")
+            settle(s.list)
+            const oldNow = s.fake.names.indexOf(oldName)
+            verify(oldNow >= 0 && oldNow !== 5, "old cursor file still present elsewhere")
+            compare(s.list.currentIndex, 5)
+            fuzzyCompare(offsetOf(s.list, s.fake.names.indexOf(topName)), topBefore, 0.5)
+            verify(editor.activeFocus)
+            steady(s.list)
+        }
+
+        function test_unmapped_falls_back_to_cursor_data() { return views() }
+        function test_unmapped_falls_back_to_cursor(data) {
+            const s = setup(data, 1000, 0)
+            scrollTo(s.list, 500, 0)
+            s.fake.publish(makeRows(1000, "b"), 20, 2, {})
+            settle(s.list)
+            verify(onScreen(s.list, 20), "nothing on screen survived: show the cursor")
+            steady(s.list)
+        }
+
+        function test_keep_start_data() { return views() }
+        function test_keep_start(data) {
+            const s = setup(data, 1000, 500)
+            scrollTo(s.list, 495, 3)
+            s.fake.clearCalls()
+            s.fake.publish(makeRows(800, "b"), 0, 0, shift(1000, 0))
+            settle(s.list)
+            compare(s.list.contentY, s.list.originY)
+            compare(namedCalls(s.fake, "published_row"), [], "keep 0 needs no mapping")
+            steady(s.list)
+        }
+
+        function test_keep_cursor_data() { return views() }
+        function test_keep_cursor(data) {
+            const s = setup(data, 1000, 0)
+            settle(s.list)
+            s.fake.clearCalls()
+            s.fake.publish(makeRows(1000, "b"), 700, 1, shift(1000, 0))
+            settle(s.list)
+            verify(onScreen(s.list, 700))
+            compare(namedCalls(s.fake, "published_row"), [], "keep 1 follows the cursor")
+            steady(s.list)
+        }
+
+        function test_clamps_without_overscroll_data() { return views() }
+        function test_clamps_without_overscroll(data) {
+            const s = setup(data, 1000, 0)
+            scrollTo(s.list, 600, 0)
+            const first = topRow(s.list)
+            // The list shrinks; the old top row lands where its offset would
+            // need content above the start.
+            const map = {}
+            map[first] = 1
+            s.fake.publish(makeRows(40, "b"), 0, 2, map)
+            settle(s.list)
+            verify(s.list.contentY >= s.list.originY)
+            verify(s.list.contentY <= s.list.originY + Math.max(0, s.list.contentHeight - s.list.height) + 0.5)
+            steady(s.list)
+            // Grown content past the end clamps to the end, not beyond.
+            const s2 = setup(data, 1000, 990)
+            scrollTo(s2.list, 990, 0)
+            const map2 = {}
+            map2[990] = 1199
+            s2.fake.publish(makeRows(1200, "b"), 1199, 2, map2)
+            settle(s2.list)
+            verify(s2.list.contentY <= s2.list.originY + Math.max(0, s2.list.contentHeight - s2.list.height) + 0.5)
+            verify(onScreen(s2.list, 1199))
+            steady(s2.list)
+        }
+
+        function test_hidden_view_is_inert_data() { return views() }
+        function test_hidden_view_is_inert(data) {
+            const s = setup(data, 200, 10, { visible: false })
+            verify(s.list.model === null || s.list.model === undefined)
+            s.fake.clearCalls()
+            s.fake.publish(makeRows(300, "b"), 110, 2, shift(200, 100))
+            compare(namedCalls(s.fake, "published_row"), [], "a hidden view hears nothing")
+            s.view.visible = true
+            settle(s.list)
+            compare(s.list.count, 300)
+        }
+
+        function test_focus_and_editor_untouched_data() { return views() }
+        function test_focus_and_editor_untouched(data) {
+            const s = setup(data, 1000, 300)
+            scrollTo(s.list, 290, 0)
+            editor.text = "query"
+            editor.forceActiveFocus()
+            editor.cursorPosition = 2
+            editor.select(1, 3)
+            verify(editor.activeFocus)
+            s.fake.publish(makeRows(1100, "b"), 400, 2, shift(1000, 100))
+            settle(s.list)
+            verify(editor.activeFocus, "a publication never moves keyboard focus")
+            verify(!s.list.activeFocus)
+            compare(editor.text, "query")
+            compare(editor.selectionStart, 1)
+            compare(editor.selectionEnd, 3)
+        }
+
+        // --- empty-list text follows the rows on screen ----------------------
+        function emptyText(item) {
+            const stack = [item]
+            while (stack.length) {
+                const it = stack.pop()
+                if (it.text !== undefined && typeof it.text === "string"
+                        && (it.text.indexOf("No match") === 0 || it.text === "This folder is empty")
+                        && it.visible)
+                    return it.text
+                for (const c of it.children) stack.push(c)
+                if (it.contentItem) for (const c of it.contentItem.children) stack.push(c)
+            }
+            return ""
+        }
+        function test_empty_text_uses_shown_filter_data() {
+            return views().filter(v => v.tag !== "columns")
+        }
+        function test_empty_text_uses_shown_filter(data) {
+            const s = setup(data, 0, 0)
+            s.fake.filter = "newer"
+            s.fake.shown_filter = "older"
+            compare(emptyText(s.view), "No match for \"older\"")
+            s.fake.shown_filter = ""
+            compare(emptyText(s.view), "This folder is empty",
+                    "a query still being applied is not what the rows match")
+        }
+
+        // --- Columns: byte tokens and the response revision -----------------
+        function side(revision, names, peekNames) {
+            return JSON.stringify({
+                revision: revision,
+                parent: { path: "/p", error: "", more: 0, token: "local:2f70", names: names },
+                peek: { kind: "dir", name: "x", path: "/x/x", error: "", more: 0, token: "local:2f782f78",
+                        names: peekNames }
+            })
+        }
+        // Two labels that escape to the same text: a real newline and the
+        // literal characters of its escape. Only the tokens differ.
+        readonly property var collide: [
+            { n: "a<U+000A>b", d: true, cur: false, token: "local:2f702f610a62" },
+            { n: "a<U+000A>b", d: true, cur: false, token: "local:2f702f613c552b303030413e62" },
+            { n: "here", d: true, cur: true, token: "local:2f702f68657265" },
+            { n: "file", d: false, cur: false, token: "local:2f702f66696c65" }
+        ]
+        readonly property var peekNames: [
+            { n: "child", d: true, token: "local:2f782f782f6368696c64" },
+            { n: "note.txt", d: false, token: "local:2f782f782f6e6f74652e747874" }
+        ]
+        function columns() {
+            const s = setup({ comp: columnsC, list: "columnsList" }, 5, 0)
+            s.fake.columns_side = side("r1", collide, peekNames)
+            s.fake.admittedRevision = "r1"
+            const parentList = findChild(s.view, "columnsParent")
+            const peekList = findChild(s.view, "columnsPeek")
+            settle(parentList)
+            settle(peekList)
+            s.fake.clearCalls()
+            return { s: s, parent: parentList, peek: peekList }
+        }
+        function clickRow(list, row) {
+            const it = list.itemAtIndex(row)
+            verify(it, "side row " + row)
+            mouseClick(it, it.width / 2, it.height / 2)
+        }
+        function noLabelNavigation(fake) {
+            compare(namedCalls(fake, "navigate"), [], "never a label joined into a path")
+            compare(namedCalls(fake, "navigate_token"), [])
+            compare(namedCalls(fake, "entry_path"), [])
+        }
+        function test_columns_parent_uses_exact_tokens() {
+            const c = columns()
+            clickRow(c.parent, 0)
+            clickRow(c.parent, 1)
+            compare(c.s.fake.navigations, [collide[0].token, collide[1].token])
+            compare(namedCalls(c.s.fake, "columns_navigate"),
+                    [["columns_navigate", collide[0].token, "r1"], ["columns_navigate", collide[1].token, "r1"]])
+            noLabelNavigation(c.s.fake)
+        }
+        function test_columns_current_and_file_rows_do_not_navigate() {
+            const c = columns()
+            clickRow(c.parent, 2)
+            clickRow(c.parent, 3)
+            compare(namedCalls(c.s.fake, "columns_navigate"), [])
+            noLabelNavigation(c.s.fake)
+        }
+        function test_columns_peek_folder_and_file() {
+            const c = columns()
+            clickRow(c.peek, 0)
+            clickRow(c.peek, 1)
+            compare(c.s.fake.navigations, [peekNames[0].token, "local:2f782f78"],
+                    "a file in the preview opens the previewed folder by its token")
+            noLabelNavigation(c.s.fake)
+        }
+        function test_columns_stale_preview_is_refused() {
+            const c = columns()
+            // The displayed folder or cursor moved on; this column is old.
+            c.s.fake.admittedRevision = "r2"
+            clickRow(c.parent, 0)
+            clickRow(c.peek, 0)
+            compare(namedCalls(c.s.fake, "columns_navigate").map(x => x[2]), ["r1", "r1"])
+            compare(c.s.fake.navigations, [], "Rust refuses; the UI adds no fallback")
+            noLabelNavigation(c.s.fake)
+            // A fresh response carries its own revision and rows.
+            c.s.fake.columns_side = side("r2", [{ n: "new", d: true, cur: false, token: "local:2f702f6e6577" }], [])
+            settle(c.parent)
+            clickRow(c.parent, 0)
+            compare(c.s.fake.navigations, ["local:2f702f6e6577"])
+        }
+
+        // QA click points for the side columns: keyed by raw token, clicking
+        // the reported window point reaches exactly that entry.
+        function test_columns_preview_points_click_exact_token() {
+            const c = columns()
+            const pts = c.s.view.columnsPreviewPoints()
+            compare(pts.revision, "r1")
+            compare(Object.keys(pts.parent).sort(), collide.map(x => x.token).sort())
+            compare(Object.keys(pts.peek).sort(), peekNames.map(x => x.token).sort())
+            const at = pts.parent[collide[1].token]
+            mouseClick(top, at[0], at[1])
+            compare(c.s.fake.navigations, [collide[1].token],
+                    "the second of two identical labels, by its own token")
+            const child = pts.peek[peekNames[0].token]
+            mouseClick(top, child[0], child[1])
+            compare(c.s.fake.navigations, [collide[1].token, peekNames[0].token])
+            noLabelNavigation(c.s.fake)
+        }
+        function test_columns_preview_points_bounded_and_inert() {
+            const c = columns()
+            const many = []
+            for (let i = 0; i < 200; i++)
+                many.push({ n: "n" + i, d: true, cur: false, token: "local:2f702f" + (1000 + i).toString(16) })
+            c.s.fake.columns_side = side("r3", many, peekNames)
+            settle(c.parent)
+            const pts = c.s.view.columnsPreviewPoints()
+            const keys = Object.keys(pts.parent)
+            verify(keys.length > 0 && keys.length < many.length, "only delegates on screen")
+            const box = c.parent.mapToItem(null, 0, 0)
+            for (const k of keys) {
+                verify(pts.parent[k][1] >= box.y && pts.parent[k][1] < box.y + c.parent.height)
+                verify(many.some(m => m.token === k))
+            }
+            c.s.view.visible = false
+            compare(c.s.view.columnsPreviewPoints(), null, "hidden Columns reports nothing")
+        }
+        function test_pane_columns_qa_wrappers() {
+            const p = pane()
+            p.pane.viewMode = "rows"
+            compare(p.pane.columnsSide(), null)
+            compare(p.pane.columnsPreviewPoints(), null)
+            p.fake.columns_side = side("r9", collide, peekNames)
+            p.pane.viewMode = "columns"
+            compare(p.pane.columnsSide().revision, "r9")
+            compare(p.pane.columnsPreviewPoints().revision, "r9")
+        }
+
+        // --- Pane: Gust's own internal targets travel as raw tokens ----------
+        function tokenPane() {
+            const p = pane()
+            p.fake.names = p.fake.names.map((n, i) => i < 2 ? "dup" : n)   // colliding labels
+            p.fake.tokens = ["local:2f782f610a62", "local:2f782f613c552b303030413e62", ""]
+            p.fake.dirs = [true, true, true]
+            p.fake.clearCalls()
+            return p
+        }
+        function noDisplayAuthority(fake) {
+            for (const n of ["entry_path", "navigate", "drag_preview_into", "drag_drop_into", "uri_drop", "uri_preview"])
+                compare(namedCalls(fake, n), [], n + " is never used for an internal target")
+        }
+        function test_pane_edge_split_uses_row_token() {
+            const p = tokenPane()
+            const spy = keep(Qt.createQmlObject('import QtTest; SignalSpy { signalName: "openInSplit" }', top))
+            spy.target = p.pane
+            p.pane.canEdgeSplit = true
+            p.pane.beginEdge(1)
+            p.pane.overEdge = true
+            verify(p.pane.takeEdgeDrop())
+            compare(spy.count, 1)
+            compare(spy.signalArguments[0][0], "token:local:2f782f613c552b303030413e62")
+            compare(spy.signalArguments[0][1], "dup", "the label stays a label")
+            noDisplayAuthority(p.fake)
+        }
+        function test_pane_edge_split_refuses_row_without_token() {
+            const p = tokenPane()
+            const spy = keep(Qt.createQmlObject('import QtTest; SignalSpy { signalName: "openInSplit" }', top))
+            spy.target = p.pane
+            p.pane.canEdgeSplit = true
+            p.pane.beginEdge(2)
+            compare(p.pane.dragFolder, "", "no strip offered for a row that is gone")
+            p.pane.overEdge = true
+            verify(!p.pane.takeEdgeDrop())
+            compare(spy.count, 0)
+            noDisplayAuthority(p.fake)
+        }
+        function test_pane_folder_token_at() {
+            const p = tokenPane()
+            p.fake.dirs = [true, false]
+            compare(p.pane.folderTokenAt(0), "local:2f782f610a62")
+            compare(p.pane.folderTokenAt(1), p.fake.locationToken, "a file row drops into this folder")
+            compare(p.pane.folderTokenAt(-1), p.fake.locationToken)
+            noDisplayAuthority(p.fake)
+        }
+        Component {
+            id: proxyC
+            Item {
+                objectName: "gustDragProxy"
+                width: 1; height: 1
+                property var paneModel: null
+                property int transferMode: 1
+                Drag.keys: ["text/uri-list"]
+                Drag.dragType: Drag.Internal
+            }
+        }
+        // Gust's own drag arriving from the other pane, through the real
+        // DropArea handlers: destination by token, never by display path.
+        function test_pane_cross_pane_drop_uses_tokens() {
+            const p = tokenPane()
+            const src = keep(fakeC.createObject(top))
+            const proxy = keep(proxyC.createObject(top, { paneModel: src, transferMode: 1 }))
+            const rows = findChild(p.pane, "rowsList")
+            settle(rows)
+            const it = rows.itemAtIndex(1)
+            const at = it.mapToItem(top, it.width / 2, it.height / 2)
+            proxy.x = at.x; proxy.y = at.y
+            proxy.Drag.active = true
+            proxy.x += 1
+            tryVerify(() => namedCalls(src, "drag_preview_into_token").length > 0, 1000)
+            compare(namedCalls(src, "drag_preview_into_token")[0],
+                    ["drag_preview_into_token", "local:2f782f613c552b303030413e62", 1])
+            proxy.Drag.drop()
+            compare(namedCalls(src, "drag_drop_into_token"),
+                    [["drag_drop_into_token", "local:2f782f613c552b303030413e62", 1]])
+            noDisplayAuthority(src)
+            noDisplayAuthority(p.fake)
+            compare(namedCalls(p.fake, "drop_enter"), [], "Gust's own drag is not an outside drop")
+        }
+
+        // --- Pane: a drag is admitted only once the selection has landed ----
+        readonly property string pendingRefusal: "Selection is still being applied; wait and try again."
+        function dragViews() {
+            return [{ tag: "rows", list: "rowsList" }, { tag: "grid", list: "iconGrid" },
+                    { tag: "columns", list: "columnsList" }]
+        }
+        function dragPane(data) {
+            const p = pane()
+            p.pane.viewMode = data.tag
+            const list = findChild(p.pane, data.list)
+            settle(list)
+            const failures = []
+            p.pane.dropFailed.connect((owner, message) => failures.push(message))
+            p.fake.clearCalls()
+            return { fake: p.fake, pane: p.pane, view: p.pane.currentView(), list: list,
+                     item: list.itemAtIndex(1), failures: failures }
+        }
+        function dragOut(d, steps) {
+            const it = d.item
+            mousePress(it, 10, 10, Qt.LeftButton)
+            for (let i = 1; i <= steps; i++) mouseMove(it, 10 + i * 12, 10 + i * 6, -1, Qt.LeftButton)
+        }
+        function test_drag_refused_while_selection_pending_data() { return dragViews() }
+        function test_drag_refused_while_selection_pending(data) {
+            const d = dragPane(data)
+            d.fake.selection_pending = true
+            dragOut(d, 4)
+            verify(!d.view.dragActive, "the view never enters drag state")
+            verify(!d.pane.dragActive)
+            compare(d.pane.ghostName(), "", "no drag ghost")
+            compare(namedCalls(d.fake, "drag_begin"), [], "nothing handed to the model")
+            compare(namedCalls(d.fake, "drag_preview"), [])
+            compare(d.failures, [pendingRefusal], "said once, not on every move")
+            mouseRelease(d.item, 58, 34, Qt.LeftButton)
+            compare(namedCalls(d.fake, "drag_drop_on_row"), [])
+            for (const n of ["sel_clear", "sel_toggle", "sel_range_to", "focus_row"])
+                compare(namedCalls(d.fake, n), [], "the refused drag's release is no click")
+            // The next press starts afresh: an ordinary click still focuses.
+            d.fake.selection_pending = false
+            mouseClick(d.item, 10, 10, Qt.LeftButton)
+            compare(namedCalls(d.fake, "focus_row"), [["focus_row", 1]], "the next click is an ordinary click")
+            // And the next drag is admitted.
+            dragOut(d, 3)
+            verify(d.view.dragActive)
+            mouseRelease(d.item, 46, 28, Qt.LeftButton)
+        }
+        function test_drag_admitted_once_selection_landed_data() { return dragViews() }
+        function test_drag_admitted_once_selection_landed(data) {
+            const d = dragPane(data)
+            dragOut(d, 4)
+            verify(d.view.dragActive)
+            verify(d.pane.dragActive)
+            compare(namedCalls(d.fake, "drag_begin"), [["drag_begin", 1]], "begun once, for the pressed row")
+            verify(d.pane.ghostName() !== "")
+            compare(d.failures, [])
+            mouseRelease(d.item, 58, 34, Qt.LeftButton)
+            verify(!d.view.dragActive)
+            compare(namedCalls(d.fake, "drag_drop_on_row").length, 1)
+        }
+        function test_export_refusal_starts_no_outward_drag() {
+            const d = dragPane({ tag: "rows", list: "rowsList" })
+            d.fake.mimeJson = JSON.stringify({ uris: "", text: "", gnome: "", refusal: pendingRefusal })
+            const proxy = findChild(d.pane, "gustDragProxy")
+            dragOut(d, 3)
+            verify(d.view.dragActive)
+            // Out past the pane's right edge, where a drag is handed to the system.
+            const out = d.item.mapFromItem(d.pane, d.pane.width + 40, 40)
+            mouseMove(d.item, out.x, out.y, -1, Qt.LeftButton)
+            verify(namedCalls(d.fake, "drag_mime_json").length > 0)
+            verify(!proxy.Drag.active, "nothing to export: no system drag")
+            verify(!proxy.handedOff)
+            mouseRelease(d.item, out.x, out.y, Qt.LeftButton)
+        }
+
+        // --- Pane: delayed, accessible pending marks; drag state -------------
+        function pane() {
+            const fake = keep(fakeC.createObject(top))
+            fake.show(makeRows(20, "a"), 0)
+            const p = keep(paneC.createObject(top, { model: fake, width: 600, height: 400 }))
+            const mark = findChild(p, "pendingMark")
+            verify(mark)
+            return { fake: fake, pane: p, mark: mark }
+        }
+        function test_pending_mark_waits_then_speaks() {
+            const p = pane()
+            verify(!p.mark.visible)
+            p.fake.sort_pending = true
+            verify(!p.mark.visible, "no mark before a motion beat has passed")
+            tryVerify(() => p.mark.visible, Tokens.animFast * 5)
+            compare(p.mark.words, "Sorting…")
+            compare(p.mark.Accessible.name, "Sorting…")
+            compare(p.mark.Accessible.role, Accessible.StatusBar)
+            verify(!p.mark.Accessible.ignored)
+            p.fake.filter_pending = true
+            compare(p.mark.words, "Sorting…  ·  Filtering…")
+            verify(p.mark.visible)
+            p.fake.selection_pending = true
+            compare(p.mark.words, "Sorting…  ·  Filtering…  ·  Updating selection…")
+            p.fake.sort_pending = false
+            p.fake.filter_pending = false
+            compare(p.mark.words, "Updating selection…")
+            p.fake.selection_pending = false
+            verify(!p.mark.visible, "hidden as soon as the rows catch up")
+            verify(p.mark.Accessible.ignored)
+        }
+        function test_pending_mark_skips_quick_results() {
+            const p = pane()
+            let shown = 0
+            const watch = () => { if (p.mark.visible) shown++ }
+            p.mark.visibleChanged.connect(watch)
+            p.fake.filter_pending = true
+            wait(Tokens.animFast / 3)
+            p.fake.filter_pending = false
+            wait(Tokens.animFast * 2)
+            compare(shown, 0)
+            p.mark.visibleChanged.disconnect(watch)
+        }
+        function test_pending_mark_tokens_and_null_model() {
+            const p = pane()
+            const label = p.mark.children[p.mark.children.length - 1]
+            compare(label.color, Tokens.foregroundDim)
+            compare(label.font.pixelSize, Tokens.fontCaption)
+            compare(p.mark.radius, Tokens.radius)
+            p.fake.sort_pending = true
+            p.pane.model = null
+            compare(p.mark.words, "")
+            verify(!p.mark.visible)
+        }
+        function test_pending_mark_never_takes_focus() {
+            const p = pane()
+            editor.forceActiveFocus()
+            p.fake.sort_pending = true
+            tryVerify(() => p.mark.visible, Tokens.animFast * 5)
+            verify(editor.activeFocus)
+            verify(!p.mark.enabled)
+        }
+        function test_pane_drag_active_data() {
+            return [{ tag: "rows" }, { tag: "grid" }, { tag: "columns" }]
+        }
+        function test_pane_drag_active(data) {
+            const p = pane()
+            p.pane.viewMode = data.tag
+            verify(!p.pane.dragActive)
+            p.pane.currentView().dragActive = true
+            verify(p.pane.dragActive)
+            p.pane.currentView().dragActive = false
+            verify(!p.pane.dragActive)
+        }
+    }
+}

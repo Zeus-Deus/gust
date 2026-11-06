@@ -1,5 +1,12 @@
 # Bench results
 
+These are historical results, most recently against Flea 0.3.7 on 3 October
+2026. They do not rank current Gust against Flea's later GPUI frontend.
+The manifests do not record a Gust binary hash; the Gust revision is identified
+in prose. Mapping and CPU quiet do not measure first painted rows or input
+readiness. The media fixture gives Gust no thumbnail work and is unranked for
+that comparison.
+
 Method: Flea's own field bench (`tools/flea-field-bench`, thisisgm/flea
 `docs/benchmarks.md`), run unmodified except for a 13-line diff that adds Gust
 as an entrant (`bench/harness/gust-entrant.diff`). Same VM, same fixtures,
@@ -7,7 +14,11 @@ three cold runs per entrant, medians with [min–max].
 
 - **First window** = compositor-mapped. **Settled** = 500 ms with no CPU
   activity in the entrant's process tree. **PSS** = window process;
-  **+helper** = Flea's backend. **CPU** = whole tree.
+  **+helper** = Flea's backend. **CPU** in the historical tables is the main
+  process only (`cpu_s` in these CSVs). Whole-tree CPU is `cpu_tree_s`; for the
+  October standard 100k run its medians are Gust 0.26 s and Flea 0.50 s, and on
+  the low-end profile 0.23 s and 0.30 s respectively. Do not compare these
+  main-process CPU columns to newer whole-tree measurements.
 - Fixtures live outside `$HOME` on btrfs: 100 000 empty files
   (`tools/flea-bench`) and 2 000 mixed media files (`tools/flea-media-fixture`).
 - VM: KVM guest, 8 vCPU, 3 GiB, Omarchy on Hyprland, GPU-less (llvmpipe).
@@ -32,7 +43,7 @@ Checked on the live harness process: affinity `0,1`, `memory.max`
 
 ### Standard profile (medians of 3 cold runs, [min–max])
 
-| Fixture | Entrant | First window ms | Settled ms | PSS MiB | CPU s |
+| Fixture | Entrant | First window ms | Settled ms | PSS MiB | Main CPU s |
 |---|---|---|---|---|---|
 | 100k | **Gust** | **240** [234–258] | **410** [340–411] | **93** | **0.24** |
 | 100k | Flea 0.3.7 | 297 [295–313] | 756 [748–769] | 177 (+6.9) | 0.36 |
@@ -47,11 +58,13 @@ Checked on the live harness process: affinity `0,1`, `memory.max`
 | media | Dolphin | 367 | 7788 | 97 | 2.71 |
 | media | Nautilus | 493 | 14205 | 279 | 7.79 |
 
-Gust leads every column of Flea's table on both fixtures.
+On this historical standard 100k fixture Gust has lower recorded values in
+each column. The media settle/CPU figures are not a performance ranking:
+Gust's Rows view did no thumbnail work while Flea generated thumbnails.
 
 ### Low-end profile (2 CPUs, 2 GiB, software rendering, cold cache)
 
-| Fixture | Entrant | First window ms | Settled ms | PSS MiB | CPU s |
+| Fixture | Entrant | First window ms | Settled ms | PSS MiB | Main CPU s |
 |---|---|---|---|---|---|
 | 100k | Gust | 217 [205–232] | **352** [348–365] | 93 | 0.22 |
 | 100k | Flea 0.3.7 | **211** [205–219] | 434 [354–741] | **75** (+6.9) | **0.18** |
@@ -79,7 +92,8 @@ Gust leads every column of Flea's table on both fixtures.
   context on llvmpipe, not Gust's work.
 - *First window, 6 ms (100k) and 38 ms (media).* The 100k ranges overlap
   (Gust 205–232, Flea 205–219). The media gap is real. Gust still settles
-  first by 82 ms (100k) and 662 ms (media): the window is usable sooner.
+  first by 82 ms (100k) and 662 ms (media) at the CPU-quiet endpoint. This
+  does not establish earlier useful content, and the media work differs.
 - *PSS on 100k, 93 vs 75 (+6.9 helper) MiB.* Gust holds the listing in
   the window process; Flea keeps it in a separate backend and the window
   gets only the visible rows. Measured with the release binary, software
@@ -92,16 +106,16 @@ Gust leads every column of Flea's table on both fixtures.
   process; Flea's backend does that work outside it, so its window-only
   CPU is lower while its whole-tree CPU is higher (0.30 vs 0.23 s).
 
-Closing these would mean moving the listing out of the window process.
-That is an architecture change, not a v1 item; it is recorded in
-`docs/HANDOFF.md` under "After v1".
+These measurements do not establish that moving the listing to another
+process would improve overall resources. Entry representation, caches and
+renderer choice also require attribution before an architecture decision.
 
 ## Earlier run (`just bench-field`, 2026-09-30, at 319fc4b, Flea 0.3.6)
 
 CSVs: `bench/field/2026-09-30-scale-std.csv`, `bench/field/2026-09-30-media-std.csv`
 (medians over three cold runs; the table below this one is the first run at a4541a1).
 
-| Fixture | Entrant | First window | Settled | PSS MiB | CPU s |
+| Fixture | Entrant | First window | Settled | PSS MiB | Main CPU s |
 |---|---|---|---|---|---|
 | 100k | **Gust** | **212** [209–227] | **347** [333–381] | **109** | **0.28** |
 | 100k | Flea 0.3.6 | 295 [291–299] | 757 [751–769] | 220 (+6.8) | 0.53 |
@@ -116,13 +130,14 @@ CSVs: `bench/field/2026-09-30-scale-std.csv`, `bench/field/2026-09-30-media-std.
 | media | Dolphin | 346 | 6823 | 109 | 30.20 |
 | media | Nautilus | 501 | 12843 | 315 | 54.35 |
 
-Gust leads every column of Flea's table on both fixtures in both runs. The
-only column Gust does not win overall is media-fixture PSS, where Thunar
-(GTK3, no Qt Quick scene graph) uses 42 MiB to Gust's 95.
+Gust has lower recorded values than Flea on the historical 100k fixture.
+The media rows show different work and must not be ranked as an image-browsing
+comparison. Thunar's recorded media window PSS is 42 MiB to Gust's 95; this
+also does not establish equal thumbnail work.
 
 ## First run, 100 000 files, standard profile
 
-| Entrant | First window | Settled | PSS MiB | CPU s |
+| Entrant | First window | Settled | PSS MiB | Main CPU s |
 |---|---|---|---|---|
 | **Gust** | **269** [265–295] | **476** [429–580] | **107** | **0.34** |
 | Flea 0.3.6 | 360 [352–418] | 816 [812–870] | 216 (+6.8) | 0.61 |
@@ -138,7 +153,7 @@ the rows on screen (DECISIONS D6).
 
 ## 2 000 media files, standard profile
 
-| Entrant | First window | Settled | PSS MiB | CPU s |
+| Entrant | First window | Settled | PSS MiB | Main CPU s |
 |---|---|---|---|---|
 | **Gust** | **289** [289–302] | **445** [444–459] | 90 | **0.29** |
 | Thunar | 319 [307–363] | 634 [628–662] | **41** | 0.51 |
@@ -151,8 +166,8 @@ the rows on screen (DECISIONS D6).
 
 | Target | State |
 |---|---|
-| Lead every column of Flea's table, 100k | **met** |
-| Lead every column of Flea's table, media | **met** vs Flea; Thunar has lower PSS (41 vs 90 MiB) |
+| Lead every column of Flea's table, 100k | Historical standard-profile observation only; no current-build claim |
+| Lead every column of Flea's table, media | Unranked: thumbnail work differs; Thunar has lower recorded PSS |
 | Low-end profile (2 vCPU / 2 GB / software) | **run 2026-10-03** vs Flea 0.3.7: Gust leads settled on both fixtures; Flea leads first window (6 / 38 ms) and window PSS on 100k — explained above |
 | First rows painted before Flea's first window | not measured |
 | Zero blank frames on folder change | not measured |

@@ -28,6 +28,7 @@ pub mod omarchy_keys;
 pub mod open;
 pub mod peek;
 pub mod portal_conf;
+pub mod projection;
 pub mod properties;
 pub mod recent;
 pub mod renderer;
@@ -47,6 +48,8 @@ pub mod watch;
 pub use entry::{
     Completeness, DirectorySnapshot, Entry, EntryId, EntryKind, Metadata, SortField, SortSpec,
 };
-pub use lister::{fill_metadata, list_names, CancelToken};
+pub use lister::{
+    fill_metadata, fill_metadata_unordered, list_names, list_names_unordered, CancelToken,
+};
 pub use location::{Cap, Capabilities, LocationKey, ProviderId};
 pub use theme::Tokens;

@@ -10,6 +10,7 @@ pub fn mime(entry: &gust_core::Entry) -> Option<&'static str> {
         .flatten()
 }
 
+#[cfg(test)]
 pub fn retain_eligible(
     previews: &mut std::collections::HashMap<OsString, String>,
     entries: &[gust_core::Entry],
@@ -20,25 +21,6 @@ pub fn retain_eligible(
         .map(|e| &e.name)
         .collect();
     previews.retain(|name, _| eligible.contains(name));
-}
-
-pub fn cached_rows(
-    dir: &Path,
-    names: impl IntoIterator<Item = OsString>,
-    cancel: &CancelToken,
-) -> Vec<(OsString, String)> {
-    let mut hits = Vec::new();
-    for name in names {
-        if cancel.is_cancelled() {
-            break;
-        }
-        if let Some(thumb) =
-            gust_thumbs::render::cached_thumbnail(&dir.join(&name), gust_thumbs::ThumbSize::Normal)
-        {
-            hits.push((name, thumb.url()));
-        }
-    }
-    hits
 }
 
 pub fn run(

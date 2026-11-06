@@ -1,0 +1,209 @@
+import QtQuick
+import QtTest
+
+// Exact Main.qml startWithPrefs (inserted into the window stub by its
+// runner) against a synthetic DirModel. What the window opened with is
+// recorded by the exact Component.onCompleted capture; reload() is counted, since
+// the real one lists the folder with the cached remembered sort.
+TestCase {
+    name: "PreferencesStartup"
+
+    QtObject {
+        id: dirModel
+        property string token: "home"
+        property bool back: false
+        property bool show_hidden: false
+        property string filter: ""
+        property int cursor: 0
+        property int selected: 0
+        property string sort_field: "name"
+        property bool sort_ascending: true
+        property int reloads: 0
+        property int hiddenToggles: 0
+        function location_token() { return token }
+        function can_go_back() { return back }
+        function sel_count() { return selected }
+        function reload() { reloads += 1 }
+        function toggle_hidden() { show_hidden = !show_hidden; hiddenToggles += 1 }
+    }
+    QtObject { id: tabList; property int count: 1 }
+
+    QtObject {
+        id: win
+        property bool prefsStarted: false
+        property var prefsLaunch: ({})
+        property string viewMode: "rows"
+        property bool defaultShowHidden: false
+        // Whether a tab list from last time exists and is restored.
+        property bool hasSession: false
+        property int restores: 0
+        property int rememberedViews: 0
+        property int settingsApplied: 0
+        function restoreSession() { restores += 1; return hasSession }
+        // The session store's side is tst_work_guard's; here only whether
+        // startWithPrefs keeps or saves the user's tabs.
+        property bool sessionDirty: false
+        property string sessionSaveError: ""
+        property int sessionSaves: 0
+        function saveSession() { sessionSaves += 1; sessionDirty = false; return "" }
+        function applySettings() { settingsApplied += 1 }
+        function applyRememberedView() { rememberedViews += 1 }
+        // Main.qml's own capture in Component.onCompleted.
+        function launch() {
+            @CAPTURE_LAUNCH@
+        }
+@PREFS_LAUNCH_UNTOUCHED@
+@START_WITH_PREFS@
+    }
+
+    function init() {
+        dirModel.token = "home"; dirModel.back = false; dirModel.show_hidden = false
+        dirModel.filter = ""; dirModel.cursor = 0; dirModel.selected = 0
+        dirModel.sort_field = "name"; dirModel.sort_ascending = true
+        dirModel.reloads = 0; dirModel.hiddenToggles = 0
+        tabList.count = 1
+        win.prefsStarted = false; win.viewMode = "rows"; win.defaultShowHidden = false; win.hasSession = false
+        win.restores = 0; win.rememberedViews = 0; win.settingsApplied = 0
+        win.sessionDirty = false; win.sessionSaveError = ""; win.sessionSaves = 0
+        win.launch()
+    }
+
+    // Nothing restored or reloaded: the user's state is left exactly as is.
+    function verifyKept(why) {
+        verify(win.prefsStarted, why)
+        compare(win.restores, 0, why + ": no tabs from last time over it")
+        compare(dirModel.reloads, 0, why + ": no relisting under it")
+        compare(win.rememberedViews, 0, why)
+        compare(dirModel.hiddenToggles, 0, why)
+        compare(win.settingsApplied, 1, why + ": settings still apply")
+    }
+
+    function test_late_load_without_a_session_lists_once_with_the_remembered_sort() {
+        win.startWithPrefs(false)
+        compare(win.restores, 1)
+        compare(dirModel.reloads, 1, "the first listing had only the default sort")
+        compare(win.rememberedViews, 1)
+    }
+
+    function test_launch_without_a_session_lists_once() {
+        win.startWithPrefs(true)
+        compare(dirModel.reloads, 1)
+    }
+
+    function test_a_restored_session_is_not_listed_twice() {
+        win.hasSession = true
+        win.startWithPrefs(false)
+        compare(win.restores, 1)
+        compare(dirModel.reloads, 0, "restored tabs list themselves")
+        init()
+        win.hasSession = true
+        win.startWithPrefs(true)
+        compare(dirModel.reloads, 0)
+    }
+
+    function test_later_preference_updates_never_relist() {
+        win.startWithPrefs(false)
+        compare(dirModel.reloads, 1)
+        // prefsPublished only calls startWithPrefs while !prefsStarted.
+        verify(win.prefsStarted)
+    }
+
+    function test_default_hidden_files_follow_an_untouched_start() {
+        win.defaultShowHidden = true
+        win.startWithPrefs(false)
+        verify(dirModel.show_hidden)
+        compare(dirModel.hiddenToggles, 1)
+        compare(dirModel.reloads, 1)
+    }
+
+    function test_a_filter_typed_before_the_load_is_kept() {
+        dirModel.filter = "rep"
+        win.startWithPrefs(false)
+        verifyKept("filter")
+        compare(dirModel.filter, "rep")
+    }
+
+    function test_a_selection_made_before_the_load_is_kept() {
+        dirModel.selected = 2
+        win.startWithPrefs(false)
+        verifyKept("selection")
+    }
+
+    function test_a_cursor_moved_before_the_load_is_kept() {
+        dirModel.cursor = 7
+        win.startWithPrefs(false)
+        verifyKept("cursor")
+        compare(dirModel.cursor, 7)
+    }
+
+    function test_a_sort_chosen_before_the_load_is_kept() {
+        dirModel.sort_field = "modified"
+        win.startWithPrefs(false)
+        verifyKept("sort field")
+        init()
+        dirModel.sort_ascending = false
+        win.startWithPrefs(false)
+        verifyKept("sort direction")
+    }
+
+    function test_view_and_hidden_changes_before_the_load_are_kept() {
+        win.viewMode = "grid"
+        win.startWithPrefs(false)
+        verifyKept("view")
+        init()
+        dirModel.show_hidden = true
+        win.defaultShowHidden = false
+        win.startWithPrefs(false)
+        verifyKept("hidden files")
+        verify(dirModel.show_hidden)
+    }
+
+    function test_navigation_and_tabs_before_the_load_are_kept() {
+        dirModel.token = "elsewhere"
+        win.startWithPrefs(false)
+        verifyKept("location")
+        init()
+        dirModel.back = true
+        win.startWithPrefs(false)
+        verifyKept("history")
+        init()
+        tabList.count = 2
+        win.startWithPrefs(false)
+        verifyKept("tabs")
+    }
+
+    function test_launch_with_preferences_ready_always_restores() {
+        // Nothing can have been touched before the window existed.
+        win.hasSession = true
+        win.startWithPrefs(true)
+        compare(win.restores, 1)
+        compare(dirModel.reloads, 0)
+        compare(win.rememberedViews, 1)
+    }
+
+    function test_a_touched_window_saves_its_own_tabs_once_ready() {
+        tabList.count = 2
+        win.sessionDirty = true
+        win.startWithPrefs(false)
+        compare(win.restores, 0, "last time's tabs do not replace the user's")
+        compare(win.sessionSaves, 1)
+        verify(!win.sessionDirty)
+    }
+
+    function test_a_touched_window_with_nothing_unsaved_saves_nothing() {
+        dirModel.cursor = 3
+        win.startWithPrefs(false)
+        compare(win.sessionSaves, 0)
+    }
+
+    function test_an_untouched_start_drops_the_placeholder_and_restores() {
+        win.hasSession = true
+        win.sessionDirty = true
+        win.sessionSaveError = "preferences are still loading"
+        win.startWithPrefs(false)
+        compare(win.restores, 1)
+        compare(win.sessionSaves, 0, "the placeholder tab is not saved over last time's")
+        verify(!win.sessionDirty)
+        compare(win.sessionSaveError, "")
+    }
+}

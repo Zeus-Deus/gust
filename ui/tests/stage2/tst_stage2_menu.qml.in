@@ -1,0 +1,298 @@
+import QtQuick
+import QtTest
+import com.gust.app
+
+// First right-click on an unselected row while its selection is applied
+// asynchronously (DESIGN §2.2.1): the real Pane and views, Main's exact
+// context-menu, menu-intent, live-hold and dirModel handlers (extracted by the
+// runner), and a fake model whose sel_only raises selection_pending until
+// ackSelection(). Not the native CXX model or a real compositor pointer.
+Item {
+    id: top
+    width: 900
+    height: 700
+
+    QtObject { id: palette; property bool visible: false }
+    QtObject { id: confirm; property bool visible: false }
+    QtObject { id: connectionRecovery; property bool visible: false }
+    QtObject { id: settingsPanel; property bool open: false }
+    QtObject { id: trashPanel; property bool open: false }
+    QtObject { id: recentPanel; property bool open: false }
+    QtObject { id: connectPanel; property bool open: false }
+    QtObject { id: deviceSharing; property bool open: false }
+    QtObject { id: conflictDialog; property bool visible: false }
+    QtObject { id: quickLook; property bool open: false; function hide() { open = false } }
+    QtObject { id: prompt; property bool visible: false; property bool claimingFocus: false }
+    QtObject { id: renameCard; property bool open: false }
+    QtObject {
+        id: contextMenu
+        property bool open: false
+        property int current: -1
+        property var popups: []
+        function popup(x, y, items) {
+            open = true
+            popups = popups.concat([{ x: x, y: y, labels: items.map(i => i.label) }])
+        }
+        function step(from, dir) { return 0 }
+    }
+    QtObject { id: hints; property string message: "" }
+    QtObject { id: paneBLoader; property var item: null }
+    QtObject { id: tabList; property int count: 2 }
+    QtObject { id: tabs; function objectAt(i) { return i === 0 ? fakeA : fakeB } }
+    FakeDirModel { id: fakeA }
+    FakeDirModel { id: fakeB }
+
+    Item {
+        id: win
+        property var dirModel: fakeA
+        property string alertText: ""
+        property var dumps: []
+        function qaDump(tag) { dumps = dumps.concat([tag]) }
+        function focusPane(p) {}
+        function focusList() {}
+        function refreshPlaces() {}
+        // What the menu says depends on the selection it opens on.
+        function contextItems(row) {
+            return row < 0 ? [{ label: "New folder" }]
+                           : [{ label: "Open " + dirModel.sel_count() + " · " + dirModel.entry_name(row) }]
+        }
+@HOLD@
+@HOLD_HANDLER@
+@DIRMODEL_HANDLER@
+@SELECTION_SETTLING@
+@MENU@
+    }
+
+    Pane {
+        id: paneA
+        width: 600
+        height: 400
+        model: win.dirModel
+        viewMode: "rows"
+@PANE_CONTEXT@
+@PANE_SELECTION@
+    }
+
+    TestCase {
+        name: "Stage2FirstRightClick"
+        when: windowShown
+
+        function prepare(fake, n) {
+            const rows = Qt.createQmlObject("import QtQuick; ListModel {}", top)
+            for (let i = 0; i < n; i++)
+                rows.append({ name: "a" + i, isDir: false, isSelected: false, iconKey: "",
+                              clipMark: "", isHidden: false, tagKeys: "", emblems: "",
+                              typeText: "", sizeText: "", modifiedText: "",
+                              isSymlink: false, linkOk: true, thumbUrl: "" })
+            fake.show(rows, 0)
+            fake.tokens = fake.names.map((n, i) => "local:2f" + (0x1000 + i).toString(16))
+            fake.selected = []
+            fake.pendingSelection = null
+            fake.selection_pending = false
+            fake.selectionBarrier = true
+            fake.clearCalls()
+        }
+        function init() {
+            contextMenu.open = false
+            contextMenu.popups = []
+            prompt.visible = false
+            confirm.visible = false
+            palette.visible = false
+            renameCard.open = false
+            quickLook.open = false
+            fakeA.queuedRelease = null
+            win.menuIntent = null
+            win.dirModel = fakeA
+            win.alertText = ""
+            win.dumps = []
+            prepare(fakeA, 30)
+            prepare(fakeB, 30)
+        }
+        function views() {
+            return [{ tag: "rows", list: "rowsList" }, { tag: "grid", list: "iconGrid" },
+                    { tag: "columns", list: "columnsList" }]
+        }
+        function rightClick(data, row) {
+            paneA.viewMode = data.tag
+            const list = findChild(paneA, data.list)
+            tryVerify(() => !isPolishScheduled(list), 1000)
+            const it = list.itemAtIndex(row)
+            verify(it, "row " + row)
+            const at = it.mapToItem(null, it.width / 3, it.height / 2)
+            mouseClick(it, it.width / 3, it.height / 2, Qt.RightButton)
+            return at
+        }
+        function calls(fake, n) { return fake.calls.filter(c => c[0] === n) }
+
+        function test_first_right_click_opens_once_after_selection_lands_data() { return views() }
+        function test_first_right_click_opens_once_after_selection_lands(data) {
+            const at = rightClick(data, 3)
+            compare(calls(fakeA, "sel_only"), [["sel_only", 3]])
+            verify(fakeA.selection_pending, "the click's own selection is waiting")
+            compare(contextMenu.popups, [], "no menu on the previous selection")
+            compare(win.alertText, "", "the gesture is not refused")
+            verify(win.liveHold, "rows hold still for the waiting menu")
+            fakeA.clearCalls()
+            fakeA.ackSelection()
+            compare(contextMenu.popups.length, 1, "opens on the first right-click")
+            compare(contextMenu.popups[0].labels, ["Open 1 · a3"])
+            fuzzyCompare(contextMenu.popups[0].x, at.x, 1)
+            fuzzyCompare(contextMenu.popups[0].y, at.y, 1)
+            compare(win.menuIntent, null)
+            verify(win.liveHold)
+            compare(calls(fakeA, "hold_live_updates"), [], "the hold never lapsed between waiting and open")
+            fakeA.selection_pending = true
+            fakeA.selection_pending = false
+            compare(contextMenu.popups.length, 1, "exactly once")
+        }
+        function test_selected_row_opens_immediately_data() { return views() }
+        function test_selected_row_opens_immediately(data) {
+            fakeA.selected = [3]
+            rightClick(data, 3)
+            compare(calls(fakeA, "sel_only"), [])
+            compare(contextMenu.popups.length, 1)
+            compare(contextMenu.popups[0].labels, ["Open 1 · a3"])
+        }
+        function test_tab_change_cancels_data() { return views() }
+        function test_tab_change_cancels(data) {
+            rightClick(data, 3)
+            win.dirModel = fakeB
+            compare(win.menuIntent, null)
+            fakeA.ackSelection()
+            compare(contextMenu.popups, [])
+            verify(!win.liveHold)
+        }
+        function test_location_change_cancels_data() { return views() }
+        function test_location_change_cancels(data) {
+            rightClick(data, 3)
+            fakeA.locationChanged()
+            compare(win.menuIntent, null)
+            fakeA.ackSelection()
+            compare(contextMenu.popups, [])
+        }
+        function test_target_change_drops_data() { return views() }
+        function test_target_change_drops(data) {
+            rightClick(data, 3)
+            fakeA.tokens = fakeA.tokens.map((t, i) => i === 3 ? "local:2f6f74686572" : t)
+            fakeA.ackSelection()
+            compare(contextMenu.popups, [], "never a menu for another entry")
+            verify(win.dumps.indexOf("context-menu-dropped") >= 0)
+        }
+        function test_refused_selection_drops_data() { return views() }
+        function test_refused_selection_drops(data) {
+            rightClick(data, 3)
+            fakeA.ackSelection(true)
+            compare(contextMenu.popups, [], "the selection never held that row")
+            compare(win.menuIntent, null)
+        }
+        function test_newer_right_click_supersedes_data() { return views() }
+        function test_newer_right_click_supersedes(data) {
+            rightClick(data, 3)
+            rightClick(data, 5)
+            verify(win.menuIntent && win.menuIntent.row === 5, "one waiting menu")
+            fakeA.ackSelection()
+            compare(contextMenu.popups.length, 1)
+            compare(contextMenu.popups[0].labels, ["Open 1 · a5"])
+        }
+        function test_overlay_opened_meanwhile_drops_data() {
+            return [{ tag: "prompt", obj: prompt, prop: "visible" },
+                    { tag: "confirm", obj: confirm, prop: "visible" },
+                    { tag: "palette", obj: palette, prop: "visible" },
+                    { tag: "rename-card", obj: renameCard, prop: "open" },
+                    { tag: "quick-look", obj: quickLook, prop: "open" },
+                    { tag: "other-menu", obj: contextMenu, prop: "open" }]
+        }
+        function test_overlay_opened_meanwhile_drops(data) {
+            rightClick({ tag: "rows", list: "rowsList" }, 3)
+            data.obj[data.prop] = true
+            fakeA.ackSelection()
+            compare(contextMenu.popups, [], "no menu over another overlay")
+            compare(win.menuIntent, null)
+            data.obj[data.prop] = false
+        }
+        function test_folder_menu_unchanged_while_pending_data() {
+            return [{ tag: "rows", list: "rowsList" }, { tag: "grid", list: "iconGrid" }]
+        }
+        function test_folder_menu_unchanged_while_pending(data) {
+            prepare(fakeA, 3)
+            paneA.viewMode = data.tag
+            fakeA.selection_pending = true
+            const view = paneA.currentView()
+            mouseClick(view, view.width / 2, view.height - 20, Qt.RightButton)
+            compare(contextMenu.popups.length, 1)
+            compare(contextMenu.popups[0].labels, ["New folder"])
+            compare(win.menuIntent, null)
+        }
+        // Quick Look (or an older waiting menu) lets go only once the new
+        // menu or intent holds: a waiting filter cannot land in between.
+        function filteredWithout(name) {
+            const rows = Qt.createQmlObject("import QtQuick; ListModel {}", top)
+            for (const n of fakeA.names)
+                if (n !== name)
+                    rows.append({ name: n, isDir: false, isSelected: false, iconKey: "",
+                                  clipMark: "", isHidden: false, tagKeys: "", emblems: "",
+                                  typeText: "", sizeText: "", modifiedText: "",
+                                  isSymlink: false, linkOk: true, thumbUrl: "" })
+            return rows
+        }
+        function noLapse() {
+            compare(calls(fakeA, "hold_live_updates").filter(c => c[1] === false).length, 0,
+                    "the live hold never lapsed")
+        }
+        function test_quick_look_held_until_menu_holds_data() { return views() }
+        function test_quick_look_held_until_menu_holds(data) {
+            quickLook.open = true
+            fakeA.selected = [3]
+            fakeA.queuedRelease = () => fakeA.publish(filteredWithout("a3"), 0, 2, {})
+            rightClick(data, 3)
+            compare(contextMenu.popups.length, 1)
+            compare(contextMenu.popups[0].labels, ["Open 1 · a3"], "the menu names the row clicked")
+            verify(!quickLook.open)
+            noLapse()
+            verify(fakeA.queuedRelease !== null, "the menu holds the rows now")
+        }
+        function test_quick_look_held_until_intent_holds_data() { return views() }
+        function test_quick_look_held_until_intent_holds(data) {
+            quickLook.open = true
+            fakeA.queuedRelease = () => fakeA.publish(filteredWithout("a3"), 0, 2, {})
+            rightClick(data, 3)
+            verify(win.menuIntent)
+            verify(!quickLook.open)
+            noLapse()
+            fakeA.ackSelection()
+            compare(contextMenu.popups.length, 1)
+            compare(contextMenu.popups[0].labels, ["Open 1 · a3"])
+            noLapse()
+        }
+        function test_replaced_intent_never_lapses() {
+            rightClick({ tag: "rows", list: "rowsList" }, 3)
+            verify(win.menuIntent)
+            fakeA.queuedRelease = () => fakeA.publish(filteredWithout("a3"), 0, 2, {})
+            win.openContextMenu(-1, 30, 30)          // the folder's menu replaces it
+            compare(win.menuIntent, null)
+            compare(contextMenu.popups.length, 1)
+            noLapse()
+        }
+        // A newer click in the list drops a waiting menu: it never opens late
+        // on a selection the user has since extended.
+        function test_newer_click_drops_waiting_menu_data() { return views() }
+        function test_newer_click_drops_waiting_menu(data) {
+            rightClick(data, 3)
+            verify(win.menuIntent)
+            const list = findChild(paneA, data.list)
+            const other = list.itemAtIndex(5)
+            mouseClick(other, other.width / 3, other.height / 2, Qt.LeftButton, Qt.ControlModifier)
+            compare(win.menuIntent, null)
+            fakeA.ackSelection()
+            compare(contextMenu.popups, [], "no late menu")
+        }
+        function test_row_gone_is_refused_not_waited() {
+            fakeA.tokens = fakeA.tokens.map((t, i) => i === 3 ? "" : t)
+            rightClick({ tag: "rows", list: "rowsList" }, 3)
+            compare(win.menuIntent, null)
+            compare(win.alertText, "Selection is still being applied; wait and try again.")
+            fakeA.ackSelection()
+            compare(contextMenu.popups, [])
+        }
+    }
+}

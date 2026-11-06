@@ -45,7 +45,7 @@ Window {
                     cancel_clip_paste()
                     hints.message = qsTr("Paste cancelled")
                 }
-                sessionSaveTimer.restart()
+                win.sessionChanged()
                 win.noteSplitTabMoved(tabModel)
             }
             // Mounts and connections finish on a worker; every tab reports
@@ -62,7 +62,14 @@ Window {
                 win.refreshDevices()
                 win.qaDump("devices-changed")
             }
-            Component.onCompleted: hold_live_updates(win.liveHold)
+            // Preferences are one process-wide state behind every model.
+            // Every tab subscribes, so a save result or failure still lands
+            // when the tab on screen changes or the first tab is closed.
+            onPreferences_changed: win.prefsNotified()
+            Component.onCompleted: {
+                hold_live_updates(win.liveHold)
+                preferences_subscribe()
+            }
         }
         onObjectAdded: win.refreshActiveModel()
         onObjectRemoved: (index, object) => {
@@ -118,12 +125,16 @@ Window {
     }
 
     onClosing: (close) => {
-        if (win.closeNow)
+        // Running work is always settled first: its confirm (or the user's
+        // choice not to wait) comes before anything else. Then preferences.
+        const busy = win.closeNow ? [] : win.busyModels()
+        if (busy.length === 0) {
+            win.prefsClose(close)
             return
-        const busy = win.busyModels()
-        if (busy.length === 0)
-            return
+        }
         close.accepted = false
+        // Prefs' own quit, if it was one, ends here; the next close is the user's.
+        win.prefsQuitRequested = false
         if (win.closing) {
             // Stop was already asked for and something has not finished:
             // usually a remote call that has not come back yet. Closing
@@ -209,6 +220,145 @@ Window {
         }
     }
 
+    // --- preferences at close (DESIGN §2.1) ---------------------------------
+    // Waiting for the preferences worker to acknowledge the latest revision.
+    property bool prefsClosing: false
+    // Revision the close is waiting for, as Rust's decimal u64 string.
+    property string prefsCloseTarget: ""
+    // The save failure already showing when the flush began, and the
+    // worker's completed attempt count then (a decimal string).
+    property string prefsCloseError: ""
+    property string prefsCloseAttempt: ""
+    // Set by prefsClose's own Qt.quit(), so that close is not mistaken for
+    // the user asking a second time.
+    property bool prefsQuitRequested: false
+    // What the user agreed to lose with "Close anyway": the admitted revision
+    // and the rejected choices showing then. "" when nothing was accepted. A
+    // newer change or another rejection is not covered and is asked about.
+    property string prefsLossAccepted: ""
+    // The same, for the question on screen: what "Close anyway" accepts.
+    property string prefsLossAsked: ""
+
+    /// Revisions are decimal u64 strings: a JS number loses precision past
+    /// 2^53, so compare as digit strings (length, then lexically).
+    function revisionAtLeast(a, b) {
+        const x = String(a === undefined || a === null || a === "" ? "0" : a).replace(/^0+(?=\d)/, "")
+        const y = String(b === undefined || b === null || b === "" ? "0" : b).replace(/^0+(?=\d)/, "")
+        return x.length !== y.length ? x.length > y.length : x >= y
+    }
+
+    /// The window's last step before it goes: save preferences without
+    /// blocking the event loop. `close` is the close event, or null when the
+    /// worker reports progress or the deadline passes. Leaves
+    /// close.accepted alone when nothing would be lost; otherwise holds the
+    /// window, asks the worker to flush, and quits once the latest revision
+    /// is acknowledged with no error. A rejected choice was never admitted,
+    /// so no acknowledgement covers it and a flush cannot retry it: once
+    /// nothing else is being saved, it asks at once. A failure or timeout
+    /// asks too; only "Close anyway" loses changes. A change made while
+    /// waiting extends the wait.
+    function prefsClose(close) {
+        const fromUser = close !== null && !win.prefsQuitRequested
+        if (close !== null) {
+            win.prefsQuitRequested = false
+            // The final tab list is part of what must be saved: the user's
+            // first close always captures it (an earlier save may have been
+            // skipped, as with restore off since enabled), and any close
+            // captures an unadmitted change, even after its debounce fired or
+            // was refused. Prefs' own quit re-entering here, a second close
+            // while waiting and the close after "Close anyway" admit only a
+            // real change, so no identical revision is admitted again.
+            const capture = win.sessionDirty || sessionSaveTimer.running
+                            || (fromUser && !win.prefsClosing && win.prefsLossAccepted === "")
+            sessionSaveTimer.stop()
+            if (capture) win.saveSession()
+        }
+        // Progress never answers over a question already on screen: this
+        // one, or any other the user is reading (asked again once it goes).
+        if (close === null && (!win.prefsClosing || confirm.visible))
+            return
+        // A fresh snapshot, not the bound copy: a change admitted just now
+        // has not been published to the QML properties yet.
+        let p = {}
+        try { p = JSON.parse(dirModel.settings_json()) } catch (e) {}
+        const revision = String(p.revision || "0")
+        const rejected = String(p.admission_error || "")
+        // A tab change made while waiting is due from its debounce; one whose
+        // save was refused (or could not run yet) is a loss to report.
+        const tabsDue = win.sessionDirty && sessionSaveTimer.running
+        const tabsRefused = win.sessionDirty && !sessionSaveTimer.running
+                            ? (win.sessionSaveError !== "" ? win.sessionSaveError : qsTr("not accepted")) : ""
+        const error = tabsRefused !== "" ? qsTr("Tabs not saved: ") + tabsRefused : String(p.error || "")
+        // A save failure, without the rejected choices the worker appends.
+        const failure = tabsRefused !== "" ? error
+                      : rejected !== "" && error.endsWith(rejected)
+                        ? error.slice(0, error.length - rejected.length).replace(/; $/, "") : error
+        // What "Close anyway" is asked about and, once chosen, covers.
+        const lossState = revision + "\n" + rejected + "\n" + (win.sessionDirty ? "tabs" : "")
+        if (win.prefsLossAccepted !== "" && win.prefsLossAccepted === lossState)
+            return
+        // Admitted but not yet acknowledged. Before the first load nothing
+        // can have been admitted; a refusal then is still an error below.
+        const waiting = tabsDue
+                        || (p.ready === true && (p.pending === true || !win.revisionAtLeast(p.saved_revision, revision)))
+        if (!waiting && error === "") {
+            const waited = win.prefsClosing
+            win.prefsClosing = false
+            prefsCloseDeadline.stop()
+            if (close === null && waited) {
+                win.prefsQuitRequested = true
+                win.qaDump("close-prefs-saved")
+                win.qaFlush()
+                Qt.quit()
+            }
+            return
+        }
+        if (close !== null) close.accepted = false
+        // Nothing further can arrive that would save it: ask now.
+        const settled = tabsRefused !== "" || (!waiting && rejected !== "")
+        if (!win.prefsClosing) {
+            win.prefsClosing = true
+            win.prefsCloseError = tabsRefused !== "" ? "" : failure
+            win.prefsCloseAttempt = String(p.completed_attempt || "")
+            win.prefsCloseTarget = dirModel.preferences_flush()
+            prefsCloseDeadline.restart()
+            hints.message = qsTr("Saving settings…")
+            win.qaDump("close-prefs-saving")
+            if (!settled) return
+        } else if (!win.revisionAtLeast(win.prefsCloseTarget, revision))
+            win.prefsCloseTarget = dirModel.preferences_flush()
+        // A failure showing when the flush began may be from before it, and
+        // the next attempt may already have been running then. The second
+        // attempt after the flush began must have read it, so the same
+        // failure then is news; so is a different one. Without counts, the
+        // deadline decides. Attempt counts stay far below 2^53.
+        const before = Number(win.prefsCloseAttempt)
+        const now = Number(p.completed_attempt)
+        const retried = win.prefsCloseAttempt !== "" && Number.isSafeInteger(before)
+                        && Number.isSafeInteger(now) && now >= before + 2
+        const failed = failure !== "" && (failure !== win.prefsCloseError || retried)
+        if (!fromUser && !failed && !settled && !prefsCloseDeadline.expired) return
+        prefsCloseDeadline.stop()
+        win.prefsLossAsked = lossState
+        confirm.purpose = "closeprefs"
+        confirm.open(qsTr("Settings not saved"),
+            (error !== "" ? error + ". " : qsTr("Saving is taking too long. "))
+                + qsTr("Closing now may lose the latest settings, sort, view or tab changes."),
+            qsTr("Close anyway"),
+            true)
+        win.qaDump("close-prefs-unsaved")
+    }
+
+    // How long a close waits for preferences before asking. The worker is
+    // never joined: a stalled config folder cannot hang the window.
+    Timer {
+        id: prefsCloseDeadline
+        interval: 3000
+        property bool expired: false
+        onRunningChanged: if (running) expired = false
+        onTriggered: { expired = true; win.prefsClose(null) }
+    }
+
     // Live selection summary. Bound to the model, so no handler can leave a
     // stale count on screen by forgetting to refresh it.
     readonly property string selectionText: dirModel.selection_text
@@ -237,19 +387,109 @@ Window {
     }
 
     // --- settings --------------------------------------------------------
-    /// Apply saved settings to this window. Called at start and after every
-    /// change; the renderer choice alone waits for the next start.
+    // The preferences worker's cached snapshot (DirModel.settings_json(),
+    // no I/O). Re-read once per event-loop turn after any tab reports
+    // preferences_changed, and at once after a change made here.
+    property int prefsTick: 0
+    readonly property var prefs: {
+        // Reading the tick is what re-evaluates this; it is never negative.
+        if (win.prefsTick < 0 || !dirModel) return ({})
+        try { return JSON.parse(dirModel.settings_json()) } catch (e) { return ({}) }
+    }
+    readonly property bool prefsReady: win.prefs.ready === true
+    readonly property string prefsError: win.prefs.error || ""
+    readonly property string prefsRevision: String(win.prefs.revision || "0")
+    readonly property string prefsSavedRevision: String(win.prefs.saved_revision || "0")
+    // Saved means the worker acknowledged this revision, not just accepted it.
+    readonly property bool prefsPending: win.prefs.pending === true
+                                         || !win.revisionAtLeast(win.prefsSavedRevision, win.prefsRevision)
+    // One word for the panel, the settings button and QA.
+    // A rejected choice (admission_error) was never admitted: unsaved too.
+    readonly property string prefsStatus: win.prefsError !== ""
+                                          ? (win.prefsPending || (win.prefs.admission_error || "") !== "" ? "unsaved" : "problem")
+                                          : !win.prefsReady ? "loading"
+                                          : win.prefsPending ? "saving" : "saved"
+    // The strip's notice while something is unsaved. Derived, never copied
+    // into alertText: it goes when a save succeeds, and an async result never
+    // clears an unrelated alert.
+    readonly property string prefsNotice: win.prefsStatus === "unsaved" ? qsTr("Settings not saved: ") + win.prefsError : ""
+    function prefsNotified() { Qt.callLater(win.prefsPublished) }
+    function prefsPublished() {
+        win.prefsTick += 1
+        // An integration toggle's refreshed state has arrived.
+        settingsPanel.busyKey = ""
+        if (win.prefsReady && !win.prefsStarted) win.startWithPrefs(false)
+        win.applySettings()
+        win.qaDump("preferences")
+        if (win.prefsClosing) win.prefsClose(null)
+    }
+
+    // Startup steps that need the loaded preferences ran (at launch, or once
+    // they arrived). Until then no tab list is saved: the default single tab
+    // must not overwrite last time's tabs before they were restored.
+    property bool prefsStarted: false
+    // What the window opened with (Component.onCompleted). A change to any
+    // of it before preferences arrive is the user's, and is kept.
+    property var prefsLaunch: ({})
+    /// The user has not moved, filtered, selected, re-sorted, changed view
+    /// or hidden files, or opened a tab since the window opened.
+    function prefsLaunchUntouched() {
+        const was = win.prefsLaunch
+        return tabList.count === 1 && !dirModel.can_go_back()
+               && dirModel.location_token() === was.token
+               && win.viewMode === was.view
+               && dirModel.show_hidden === was.hidden
+               && dirModel.filter === was.filter
+               && dirModel.cursor === was.cursor
+               && dirModel.sel_count() === was.selected
+               && dirModel.sort_field === was.sortField
+               && dirModel.sort_ascending === was.ascending
+    }
+    function startWithPrefs(atLaunch) {
+        win.prefsStarted = true
+        // Loaded late: only adopt last time's tabs, sort, view and hidden
+        // files if the window is untouched. Nothing is pulled out from under
+        // the user; their tabs are saved instead of last time's.
+        const untouched = atLaunch || win.prefsLaunchUntouched()
+        if (untouched) {
+            // The placeholder tab is nobody's session.
+            win.sessionDirty = false
+            win.sessionSaveError = ""
+            // Last time's tabs list themselves. Otherwise this folder lists
+            // once with the cached remembered sort: a late load's first
+            // listing had only the default. Later updates never reorder it.
+            if (!win.restoreSession()) dirModel.reload()
+        } else if (win.sessionDirty) win.saveSession()
+        win.applySettings()
+        if (!untouched) return
+        // The folder Gust opens with gets its remembered view too.
+        applyRememberedView()
+        if (win.defaultShowHidden && !dirModel.show_hidden) dirModel.toggle_hidden()
+    }
+
+    /// Apply saved settings to this window when they change (here, from
+    /// another Gust window or by hand). Only a field whose saved value moved
+    /// is applied: a snapshot that only carried the tab list, or another
+    /// setting, does not bounce back the sidebar toggled for this window.
+    /// The renderer choice alone waits for the next start.
+    property var appliedSettings: ({})
     function applySettings() {
-        let s = {}
-        try { s = JSON.parse(dirModel.settings_json()) } catch (e) { return }
-        win.keyPreset = ["vim", "mac", "windows"].includes(s.key_preset) ? s.key_preset : "standard"
-        win.sidebarVisible = s.sidebar !== false
-        Tokens.density = s.spacing > 0 ? s.spacing : 1.0
-        win.defaultShowHidden = s.show_hidden === true
+        const s = win.prefs
+        if (s.ready !== true) return
+        const was = win.appliedSettings
+        win.appliedSettings = { key_preset: s.key_preset, sidebar: s.sidebar, spacing: s.spacing, show_hidden: s.show_hidden }
+        if (was.key_preset !== s.key_preset)
+            win.keyPreset = ["vim", "mac", "windows"].includes(s.key_preset) ? s.key_preset : "standard"
+        if (was.sidebar !== s.sidebar) win.sidebarVisible = s.sidebar !== false
+        if (was.spacing !== s.spacing) Tokens.density = s.spacing > 0 ? s.spacing : 1.0
+        if (was.show_hidden !== s.show_hidden) win.defaultShowHidden = s.show_hidden === true
     }
     property bool defaultShowHidden: false
     function openSettings() {
-        settingsPanel.show(dirModel.settings_json())
+        // Picks up edits made elsewhere and the desktop's integration state,
+        // read by the worker; the panel follows when they arrive.
+        dirModel.preferences_refresh()
+        settingsPanel.show()
         win.qaDump("settings")
     }
     // qaDump for close lives in the panel's onClosed as well.
@@ -625,12 +865,27 @@ Window {
         onTriggered: {
             confirm.purpose = "bulk"
             confirm.open(win.bulkSummary, win.bulkLines, qsTr("Rename"), false)
+            win.bulkConfirmPending = false
             win.qaDump("bulk-confirm-open")
         }
+    }
+    /// Between a bulk pattern's prompt closing and its confirmation opening.
+    property bool bulkConfirmPending: false
+
+    /// A selection the user just made can still be on its way into the list
+    /// (DESIGN §2.2.1). Anything that counts, names or acts on the selection
+    /// waits for it rather than using the previous one: say so and refuse.
+    function selectionSettling() {
+        if (!dirModel || !dirModel.selection_pending) return false
+        // The same words the model uses when it refuses for this reason.
+        win.alertText = qsTr("Selection is still being applied; wait and try again.")
+        win.qaDump("selection-pending")
+        return true
     }
 
     function askBulkRename() {
         if (!dirModel || dirModel.count === 0) return
+        if (win.selectionSettling()) return
         const names = dirModel.bulk_names(dirModel.cursor)
         if (names !== "") {
             renameCard.openWith(dirModel, dirModel.cursor, names)
@@ -646,6 +901,7 @@ Window {
     /// by pattern", and the fallback for names the card cannot show.
     function askBulkPattern() {
         if (!dirModel || dirModel.count === 0) return
+        if (win.selectionSettling()) return
         prompt.secret = false
         prompt.mode = "bulk"
         prompt.openWith(qsTr("Rename these files"), "{name}.{ext}",
@@ -693,8 +949,11 @@ Window {
         // back to the file list. Open the dialog once the prompt is gone.
         win.bulkLines = lines.join("\n")
         win.bulkSummary = plan.summary
-        prompt.close()
+        // Rows hold still from here until the confirmation is up: the plan
+        // shown is the one applied (see liveHold).
+        win.bulkConfirmPending = true
         bulkConfirmAfterPrompt.start()
+        prompt.close()
         win.qaDump("bulk-confirm")
     }
 
@@ -1085,8 +1344,7 @@ Window {
         } else {
             // The only tab stays put; the new pane opens where it is, so the
             // split shows something immediately rather than an empty half.
-            const here = win.dirModel ? win.dirModel.location : ""
-            tabList.append({ startPath: here, label: "…", pane: 1 })
+            tabList.append({ startPath: win.hereTarget(win.dirModel), label: "…", pane: 1 })
             tabViews.push(win.paneViewMode(0))
             win.paneTab = [win.paneTab[0], tabList.count - 1]
             win.splitMadeModel = win.tabModelAt(tabList.count - 1)
@@ -1106,13 +1364,14 @@ Window {
     /// is the user's tab for good.
     property var splitMadeModel: null
     onSplitMadeModelChanged: splitMadeAt = ""
-    /// Where that tab opened; going anywhere else makes the tab the user's.
+    /// Where that tab opened, as its raw location token (two folders can share
+    /// a label); going anywhere else makes the tab the user's.
     property string splitMadeAt: ""
 
     /// Called once the tab has been opened at its folder. Its model starts
     /// elsewhere (the startup folder), so earlier moves are not the user's.
     function armSplitTab() {
-        win.splitMadeAt = win.splitMadeModel ? win.splitMadeModel.location : ""
+        win.splitMadeAt = win.splitMadeModel ? win.splitMadeModel.location_token() : ""
     }
 
     /// A transfer makes the split's own tab the user's, even after it
@@ -1123,7 +1382,7 @@ Window {
     }
 
     function noteSplitTabMoved(m) {
-        if (m === win.splitMadeModel && win.splitMadeAt !== "" && m.location !== win.splitMadeAt)
+        if (m === win.splitMadeModel && win.splitMadeAt !== "" && m.location_token() !== win.splitMadeAt)
             win.splitMadeModel = null
     }
 
@@ -1136,12 +1395,37 @@ Window {
             && closeTabAfterCancel.models.indexOf(m) < 0
     }
 
-    /// Show `path` in pane `side` (0 left, 1 right). With one pane, the
-    /// left is the pane already open and the right opens the split.
-    function openPathInPane(path, side) {
+    /// Where to go, as tabs and panes pass it around: "token:" + a raw path
+    /// token for a folder Gust is showing, else a path the user typed or
+    /// picked from a list of places (DESIGN §2.2.1). A token is opened by its
+    /// exact bytes and never retried as text; a refusal is what the user sees.
+    function navigateTarget(m, target) {
+        if (target.startsWith("token:")) m.navigate_token(target.substring(6))
+        else m.navigate(target)
+    }
+    /// A displayed row as such a target, or "" when that row is gone.
+    function rowTarget(m, row) {
+        const t = m ? m.entry_token(row) : ""
+        return t !== "" ? "token:" + t : ""
+    }
+    /// The folder a model is showing as such a target ("" without one).
+    function hereTarget(m) {
+        const t = m ? m.location_token() : ""
+        return t !== "" ? "token:" + t : ""
+    }
+    /// Said when a row asked for is no longer in the list.
+    function rowGone() {
+        win.alertText = qsTr("That folder is no longer in the list")
+        win.qaDump("row-gone")
+    }
+
+    /// Show `path` (a target, see navigateTarget) in pane `side` (0 left,
+    /// 1 right), labelled `label` until the tab names itself. With one pane,
+    /// the left is the pane already open and the right opens the split.
+    function openPathInPane(path, side, label) {
         if (!path || path === "") return
         if (side === 0 && win.paneCount < 2) {
-            win.dirModel.navigate(path)
+            win.navigateTarget(win.dirModel, path)
             win.focusList()
             win.qaDump("pane-open-path")
             return
@@ -1149,12 +1433,14 @@ Window {
         if (win.paneCount > 1) {
             const m = win.paneModel(side)
             win.focusPane(side)
-            if (m) m.navigate(path)
+            if (m) win.navigateTarget(m, path)
             win.focusList()
             win.qaDump("pane-open-path")
             return
         }
-        tabList.append({ startPath: path, label: win.lastSegment(path), pane: 1 })
+        // A token's hex is never a label.
+        const shown = label ? label : path.startsWith("token:") ? "…" : win.lastSegment(path)
+        tabList.append({ startPath: path, label: shown, pane: 1 })
         tabViews.push(win.paneViewMode(0))
         const at = tabList.count - 1
         win.paneCount = 2
@@ -1242,13 +1528,14 @@ Window {
         const dest = win.paneModel(other)
         const src = win.dirModel
         if (!dest || !src) return
-        if (dest.location === src.location) {
+        const destToken = dest.location_token()
+        if (destToken === src.location_token()) {
             win.alertText = qsTr("Both panes are showing the same folder")
             win.qaDump("pane-send-refused")
             return
         }
-        const err = asMove ? src.move_selection_to(dest.location)
-                           : src.copy_selection_to(dest.location)
+        const err = asMove ? src.move_selection_to_token(destToken)
+                           : src.copy_selection_to_token(destToken)
         if (err === "?conflict") { win.transferStarted(src, err, "pane-send"); return }
         if (err !== "") {
             win.alertText = err
@@ -1274,6 +1561,8 @@ Window {
     onDirModelChanged: {
         if (dirModel && dirModel.places_json === "{}") win.refreshPlaces()
         hints.message = ""
+        // A menu waiting for another tab's selection never opens over this one.
+        if (win.menuIntent && win.menuIntent.model !== dirModel) win.menuIntent = null
     }
 
     // Back/Forward availability. can_go_back() is a call, which QML never
@@ -1283,13 +1572,17 @@ Window {
     readonly property bool canBack: dirModel ? (dirModel.location, dirModel.can_go_back()) : false
     readonly property bool canForward: dirModel ? (dirModel.location, dirModel.can_go_forward()) : false
 
-    // While an overlay refers to a row BY INDEX (the rename prompt, a
-    // context menu, Quick Look, a confirm or conflict dialog), a file created or deleted
-    // by another program must not shift the rows under it: the rename would
-    // hit the wrong file. Live updates wait, and land when it closes.
+    // While an overlay refers to a row BY INDEX (the rename prompt or card, a
+    // context menu, Quick Look, a confirm or conflict dialog), or a drag or a
+    // selection band is in flight, a file created or deleted by another program must not shift the
+    // rows under it: the rename would hit the wrong file. Live updates, and
+    // finished re-sorts and re-filters, wait and land when it closes.
     readonly property bool liveHold: palette.visible || confirm.visible || connectionRecovery.visible || settingsPanel.open || trashPanel.open || recentPanel.open || connectPanel.open || deviceSharing.open
-                                     || contextMenu.open || conflictDialog.visible || quickLook.open
-                                     || prompt.visible || prompt.claimingFocus
+                                     || contextMenu.open || contextMenu.dispatching || conflictDialog.visible || quickLook.open
+                                     || prompt.visible || prompt.claimingFocus || renameCard.open
+                                     || paneA.dragActive || (paneBLoader.item ? paneBLoader.item.dragActive : false)
+                                     || paneA.bandActive || (paneBLoader.item ? paneBLoader.item.bandActive : false)
+                                     || !!win.menuIntent || !!win.bulkConfirmPending
     onLiveHoldChanged: {
         for (let i = 0; i < tabList.count; i++) {
             const m = tabs.objectAt(i)
@@ -1323,7 +1616,7 @@ Window {
         }
     }
     onActiveTabChanged: {
-        sessionSaveTimer.restart()
+        win.sessionChanged()
         refreshActiveModel()
         // The transfer card belongs to the tab on screen.
         win.job = null
@@ -1370,9 +1663,9 @@ Window {
 
     function tabModelAt(i) { return tabs.objectAt(i) }
 
+    /// `path` is a target (see navigateTarget); none opens this folder again.
     function newTab(path) {
-        const here = path && path !== "" ? path
-                   : (dirModel ? dirModel.location : "")
+        const here = path && path !== "" ? path : win.hereTarget(dirModel)
         // Opens BESIDE the active tab, not at the end: "open in new tab"
         // should land where the eye already is.
         const at = activeTab + 1
@@ -1512,7 +1805,7 @@ Window {
         // An EXPLICIT choice, so it is remembered for this location.
         // applyRememberedView() must never call this.
         dirModel.remember_view(m)
-        sessionSaveTimer.restart()
+        win.sessionChanged()
         focusList()
         qaDump("view")
     }
@@ -1612,10 +1905,15 @@ Window {
         // A Save is never answered by a stray Return meant for the list:
         // Return in the list opens folders; only the name field or the
         // Save button accept (DESIGN: dialogs never act on a guess).
+        // An Open answers with the selection, so it must have landed.
+        if (win.selectionSettling()) return
         const err = dirModel.chooser_accept(chooserBar.name)
         chooserBar.error = err
         win.qaDump("chooser-accept")
-        if (err === "") Qt.quit()
+        if (err === "") {
+            win.qaFlush()
+            Qt.quit()
+        }
     }
 
     function activateRow(row) {
@@ -1636,6 +1934,8 @@ Window {
         // Several files selected: one viewer showing all of them beats five
         // viewers showing one each (DESIGN §6.18). Returns "" when this is
         // not a multi-file situation, so ordinary activation still runs.
+        // Until a pending selection lands, how many are selected is unknown.
+        if (win.selectionSettling()) return
         if (dirModel.sel_count() > 1) {
             const many = dirModel.activate_selection()
             if (many.startsWith("OK:")) {
@@ -1796,7 +2096,9 @@ Window {
     /// browser does (Flea #219). Appended, so no other tab index moves.
     function openRowInBackgroundTab(model, row) {
         if (!model || !model.is_dir(row)) return
-        tabList.append({ startPath: model.entry_path(row), label: model.entry_name(row),
+        const target = win.rowTarget(model, row)
+        if (target === "") { win.rowGone(); return }
+        tabList.append({ startPath: target, label: model.entry_name(row),
                          pane: win.activePane })
         tabViews.push("rows")
         win.refreshPaneTabCount()
@@ -1873,9 +2175,13 @@ Window {
             win.qaDump(a)
         }
         else if (a === "open-with") { palette.openWith("open with "); return }
-        else if (a === "open-tab") win.newTab(dirModel.entry_path(dirModel.cursor))
-        else if (a === "open-other-pane")
-            win.openPathInPane(dirModel.entry_path(dirModel.cursor), win.paneCount > 1 && win.activePane === 1 ? 0 : 1)
+        else if (a === "open-tab" || a === "open-other-pane") {
+            const target = win.rowTarget(dirModel, dirModel.cursor)
+            if (target === "") win.rowGone()
+            else if (a === "open-tab") win.newTab(target)
+            else win.openPathInPane(target, win.paneCount > 1 && win.activePane === 1 ? 0 : 1,
+                                    dirModel.entry_name(dirModel.cursor))
+        }
         else if (a === "copy-path") hints.message = dirModel.copy_path(dirModel.cursor)
         else if (a === "copy-path-folder") hints.message = dirModel.copy_path(-1)
         else if (a === "paste-into") {
@@ -2136,12 +2442,64 @@ Window {
         return list
     }
 
-    function openContextMenu(row, x, y) {
+    function openContextMenu(row, x, y, fromKeyboard) {
         if (!dirModel) return
-        if (quickLook.open) quickLook.hide()
         win.alertText = ""
+        // A row's menu counts and names the selection ("Open 3 items"). The
+        // right-click that opens it usually selects that row first; while
+        // that selection is being applied, the menu waits for it (once)
+        // rather than describing the previous selection (DESIGN §2.2.1).
+        // A newer menu gesture replaces one still waiting.
+        if (row >= 0 && dirModel.selection_pending) {
+            const token = dirModel.entry_token(row)
+            if (token === "") {
+                win.menuIntent = null
+                win.selectionSettling()
+            } else {
+                win.menuIntent = { model: dirModel, row: row, token: token,
+                                   x: x, y: y, fromKeyboard: !!fromKeyboard }
+                win.qaDump("context-menu-waiting")
+            }
+        } else {
+            win.popupContextMenu(row, x, y, fromKeyboard)
+            win.menuIntent = null
+        }
+        // Only now, with the menu (or its waiting intent) holding the rows,
+        // may Quick Look go: rows never move between the click and the menu.
+        if (quickLook.open) quickLook.hide()
+    }
+    function popupContextMenu(row, x, y, fromKeyboard) {
         contextMenu.popup(x, y, win.contextItems(row))
+        if (fromKeyboard) contextMenu.current = contextMenu.step(-1, 1)
         win.qaDump("context-menu")
+    }
+
+    /// The one row menu waiting for its selection: the model, the exact
+    /// displayed entry (raw token at that row) and where it was asked for.
+    /// Rows cannot move meanwhile (it holds live updates); it is dropped if
+    /// the tab or folder changes, a newer click or band in a list
+    /// (selectionTouched) or another menu or dialog comes up, or the
+    /// selection that lands no longer holds that entry. Keyboard selection
+    /// keys do not drop it; the menu then describes the selection that
+    /// landed. It only ever opens a menu: nothing in it is run.
+    property var menuIntent: null
+    Connections {
+        target: win.menuIntent ? win.menuIntent.model : null
+        function onSelection_pendingChanged() { win.menuIntentSettled() }
+        function onLocationChanged() { win.menuIntent = null }
+    }
+    function menuIntentSettled() {
+        const it = win.menuIntent
+        if (!it || it.model.selection_pending) return
+        const ok = it.model === win.dirModel
+                && it.model.entry_token(it.row) === it.token
+                && it.model.sel_contains(it.row)
+                && !contextMenu.open && !palette.visible && !prompt.visible
+                && !confirm.visible && !renameCard.open && !quickLook.open
+        // Open before letting go, so the live hold never lapses in between.
+        if (ok) win.popupContextMenu(it.row, it.x, it.y, it.fromKeyboard)
+        win.menuIntent = null
+        if (!ok) win.qaDump("context-menu-dropped")
     }
 
     /// The toolbar's sort menu, under its button. The check marks what is
@@ -2171,14 +2529,14 @@ Window {
         if (row >= 0 && !dirModel.sel_contains(row) && dirModel.sel_count() > 0)
             dirModel.sel_only(row)
         const p = row >= 0 ? win.activePaneItem().cursorAnchor() : Qt.point(win.width / 3, win.height / 3)
-        win.openContextMenu(row, p.x, p.y)
-        contextMenu.current = contextMenu.step(-1, 1)
+        win.openContextMenu(row, p.x, p.y, true)
     }
 
     property int pendingTrashRow: -1
 
     // --- operations --------------------------------------------------
     function askRename() {
+        if (win.selectionSettling()) return
         // Several selected: rename them all at once in the card.
         if (dirModel.sel_count() > 1) { win.askBulkRename(); return }
         const row = dirModel.cursor
@@ -2214,6 +2572,7 @@ Window {
     }
 
     function askOwner() {
+        if (win.selectionSettling()) return
         const n = dirModel.sel_count()
         prompt.mode = "owner"
         prompt.openWith(n > 1 ? qsTr("Owner for ") + n + qsTr(" items") : qsTr("Owner"), "",
@@ -2222,9 +2581,20 @@ Window {
     }
 
     /// Where a right-button drag was released, and in which pane's model.
+    /// That model holds the drag (its payload, and rows held still) until
+    /// the menu is over: the chosen action consumes the payload first, then
+    /// releaseDropDrag() lets it go, whether Copy, Move, Link, Cancel, Esc
+    /// or a click elsewhere ended it.
     property var dropMenuModel: null
     property int dropMenuRow: -1
+    function releaseDropDrag() {
+        const m = win.dropMenuModel
+        win.dropMenuModel = null
+        win.dropMenuRow = -1
+        if (m) m.drag_end()
+    }
     function openDropMenu(model, row, x, y) {
+        win.releaseDropDrag()
         win.dropMenuModel = model
         win.dropMenuRow = row
         contextMenu.popup(x, y, [
@@ -2239,10 +2609,35 @@ Window {
     }
 
     // --- tabs at start ------------------------------------------------------
-    Timer { id: sessionSaveTimer; interval: 600; onTriggered: win.saveSession() }
-    onTabCountChanged: sessionSaveTimer.restart()
+    // The tab list changed since its last admitted (or deliberately skipped)
+    // save. Kept through loading, an expired debounce and a refusal: only an
+    // accepted save clears it, so the close can still capture or report it.
+    property bool sessionDirty: false
+    // Why the last session save was not admitted ("" when it was).
+    property string sessionSaveError: ""
+    function sessionChanged() {
+        win.sessionDirty = true
+        sessionSaveTimer.restart()
+    }
+    Timer {
+        id: sessionSaveTimer
+        interval: 600
+        onTriggered: win.saveSession()
+    }
+    onTabCountChanged: win.sessionChanged()
+    /// Admit the current tabs. "" when admitted or intentionally not kept
+    /// (admin, chooser, restore off, an untouched window before loading);
+    /// otherwise the refusal, and the tabs stay dirty to be retried.
     function saveSession() {
-        if (win.adminMode) return
+        if (win.adminMode) { win.sessionDirty = false; return "" }
+        if (!win.prefsStarted) {
+            // Last time's tabs have not been offered back yet. An untouched
+            // window has nothing of the user's to keep, and its placeholder
+            // tab must not replace them; anything else waits for startWithPrefs.
+            if (win.prefsLaunchUntouched()) { win.sessionDirty = false; win.sessionSaveError = ""; return "" }
+            win.sessionSaveError = qsTr("preferences are still loading")
+            return win.sessionSaveError
+        }
         const lines = []
         for (let i = 0; i < tabList.count; i++) {
             const m = tabs.objectAt(i)
@@ -2253,7 +2648,11 @@ Window {
             else tok = dirModel.token_for(sp)
             lines.push(tok + " " + (win.tabViews[i] || "rows"))
         }
-        dirModel.session_save(lines.join("\n"), win.activeTab)
+        // "" is admitted (or deliberately not kept); otherwise the refusal.
+        const err = dirModel.session_save(lines.join("\n"), win.activeTab)
+        if (err === "") win.sessionDirty = false
+        win.sessionSaveError = err
+        return err
     }
     /// Reopen last time's tabs (Settings → Tabs at start). Only the active
     /// one lists its folder now; the others when they are first shown.
@@ -2371,6 +2770,8 @@ Window {
     function askTrash() {
         confirm.purpose = "trash"
         if (dirModel.count === 0) return
+        // The dialog names what it will remove; never the previous selection.
+        if (win.selectionSettling()) return
         const hard = dirModel.delete_needs_hard_confirm()
         pendingTrashRow = dirModel.cursor
 
@@ -2754,13 +3155,28 @@ Window {
                         font.family: Tokens.fontFamily
                         font.pixelSize: Tokens.fontBody
                     }
+                    // A preferences failure stays visible here until a save
+                    // succeeds: a failed sort or view save is otherwise silent.
+                    Rectangle {
+                        objectName: "settingsProblemDot"
+                        visible: win.prefsError !== ""
+                        anchors.top: parent.top
+                        anchors.right: parent.right
+                        anchors.margins: Tokens.spaceXs
+                        width: Tokens.spaceSm
+                        height: Tokens.spaceSm
+                        radius: Tokens.radius
+                        color: Tokens.danger
+                    }
                     MouseArea {
                         anchors.fill: parent
                         cursorShape: Qt.PointingHandCursor
                         onClicked: win.openSettings()
                     }
                     Accessible.role: Accessible.Button
-                    Accessible.name: qsTr("Settings")
+                    Accessible.name: win.prefsStatus === "unsaved" ? qsTr("Settings — not saved")
+                                     : win.prefsStatus === "problem" ? qsTr("Settings — problem") : qsTr("Settings")
+                    Accessible.description: win.prefsError
                 }
             }
         }
@@ -2860,7 +3276,7 @@ Window {
                     // A click in the list gives the list the keyboard, even
                     // when this pane was already active (e.g. from a text
                     // field such as the Save name).
-                    onSelectionTouched: { win.focusPane(0); win.focusList(); win.qaDump("select") }
+                    onSelectionTouched: { win.menuIntent = null; win.focusPane(0); win.focusList(); win.qaDump("select") }
                     onDragBegan: { win.focusPane(0); win.qaDump("drag-begin") }
                     onDropPreview: (t) => { hints.message = t }
                     onDropFailed: (owner, message) => { win.transferStarted(owner, message, "drop") }
@@ -2868,7 +3284,7 @@ Window {
                     onDropDone: (owner) => { win.transferStarted(owner, "", "drop") }
                     onContextRequested: (r, x, y) => { win.focusPane(0); win.openContextMenu(r, x, y) }
                     canEdgeSplit: win.paneCount < 2
-                    onOpenInSplit: (path) => win.openPathInPane(path, 1)
+                    onOpenInSplit: (target, label) => win.openPathInPane(target, 1, label)
                 }
 
                 // The divider. It is a visible seam, not a decoration: the
@@ -2898,7 +3314,7 @@ Window {
                         dropAsMove: win.dropAsMove
                         onActivated: (r) => { win.focusPane(1); win.activateRow(r) }
                     onOpenInNewTab: (r) => win.openRowInBackgroundTab(win.paneBModel, r)
-                        onSelectionTouched: { win.focusPane(1); win.focusList(); win.qaDump("select") }
+                        onSelectionTouched: { win.menuIntent = null; win.focusPane(1); win.focusList(); win.qaDump("select") }
                         onDragBegan: { win.focusPane(1); win.qaDump("drag-begin") }
                         onDropPreview: (t) => { hints.message = t }
                         onDropFailed: (owner, message) => { win.transferStarted(owner, message, "drop") }
@@ -3191,7 +3607,7 @@ Window {
             // Bound, not assigned: a selection is live state and must not go
             // stale behind a message some earlier keystroke left here.
             selection: win.selectionText
-            alert: win.alertText !== "" ? win.alertText : dirModel.notice
+            alert: win.alertText !== "" ? win.alertText : win.prefsNotice !== "" ? win.prefsNotice : dirModel.notice
             dialog: confirm.visible || connectionRecovery.visible
             onStatusChanged: win.qaDump("hint")
             onMessageChanged: win.qaDump("hint")
@@ -3760,33 +4176,56 @@ Window {
 
     SettingsPanel {
         id: settingsPanel
+        // Bound, never assigned: every published snapshot reaches the panel.
+        s: win.prefs
+        status: win.prefsStatus
+        error: win.prefsError
         onChanged: (key, value) => {
+            // "" means accepted, not saved: the status line says when it is.
             const err = dirModel.settings_set(key, value)
-            if (err !== "") win.alertText = err
+            // A new action: its refusal, or nothing, replaces the last one's words.
+            win.alertText = err
+            hints.message = ""
+            // The accepted value shows at once.
+            win.prefsTick += 1
             // New tabs honour hidden-files; the current one follows too,
             // since the user just asked for it.
-            if (key === "show_hidden" && (value === "true") !== dirModel.show_hidden)
+            if (err === "" && key === "show_hidden" && (value === "true") !== dirModel.show_hidden)
                 dirModel.toggle_hidden()
             win.applySettings()
-            settingsPanel.s = JSON.parse(dirModel.settings_json())
             win.qaDump("settings-changed")
         }
+        // Retry is a request, never a timer: the worker reads and writes again.
+        onRetryRequested: {
+            win.alertText = ""
+            hints.message = ""
+            // Refused tabs are retried by asking again, never on a timer.
+            if (win.sessionDirty && !sessionSaveTimer.running) win.saveSession()
+            dirModel.preferences_flush()
+            win.qaDump("settings-retry")
+        }
+        // Desktop integration runs once per choice and is never retried or
+        // replayed. Its state is re-read by the preferences worker; the row
+        // waits for that answer instead of showing a guess.
         onDialogsRequested: (on) => {
             const err = dirModel.set_file_dialogs(on)
             if (err !== "") win.alertText = err
-            settingsPanel.s = JSON.parse(dirModel.settings_json())
+            else settingsPanel.busyKey = "file_dialogs"
+            dirModel.preferences_refresh()
             win.qaDump("settings-dialogs")
         }
         onKeysRequested: (on) => {
             const err = dirModel.set_omarchy_keys(on)
             if (err !== "") win.alertText = err
-            settingsPanel.s = JSON.parse(dirModel.settings_json())
+            else settingsPanel.busyKey = "omarchy_keys"
+            dirModel.preferences_refresh()
             win.qaDump("settings-keys")
         }
         onDefaultRequested: (on) => {
             const err = dirModel.set_default_file_manager(on)
             if (err !== "") win.alertText = err
-            settingsPanel.s = JSON.parse(dirModel.settings_json())
+            else settingsPanel.busyKey = "default"
+            dirModel.preferences_refresh()
             win.qaDump("settings-default")
         }
         onClosed: { win.focusList(); win.qaDump("settings-closed") }
@@ -3801,9 +4240,11 @@ Window {
         onHashChanged: win.qaDump("hash")
         onProgramChanged: win.qaDump("quicklook-program")
         onRunRequested: (row) => {
-            quickLook.hide()
+            // Resolve the program and open its confirmation while the
+            // preview still holds the rows; the dialog holds them after.
             if (row >= 0) win.askRun(row)
             else win.alertText = qsTr("That file is gone")
+            quickLook.hide()
         }
         onClosed: win.focusList()
     }
@@ -3811,6 +4252,7 @@ Window {
     ContextMenu {
         id: contextMenu
         onChosen: (a) => win.runAction(a)
+        onFinished: (a) => { if (win.dropMenuModel) win.releaseDropDrag() }
         onHighlightMoved: win.qaDump("context-menu")
         onClosed: { win.focusList(); win.qaDump("context-menu") }
     }
@@ -3843,9 +4285,12 @@ Window {
         onAccepted: (names) => {
             const m = renameCard.model
             const r = renameCard.row
+            // Apply while the open card still holds the rows: closing first
+            // could let a waiting re-sort land, and the checked lines would
+            // then be matched to files in the new order.
+            const err = m ? m.bulk_apply_names(r, names) : ""
             renameCard.close()
             if (!m) return
-            const err = m.bulk_apply_names(r, names)
             if (err !== "") win.alertText = err
             win.qaDump("bulk-done")
         }
@@ -3902,7 +4347,16 @@ Window {
         // share one handler by accident.
         property string purpose: "trash"
         onVisibleChanged: win.qaDump("confirm")
-        onClosed: { if (connectPanel.open) connectPanel.refocus(); else win.focusList() }
+        onClosed: {
+            // The keyboard returns to the panel the question was asked over;
+            // focusList() leaves an open panel alone on purpose.
+            if (connectPanel.open) connectPanel.refocus()
+            else if (settingsPanel.open) settingsPanel.refocus()
+            else win.focusList()
+            // A close still waiting on preferences did not ask over this
+            // question; it asks now if a failure or the deadline came meanwhile.
+            if (win.prefsClosing) Qt.callLater(win.prefsClose, null)
+        }
         onAccepted: {
             if (confirm.purpose === "run" || confirm.purpose === "allow-run") {
                 const model = win.pendingRunModel
@@ -3964,6 +4418,17 @@ Window {
                 closeAfterCancel.start()
                 return
             }
+            if (confirm.purpose === "closeprefs") {
+                // Preferences failed or timed out, and the user chose to go
+                // anyway, told what may be lost. The only way past a flush.
+                confirm.purpose = "trash"
+                win.prefsLossAccepted = win.prefsLossAsked
+                win.prefsClosing = false
+                win.qaDump("close-prefs-abandoned")
+                win.qaFlush()
+                Qt.quit()
+                return
+            }
             if (confirm.purpose === "closewait") {
                 // The user chose not to wait for a stop that has not
                 // finished. Their decision, made with the consequence shown.
@@ -3971,6 +4436,7 @@ Window {
                 closeAfterCancel.stop()
                 win.closeNow = true
                 win.qaDump("close-without-waiting")
+                win.qaFlush()
                 Qt.quit()
                 return
             }
@@ -4033,8 +4499,25 @@ Window {
             }
             if (confirm.purpose === "close") {
                 confirm.purpose = "trash"
+                // Keeping the window takes back an earlier "Close anyway".
+                win.prefsLossAccepted = ""
                 hints.message = qsTr("Transfer continues")
                 win.qaDump("close-cancelled")
+                win.focusList()
+                return
+            }
+            if (confirm.purpose === "closeprefs") {
+                // Keep the window. The next close waits for jobs and saves
+                // again from the start; the settings button keeps any error.
+                confirm.purpose = "trash"
+                win.prefsClosing = false
+                win.prefsLossAccepted = ""
+                win.closeNow = false
+                win.closing = false
+                // Neutral: the strip's notice says whether settings are
+                // unsaved and goes once they save, so this never contradicts it.
+                hints.message = qsTr("Window kept open — Ctrl+, for settings")
+                win.qaDump("close-prefs-kept")
                 win.focusList()
                 return
             }
@@ -4062,11 +4545,43 @@ Window {
     // after the last one reports where the row really ended up. QA only.
     Timer { id: qaSettle; interval: 300; onTriggered: win.qaDump("settle") }
 
+    // Building the probe reads much of the window and serialises it, so it is
+    // never done inside the signal that asked for it (a row publication can
+    // emit several): qaDump only notes the tag, and one dump of the newest
+    // state is written on the next turn of the event loop. Still GUI-thread
+    // work, just outside the caller. `tags` lists what this dump stands for.
+    property string qaPendingTag: ""
+    property var qaPendingTags: []
+    Timer { id: qaPending; interval: 0; onTriggered: win.qaWrite(win.qaTakePending()) }
+
     function qaDump(tag) {
         if (qaStatePath === "") return
         if (tag !== "settle") qaSettle.restart()
+        win.qaPendingTag = tag
+        // Bounded: the oldest tags drop off a long burst.
+        win.qaPendingTags = win.qaPendingTags.slice(-15).concat([tag])
+        if (!qaPending.running) qaPending.start()
+    }
+    /// The tags noted since the last write, cleared for the next one.
+    function qaTakePending() {
+        const p = { tag: win.qaPendingTag, tags: win.qaPendingTags }
+        win.qaPendingTag = ""
+        win.qaPendingTags = []
+        return p
+    }
+    /// Write a noted dump now: the last state before the app quits, when the
+    /// next turn of the event loop will not come.
+    function qaFlush() {
+        if (!qaPending.running) return
+        qaPending.stop()
+        win.qaWrite(win.qaTakePending())
+    }
+
+    function qaWrite(pending) {
+        const tag = pending.tag
         const payload = {
             tag: tag,
+            tags: pending.tags,
             view: win.viewMode,
             // A file is being dragged inside the window (qa).
             dragging: (function () {
@@ -4187,6 +4702,14 @@ Window {
                 const it = win.activePaneItem()
                 return it && it.rowPoints ? it.rowPoints() : ({})
             })(),
+            columnsSide: (function () {
+                const it = win.activePaneItem()
+                return it && it.columnsSide ? it.columnsSide() : null
+            })(),
+            columnsPreviewPoints: (function () {
+                const it = win.activePaneItem()
+                return it && it.columnsPreviewPoints ? it.columnsPreviewPoints() : null
+            })(),
             activeTabPath: win.dirModel ? win.dirModel.location : "",
             quickLookName: quickLook.info ? quickLook.info.name : "",
             quickLookKind: quickLook.info ? quickLook.info.kindWords : "",
@@ -4215,6 +4738,10 @@ Window {
             clip: dirModel.clip_summary(),
             selCount: dirModel.sel_count(),
             selSummary: dirModel.sel_summary(),
+            sortPending: !!dirModel.sort_pending,
+            filterPending: !!dirModel.filter_pending,
+            selectionPending: !!dirModel.selection_pending,
+            shownFilter: dirModel.shown_filter || "",
             hintShown: hints.displayText,
             hintKeys: hints.shownKeys,
             alertText: win.alertText,
@@ -4254,6 +4781,18 @@ Window {
             trashItems: trashPanel.items.map(i => i.shown + "|" + i.from),
             trashError: trashPanel.error,
             settings: settingsPanel.s,
+            prefsReady: win.prefsReady,
+            prefsPending: win.prefsPending,
+            prefsError: win.prefsError,
+            prefsRevision: win.prefsRevision,
+            prefsSavedRevision: win.prefsSavedRevision,
+            prefsStatus: win.prefsStatus,
+            prefsStarted: win.prefsStarted,
+            prefsClosing: win.prefsClosing,
+            prefsCloseTarget: win.prefsCloseTarget,
+            prefsLossAccepted: win.prefsLossAccepted !== "",
+            settingsStatusText: settingsPanel.statusText,
+            settingsBusyKey: settingsPanel.busyKey,
             keyPreset: win.keyPreset,
             sidebarVisible: win.sidebarVisible,
             density: Tokens.density,
@@ -4414,17 +4953,23 @@ Window {
         // The model does not list anything until it is told to: construction
         // must not do I/O. This is the one explicit kick at startup — or the
         // first restored tab, when Settings asks for last time's tabs.
-        if (!win.restoreSession()) dirModel.reload()
+        // Preferences are normally loaded before the window exists; if not,
+        // the folder lists now and they apply when they arrive, with one more
+        // listing for its remembered sort if the user has not touched it.
+        dirModel.preferences_subscribe()
+        win.prefsTick += 1
+        win.prefsLaunch = { token: dirModel.location_token(), view: win.viewMode, hidden: dirModel.show_hidden,
+                            filter: dirModel.filter, cursor: dirModel.cursor, selected: dirModel.sel_count(),
+                            sortField: dirModel.sort_field, ascending: dirModel.sort_ascending }
+        if (win.prefsReady) win.startWithPrefs(true)
+        else dirModel.reload()
         // After a crash, say what was interrupted — read once, here.
         try { interruptedNotice.items = JSON.parse(dirModel.interrupted_jobs()) } catch (e) {}
-        // The folder Gust opens with gets its remembered view too.
-        applyRememberedView()
         // A local read of the kernel's own view: no daemon, no network.
         dirModel.request_devices()
         dirModel.watch_devices()
         win.refreshPlaces()
         win.refreshBookmarks()
-        win.applySettings()
         chooserBar.mode = dirModel.chooser_mode()
         if (chooserBar.active) {
             chooserBar.title = dirModel.chooser_title()
@@ -4432,7 +4977,6 @@ Window {
             win.title = Qt.binding(() => (chooserBar.title || qsTr("Choose")) + " — Gust")
             if (chooserBar.mode === "save") Qt.callLater(chooserBar.focusName)
         }
-        if (win.defaultShowHidden && !dirModel.show_hidden) dirModel.toggle_hidden()
         qaStatePath = qaWriter.env_path("GUST_QA_STATE")
         // Started by a tab detach: take the view it had, then tell the
         // window it came from that this one is on screen.

@@ -147,6 +147,18 @@ sys.exit(23 if os.environ.get('CASE') in ('failure', 'diagnostic', 'build-script
         self.assertNotIn("private-marker", result.stdout + result.stderr)
         self.assertNotIn("/synthetic-private/", result.stdout + result.stderr)
 
+    def test_app_scope_filters_only_its_named_manual_trial_and_reports_it(self):
+        trial = "projection::tests::release_scheduler_supersession_trials"
+        result, summary = self.run_case("pass", "--app", "--required", "--", "caller_filter")
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(summary["excluded_manual_benchmarks"], [trial])
+        argv = json.loads(next(self.root.glob("capture-*")).read_text())["argv"]
+        self.assertEqual(argv[argv.index("--"):], ["--", "caller_filter", "--skip", trial])
+        self.assertNotIn("--ignored", argv)
+        result, summary = self.run_case("ignored", "--app", "--required")
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(summary["ignored"], 1)
+
     def test_custom_build_header_reports_locked_crate_without_version_or_paths(self):
         result, summary = self.run_case("build-script", "--app", "--required")
         self.assertEqual(result.returncode, 1)

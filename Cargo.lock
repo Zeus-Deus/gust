@@ -339,6 +339,8 @@ dependencies = [
  "gust-ops",
  "gust-remote",
  "gust-thumbs",
+ "hashbrown 0.17.1",
+ "rustix",
  "serde_json",
 ]
 

@@ -3,7 +3,9 @@ import com.gust.app
 
 // Settings — five choices, each one row, each a set of clickable options.
 // Everything shown here is honoured: nothing is listed that Gust ignores.
-// Saved at once to ~/.config/gust/settings.toml (see gust-core settings.rs).
+// A choice shows as soon as it is accepted; the preferences worker saves it
+// to ~/.config/gust/settings.toml, and the status line says "Saved" only
+// once that save is acknowledged (DESIGN §2.1).
 Item {
     id: root
     anchors.fill: parent
@@ -11,12 +13,27 @@ Item {
     z: 60
 
     property bool open: false
-    // Parsed DirModel.settings_json().
+    // Parsed DirModel.settings_json(), bound by the window (never assigned
+    // here, so every published snapshot arrives).
     property var s: ({})
+    // "loading", "saving", "saved", "unsaved" or "problem", and the reason.
+    property string status: "loading"
+    property string error: ""
+    // An integration row whose new state the worker is still re-reading.
+    property string busyKey: ""
     // Row the keyboard is on.
     property int current: 0
 
+    readonly property bool ready: root.status !== "loading"
+    readonly property bool failed: root.status === "unsaved" || root.status === "problem"
+    readonly property string statusText: root.status === "unsaved" ? qsTr("Not saved: ") + root.error
+                                         : root.status === "problem" ? qsTr("Problem: ") + root.error
+                                         : root.status === "saving" ? qsTr("Saving…")
+                                         : root.status === "saved" ? qsTr("Saved")
+                                         : qsTr("Loading settings…")
+
     signal changed(string key, string value)
+    signal retryRequested()
     signal defaultRequested(bool on)
     signal keysRequested(bool on)
     signal dialogsRequested(bool on)
@@ -41,7 +58,7 @@ Item {
           note: "" },
         { key: "renderer", title: qsTr("Drawing"),
           options: [["auto", qsTr("Automatic")], ["software", qsTr("Software")], ["gpu", qsTr("GPU")]],
-          note: qsTr("Next start. Now: ") + (root.s.renderer_now === "software" ? qsTr("software") : qsTr("GPU")) },
+          note: "", live: "renderer" },
         { key: "default", title: qsTr("Default app"),
           options: [["true", qsTr("Use Gust")], ["false", qsTr("Previous app")]],
           note: qsTr("For folders opened by other apps") },
@@ -50,12 +67,10 @@ Item {
           note: qsTr("Other apps' file dialogs") },
         { key: "omarchy_keys", title: qsTr("Super+Shift+F"),
           options: [["true", qsTr("Gust")], ["false", qsTr("Omarchy default")]],
-          note: root.s.is_omarchy ? qsTr("Reversible")
-                                  : qsTr("Needs Omarchy") }
+          note: "", live: "omarchy" }
     ]
 
-    function show(json) {
-        try { root.s = JSON.parse(json) } catch (e) { root.s = {} }
+    function show() {
         root.current = 0
         root.open = true
         keys.forceActiveFocus()
@@ -64,6 +79,9 @@ Item {
         Qt.callLater(() => keys.forceActiveFocus())
     }
     function hide() { root.open = false; root.closed() }
+    /// Take the keyboard back after something shown over the panel (a
+    /// confirmation) goes, on the row the user was on.
+    function refocus() { if (root.open) keys.forceActiveFocus() }
     function valueOf(key) {
         if (key === "default") return root.s.is_default ? "true" : "false"
         if (key === "omarchy_keys") return root.s.omarchy_keys ? "true" : "false"
@@ -73,6 +91,9 @@ Item {
     }
     function choose(rowIndex, value) {
         const r = root.rows[rowIndex]
+        // Nothing is accepted before the first load, and an integration
+        // change runs once: no second request while its answer is pending.
+        if (!root.ready || root.busyKey === r.key) return
         if (r.key === "default") root.defaultRequested(value === "true")
         else if (r.key === "omarchy_keys") root.keysRequested(value === "true")
         else if (r.key === "file_dialogs") root.dialogsRequested(value === "true")
@@ -101,6 +122,7 @@ Item {
             else if (event.key === Qt.Key_Up || event.key === Qt.Key_K) { root.current = Math.max(0, root.current - 1); event.accepted = true }
             else if (event.key === Qt.Key_Right || event.key === Qt.Key_L) { root.step(1); event.accepted = true }
             else if (event.key === Qt.Key_Left || event.key === Qt.Key_H) { root.step(-1); event.accepted = true }
+            else if (event.key === Qt.Key_R && root.failed) { root.retryRequested(); event.accepted = true }
         }
     }
 
@@ -138,7 +160,13 @@ Item {
                     required property var modelData
                     required property int index
                     width: col.width
-                    height: Tokens.controlHeight + (modelData.note !== "" ? Tokens.fontCaption + Tokens.spaceXs : 0)
+                    // A row marked `live` takes its note from the snapshot.
+                    readonly property string note: root.busyKey === modelData.key ? qsTr("Checking…")
+                        : modelData.live === "renderer"
+                          ? qsTr("Next start. Now: ") + (root.s.renderer_now === "software" ? qsTr("software") : qsTr("GPU"))
+                        : modelData.live === "omarchy" ? (root.s.is_omarchy ? qsTr("Reversible") : qsTr("Needs Omarchy"))
+                        : modelData.note
+                    height: Tokens.controlHeight + (rowItem.note !== "" ? Tokens.fontCaption + Tokens.spaceXs : 0)
                     color: root.current === index
                            ? Tokens.withAlpha(Tokens.selectedBackground, Math.max(Tokens.selectedAlpha, 0.14))
                            : "transparent"
@@ -164,8 +192,9 @@ Item {
                         textFormat: Text.PlainText
                         x: Tokens.spaceSm
                         y: Tokens.controlHeight - Tokens.spaceXs
-                        visible: modelData.note !== ""
-                        text: modelData.note
+                        objectName: "settingsNote-" + rowItem.modelData.key
+                        visible: rowItem.note !== ""
+                        text: rowItem.note
                         color: Tokens.foregroundDim
                         font.family: Tokens.fontFamily
                         font.pixelSize: Tokens.fontCaption
@@ -216,11 +245,32 @@ Item {
             }
 
             Item { width: 1; height: Tokens.spaceSm }
+            // Persistent: an error stays until a save succeeds.
+            Text {
+                objectName: "settingsStatus"
+                textFormat: Text.PlainText
+                width: col.width
+                wrapMode: Text.Wrap
+                horizontalAlignment: Text.AlignRight
+                text: root.statusText
+                color: root.failed ? Tokens.danger : Tokens.foregroundDim
+                font.family: Tokens.fontFamily
+                font.pixelSize: Tokens.fontCaption
+                MouseArea {
+                    anchors.fill: parent
+                    enabled: root.failed
+                    cursorShape: root.failed ? Qt.PointingHandCursor : Qt.ArrowCursor
+                    onClicked: root.retryRequested()
+                }
+                Accessible.role: root.failed ? Accessible.Button : Accessible.StaticText
+                Accessible.name: root.failed ? root.statusText + qsTr(". Retry") : root.statusText
+            }
             Text {
                 textFormat: Text.PlainText
                 width: col.width
                 horizontalAlignment: Text.AlignRight
-                text: qsTr("↑↓ choose · ←→ change · Esc close")
+                text: root.failed ? qsTr("↑↓ choose · ←→ change · R retry · Esc close")
+                                  : qsTr("↑↓ choose · ←→ change · Esc close")
                 color: Tokens.foregroundDim
                 font.family: Tokens.fontFamily
                 font.pixelSize: Tokens.fontCaption
