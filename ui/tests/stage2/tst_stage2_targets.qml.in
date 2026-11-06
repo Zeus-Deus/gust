@@ -22,6 +22,7 @@ Item {
             id: m
             property string shown: "/x"
             property string token: ""
+            property string textTargetToken: top.tokA
             property var rows: []
             property int cursor: 0
             property bool everActivated: true
@@ -30,6 +31,7 @@ Item {
             function note(n, a) { calls.push([n].concat(a || [])) }
             function named(n) { return calls.filter(c => c[0] === n) }
             function location_token() { note("location_token"); return token }
+            function token_for(path) { note("token_for", [path]); return textTargetToken }
             function entry_token(r) { note("entry_token", [r]); return rows[r] ? rows[r].token : "" }
             function entry_name(r) { return rows[r] ? rows[r].name : "" }
             function is_dir(r) { return rows[r] ? rows[r].dir : false }
@@ -229,12 +231,13 @@ Item {
             win.noteSplitTabMoved(m)
             compare(win.splitMadeModel, null, "subsequent navigation keeps the tab")
         }
-        function test_split_text_destination_arms_on_first_publication() {
+        function test_split_text_destination_arms_before_publication() {
             const m = tabs.objectAt(3)
             m.token = top.tokB
             win.splitMadeModel = m
             win.armSplitTab("/media/usb")
-            compare(win.splitMadeAt, "")
+            compare(win.splitMadeAt, top.tokA)
+            compare(m.named("token_for"), [["token_for", "/media/usb"]])
             m.token = top.tokA
             win.noteSplitTabMoved(m)
             compare(win.splitMadeAt, top.tokA)
@@ -242,6 +245,19 @@ Item {
             m.token = top.tokB
             win.noteSplitTabMoved(m)
             compare(win.splitMadeModel, null)
+        }
+        function test_split_same_startup_text_destination_has_no_initial_location_signal() {
+            const m = tabs.objectAt(3)
+            m.token = top.tokA
+            win.splitMadeModel = m
+            win.armSplitTab("/home/u")
+            compare(win.splitMadeAt, top.tokA)
+            // Initial loading completes at the same location. No move handler
+            // runs; the first actual change is the user's child navigation.
+            compare(win.splitMadeModel, m)
+            m.token = top.tokB
+            win.noteSplitTabMoved(m)
+            compare(win.splitMadeModel, null, "user-navigated tab must survive closing its pane")
         }
         function test_send_to_other_pane_by_token_data() {
             return [{ tag: "copy", move: false, name: "copy_selection_to_token" },

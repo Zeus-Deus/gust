@@ -85,6 +85,22 @@ correctness checks with private evidence, not renewed performance or platform
 acceptance. Historical Stage 1–5 measurements and limitations below remain
 historical evidence, and stopped timing experiments remain stopped.
 
+### Split re-review correction
+
+Re-review found that waiting for the first text-destination location signal
+left tracking unarmed when that destination was already the model's startup
+location. Text places now use the existing filesystem-free `token_for()` API
+to establish their intended raw destination immediately. The first subsequent
+user navigation releases scratch ownership even if initial loading emits no
+location-change signal.
+
+The updated QML suite passed 235 checks with no warnings. A new software-native
+same-startup-Home journey passed 11 explicit checks with no QML warnings: dragging
+Home into an untouched split still removes the scratch tab on close; repeating
+the drag, navigating to an owned child and closing the split preserves both
+Home and child tabs. All three screenshots were inspected privately. Rust
+sources are unchanged by this follow-up; these are correctness checks only.
+
 ## Recorded evidence and its limits
 
 Evidence used synthetic fixtures in private temporary homes and isolated native

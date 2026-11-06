@@ -73,8 +73,10 @@ probe started after that request can acknowledge its token in the cached
 snapshot; preference admission and older worker completions cannot release an
 integration control's busy guard. Errors remain observable separately.
 
-Split-created tabs track the intended raw destination token, or arm on the
-initial location publication for text destinations. Deferred row menus are
+Split-created tabs track the intended raw destination token before publication.
+Absolute text destinations from places use the model's existing `token_for()`
+conversion. Tracking never waits for a location-change signal: initial loading
+may complete at the model's unchanged startup location. Deferred row menus are
 cancelled when another modal overlay opens, including Settings.
 
 ## 2.1 Interactive preferences and matching

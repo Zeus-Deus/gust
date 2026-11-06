@@ -1374,10 +1374,12 @@ Window {
     /// a label); going anywhere else makes the tab the user's.
     property string splitMadeAt: ""
 
-    /// Navigation publishes later. A raw target already identifies the intended
-    /// folder; a text target arms on its first location publication.
+    /// Navigation publishes later, and the initial folder may already be the
+    /// model's startup location. Record its intended identity without waiting
+    /// for a location-change signal that might never fire.
     function armSplitTab(target) {
-        win.splitMadeAt = win.splitMadeModel && target.startsWith("token:") ? target.substring(6) : ""
+        const m = win.splitMadeModel
+        win.splitMadeAt = !m ? "" : target.startsWith("token:") ? target.substring(6) : m.token_for(target)
     }
 
     /// A transfer makes the split's own tab the user's, even after it
@@ -1388,9 +1390,8 @@ Window {
     }
 
     function noteSplitTabMoved(m) {
-        if (m !== win.splitMadeModel) return
-        if (win.splitMadeAt === "") win.splitMadeAt = m.location_token()
-        else if (m.location_token() !== win.splitMadeAt) win.splitMadeModel = null
+        if (m === win.splitMadeModel && win.splitMadeAt !== "" && m.location_token() !== win.splitMadeAt)
+            win.splitMadeModel = null
     }
 
     /// Is tab `i` that tab, untouched and with nothing running or undoable?
