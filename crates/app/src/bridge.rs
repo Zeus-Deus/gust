@@ -1400,6 +1400,19 @@ pub enum ClipMode {
     Cut,
 }
 
+/// Text destinations must have the same identity before and after navigation.
+/// This is lexical preparation only; resolving symlinks would require I/O and
+/// would change the meaning of parent components.
+fn typed_navigation_path(typed: &str) -> PathBuf {
+    let path = match std::env::var_os("HOME").filter(|h| !h.is_empty()) {
+        Some(home) if typed == "~" || typed.starts_with("~/") => {
+            gust_core::jump::expand(typed, Path::new(&home))
+        }
+        _ => PathBuf::from(typed),
+    };
+    path.components().collect()
+}
+
 /// The folder Gust should open, decided once at startup.
 ///
 /// A file manager must honour `gust /some/path` — that is how a desktop
@@ -6030,14 +6043,8 @@ impl qobject::DirModel {
     }
 
     fn navigate(mut self: Pin<&mut Self>, path: &QString) {
-        let typed = path.to_string();
-        let p = match std::env::var_os("HOME").filter(|h| !h.is_empty()) {
-            Some(home) if typed == "~" || typed.starts_with("~/") => {
-                gust_core::jump::expand(&typed, Path::new(&home))
-            }
-            _ => PathBuf::from(typed),
-        };
-        self.as_mut().navigate_path(p);
+        self.as_mut()
+            .navigate_path(typed_navigation_path(&path.to_string()));
     }
     fn navigate_path(mut self: Pin<&mut Self>, p: PathBuf) {
         if self.as_mut().refuse_pending_selection() {
@@ -9206,7 +9213,7 @@ impl qobject::DirModel {
     }
 
     fn token_for(&self, path: &QString) -> QString {
-        QString::from(&LocationKey::local(PathBuf::from(path.to_string())).to_token())
+        QString::from(&LocationKey::local(typed_navigation_path(&path.to_string())).to_token())
     }
 
     fn start_at_token(mut self: Pin<&mut Self>, token: &QString) {

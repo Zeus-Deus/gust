@@ -75,7 +75,11 @@ integration control's busy guard. Errors remain observable separately.
 
 Split-created tabs track the intended raw destination token before publication.
 Absolute text destinations from places use the model's existing `token_for()`
-conversion. Tracking never waits for a location-change signal: initial loading
+conversion. `token_for()` and text navigation share the same filesystem-free
+preparation: existing `~` expansion and `Path::components()` normalization.
+Trailing/repeated separators and interior `.` components therefore cannot
+change the intended identity; `..` is preserved, without canonicalization.
+Tracking never waits for a location-change signal: initial loading
 may complete at the model's unchanged startup location. Deferred row menus are
 cancelled when another modal overlay opens, including Settings.
 

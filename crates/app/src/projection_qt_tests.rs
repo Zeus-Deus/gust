@@ -220,6 +220,7 @@ fn actual_qt_navigation_layout_persistent_mapping_metadata_and_hold() {
             .to_string()
             .contains("Invalid destination token"));
     }
+    typed_destination_tokens_match_actual_navigation(app, &mut model, &fixture);
     newer_focus_survives_held_relist(app, &mut model, &fixture);
     equal_viewport_filter_measures_new_folders(app, &mut model, &fixture);
     publication_attribution_reenters_qt(app, &fixture);
@@ -1421,4 +1422,56 @@ fn equal_viewport_filter_measures_new_folders(
     }
     model.pin_mut().set_filter_text(&QString::from(""));
     wait(app, model, |m| !m.filter_pending);
+}
+
+fn typed_destination_tokens_match_actual_navigation(
+    app: &QCoreApplication,
+    model: &mut cxx::UniquePtr<qobject::DirModel>,
+    fixture: &Fixture,
+) {
+    let destination = fixture.0.join("Documents");
+    std::fs::create_dir(&destination).unwrap();
+    std::fs::write(destination.join("file"), b"synthetic destination").unwrap();
+    let expected = LocationKey::local(&destination).to_token();
+    let aliases = [
+        format!("{}/Documents/", fixture.0.display()),
+        format!("{}//Documents//", fixture.0.display()),
+        format!("{}/./Documents/./", fixture.0.display()),
+    ];
+    // Parse the real GTK representation; its path retains the trailing slash.
+    let bookmark_text = format!(
+        "{}/ Documents\n",
+        gust_core::clipboard::path_to_uri(&destination)
+    );
+    let bookmarks = gust_core::bookmarks::parse(&bookmark_text);
+    assert_eq!(bookmarks.len(), 1);
+    assert!(bookmarks[0]
+        .path
+        .as_os_str()
+        .as_encoded_bytes()
+        .ends_with(b"/"));
+    for text in std::iter::once(bookmarks[0].path.to_string_lossy().into_owned()).chain(aliases) {
+        let text = QString::from(&text);
+        assert_eq!(model.token_for(&text).to_string(), expected);
+        model.pin_mut().navigate(&text);
+        assert_eq!(model.requested_key.to_token(), expected);
+        wait(app, model, |m| {
+            m.settled && m.location_token().to_string() == expected
+        });
+        assert_eq!(model.path_of_row(0), Some(destination.join("file")));
+    }
+    // Parent components retain their meaning even when a component is a symlink.
+    let parent_text = format!("{}/link/../Documents/", fixture.0.display());
+    assert_eq!(
+        model.token_for(&QString::from(&parent_text)).to_string(),
+        LocationKey::local(fixture.0.join("link/../Documents")).to_token()
+    );
+    if let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) {
+        let expected_home: PathBuf = Path::new(&home).components().collect();
+        assert_eq!(
+            model.token_for(&QString::from("~/./")).to_string(),
+            LocationKey::local(expected_home).to_token()
+        );
+    }
+    model.pin_mut().stop_watch();
 }

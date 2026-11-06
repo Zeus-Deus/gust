@@ -101,6 +101,25 @@ the drag, navigating to an owned child and closing the split preserves both
 Home and child tabs. All three screenshots were inspected privately. Rust
 sources are unchanged by this follow-up; these are correctness checks only.
 
+### Text-destination normalization correction
+
+A subsequent re-review identified a token mismatch for valid GTK bookmarks
+with trailing separators, repeated separators or interior `.` components.
+`token_for()` and text navigation now share the existing filesystem-free home
+expansion and component normalization, so the intended split identity matches
+the admitted and published navigation identity. Parent components remain
+unresolved; this does not canonicalize paths or follow symlinks.
+
+All 143 required app tests passed, including new real-Qt assertions across the
+GTK bookmark parser, token conversion, admitted navigation and published location.
+They cover trailing/repeated separators, interior dots, preserved parent
+components and home expansion. A new software-native GTK trailing-slash bookmark
+journey passed nine explicit checks with no QML warnings. The raw bookmark's
+slash survived parsing, its split displayed the normalized destination, and
+closing that untouched split removed only its scratch tab. Both screenshots
+were inspected privately. These remain correctness checks, without performance
+or broader platform acceptance.
+
 ## Recorded evidence and its limits
 
 Evidence used synthetic fixtures in private temporary homes and isolated native
