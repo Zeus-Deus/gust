@@ -23,6 +23,8 @@ Item {
         property var models: [leftModel, rightModel]
         property int focusCalls: 0
         property bool focusedCorrectOwner: true
+        // A newer click drops a waiting row menu (Main's onSelectionTouched).
+        property var menuIntent: ({row: 1})
         function focusList() {
             focusCalls += 1
             focusedCorrectOwner = focusedCorrectOwner && dirModel === root.model
@@ -52,10 +54,12 @@ Item {
         function focus_row(i) { cursor = i }
         function sel_contains(i) { return selection === String(i) }
         function sel_only(i) { selection = String(i) }
-        function entry_path(i) { return "/current/PickedFolder" }
-        function navigate(path) {
-            navigated = path
+        property var labelNavigations: []
+        function navigate(path) { labelNavigations = labelNavigations.concat([path]) }
+        function columns_navigate(token, revision) {
+            navigated = token + "@" + revision
             ownerAtNavigate = win.dirModel === leftModel
+            return true
         }
     }
     QtObject {
@@ -71,10 +75,12 @@ Item {
         function focus_row(i) { cursor = i }
         function sel_contains(i) { return selection === String(i) }
         function sel_only(i) { selection = String(i) }
-        function entry_path(i) { return "/current/PickedFolder" }
-        function navigate(path) {
-            navigated = path
+        property var labelNavigations: []
+        function navigate(path) { labelNavigations = labelNavigations.concat([path]) }
+        function columns_navigate(token, revision) {
+            navigated = token + "@" + revision
             ownerAtNavigate = win.dirModel === rightModel
+            return true
         }
     }
     QtObject {
@@ -94,7 +100,8 @@ Item {
         property int targetPane: 0
         property var model: win.models[targetPane]
         property bool suppressClick: false
-        property var side: ({parent: {path: "/parent"}})
+        property var side: ({revision: "rev7", parent: {path: "/parent", token: "local:2f706172656e74"},
+                             peek: {kind: "dir", path: "/current/PickedFolder", token: "local:7069636b6564"}})
         property int selections: 0
         property int contextCalls: 0
         property int middleCalls: 0
@@ -120,7 +127,7 @@ Item {
             x: 120
             width: 100
             height: 80
-            property var modelData: ({d: true, cur: false, n: "Sibling"})
+            property var modelData: ({d: true, cur: false, n: "Sibling", token: "local:7369626c696e67"})
 @PARENT_CLICK@
         }
         MouseArea {
@@ -128,7 +135,7 @@ Item {
             x: 240
             width: 100
             height: 80
-            property var modelData: ({d: true, n: "Child"})
+            property var modelData: ({d: true, n: "Child", token: "local:6368696c64"})
 @PEEK_CLICK@
         }
     }
@@ -141,12 +148,14 @@ Item {
         root.selections = 0
         root.contextCalls = 0
         root.middleCalls = 0
-        parentMouse.modelData = {d: true, cur: false, n: "Sibling"}
-        peekMouse.modelData = {d: true, n: "Child"}
+        win.menuIntent = ({row: 1})
+        parentMouse.modelData = {d: true, cur: false, n: "Sibling", token: "local:7369626c696e67"}
+        peekMouse.modelData = {d: true, n: "Child", token: "local:6368696c64"}
         for (const m of win.models) {
             m.cursor = 7
             m.selection = "sentinel"
             m.navigated = ""
+            m.labelNavigations = []
             m.ownerAtNavigate = false
         }
         prepare(0)
@@ -178,6 +187,7 @@ Item {
         compare(root.model.selection, "sentinel", "focusing must not change Columns selection policy")
         compare(win.models[1 - data.target].cursor, 7)
         compare(root.selections, 1)
+        compare(win.menuIntent, null, "a newer click drops a waiting row menu")
     }
     function test_same_cursor_claims_owner_data() { return directions() }
     function test_same_cursor_claims_owner(data) {
@@ -222,17 +232,18 @@ Item {
         prepare(data.target)
         mouseClick(parentMouse, 20, 20, Qt.LeftButton)
         requireOwner(data.target)
-        compare(root.model.navigated, "/parent/Sibling")
+        compare(root.model.navigated, "local:7369626c696e67@rev7", "row token with the response revision")
+        compare(root.model.labelNavigations, [], "never a label joined into a path")
         verify(root.model.ownerAtNavigate, "navigation must run after selecting its pane")
     }
     function test_current_parent_row_focuses_without_navigation() {
-        parentMouse.modelData = {d: true, cur: true, n: "Current"}
+        parentMouse.modelData = {d: true, cur: true, n: "Current", token: "local:63757272656e74"}
         mouseClick(parentMouse, 20, 20, Qt.LeftButton)
         requireOwner(0)
         compare(root.model.navigated, "")
     }
     function test_parent_file_focuses_without_opening() {
-        parentMouse.modelData = {d: false, cur: false, n: "File"}
+        parentMouse.modelData = {d: false, cur: false, n: "File", token: "local:66696c65"}
         mouseClick(parentMouse, 20, 20, Qt.LeftButton)
         requireOwner(0)
         compare(root.model.navigated, "")
@@ -242,14 +253,16 @@ Item {
         prepare(data.target)
         mouseClick(peekMouse, 20, 20, Qt.LeftButton)
         requireOwner(data.target)
-        compare(root.model.navigated, "/current/PickedFolder/Child")
+        compare(root.model.navigated, "local:6368696c64@rev7")
+        compare(root.model.labelNavigations, [])
         verify(root.model.ownerAtNavigate)
     }
     function test_peek_file_only_navigates_container() {
-        peekMouse.modelData = {d: false, n: "File"}
+        peekMouse.modelData = {d: false, n: "File", token: "local:66696c65"}
         mouseClick(peekMouse, 20, 20, Qt.LeftButton)
         requireOwner(0)
-        compare(root.model.navigated, "/current/PickedFolder")
+        compare(root.model.navigated, "local:7069636b6564@rev7", "the previewed folder's own token")
+        compare(root.model.labelNavigations, [])
         verify(root.model.ownerAtNavigate)
     }
     }

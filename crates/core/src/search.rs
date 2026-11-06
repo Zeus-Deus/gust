@@ -15,23 +15,57 @@ use std::path::PathBuf;
 mod session;
 pub use session::*;
 
-/// Subsequence match, case-insensitive on ASCII: "dwn" matches "Downloads".
-pub fn fuzzy_matches(needle: &str, haystack: &OsStr) -> bool {
-    if needle.is_empty() {
-        return true;
-    }
-    let n: Vec<u8> = needle.bytes().map(|b| b.to_ascii_lowercase()).collect();
-    let h = haystack.as_bytes();
-    let mut ni = 0;
-    for &c in h {
-        if c.to_ascii_lowercase() == n[ni] {
-            ni += 1;
-            if ni == n.len() {
-                return true;
-            }
+/// A query prepared once for repeated byte-preserving filename matching.
+/// Only ASCII case is folded; non-UTF-8 names and Unicode bytes are unchanged.
+#[derive(Debug, Clone)]
+pub struct PreparedQuery {
+    needle: Vec<u8>,
+}
+
+impl PreparedQuery {
+    pub fn new(needle: &str) -> Self {
+        Self {
+            needle: needle.bytes().map(|b| b.to_ascii_lowercase()).collect(),
         }
     }
-    false
+
+    /// Subsequence match, case-insensitive on ASCII: "dwn" matches "Downloads".
+    /// Matching a name does not allocate.
+    pub fn fuzzy_matches(&self, haystack: &OsStr) -> bool {
+        if self.needle.is_empty() {
+            return true;
+        }
+        let h = haystack.as_bytes();
+        if self.needle.len() > h.len() {
+            return false;
+        }
+        let mut ni = 0;
+        for &c in h {
+            if c.to_ascii_lowercase() == self.needle[ni] {
+                ni += 1;
+                if ni == self.needle.len() {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// The same prefix/substring/subsequence score as [`match_score`].
+    pub fn match_score(&self, haystack: &OsStr) -> Option<u32> {
+        if self.needle.is_empty() {
+            return Some(0);
+        }
+        if let Some(score) = substring_score(&self.needle, haystack) {
+            return Some(score);
+        }
+        self.fuzzy_matches(haystack).then_some(1000)
+    }
+}
+
+/// Subsequence match, case-insensitive on ASCII: "dwn" matches "Downloads".
+pub fn fuzzy_matches(needle: &str, haystack: &OsStr) -> bool {
+    PreparedQuery::new(needle).fuzzy_matches(haystack)
 }
 
 /// Score a match so better matches sort first (lower is better).
@@ -40,29 +74,43 @@ pub fn match_score(needle: &str, haystack: &OsStr) -> Option<u32> {
     if needle.is_empty() {
         return Some(0);
     }
-    let hl = haystack.as_bytes();
-    let nl = needle.as_bytes();
-    if let Some(p) = hl
-        .windows(nl.len())
-        .position(|part| part.eq_ignore_ascii_case(nl))
-    {
-        return Some(if p == 0 {
-            0
-        } else {
-            1 + u32::try_from(p).unwrap_or(u32::MAX - 1)
-        });
-    }
-    if fuzzy_matches(needle, haystack) {
-        return Some(1000);
-    }
-    None
+    // Keep the compatibility helper's allocation-free substring fast path.
+    substring_score(needle.as_bytes(), haystack)
+        .or_else(|| fuzzy_matches(needle, haystack).then_some(1000))
+}
+
+fn substring_score(needle: &[u8], haystack: &OsStr) -> Option<u32> {
+    haystack
+        .as_bytes()
+        .windows(needle.len())
+        .position(|part| part.eq_ignore_ascii_case(needle))
+        .map(|p| {
+            if p == 0 {
+                0
+            } else {
+                1 + u32::try_from(p).unwrap_or(u32::MAX - 1)
+            }
+        })
+}
+
+/// Matching rows in listing order, with no ranking, sorting or filesystem I/O.
+/// The query is prepared once; membership uses raw filename bytes, not labels.
+pub fn matching_indices(entries: &[Entry], needle: &str, show_hidden: bool) -> Vec<usize> {
+    let query = PreparedQuery::new(needle);
+    entries
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| (show_hidden || !e.is_hidden()) && query.fuzzy_matches(&e.name))
+        .map(|(i, _)| i)
+        .collect()
 }
 
 /// Filter an in-memory listing. Pure, no I/O — safe to run on every keystroke.
 pub fn filter_entries<'a>(entries: &'a [Entry], needle: &str) -> Vec<&'a Entry> {
+    let query = PreparedQuery::new(needle);
     let mut v: Vec<(u32, &Entry)> = entries
         .iter()
-        .filter_map(|e| match_score(needle, &e.name).map(|s| (s, e)))
+        .filter_map(|e| query.match_score(&e.name).map(|s| (s, e)))
         .collect();
     v.sort_by_key(|(s, _)| *s);
     v.into_iter().map(|(_, e)| e).collect()

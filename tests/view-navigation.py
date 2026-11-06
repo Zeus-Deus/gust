@@ -66,6 +66,7 @@ def main():
 
     class Model(QAbstractListModel):
         cursorChanged = Signal()
+        rows_replaced = Signal(int)
 
         def __init__(self):
             super().__init__()
@@ -111,7 +112,19 @@ def main():
         sort_ascending = Property(bool, lambda self: True, constant=True)
         empty_reason = Property(str, lambda self: "", constant=True)
         filter = Property(str, lambda self: "", constant=True)
+        shown_filter = Property(str, lambda self: "", constant=True)
+        sort_pending = Property(bool, lambda self: False, constant=True)
+        filter_pending = Property(bool, lambda self: False, constant=True)
+        selection_pending = Property(bool, lambda self: False, constant=True)
         columns_side = Property(str, lambda self: "", constant=True)
+
+        @Slot(int, result=int)
+        def published_row(self, row):
+            return row
+
+        @Slot(str, str, result=bool)
+        def columns_navigate(self, token, revision):
+            return False
 
         @Slot(int, int)
         def want_rows(self, first, count):

@@ -1,0 +1,292 @@
+import QtQuick
+import QtTest
+
+// Exact Main.qml tab/split/cross-pane functions (extracted by the runner)
+// around bounded fakes: internal targets travel as raw path tokens, never as
+// display paths, and a refused token is not retried as text (DESIGN §2.2.1).
+// Display labels collide on purpose; only the tokens tell the folders apart.
+Item {
+    id: top
+    width: 400
+    height: 300
+
+    readonly property string label: "/home/u/a<U+000A>b"
+    readonly property string tokA: "local:2f686f6d652f752f610a62"
+    readonly property string tokB: "local:2f686f6d652f752f613c552b303030413e62"
+    readonly property string tokRowA: "local:2f782f610a62"
+    readonly property string tokRowB: "local:2f782f613c552b303030413e62"
+
+    Component {
+        id: modelC
+        QtObject {
+            id: m
+            property string shown: "/x"
+            property string token: ""
+            property string textTargetToken: top.tokA
+            property var rows: []
+            property int cursor: 0
+            property bool everActivated: true
+            property var calls: []
+            readonly property string location: shown
+            function note(n, a) { calls.push([n].concat(a || [])) }
+            function named(n) { return calls.filter(c => c[0] === n) }
+            function location_token() { note("location_token"); return token }
+            function token_for(path) { note("token_for", [path]); return textTargetToken }
+            function entry_token(r) { note("entry_token", [r]); return rows[r] ? rows[r].token : "" }
+            function entry_name(r) { return rows[r] ? rows[r].name : "" }
+            function is_dir(r) { return rows[r] ? rows[r].dir : false }
+            function entry_path(r) { note("entry_path", [r]); return shown + "/" + entry_name(r) }
+            function navigate(p) { note("navigate", [p]) }
+            function navigate_token(t) { note("navigate_token", [t]) }
+            function copy_selection_to(p) { note("copy_selection_to", [p]); return "" }
+            function move_selection_to(p) { note("move_selection_to", [p]); return "" }
+            function copy_selection_to_token(t) {
+                note("copy_selection_to_token", [t])
+                return t.startsWith("local:") ? "" : "That folder cannot be used"
+            }
+            function move_selection_to_token(t) {
+                note("move_selection_to_token", [t])
+                return t.startsWith("local:") ? "" : "That folder cannot be used"
+            }
+            function job_running() { return false }
+        }
+    }
+
+    ListModel { id: tabList }
+    QtObject {
+        id: tabs
+        property var models: []
+        function objectAt(i) {
+            while (models.length <= i) models.push(modelC.createObject(top))
+            return models[i]
+        }
+    }
+    QtObject { id: hints; property string message: "" }
+    QtObject { id: jobTimer; property int starts: 0; function start() { starts++ } }
+
+    Item {
+        id: win
+        property int paneCount: 1
+        property int activePane: 0
+        property int activeTab: 0
+        property var paneTab: [0, -1]
+        property var tabViews: ["rows"]
+        property var dirModel: null
+        property string alertText: ""
+        property var dumps: []
+        property var activated: []
+        property var transfers: []
+        function qaDump(tag) { dumps.push(tag) }
+        function focusPane(p) { activePane = p; dirModel = paneModel(p) }
+        function focusList() {}
+        function refreshPaneTabCount() {}
+        function activateTab(i) { activated.push(i) }
+        function transferStarted(m, e, kind) { transfers.push(e) }
+@SPLIT_STATE@
+@FUNCTIONS@
+        function menuOpenRow(a) {
+            if (a === "") {}
+@OPEN_ROW_BRANCH@
+        }
+    }
+
+    TestCase {
+        name: "Stage2Targets"
+        when: windowShown
+
+        property var here: null
+
+        function init() {
+            tabList.clear()
+            tabs.models = []
+            tabList.append({ startPath: "", label: "x", pane: 0 })
+            here = tabs.objectAt(0)
+            here.shown = top.label
+            here.token = top.tokA
+            here.rows = [{ name: "a<U+000A>b", token: top.tokRowA, dir: true },
+                         { name: "a<U+000A>b", token: top.tokRowB, dir: true },
+                         { name: "gone", token: "", dir: true }]
+            here.cursor = 1
+            win.paneCount = 1
+            win.activePane = 0
+            win.activeTab = 0
+            win.paneTab = [0, -1]
+            win.tabViews = ["rows"]
+            win.dirModel = here
+            win.alertText = ""
+            win.activated = []
+            win.transfers = []
+            win.splitMadeModel = null
+            hints.message = ""
+        }
+        function displayAuthority(m) {
+            return m.calls.filter(c => ["entry_path", "navigate", "copy_selection_to",
+                                        "move_selection_to"].indexOf(c[0]) >= 0)
+        }
+        function twoPanes() {
+            tabList.append({ startPath: "", label: "y", pane: 1 })
+            win.tabViews = ["rows", "rows"]
+            win.paneCount = 2
+            win.paneTab = [0, 1]
+            const other = tabs.objectAt(1)
+            other.shown = top.label        // same label, different folder
+            other.token = top.tokB
+            return other
+        }
+
+        function test_open_tab_uses_row_token() {
+            win.menuOpenRow("open-tab")
+            compare(tabList.count, 2)
+            compare(tabList.get(1).startPath, "token:" + top.tokRowB, "the second of two identical labels")
+            compare(tabList.get(1).label, "…")
+            compare(displayAuthority(here), [])
+        }
+        function test_open_other_pane_splits_by_token_with_name_label() {
+            win.menuOpenRow("open-other-pane")
+            compare(win.paneCount, 2)
+            compare(tabList.get(1).startPath, "token:" + top.tokRowB)
+            compare(tabList.get(1).label, "a<U+000A>b", "a name, never token hex")
+            verify(tabList.get(1).label.indexOf("local:") < 0)
+            compare(displayAuthority(here), [])
+        }
+        function test_open_other_pane_navigates_existing_pane_by_token() {
+            const other = twoPanes()
+            win.menuOpenRow("open-other-pane")
+            compare(other.named("navigate_token"), [["navigate_token", top.tokRowB]])
+            compare(displayAuthority(other), [])
+            compare(displayAuthority(here), [])
+        }
+        function test_row_without_token_refuses() {
+            here.cursor = 2
+            win.menuOpenRow("open-tab")
+            win.menuOpenRow("open-other-pane")
+            win.openRowInBackgroundTab(here, 2)
+            compare(tabList.count, 1, "no tab opened for a row that is gone")
+            compare(win.paneCount, 1)
+            compare(win.alertText, "That folder is no longer in the list")
+            compare(displayAuthority(here), [])
+        }
+        function test_invalid_token_is_not_retried_as_text() {
+            const other = twoPanes()
+            win.openPathInPane("token:not-a-token", 1, "x")
+            compare(other.named("navigate_token"), [["navigate_token", "not-a-token"]])
+            compare(other.named("navigate"), [], "no fallback to display text")
+            win.paneCount = 1
+            win.dirModel = here
+            win.openPathInPane("token:not-a-token", 0, "x")
+            compare(here.named("navigate_token"), [["navigate_token", "not-a-token"]])
+            compare(here.named("navigate"), [])
+        }
+        function test_places_still_open_typed_paths() {
+            win.openPathInPane("/media/usb", 1)
+            compare(tabList.get(1).startPath, "/media/usb")
+            compare(tabList.get(1).label, "usb")
+            win.openPathInPane("/srv", 0)     // two panes now: the left one goes there
+            compare(here.named("navigate"), [["navigate", "/srv"]])
+        }
+        function test_background_tab_uses_row_token() {
+            win.openRowInBackgroundTab(here, 0)
+            compare(tabList.get(1).startPath, "token:" + top.tokRowA)
+            compare(tabList.get(1).label, "a<U+000A>b")
+            compare(displayAuthority(here), [])
+        }
+        function test_new_tab_and_split_start_at_raw_location() {
+            win.newTab("")
+            compare(tabList.get(1).startPath, "token:" + top.tokA)
+            tabList.remove(1)
+            win.splitPane()
+            compare(tabList.get(tabList.count - 1).startPath, "token:" + top.tokA)
+            compare(displayAuthority(here), [])
+        }
+        function test_new_tab_without_location_token_starts_default() {
+            here.token = ""
+            win.newTab("")
+            compare(tabList.get(1).startPath, "")
+        }
+        function test_split_tab_identity_is_raw_location() {
+            const m = tabs.objectAt(3)
+            m.token = top.tokA
+            m.shown = top.label
+            win.splitMadeModel = m
+            win.armSplitTab("token:" + top.tokA)
+            compare(win.splitMadeAt, top.tokA)
+            m.shown = "/elsewhere/label"            // label only: same folder
+            win.noteSplitTabMoved(m)
+            compare(win.splitMadeModel, m)
+            m.shown = top.label
+            m.token = top.tokB                      // same label, other folder
+            win.noteSplitTabMoved(m)
+            compare(win.splitMadeModel, null)
+        }
+        function test_split_initial_navigation_publishes_asynchronously() {
+            const m = tabs.objectAt(3)
+            m.token = top.tokB  // startup location, before the requested destination
+            win.splitMadeModel = m
+            win.armSplitTab("token:" + top.tokA)
+            compare(win.splitMadeAt, top.tokA)
+            m.token = top.tokA
+            win.noteSplitTabMoved(m)
+            compare(win.splitMadeModel, m, "initial destination is still scratch")
+            m.token = top.tokB
+            win.noteSplitTabMoved(m)
+            compare(win.splitMadeModel, null, "subsequent navigation keeps the tab")
+        }
+        function test_split_text_destination_arms_before_publication() {
+            const m = tabs.objectAt(3)
+            m.token = top.tokB
+            win.splitMadeModel = m
+            win.armSplitTab("/media/usb")
+            compare(win.splitMadeAt, top.tokA)
+            compare(m.named("token_for"), [["token_for", "/media/usb"]])
+            m.token = top.tokA
+            win.noteSplitTabMoved(m)
+            compare(win.splitMadeAt, top.tokA)
+            compare(win.splitMadeModel, m)
+            m.token = top.tokB
+            win.noteSplitTabMoved(m)
+            compare(win.splitMadeModel, null)
+        }
+        function test_split_same_startup_text_destination_has_no_initial_location_signal() {
+            const m = tabs.objectAt(3)
+            m.token = top.tokA
+            win.splitMadeModel = m
+            win.armSplitTab("/home/u")
+            compare(win.splitMadeAt, top.tokA)
+            // Initial loading completes at the same location. No move handler
+            // runs; the first actual change is the user's child navigation.
+            compare(win.splitMadeModel, m)
+            m.token = top.tokB
+            win.noteSplitTabMoved(m)
+            compare(win.splitMadeModel, null, "user-navigated tab must survive closing its pane")
+        }
+        function test_send_to_other_pane_by_token_data() {
+            return [{ tag: "copy", move: false, name: "copy_selection_to_token" },
+                    { tag: "move", move: true, name: "move_selection_to_token" }]
+        }
+        function test_send_to_other_pane_by_token(data) {
+            twoPanes()
+            win.sendToOtherPane(data.move)
+            compare(here.named(data.name), [[data.name, top.tokB]],
+                    "two folders with one label are still different folders")
+            compare(displayAuthority(here), [])
+            compare(win.alertText, "")
+            compare(jobTimer.starts > 0, true)
+        }
+        function test_send_refuses_same_raw_folder_despite_labels() {
+            const other = twoPanes()
+            other.token = top.tokA
+            other.shown = "/another/label"
+            win.sendToOtherPane(false)
+            compare(win.alertText, "Both panes are showing the same folder")
+            compare(here.named("copy_selection_to_token"), [])
+        }
+        function test_send_invalid_destination_token_refused() {
+            const other = twoPanes()
+            other.token = "garbage"
+            win.sendToOtherPane(true)
+            compare(here.named("move_selection_to_token"), [["move_selection_to_token", "garbage"]])
+            compare(win.alertText, "That folder cannot be used")
+            compare(displayAuthority(here), [])
+        }
+    }
+}

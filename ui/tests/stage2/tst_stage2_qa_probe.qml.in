@@ -1,0 +1,96 @@
+import QtQuick
+import QtTest
+
+// The exact Main.qml QA-probe scheduling (extracted by the runner): qaDump
+// only notes tags; one dump of the newest state is built on a later turn of
+// the event loop; nothing at all happens while GUST_QA_STATE is unset.
+// qaWrite's payload is replaced by a recorder here; its content is unchanged
+// production code covered by the native QA receipts.
+Item {
+    id: top
+    width: 200
+    height: 100
+
+    Item {
+        id: win
+        property string qaStatePath: "/tmp/gust-qa-state.json"
+        property var writes: []
+        function qaWrite(pending) { writes = writes.concat([pending]) }
+@QA_STATE@
+@QA_FUNCTIONS@
+    }
+
+    TestCase {
+        name: "Stage2QaProbe"
+        when: windowShown
+
+        function init() {
+            qaSettle.stop()
+            qaPending.stop()
+            win.qaPendingTag = ""
+            win.qaPendingTags = []
+            win.qaStatePath = "/tmp/gust-qa-state.json"
+            win.writes = []
+        }
+
+        function test_burst_becomes_one_later_dump_of_the_newest_tag() {
+            win.qaDump("select")
+            win.qaDump("count")
+            win.qaDump("location")
+            compare(win.writes, [], "nothing is built inside the caller")
+            verify(qaPending.running)
+            tryVerify(() => win.writes.length === 1, 1000)
+            compare(win.writes[0].tag, "location")
+            compare(win.writes[0].tags, ["select", "count", "location"])
+            verify(!qaPending.running)
+            wait(20)
+            compare(win.writes.length, 1, "one pending dump, written once")
+        }
+        function test_separate_turns_write_separately() {
+            win.qaDump("a")
+            tryVerify(() => win.writes.length === 1, 1000)
+            win.qaDump("b")
+            tryVerify(() => win.writes.length === 2, 1000)
+            compare(win.writes.map(w => w.tag), ["a", "b"])
+            compare(win.writes[1].tags, ["b"])
+        }
+        function test_tag_list_is_bounded() {
+            for (let i = 0; i < 40; i++) win.qaDump("t" + i)
+            tryVerify(() => win.writes.length === 1, 1000)
+            compare(win.writes[0].tags.length, 16)
+            compare(win.writes[0].tags[15], "t39")
+            compare(win.writes[0].tags[0], "t24")
+        }
+        function test_settle_keeps_its_meaning() {
+            win.qaDump("cursor")
+            verify(qaSettle.running, "an ordinary dump restarts the settle timer")
+            tryVerify(() => win.writes.length === 1, 1000)
+            tryVerify(() => win.writes.length === 2, qaSettle.interval * 4)
+            compare(win.writes[1].tag, "settle")
+            verify(!qaSettle.running, "a settle dump does not schedule another")
+        }
+        function test_flush_writes_now_and_only_once() {
+            win.qaDump("close-without-waiting")
+            win.qaFlush()
+            compare(win.writes.length, 1, "written before the app quits")
+            compare(win.writes[0].tag, "close-without-waiting")
+            verify(!qaPending.running)
+            wait(20)
+            compare(win.writes.length, 1)
+            win.qaFlush()
+            compare(win.writes.length, 1, "nothing pending, nothing written")
+        }
+        function test_disabled_probe_does_no_work() {
+            win.qaStatePath = ""
+            win.qaDump("select")
+            win.qaDump("count")
+            win.qaFlush()
+            verify(!qaPending.running)
+            verify(!qaSettle.running)
+            compare(win.qaPendingTags, [])
+            compare(win.qaPendingTag, "")
+            wait(20)
+            compare(win.writes, [])
+        }
+    }
+}

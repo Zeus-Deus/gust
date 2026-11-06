@@ -14,6 +14,8 @@ gust-ops.workspace = true
 gust-remote.workspace = true
 gust-thumbs.workspace = true
 serde_json.workspace = true
+rustix.workspace = true
+hashbrown = { version = "=0.17.1", default-features = false }
 cxx = "1.0"
 cxx-qt = "0.10"
 cxx-qt-lib = { version = "0.10", features = ["qt_full"] }

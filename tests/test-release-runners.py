@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise the shared runner's process boundary with synthetic Cargo output."""
 
+import argparse
 import concurrent.futures
 import contextlib
 import fcntl
@@ -146,6 +147,18 @@ sys.exit(23 if os.environ.get('CASE') in ('failure', 'diagnostic', 'build-script
         self.assertTrue(summary["diagnostics"]["native_compiler_failure"])
         self.assertNotIn("private-marker", result.stdout + result.stderr)
         self.assertNotIn("/synthetic-private/", result.stdout + result.stderr)
+
+    def test_app_scope_filters_only_its_named_manual_trial_and_reports_it(self):
+        trial = "projection::tests::release_scheduler_supersession_trials"
+        result, summary = self.run_case("pass", "--app", "--required", "--", "caller_filter")
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(summary["excluded_manual_benchmarks"], [trial])
+        argv = json.loads(next(self.root.glob("capture-*")).read_text())["argv"]
+        self.assertEqual(argv[argv.index("--"):], ["--", "caller_filter", "--skip", trial])
+        self.assertNotIn("--ignored", argv)
+        result, summary = self.run_case("ignored", "--app", "--required")
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(summary["ignored"], 1)
 
     def test_custom_build_header_reports_locked_crate_without_version_or_paths(self):
         result, summary = self.run_case("build-script", "--app", "--required")
@@ -368,6 +381,44 @@ except KeyboardInterrupt:
                 capture_output=True, text=True, timeout=10)
             self.assertEqual(result.returncode, 1)
             self.assertFalse(destination.exists())
+
+
+spec = importlib.util.spec_from_file_location("optimization_qa", Path(__file__).with_name("qa-optimization.py"))
+qa = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(qa)
+
+class OptimizationAdmitted(Exception):
+    pass
+
+class OptimizationArguments(unittest.TestCase):
+    def test_bounded_search_defaults_and_explicit_limit(self):
+        for journey in ("--projection-search-jobs", "--projection-search-operations"):
+            for entries in (None, 99999, 100000):
+                with self.subTest(journey=journey, entries=entries):
+                    argv = ["qa-optimization.py", "--binary", "/synthetic/gust", "--output", "/tmp/gust-synthetic", journey]
+                    if entries is not None:
+                        argv += ["--entries", str(entries)]
+                    captured = []
+                    parse = argparse.ArgumentParser.parse_args
+                    def capture(parser, *args, **kwargs):
+                        result = parse(parser, *args, **kwargs)
+                        captured.append(result)
+                        return result
+                    # Path.resolve is the first external input check after argument admission.
+                    with patch.object(argparse.ArgumentParser, "parse_args", capture), patch.object(sys, "argv", argv), patch.object(Path, "resolve", side_effect=OptimizationAdmitted):
+                        if entries == 100000:
+                            with self.assertRaises(SystemExit) as failure:
+                                qa.main()
+                            self.assertEqual(failure.exception.code, 2)
+                        else:
+                            with self.assertRaises(OptimizationAdmitted):
+                                qa.main()
+                            self.assertEqual(captured[0].entries, 99999)
+    def test_timing_fixture_still_admits_100k(self):
+        argv = ["qa-optimization.py", "--binary", "/synthetic/gust", "--output", "/tmp/gust-synthetic", "--projection", "--entries", "100000"]
+        with patch.object(sys, "argv", argv), patch.object(Path, "resolve", side_effect=OptimizationAdmitted):
+            with self.assertRaises(OptimizationAdmitted):
+                qa.main()
 
 
 if __name__ == "__main__":

@@ -20,6 +20,7 @@ import tomllib
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGES = ("gust-core", "gust-ops", "gust-remote", "gust-thumbs", "gust-testkit")
 MANUAL_BENCHMARK = "recursive::tests::copy_1000_small_files"
+APP_MANUAL_BENCHMARK = "projection::tests::release_scheduler_supersession_trials"
 RESULT = re.compile(
     r"^test result: (?:ok|FAILED)\. (\d+) passed; (\d+) failed; (\d+) ignored;",
     re.MULTILINE,
@@ -128,6 +129,7 @@ def main(argv):
     boundary = argv.index("--") if "--" in argv else len(argv)
     argv = [arg for index, arg in enumerate(argv) if index >= boundary or arg != "--locked"]
     package_unit = "--package-unit" in argv
+    excluded_manual = []
     if package_unit:
         argv.remove("--package-unit")
         # This unconditional #[ignore] is a manual disk benchmark, not a unit
@@ -138,6 +140,7 @@ def main(argv):
         if "--" not in argv:
             argv.append("--")
         argv += ["--skip", MANUAL_BENCHMARK]
+        excluded_manual.append(MANUAL_BENCHMARK)
     required = enabled(os.environ.get("GUST_ALL_REQUIRED", ""))
     if "--required" in argv:
         required = True
@@ -149,6 +152,12 @@ def main(argv):
     elif "--app" in argv:
         argv.remove("--app")
         packages = ["-p", "gust-app"]
+        # This isolated release trial must not run in parallel unit CI or
+        # turn an intentional manual benchmark into an unprovisioned ignore.
+        if "--" not in argv:
+            argv.append("--")
+        argv += ["--skip", APP_MANUAL_BENCHMARK]
+        excluded_manual.append(APP_MANUAL_BENCHMARK)
     elif any(arg in {"-p", "--package"} or arg.startswith("--package=") for arg in argv):
         # Explicit Cargo selectors replace the default set, allowing a focused
         # check without compiling every library in the workspace.
@@ -174,7 +183,7 @@ def main(argv):
     except OSError:
         result = summarize("", "", 127, required)
     result["scope"] = "package-library-unit" if package_unit else "selected-cargo-tests"
-    result["excluded_manual_benchmarks"] = [MANUAL_BENCHMARK] if package_unit else []
+    result["excluded_manual_benchmarks"] = excluded_manual
     catalogue = public_test_catalogue() if enabled(os.environ.get("GUST_PUBLIC_TEST_IDS", "")) else {}
     # Unknown/unit/nested/ambiguous names stay private. IDs never affect status.
     failures = public_failures(log, catalogue) if catalogue else []

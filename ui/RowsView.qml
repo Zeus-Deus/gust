@@ -20,6 +20,8 @@ FocusScope {
     }
     signal dropReleased(int row)
     property bool dragActive: false
+    /// A selection band is held down on empty space (press to release).
+    readonly property bool bandActive: rowsBand.pressed
     /// Keyboard modifiers held during the drag: Ctrl copies, Shift moves.
     property int dragMods: 0
     property int dropRow: -1
@@ -72,6 +74,10 @@ FocusScope {
     }
     Timer { id: rowsReport; interval: 40; onTriggered: root.reportRows() }
     onVisibleChanged: if (visible) rowsReport.restart()
+
+    // Where the user was looking survives a re-sort, re-filter or live
+    // change that replaces the rows (DESIGN §2.2.1).
+    ViewportAnchor { view: list }
 
     /// Where a keyboard-opened menu should appear: under the cursor row,
     /// in window coordinates.
@@ -450,6 +456,13 @@ FocusScope {
                                 if (dx * dx + dy * dy < root.dragThreshold * root.dragThreshold)
                                     return
                                 root.dragStarted(index)
+                                // The pane may refuse (a selection still being applied):
+                                // this press then ends here, and its release is no click.
+                                if (!root.dragActive) {
+                                    armed = false
+                                    root.suppressClick = true
+                                    return
+                                }
                             }
                             // Which row is under the pointer now?
                             const gp = mapToItem(list.contentItem, mouse.x, mouse.y)
@@ -496,8 +509,10 @@ FocusScope {
                     textFormat: Text.PlainText
                     anchors.centerIn: parent
                     visible: list.count === 0
+                    // The query the rows on screen match, not one still being applied.
+                    readonly property string shownQuery: (root.model && root.model.shown_filter) || ""
                     text: (root.model && root.model.empty_reason !== "") ? root.model.empty_reason
-                                  : (root.model ? root.model.filter : "").length > 0 ? "No match for \"" + (root.model ? root.model.filter : "") + "\""
+                                  : shownQuery.length > 0 ? "No match for \"" + shownQuery + "\""
                                                        : "This folder is empty"
                     color: Tokens.foregroundDim
                     font.family: Tokens.fontFamily

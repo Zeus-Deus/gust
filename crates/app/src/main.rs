@@ -1,15 +1,24 @@
 //! Gust — a fast, calm file manager for Omarchy.
 
 pub mod bridge;
+mod callback_metrics;
 mod cli;
 mod clipboard;
 mod directory_cache;
 mod fm1;
 mod folder_jump;
 mod folder_sizes;
+mod lazy_pages;
+mod name_index;
 mod place_work;
 mod portal;
+mod preferences;
+mod projection;
+mod qa_state;
+mod row_cache;
+mod sort_state;
 mod thumbnails;
+mod watch_service;
 
 use cxx_qt_lib::{QGuiApplication, QQmlApplicationEngine, QString, QUrl};
 use std::ffi::{OsStr, OsString};
@@ -409,12 +418,16 @@ fn main() {
     // nothing global, nothing about the compositor).
     // The Settings choice applies unless the user already chose in the
     // environment (GUST_RENDERER / QT_QUICK_BACKEND always win).
-    let setting = gust_core::settings::Settings::default_path()
-        .map(|p| gust_core::settings::Settings::load(&p).renderer)
-        .unwrap_or(gust_core::settings::RendererChoice::Auto);
-    let env_decides = ["GUST_RENDERER", "QT_QUICK_BACKEND", "QSG_RHI_BACKEND"]
+    let env_decides = matches!(
+        std::env::var("GUST_RENDERER")
+            .ok()
+            .as_deref()
+            .map(str::trim),
+        Some("software" | "gpu" | "hardware")
+    ) || ["QT_QUICK_BACKEND", "QSG_RHI_BACKEND"]
         .iter()
-        .any(|k| std::env::var_os(k).is_some_and(|v| !v.is_empty()));
+        .any(|key| std::env::var(key).is_ok_and(|value| !value.trim().is_empty()));
+    let setting = preferences::process().renderer_before_qt();
     let software = match setting {
         _ if env_decides => {
             gust_core::renderer::choose_for_this_machine()
@@ -478,5 +491,8 @@ fn main() {
 
     if let Some(app) = app.as_mut() {
         app.exec();
+    }
+    if !preferences::process().shutdown(std::time::Duration::from_millis(500)) {
+        eprintln!("gust: preferences exit flush did not finish; pending changes may be unsaved");
     }
 }
