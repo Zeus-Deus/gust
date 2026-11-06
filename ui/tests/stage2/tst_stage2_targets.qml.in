@@ -206,13 +206,40 @@ Item {
             m.token = top.tokA
             m.shown = top.label
             win.splitMadeModel = m
-            win.armSplitTab()
+            win.armSplitTab("token:" + top.tokA)
             compare(win.splitMadeAt, top.tokA)
             m.shown = "/elsewhere/label"            // label only: same folder
             win.noteSplitTabMoved(m)
             compare(win.splitMadeModel, m)
             m.shown = top.label
             m.token = top.tokB                      // same label, other folder
+            win.noteSplitTabMoved(m)
+            compare(win.splitMadeModel, null)
+        }
+        function test_split_initial_navigation_publishes_asynchronously() {
+            const m = tabs.objectAt(3)
+            m.token = top.tokB  // startup location, before the requested destination
+            win.splitMadeModel = m
+            win.armSplitTab("token:" + top.tokA)
+            compare(win.splitMadeAt, top.tokA)
+            m.token = top.tokA
+            win.noteSplitTabMoved(m)
+            compare(win.splitMadeModel, m, "initial destination is still scratch")
+            m.token = top.tokB
+            win.noteSplitTabMoved(m)
+            compare(win.splitMadeModel, null, "subsequent navigation keeps the tab")
+        }
+        function test_split_text_destination_arms_on_first_publication() {
+            const m = tabs.objectAt(3)
+            m.token = top.tokB
+            win.splitMadeModel = m
+            win.armSplitTab("/media/usb")
+            compare(win.splitMadeAt, "")
+            m.token = top.tokA
+            win.noteSplitTabMoved(m)
+            compare(win.splitMadeAt, top.tokA)
+            compare(win.splitMadeModel, m)
+            m.token = top.tokB
             win.noteSplitTabMoved(m)
             compare(win.splitMadeModel, null)
         }

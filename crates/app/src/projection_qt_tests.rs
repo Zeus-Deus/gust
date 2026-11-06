@@ -220,6 +220,8 @@ fn actual_qt_navigation_layout_persistent_mapping_metadata_and_hold() {
             .to_string()
             .contains("Invalid destination token"));
     }
+    newer_focus_survives_held_relist(app, &mut model, &fixture);
+    equal_viewport_filter_measures_new_folders(app, &mut model, &fixture);
     publication_attribution_reenters_qt(app, &fixture);
     marks_do_not_reset_or_layout(app, &mut model, &fixture);
     search_output_uses_latest_presentation_and_rejects_replacement(app, &mut model, &fixture);
@@ -1324,4 +1326,99 @@ fn publication_attribution_reenters_qt(app: &QCoreApplication, fixture: &Fixture
         drop(model);
         app.process_events();
     }
+}
+
+fn newer_focus_survives_held_relist(
+    app: &QCoreApplication,
+    model: &mut cxx::UniquePtr<qobject::DirModel>,
+    fixture: &Fixture,
+) {
+    let root = fixture.0.join("focus-intents");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("original"), b"original").unwrap();
+    model.pin_mut().navigate_path(root.clone());
+    wait(app, model, |m| m.settled && m.count == 1);
+    model.pin_mut().stop_watch();
+    std::fs::create_dir(root.join("A")).unwrap();
+    model.pin_mut().relist_focusing("A".into());
+    let older_revision = model.focus_revision;
+    model.pin_mut().hold_live_updates(true);
+    // Hold the old completion at the actual publication boundary.
+    wait(app, model, |m| m.runtime.slots()["completion"] == true);
+    std::fs::create_dir(root.join("B")).unwrap();
+    model.pin_mut().relist_focusing("B".into());
+    assert!(model.focus_revision > older_revision);
+    assert!(model.live_busy && model.live_dirty);
+    assert_eq!(model.focus_name.as_deref(), Some(std::ffi::OsStr::new("B")));
+    model.pin_mut().hold_live_updates(false);
+    wait(app, model, |m| {
+        !m.live_busy
+            && !m.live_dirty
+            && m.count == 3
+            && m.focus_name.is_none()
+            && m.path_of_row(m.cursor) == Some(root.join("B"))
+    });
+    assert_eq!(model.entry_name(model.cursor).to_string(), "B");
+    model.pin_mut().stop_watch();
+}
+
+fn equal_viewport_filter_measures_new_folders(
+    app: &QCoreApplication,
+    model: &mut cxx::UniquePtr<qobject::DirModel>,
+    fixture: &Fixture,
+) {
+    let root = fixture.0.join("filtered-sizes");
+    std::fs::create_dir(&root).unwrap();
+    for group in ["alpha", "beta"] {
+        for i in 0..100 {
+            let dir = root.join(format!("{group}-{i:03}"));
+            std::fs::create_dir(&dir).unwrap();
+            std::fs::write(
+                dir.join("payload"),
+                vec![0; if group == "alpha" { 13 } else { 29 }],
+            )
+            .unwrap();
+        }
+    }
+    model.pin_mut().navigate_path(root.clone());
+    wait(app, model, |m| m.settled && m.count == 200);
+    model.pin_mut().stop_watch();
+    model.pin_mut().set_filter_text(&QString::from("alpha"));
+    model.pin_mut().want_rows(0, 2);
+    wait(app, model, |m| {
+        !m.filter_pending
+            && m.count == 100
+            && m.dir_sizes.get(std::ffi::OsStr::new("alpha-002")).is_some()
+    });
+    let backing = model.all.clone();
+    let bounds = gust_core::dirsize::rows_in_view(0, 2, model.visible.len());
+    assert!(model
+        .dir_sizes
+        .get(std::ffi::OsStr::new("beta-000"))
+        .is_none());
+    // Drain the completed pass, then repeat exactly the numeric bounds.
+    wait(app, model, |m| !m.size_work.is_active());
+    model.pin_mut().set_filter_text(&QString::from("beta"));
+    wait(app, model, |m| {
+        !m.filter_pending
+            && m.count == 100
+            && m.dir_sizes.get(std::ffi::OsStr::new("beta-002")).is_some()
+    });
+    assert!(std::sync::Arc::ptr_eq(&backing, &model.all));
+    assert_eq!(
+        gust_core::dirsize::rows_in_view(0, 2, model.visible.len()),
+        bounds
+    );
+    for i in 0..3 {
+        assert_eq!(
+            model
+                .dir_sizes
+                .get(std::ffi::OsStr::new(&format!("beta-{i:03}")))
+                .unwrap()
+                .bytes,
+            29
+        );
+    }
+    model.pin_mut().set_filter_text(&QString::from(""));
+    wait(app, model, |m| !m.filter_pending);
 }

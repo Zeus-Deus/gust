@@ -57,6 +57,34 @@ Third and later scalar values replace directly. Clear remains logical,
 constant-time disablement, and final destruction keeps the retirement owner.
 Thumbnail storage and metadata ownership are unchanged by this specialization.
 
+## Review correctness follow-up
+
+Review found and corrected seven correctness/qualification gaps. Folder-size
+admission now resets for same-backing row changes. Projection frames consume
+only the focus revision they prepared, preserving newer relist focus. Split
+scratch-tab tracking uses the intended initial destination. Deferred row menus
+are cancelled by Settings and other modal overlays. Integration busy state
+waits for its explicit worker refresh token instead of any preference notice.
+Correctness-only search journeys default to 99,999 visible files plus their
+hidden file and reject larger fixtures; ordinary 100k timing fixtures are
+unchanged. The scalar cancellation helper explicitly rejects unsupported Kind.
+
+The corrected source passed 143 required app tests, including real-Qt held-relist
+and equal-viewport filter regressions; 234 offscreen QML checks with no warnings;
+115 existing work/close/preference guard checks; and 22 runner/argument tests.
+The held-relist regression initially used an impossible drain condition during
+publication hold; its wait was corrected to the actual completion boundary.
+The unsupported Kind command was exercised and exited 2 before fixture work.
+
+Two new software-rendered native correctness journeys passed 20 explicit checks
+with no QML warnings. A focused split/Settings smoke confirmed scratch-tab
+cleanup after navigating away from startup and cached refresh acknowledgement.
+The Copy/Undo journey preserved file identities/bytes; inspected screenshots
+showed Target 1→3→1 KB, Untouched 512 B and source 2 KB. These are debug-artifact
+correctness checks with private evidence, not renewed performance or platform
+acceptance. Historical Stage 1–5 measurements and limitations below remain
+historical evidence, and stopped timing experiments remain stopped.
+
 ## Recorded evidence and its limits
 
 Evidence used synthetic fixtures in private temporary homes and isolated native

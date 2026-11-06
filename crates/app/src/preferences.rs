@@ -89,6 +89,8 @@ pub struct Snapshot {
     pub saved_revision: u64,
     /// Worker attempts completed, including refusals/failures with identical text.
     pub completed_attempt: u64,
+    /// Latest explicit refresh included in a completed integration probe.
+    pub integration_refresh: u64,
     pub pending: bool,
     pub error: String,
     /// Rejected choices were never admitted; flush cannot retry them.
@@ -115,6 +117,7 @@ struct State {
     admission_errors: BTreeMap<AdmissionKey, String>,
     admission_overflow: bool,
     wake: u64,
+    refresh_requested: u64,
     stop: bool,
     subscribers: BTreeMap<u64, Callback>,
     next_subscriber: u64,
@@ -150,6 +153,7 @@ impl Preferences {
                 admission_errors: BTreeMap::new(),
                 admission_overflow: false,
                 wake: 1,
+                refresh_requested: 0,
                 stop: false,
                 subscribers: BTreeMap::new(),
                 next_subscriber: 0,
@@ -247,8 +251,21 @@ impl Preferences {
     }
 
     /// Explicit refresh also observes external edits while idle. No timer polls.
-    pub fn refresh(&self) {
-        self.flush();
+    pub fn refresh(&self) -> Result<u64, String> {
+        let target = {
+            let mut state = lock(&self.shared.state);
+            if state.stop {
+                return Err("preferences worker is stopped".into());
+            }
+            state.refresh_requested = state
+                .refresh_requested
+                .checked_add(1)
+                .ok_or_else(|| "preferences refresh revision exhausted".to_string())?;
+            state.wake = state.wake.wrapping_add(1);
+            state.refresh_requested
+        };
+        self.shared.changed.notify_all();
+        Ok(target)
     }
 
     pub fn subscribe(&self, callback: Callback) -> Result<Subscription, String> {
@@ -582,7 +599,7 @@ fn run(shared: Arc<Shared>, mut backend: Box<dyn Backend>) {
     // None is a successful observation of deletion, distinct from an I/O error.
     let mut last_good = BTreeMap::new();
     loop {
-        let (wake, intents, target, attempt) = {
+        let (wake, intents, target, attempt, refresh) = {
             let mut state = lock(&shared.state);
             while !state.stop && state.wake == observed {
                 state = shared
@@ -598,16 +615,20 @@ fn run(shared: Arc<Shared>, mut backend: Box<dyn Backend>) {
                 state.intents.clone(),
                 state.snapshot.revision,
                 state.snapshot.completed_attempt.saturating_add(1),
+                state.refresh_requested,
             )
         };
         observed = wake;
         if !intents.is_empty() {
             let documents: Vec<_> = intents.keys().map(|(doc, _)| *doc).collect();
             if let Err(error) = backend.begin_write(&documents) {
+                let integration = backend.integration();
                 {
                     let mut state = lock(&shared.state);
                     state.snapshot.error = error;
                     state.snapshot.completed_attempt = attempt;
+                    state.snapshot.integration = integration;
+                    state.snapshot.integration_refresh = refresh;
                 }
                 notify(&shared);
                 continue;
@@ -709,6 +730,7 @@ fn run(shared: Arc<Shared>, mut backend: Box<dyn Backend>) {
                 let _ = mutation.apply(&mut next);
             }
             next.completed_attempt = attempt;
+            next.integration_refresh = refresh;
             next.ready = true;
             next.revision = state.snapshot.revision;
             next.pending = !state.intents.is_empty();

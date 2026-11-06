@@ -58,6 +58,25 @@ pub struct Capabilities {
 `Unknown` it attempts and reports honestly. Capabilities come from probing the
 connected account, never from the provider's marketing name.
 
+## Review correction boundaries
+
+Folder-size admission is invalidated whenever displayed row membership/order
+changes, even if the backing and numeric viewport bounds are unchanged. Existing
+cancellation, generation and listing fences still apply.
+
+Focus intents have a GUI-owned revision carried by projection requests and row
+frames. Publication consumes only the matching revision; newer focus remains
+pending for the dirty follow-up relist. Selection/mark frames cannot consume it.
+
+Preferences refresh returns a decimal request token. Only a worker integration
+probe started after that request can acknowledge its token in the cached
+snapshot; preference admission and older worker completions cannot release an
+integration control's busy guard. Errors remain observable separately.
+
+Split-created tabs track the intended raw destination token, or arm on the
+initial location publication for text destinations. Deferred row menus are
+cancelled when another modal overlay opens, including Settings.
+
 ## 2.1 Interactive preferences and matching
 
 The preferences service owns one process-local state for settings, remembered

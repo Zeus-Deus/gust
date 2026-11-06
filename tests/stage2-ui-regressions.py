@@ -72,7 +72,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--source", type=Path, required=True)
     ap.add_argument("--output", type=Path, required=True)
-    ap.add_argument("--only", choices=["views", "main", "pane_focus", "targets", "qa_probe", "menu", "release"], default=None)
+    ap.add_argument("--only", choices=["views", "main", "pane_focus", "targets", "qa_probe", "menu", "release", "preferences"], default=None)
     args = ap.parse_args()
     source, out = args.source.resolve(), args.output.resolve()
     if out.exists():
@@ -161,6 +161,7 @@ def main():
         "@HOLD_HANDLER@": block(main_qml, "onLiveHoldChanged:"),
         "@DIRMODEL_HANDLER@": block(main_qml, "onDirModelChanged:"),
         "@SELECTION_SETTLING@": block(main_qml, "    function selectionSettling("),
+        "@OPEN_SETTINGS@": block(main_qml, "    function openSettings("),
         "@MENU@": main_qml[menu_start:menu_end],
         "@PANE_CONTEXT@": block(pane_a, "onContextRequested:"),
         "@PANE_SELECTION@": block(pane_a, "onSelectionTouched:"),
@@ -200,6 +201,23 @@ def main():
         release = release.replace(key, value)
     (tests / "tst_stage2_release.qml").write_text(release)
     bindings.update({"release" + k: v for k, v in release_bindings.items()})
+    prefs_start = main_qml.index("    property int prefsTick:")
+    prefs_end_block = block(main_qml, "    function prefsPublished(")
+    prefs_end = main_qml.index(prefs_end_block) + len(prefs_end_block)
+    pref_bindings = {
+        "@PREFS@": main_qml[prefs_start:prefs_end],
+        "@REVISION@": block(main_qml, "    function revisionAtLeast("),
+        "@DEFAULT@": block(main_qml, "onDefaultRequested:"),
+        "@DIALOGS@": block(main_qml, "onDialogsRequested:"),
+        "@KEYS@": block(main_qml, "onKeysRequested:"),
+    }
+    pref_fixture = (source / "ui/tests/stage2/tst_stage2_preferences.qml.in").read_text()
+    for key, value in pref_bindings.items():
+        if pref_fixture.count(key) != 1:
+            raise SystemExit(f"preferences placeholder {key}")
+        pref_fixture = pref_fixture.replace(key, value)
+    (tests / "tst_stage2_preferences.qml").write_text(pref_fixture)
+    bindings.update({"preferences" + k: v for k, v in pref_bindings.items()})
     (out / "bindings.json").write_text(json.dumps(bindings, indent=2) + "\n")
     # Reuse the app runner's exact handler locator without invoking its VM/
     # desktop entry point. This runner exercises only offscreen boundary doubles.
@@ -240,7 +258,7 @@ def main():
            "QSG_RENDER_LOOP": "basic", "QT_FORCE_STDERR_LOGGING": "1",
            "QT_ASSUME_STDERR_HAS_CONSOLE": "1"}
     results = {}
-    names = ["views", "main", "pane_focus", "targets", "qa_probe", "menu", "release"] if not args.only else [args.only]
+    names = ["views", "main", "pane_focus", "targets", "qa_probe", "menu", "release", "preferences"] if not args.only else [args.only]
     for name in names:
         qml = tests / f"tst_stage2_{name}.qml"
         argv = ["/usr/lib/qt6/bin/qmltestrunner", "-import", str(out / "imports"), "-input", str(qml)]

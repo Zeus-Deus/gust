@@ -140,6 +140,7 @@ SortFilterProxyModel {
     function entry_path(i) { note("entry_path", [i]); return fake.location + "/" + (fake.names[i] || "") }
     function is_dir(i) { note("is_dir", [i]); return !!fake.dirs[i] }
     function entry_token(i) { note("entry_token", [i]); return fake.tokens[i] || "" }
+    function preferences_refresh() { return "1" }
     function location_token() { note("location_token"); return fake.locationToken }
     function sel_contains(i) { note("sel_contains", [i]); return fake.selected.indexOf(i) >= 0 }
     function sel_count() { return fake.selected.length }

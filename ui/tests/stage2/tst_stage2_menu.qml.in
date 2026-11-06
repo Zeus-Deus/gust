@@ -15,7 +15,9 @@ Item {
     QtObject { id: palette; property bool visible: false }
     QtObject { id: confirm; property bool visible: false }
     QtObject { id: connectionRecovery; property bool visible: false }
-    QtObject { id: settingsPanel; property bool open: false }
+    QtObject { id: settingsPanel; property bool open: false; function show() { open = true } }
+    QtObject { id: permissionsDialog; property bool open: false }
+    QtObject { id: keyMapPanel; property bool open: false }
     QtObject { id: trashPanel; property bool open: false }
     QtObject { id: recentPanel; property bool open: false }
     QtObject { id: connectPanel; property bool open: false }
@@ -27,6 +29,7 @@ Item {
     QtObject {
         id: contextMenu
         property bool open: false
+        property bool dispatching: false
         property int current: -1
         property var popups: []
         function popup(x, y, items) {
@@ -60,6 +63,7 @@ Item {
 @HOLD_HANDLER@
 @DIRMODEL_HANDLER@
 @SELECTION_SETTLING@
+@OPEN_SETTINGS@
 @MENU@
     }
 
@@ -93,6 +97,15 @@ Item {
             fake.clearCalls()
         }
         function init() {
+            settingsPanel.open = false
+            permissionsDialog.open = false
+            keyMapPanel.open = false
+            trashPanel.open = false
+            recentPanel.open = false
+            connectPanel.open = false
+            deviceSharing.open = false
+            connectionRecovery.visible = false
+            conflictDialog.visible = false
             contextMenu.open = false
             contextMenu.popups = []
             prompt.visible = false
@@ -285,6 +298,29 @@ Item {
             compare(win.menuIntent, null)
             fakeA.ackSelection()
             compare(contextMenu.popups, [], "no late menu")
+        }
+        function test_settings_cancels_waiting_menu_before_selection_lands() {
+            rightClick({ tag: "rows", list: "rowsList" }, 3)
+            verify(win.menuIntent)
+            win.openSettings()
+            compare(settingsPanel.open, true)
+            compare(win.menuIntent, null)
+            settingsPanel.open = false
+            fakeA.ackSelection()
+            compare(contextMenu.popups, [], "closing Settings cannot revive a stale menu")
+        }
+        function test_other_modal_cancels_waiting_menu_data() {
+            return [ {tag: "permissions", panel: permissionsDialog}, {tag: "keys", panel: keyMapPanel},
+                     {tag: "trash", panel: trashPanel}, {tag: "recent", panel: recentPanel},
+                     {tag: "connect", panel: connectPanel}, {tag: "sharing", panel: deviceSharing} ]
+        }
+        function test_other_modal_cancels_waiting_menu(data) {
+            rightClick({ tag: "rows", list: "rowsList" }, 3)
+            verify(win.menuIntent)
+            data.panel.open = true
+            compare(win.menuIntent, null)
+            fakeA.ackSelection()
+            compare(contextMenu.popups, [])
         }
         function test_row_gone_is_refused_not_waited() {
             fakeA.tokens = fakeA.tokens.map((t, i) => i === 3 ? "" : t)

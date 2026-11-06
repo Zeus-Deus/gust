@@ -238,6 +238,8 @@ pub struct Frame {
     pub sort_revision: u64,
     pub hidden: bool,
     pub cursor: i32,
+    /// Nonzero only for the focus intent prepared by this row frame.
+    pub focus_revision: u64,
     pub summary: String,
     pub mapping: Vec<i32>,
     pub keep: i32,
@@ -270,6 +272,7 @@ impl Frame {
             sort_revision: 0,
             hidden: false,
             cursor: 0,
+            focus_revision: 0,
             summary: String::new(),
             mapping: Vec::new(),
             keep: 0,
@@ -320,6 +323,7 @@ pub struct Request {
     pub hidden: bool,
     pub cursor: i32,
     pub focus: Option<OsString>,
+    pub focus_revision: u64,
     pub keep: i32,
     pub submitted: Instant,
     pub clipboard: Arc<std::collections::HashSet<std::path::PathBuf>>,
@@ -717,6 +721,7 @@ impl Runtime {
             hidden: false,
             cursor: 0,
             focus: None,
+            focus_revision: 0,
             keep: 0,
             submitted: Instant::now(),
             clipboard: Arc::default(),
@@ -1840,6 +1845,11 @@ fn prepare(
                 request.hidden
             },
             cursor,
+            focus_revision: if !selection_only && request.focus.is_some() {
+                request.focus_revision
+            } else {
+                0
+            },
             summary,
             mapping,
             keep: if selection_only {
@@ -1914,6 +1924,7 @@ fn prepare_marks(
         sort_revision: base.sort_revision,
         hidden: base.hidden,
         cursor: base.cursor,
+        focus_revision: 0,
         validated_thumbnail_count: base.validated_thumbnail_count,
         summary: base.summary.clone(),
         mapping: Vec::new(),

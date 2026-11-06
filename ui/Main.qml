@@ -413,11 +413,16 @@ Window {
     // into alertText: it goes when a save succeeds, and an async result never
     // clears an unrelated alert.
     readonly property string prefsNotice: win.prefsStatus === "unsaved" ? qsTr("Settings not saved: ") + win.prefsError : ""
+    property string integrationRefreshTarget: ""
     function prefsNotified() { Qt.callLater(win.prefsPublished) }
     function prefsPublished() {
         win.prefsTick += 1
-        // An integration toggle's refreshed state has arrived.
-        settingsPanel.busyKey = ""
+        // Admission and older worker notifications are not this refresh's answer.
+        if (win.integrationRefreshTarget !== ""
+                && win.revisionAtLeast(String(win.prefs.integration_refresh || "0"), win.integrationRefreshTarget)) {
+            settingsPanel.busyKey = ""
+            win.integrationRefreshTarget = ""
+        }
         if (win.prefsReady && !win.prefsStarted) win.startWithPrefs(false)
         win.applySettings()
         win.qaDump("preferences")
@@ -486,6 +491,7 @@ Window {
     }
     property bool defaultShowHidden: false
     function openSettings() {
+        win.menuIntent = null
         // Picks up edits made elsewhere and the desktop's integration state,
         // read by the worker; the panel follows when they arrive.
         dirModel.preferences_refresh()
@@ -1352,7 +1358,7 @@ Window {
         win.activePane = 1
         win.activeTab = win.paneTab[1]
         win.activateTab(win.activeTab)
-        win.armSplitTab()
+        win.armSplitTab(tabList.get(win.activeTab).startPath)
         win.refreshPaneTabCount()
         win.qaDump("pane-split")
     }
@@ -1368,10 +1374,10 @@ Window {
     /// a label); going anywhere else makes the tab the user's.
     property string splitMadeAt: ""
 
-    /// Called once the tab has been opened at its folder. Its model starts
-    /// elsewhere (the startup folder), so earlier moves are not the user's.
-    function armSplitTab() {
-        win.splitMadeAt = win.splitMadeModel ? win.splitMadeModel.location_token() : ""
+    /// Navigation publishes later. A raw target already identifies the intended
+    /// folder; a text target arms on its first location publication.
+    function armSplitTab(target) {
+        win.splitMadeAt = win.splitMadeModel && target.startsWith("token:") ? target.substring(6) : ""
     }
 
     /// A transfer makes the split's own tab the user's, even after it
@@ -1382,8 +1388,9 @@ Window {
     }
 
     function noteSplitTabMoved(m) {
-        if (m === win.splitMadeModel && win.splitMadeAt !== "" && m.location_token() !== win.splitMadeAt)
-            win.splitMadeModel = null
+        if (m !== win.splitMadeModel) return
+        if (win.splitMadeAt === "") win.splitMadeAt = m.location_token()
+        else if (m.location_token() !== win.splitMadeAt) win.splitMadeModel = null
     }
 
     /// Is tab `i` that tab, untouched and with nothing running or undoable?
@@ -1449,7 +1456,7 @@ Window {
         win.activePane = 1
         win.activeTab = at
         win.activateTab(at)
-        win.armSplitTab()
+        win.armSplitTab(tabList.get(win.activeTab).startPath)
         win.refreshPaneTabCount()
         win.focusList()
         win.qaDump("pane-split")
@@ -2488,14 +2495,20 @@ Window {
         function onSelection_pendingChanged() { win.menuIntentSettled() }
         function onLocationChanged() { win.menuIntent = null }
     }
+    readonly property bool menuBlocked: contextMenu.open || contextMenu.dispatching
+            || palette.visible || prompt.visible || prompt.claimingFocus
+            || confirm.visible || connectionRecovery.visible || conflictDialog.visible
+            || renameCard.open || quickLook.open || settingsPanel.open
+            || trashPanel.open || recentPanel.open || connectPanel.open || deviceSharing.open
+            || permissionsDialog.open || keyMapPanel.open || !!win.bulkConfirmPending
+    onMenuBlockedChanged: { if (win.menuBlocked) win.menuIntent = null }
     function menuIntentSettled() {
         const it = win.menuIntent
         if (!it || it.model.selection_pending) return
         const ok = it.model === win.dirModel
                 && it.model.entry_token(it.row) === it.token
                 && it.model.sel_contains(it.row)
-                && !contextMenu.open && !palette.visible && !prompt.visible
-                && !confirm.visible && !renameCard.open && !quickLook.open
+                && !win.menuBlocked
         // Open before letting go, so the live hold never lapses in between.
         if (ok) win.popupContextMenu(it.row, it.x, it.y, it.fromKeyboard)
         win.menuIntent = null
@@ -4211,21 +4224,33 @@ Window {
             const err = dirModel.set_file_dialogs(on)
             if (err !== "") win.alertText = err
             else settingsPanel.busyKey = "file_dialogs"
-            dirModel.preferences_refresh()
+            win.integrationRefreshTarget = dirModel.preferences_refresh()
+            if (win.integrationRefreshTarget === "") {
+                settingsPanel.busyKey = ""
+                win.alertText = qsTr("Could not refresh desktop integration")
+            }
             win.qaDump("settings-dialogs")
         }
         onKeysRequested: (on) => {
             const err = dirModel.set_omarchy_keys(on)
             if (err !== "") win.alertText = err
             else settingsPanel.busyKey = "omarchy_keys"
-            dirModel.preferences_refresh()
+            win.integrationRefreshTarget = dirModel.preferences_refresh()
+            if (win.integrationRefreshTarget === "") {
+                settingsPanel.busyKey = ""
+                win.alertText = qsTr("Could not refresh desktop integration")
+            }
             win.qaDump("settings-keys")
         }
         onDefaultRequested: (on) => {
             const err = dirModel.set_default_file_manager(on)
             if (err !== "") win.alertText = err
             else settingsPanel.busyKey = "default"
-            dirModel.preferences_refresh()
+            win.integrationRefreshTarget = dirModel.preferences_refresh()
+            if (win.integrationRefreshTarget === "") {
+                settingsPanel.busyKey = ""
+                win.alertText = qsTr("Could not refresh desktop integration")
+            }
             win.qaDump("settings-default")
         }
         onClosed: { win.focusList(); win.qaDump("settings-closed") }

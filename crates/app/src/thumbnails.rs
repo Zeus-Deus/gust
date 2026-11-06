@@ -160,6 +160,11 @@ pub struct Work {
 }
 
 impl Work {
+    #[cfg(test)]
+    pub fn is_active(&self) -> bool {
+        self.active
+    }
+
     pub fn request(&mut self, window: (u64, usize, usize)) -> Admission {
         if self.window == Some(window) {
             return Admission::Unchanged;

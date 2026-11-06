@@ -333,7 +333,7 @@ fn idle_refresh_observes_external_changes_and_admission_is_bounded() {
     lock(&control.state)
         .files
         .insert(Document::Settings, "sidebar = false\n".into());
-    owner.refresh();
+    owner.refresh().unwrap();
     wait(&owner, |s| !s.settings.sidebar);
     lock(&control.state).blocked = true;
     owner.admit(setting("show_hidden", "true")).unwrap();
@@ -639,7 +639,7 @@ fn rejected_choices_survive_ack_refresh_and_new_subscriber_until_reselected() {
     assert_eq!(failed.views.get(&key("/rejected")), None);
     release(&control);
     wait(&owner, |s| !s.pending);
-    owner.refresh();
+    owner.refresh().unwrap();
     let subscription = owner.subscribe(Arc::new(|| true)).unwrap();
     let switched_tab = owner.snapshot();
     assert!(
@@ -679,7 +679,7 @@ fn rejected_setting_validation_and_subscription_recover_only_on_explicit_retry()
         .map(|_| owner.subscribe(Arc::new(|| true)).unwrap())
         .collect();
     assert!(owner.subscribe(Arc::new(|| true)).is_err());
-    owner.refresh();
+    owner.refresh().unwrap();
     assert!(owner.snapshot().admission_error.contains("receivers"));
     drop(subscriptions);
     assert!(owner.snapshot().admission_error.contains("receivers"));
@@ -716,7 +716,7 @@ fn read_only_load_and_refresh_never_create_parents_or_lock_files() {
         .insert(Document::Settings, missing);
     let owner = Preferences::start(Box::new(SyntheticDisk(disk)));
     wait(&owner, |s| s.ready);
-    owner.refresh();
+    owner.refresh().unwrap();
     assert!(owner.shutdown(Duration::from_secs(1)));
     assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
     std::fs::remove_dir_all(dir).unwrap();
@@ -1147,7 +1147,7 @@ fn every_failed_document_read_retains_last_good_and_pending_choices_until_recove
         let (owner, control) = loaded_documents_fixture();
         let previous = owner.snapshot();
         lock(&control.state).failed_reads.insert(document);
-        owner.refresh();
+        owner.refresh().unwrap();
         let failed = wait(&owner, |s| s.completed_attempt > previous.completed_attempt);
         assert!(failed.error.contains("read failure"), "{document:?}");
         assert_eq!(failed.saved_revision, previous.saved_revision);
@@ -1241,7 +1241,7 @@ fn successful_document_deletion_replaces_last_good_instead_of_retaining_it_as_an
         let (owner, control) = loaded_documents_fixture();
         let previous = owner.snapshot();
         lock(&control.state).files.remove(&document);
-        owner.refresh();
+        owner.refresh().unwrap();
         let refreshed = wait(&owner, |s| s.completed_attempt > previous.completed_attempt);
         assert!(refreshed.error.is_empty());
         match document {
@@ -1451,7 +1451,7 @@ fn canonical_session_records_precede_preserved_unknown_lines_across_save_refresh
             }
         }
         let before_refresh = owner.snapshot().completed_attempt;
-        owner.refresh();
+        owner.refresh().unwrap();
         let refreshed = wait(&owner, |s| s.completed_attempt > before_refresh);
         assert!(refreshed.error.is_empty());
         assert_eq!(refreshed.session, session);
@@ -1599,7 +1599,7 @@ fn sort_and_view_records_precede_two_thousand_comment_lines_on_save_refresh_and_
                 }
             }
             let before = owner.snapshot().completed_attempt;
-            owner.refresh();
+            owner.refresh().unwrap();
             let refreshed = wait(&owner, |s| s.completed_attempt > before);
             assert!(refreshed.error.is_empty());
             assert_eq!(location_canonical(document, &refreshed), canonical);
@@ -1872,5 +1872,45 @@ fn roundtrip_mismatch_blocks_worker_publication_and_ack_until_valid_replacement(
         "compact"
     );
     drop(files);
+    assert!(owner.shutdown(Duration::from_secs(1)));
+}
+
+#[test]
+fn refresh_acknowledges_only_a_probe_started_after_its_request() {
+    let (owner, control) = fixture();
+    let old = owner.snapshot().integration_refresh;
+    {
+        let mut state = lock(&control.state);
+        state.reading_blocked = true;
+        state.entered = false;
+    }
+    owner.flush();
+    entered(&control);
+    let first = owner.refresh().unwrap();
+    let target = owner.refresh().unwrap();
+    assert!(target > first && first > old);
+    owner.admit(setting("density", "compact")).unwrap();
+    assert_eq!(owner.snapshot().integration_refresh, old);
+    // Stop the next attempt separately so the older result can be observed.
+    let snapshots = Arc::new(Mutex::new(Vec::new()));
+    let seen = snapshots.clone();
+    let state = owner.shared.clone();
+    let _subscription = owner
+        .subscribe(Arc::new(move || {
+            lock(&seen).push(lock(&state.state).snapshot.integration_refresh);
+            true
+        }))
+        .unwrap();
+    release(&control);
+    wait(&owner, |s| s.integration_refresh == target);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !lock(&snapshots).contains(&target) {
+        assert!(Instant::now() < deadline);
+        std::thread::yield_now();
+    }
+    assert!(
+        lock(&snapshots).contains(&old),
+        "older completion must not acknowledge the new request"
+    );
     assert!(owner.shutdown(Duration::from_secs(1)));
 }

@@ -402,6 +402,12 @@ fn main() {
         "Kind" => SortField::Kind,
         _ => panic!("field"),
     };
+    if mode == "cancel" && field == SortField::Kind {
+        eprintln!(
+            "cancel mode supports only Size and Modified; Kind uses generic sorting checkpoints"
+        );
+        std::process::exit(2);
+    }
     let case = args.get(4).map(String::as_str).unwrap_or("random");
     let spec = SortSpec {
         field,

@@ -17,6 +17,11 @@ impl qobject::DirModel {
         }));
         self.as_mut().rust_mut().projection_subscribed = true;
     }
+    pub(super) fn focus_on_name(mut self: Pin<&mut Self>, name: std::ffi::OsString) {
+        let mut state = self.as_mut().rust_mut();
+        state.focus_revision = state.focus_revision.wrapping_add(1);
+        state.focus_name = Some(name);
+    }
     fn projection_request(&self, keep: i32) -> Request {
         Request {
             generation: self.generation,
@@ -28,6 +33,7 @@ impl qobject::DirModel {
             hidden: self.show_hidden,
             cursor: self.cursor,
             focus: self.focus_name.clone(),
+            focus_revision: self.focus_revision,
             keep,
             submitted: std::time::Instant::now(),
             clipboard: self.clip_set.clone(),
@@ -182,14 +188,12 @@ impl qobject::DirModel {
             if moved {
                 r.thumb_cancel.cancel();
                 r.thumb_work.invalidate();
+                r.size_cancel.cancel();
+                r.size_work.invalidate();
             }
             if moved && !Arc::ptr_eq(&old.all, &frame.all) {
                 r.meta_cancel.cancel();
                 r.meta_again = Some(r.view_rows);
-                r.thumb_cancel.cancel();
-                r.thumb_work.invalidate();
-                r.size_cancel.cancel();
-                r.size_work.invalidate();
             }
         }
         drop(swap);
@@ -219,8 +223,8 @@ impl qobject::DirModel {
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         let cursor_phase = metrics.publish_phases.cursor.timer();
-        let request_focus = self.as_ref().focus_name.is_some();
-        let cursor = if moved && frame.keep != 0 && self.as_ref().focus_name.is_none() {
+        let request_focus = frame.focus_revision != 0;
+        let cursor = if moved && frame.keep != 0 && !request_focus {
             usize::try_from(self.as_ref().cursor)
                 .ok()
                 .and_then(|i| frame.mapping.get(i).copied())
@@ -299,7 +303,9 @@ impl qobject::DirModel {
                 ),
             };
             self.as_mut().set_status(QString::from(&status));
-            self.as_mut().rust_mut().focus_name = None;
+            if frame.focus_revision == self.as_ref().focus_revision {
+                self.as_mut().rust_mut().focus_name = None;
+            }
             self.as_mut().rust_mut().live_busy = false;
             drop(status_phase);
             let _viewport = metrics.publish_phases.viewport.timer();

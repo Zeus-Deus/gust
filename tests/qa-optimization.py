@@ -70,7 +70,14 @@ def main():
     projection_source = Path(__file__).with_name("qa_projection.py")
     projection_sha = hashlib.sha256(projection_source.read_bytes()).hexdigest() if args.projection else None
     if args.entries is None:
-        args.entries = 100000 if args.projection else (100 if args.session_tail_regression or args.location_tail_regression or args.pointer_smoke else 2000)
+        if args.projection_search_jobs or args.projection_search_operations:
+            args.entries = 99999
+        elif args.projection:
+            args.entries = 100000
+        else:
+            args.entries = 100 if args.session_tail_regression or args.location_tail_regression or args.pointer_smoke else 2000
+    if (args.projection_search_jobs or args.projection_search_operations) and args.entries > 99999:
+        parser.error("search qualification allows at most 99999 visible entries plus the hidden entry (100000 scan budget)")
     if args.projection_native_cpu_control and not (args.projection_soak_only
             and args.projection_soak_cycles == 5 and args.entries == 100000
             and args.renderer == "software"):

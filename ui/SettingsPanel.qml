@@ -93,7 +93,8 @@ Item {
         const r = root.rows[rowIndex]
         // Nothing is accepted before the first load, and an integration
         // change runs once: no second request while its answer is pending.
-        if (!root.ready || root.busyKey === r.key) return
+        const integration = r.key === "default" || r.key === "file_dialogs" || r.key === "omarchy_keys"
+        if (!root.ready || (integration && root.busyKey !== "")) return
         if (r.key === "default") root.defaultRequested(value === "true")
         else if (r.key === "omarchy_keys") root.keysRequested(value === "true")
         else if (r.key === "file_dialogs") root.dialogsRequested(value === "true")

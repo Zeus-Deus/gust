@@ -122,7 +122,7 @@ pub mod qobject {
         fn preferences_subscribe(self: Pin<&mut DirModel>);
         /// Observe external edits/integration status without GUI I/O.
         #[qinvokable]
-        fn preferences_refresh(self: Pin<&mut DirModel>);
+        fn preferences_refresh(self: Pin<&mut DirModel>) -> QString;
         /// Return the admitted target revision; completion is asynchronous.
         #[qinvokable]
         fn preferences_flush(self: Pin<&mut DirModel>) -> QString;
@@ -1221,6 +1221,7 @@ pub struct DirModelRust {
     /// After a rename or new folder, the cursor goes to this name once it
     /// appears in the listing.
     focus_name: Option<std::ffi::OsString>,
+    focus_revision: u64,
     /// A change arrived during the hold; apply it when the hold ends.
     live_dirty: bool,
     /// A live relist is running; another change waits for it.
@@ -1563,6 +1564,7 @@ impl DirModelRust {
             // "Show in folder" from another app: the file to put the cursor
             // on once the first listing is in. Read once; never inherited by
             // windows this one opens.
+            focus_revision: 1,
             focus_name: std::env::var_os("GUST_SELECT")
                 .filter(|v| !v.is_empty())
                 .inspect(|_| std::env::remove_var("GUST_SELECT")),
@@ -2625,7 +2627,7 @@ impl qobject::DirModel {
             self.as_mut().relist_focusing(name.to_owned());
             return;
         }
-        self.as_mut().rust_mut().focus_name = Some(name.to_owned());
+        self.as_mut().focus_on_name(name.to_owned());
         self.navigate(&QString::from(dir.to_string_lossy().as_ref()));
     }
 
@@ -2816,9 +2818,15 @@ impl qobject::DirModel {
         self.as_mut().preferences_changed();
     }
 
-    fn preferences_refresh(mut self: Pin<&mut Self>) {
+    fn preferences_refresh(mut self: Pin<&mut Self>) -> QString {
         self.as_mut().preferences_subscribe();
-        crate::preferences::process().refresh();
+        match crate::preferences::process().refresh() {
+            Ok(target) => QString::from(&target.to_string()),
+            Err(error) => {
+                self.as_mut().set_status(QString::from(&error));
+                QString::default()
+            }
+        }
     }
 
     fn preferences_flush(mut self: Pin<&mut Self>) -> QString {
@@ -2853,6 +2861,7 @@ impl qobject::DirModel {
             "ready": snapshot.ready, "pending": snapshot.pending, "error": snapshot.error,
             "admission_error": snapshot.admission_error,
             "completed_attempt": snapshot.completed_attempt.to_string(),
+            "integration_refresh": snapshot.integration_refresh.to_string(),
             "revision": snapshot.revision.to_string(), "saved_revision": snapshot.saved_revision.to_string(),
             "saved": snapshot.ready && !snapshot.pending && snapshot.error.is_empty(),
         }).to_string())
@@ -2884,7 +2893,7 @@ impl qobject::DirModel {
             .output()
         {
             Ok(o) if o.status.success() => {
-                crate::preferences::process().refresh();
+                let _ = crate::preferences::process().refresh();
                 QString::default()
             }
             Ok(o) => QString::from(String::from_utf8_lossy(&o.stderr).trim()),
@@ -2964,7 +2973,7 @@ impl qobject::DirModel {
             .output()
         {
             Ok(o) if o.status.success() => {
-                crate::preferences::process().refresh();
+                let _ = crate::preferences::process().refresh();
                 QString::default()
             }
             Ok(o) => QString::from(String::from_utf8_lossy(&o.stderr).trim()),
@@ -2983,7 +2992,7 @@ impl qobject::DirModel {
             .output()
         {
             Ok(o) if o.status.success() => {
-                crate::preferences::process().refresh();
+                let _ = crate::preferences::process().refresh();
                 QString::default()
             }
             Ok(o) => QString::from(String::from_utf8_lossy(&o.stderr).trim()),
@@ -5392,7 +5401,7 @@ impl qobject::DirModel {
         let origin = self.as_mut().rust_mut().find_origin.take();
         // Back on the row the user left, not the top of the folder.
         if let Some(name) = self.as_mut().rust_mut().find_return.take() {
-            self.as_mut().rust_mut().focus_name = Some(name);
+            self.as_mut().focus_on_name(name);
         }
         match origin.as_ref().and_then(|k| k.as_path()) {
             // If a result was opened, the key DID move; go back deliberately.
@@ -5797,7 +5806,7 @@ impl qobject::DirModel {
             state.live_dirty = true;
             return;
         }
-        self.as_mut().rust_mut().focus_name = Some(name);
+        self.as_mut().focus_on_name(name);
         if self.as_ref().live_busy {
             self.as_mut().rust_mut().live_dirty = true;
         } else {
