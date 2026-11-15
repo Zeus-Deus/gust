@@ -73,7 +73,7 @@ def main():
         "activateTab", "nextTab", "runningJobModels",
     ]
     if args.insertion:
-        names.append("newTab")
+        names.extend(["hereTarget", "newTab"])
     functions = []
     for name in names:
         body = block(text, "function " + name + "(")

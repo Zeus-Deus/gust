@@ -26,11 +26,12 @@ def main():
              "crates/app/tests/permissions_worker_fixture.rs.in",
              "crates/app/tests/permissions_worker_regressions.py",
              "crates/app/tests/tab_model_regressions.py", "crates/core/src/open.rs",
-             "crates/ops/src/attrs.rs", "crates/core/src/lister.rs"]
+             "crates/ops/src/attrs.rs", "crates/core/src/lister.rs",
+             "crates/app/src/projection_bridge.rs"]
     inputs = {name: (source / name).read_bytes() for name in names}
     bridge = inputs[names[0]].decode()
     place = inputs[names[1]].decode()
-    apply = block(bridge, "    fn permissions_apply(self: Pin<&mut Self>")
+    apply = block(bridge, "    fn permissions_apply(mut self: Pin<&mut Self>")
     running = block(bridge, "    fn permissions_running(&self)")
     worker = block(bridge, "    fn start_mode_change(")
     claims = next(line for line in place.splitlines() if line.startswith("type Claims ="))
@@ -39,7 +40,9 @@ def main():
                       block(place, "pub struct ArchiveClaim"), block(place, "impl ArchiveWork"),
                       block(place, "impl Drop for ArchiveClaim"), block(place, "fn lock<T>(")])
     methods = {"@FINISH_MODE_CHANGE@": block(bridge, "    fn finish_mode_change("),
-               "@RELOAD@": block(bridge, "    fn reload(self: Pin<&mut Self>)"),
+               "@RELOAD@": block(bridge, "    fn reload(mut self: Pin<&mut Self>)"),
+               "@REFUSE_PENDING_SELECTION@": block(inputs[names[-1]].decode(),
+                                                   "    pub(super) fn refuse_pending_selection("),
                "@RUN_PREPARE@": block(bridge, "    fn run_prepare(mut self:"),
                "@RUN_CONFIRM@": block(bridge, "    fn run_confirm(mut self:"),
                "@RUN_DISCARD@": block(bridge, "    fn run_discard(mut self:")}
@@ -85,6 +88,14 @@ def main():
                     search.append(directory)
                 if filename.endswith(".rlib"):
                     libraries[artifact["target"]["name"]] = filename
+            # A cached top-level convenience hardlink can lag a subsequent
+            # build of the hashed artifact. Use the rlib paired with Cargo's
+            # current metadata when that build-dir layout supplies one.
+            for filename in artifact.get("filenames", []):
+                metadata = Path(filename)
+                library = metadata.with_suffix(".rlib")
+                if metadata.suffix == ".rmeta" and library.is_file():
+                    libraries[artifact["target"]["name"]] = str(library)
     externs = []
     for directory in search:
         externs.extend(["-L", f"dependency={directory}"])
@@ -110,7 +121,8 @@ def main():
                "place_work_sha256": hashlib.sha256(work.encode()).hexdigest(),
                "scope": "Exact Rust permissions_apply/start_mode_change/permissions_running and place-work claim; "
                         "real finish_mode_change/reload, prompt capture/acceptance and core Run identity/argv; "
-                        "real attrs and lister in insertion regressions. Qt queue, snapshot publication and terminal launch are seams. "
+                        "exact pending-selection refusal; real attrs and lister in insertion regressions. "
+                        "Qt queue, active-search state, snapshot publication and terminal launch are seams. "
                         "Not native CXX acceptance."}
     (output / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
     return results[-1]["exit"] if unchanged else 1

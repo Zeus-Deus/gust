@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Display-free Qt preview navigation + static queued-relist admission contract.
+"""Display-free Qt preview navigation + static publication-admission contract.
 
 Executes source-exact QML methods, key branch, bindings and hold notification.
 DirModel/watcher/renderer are boundary doubles, not native Rust or desktop QA.
-The queued apply_live guard is checked statically, never simulated as Rust proof.
+The Rust publication hold guard is checked statically, never simulated as native proof.
 """
 import argparse
 import hashlib
@@ -59,6 +59,9 @@ TestCase {
     QtObject { id: contextMenu; property bool open: false }
     QtObject { id: conflictDialog; property bool visible: false }
     QtObject { id: prompt; property bool visible: false; property bool claimingFocus: false }
+    QtObject { id: renameCard; property bool open: false }
+    QtObject { id: paneA; property bool dragActive: false }
+    QtObject { id: paneBLoader; property var item: null }
     QtObject { id: tabList; property int count: 1 }
     QtObject { id: tabs; function objectAt(i) { return model } }
     QtObject {
@@ -82,6 +85,10 @@ TestCase {
         property string peek_visual: ""
         property var pageRequests: []
         property int visualRequests: 0
+        property string previewName: ""
+        function preview_track(row) { previewName = row >= 0 ? names[row] : "" }
+        function preview_row() { return previewName === "" ? -1 : names.indexOf(previewName) }
+        function program_state_preview() { return "" }
         function relist(next) {
             const old = names[cursor]
             names = next
@@ -122,6 +129,9 @@ TestCase {
         property var info: null
         property int row: -1
         property real imageZoom: 1
+        property string program: ""
+        property bool programSeen: false
+        property string programError: ""
         property var model: test.dirModel
         property var audio: null
         signal closed()
@@ -250,13 +260,16 @@ def main():
     if not runner:
         raise RuntimeError("Qt 6 qmltestrunner required")
     paths = ["ui/Main.qml", "ui/QuickLook.qml", "crates/app/src/bridge.rs"]
+    has_projection = (source / "crates/app/src/projection_bridge.rs").is_file()
+    if has_projection:
+        paths += ["crates/app/src/projection_bridge.rs", "crates/app/src/projection.rs"]
     snapshots = {p: (source / p).read_bytes() for p in paths}
-    main_qml, quick, bridge = (snapshots[p].decode() for p in paths)
+    main_qml, quick, bridge = (snapshots[p].decode() for p in paths[:3])
     hold = matched(r"readonly property bool liveHold:.*?(?=\n    onLiveHoldChanged:)", main_qml)
     keys_start = main_qml.index("if (quickLook.open && event.modifiers === Qt.ShiftModifier")
     keys_end = main_qml.index("// Preset-aware chords", keys_start)
     methods = [block(quick, "function " + n + "(") for n in
-               ["show", "browse", "zoomBy", "turnPage", "togglePlay", "seekBy", "hide"]]
+               ["show", "browse", "zoomBy", "turnPage", "togglePlay", "seekBy", "hide", "refreshProgram"]]
     properties = [block(quick, "readonly property var visual:")]
     for name, kind in [("page", "int"), ("pages", "int"), ("isAudio", "bool")]:
         properties.append(matched(r"readonly property " + kind + " " + name + r":[^\n]*", quick))
@@ -267,11 +280,21 @@ def main():
     for key, value in bindings.items():
         assert fixture.count("@" + key + "@") == 1
         fixture = fixture.replace("@" + key + "@", value)
-    # Source-level admission check, explicitly not a native execution claim.
-    apply_live = block(bridge, "fn apply_live(")
-    guard = re.search(r"if self\.as_ref\(\)\.live_hold\s*\{\s*self\.as_mut\(\)\.rust_mut\(\)\.live_dirty = true;\s*return;\s*\}", apply_live)
-    queued_guard = bool(guard and apply_live.index("live_busy = false;") < guard.start()
-                        < apply_live.index("self.as_mut().rust_mut().thumb_cancel.cancel();"))
+    # Source-level seam only. Actual queued completion and Qt signal tests
+    # belong to the app runtime and native projection journey.
+    if has_projection:
+        publication = block(snapshots["crates/app/src/projection_bridge.rs"].decode(), "fn drain_projection(")
+        admission = block(snapshots["crates/app/src/projection.rs"].decode(), "pub fn take(")
+        publication = re.sub(r"\s+", "", publication)
+        admission = re.sub(r"\s+", "", admission)
+        queued_guard = ("runtime.take(self.as_ref().live_hold||self.as_ref().drag_hold)" in publication
+                        and "s.valid(f)&&(!held||!f.row_change)" in admission
+                        and "ifvalid" in admission and "s.completion.take()" in admission)
+    else:
+        apply_live = block(bridge, "fn apply_live(")
+        guard = re.search(r"if self\.as_ref\(\)\.live_hold\s*\{\s*self\.as_mut\(\)\.rust_mut\(\)\.live_dirty = true;\s*return;\s*\}", apply_live)
+        queued_guard = bool(guard and apply_live.index("live_busy = false;") < guard.start()
+                            < apply_live.index("self.as_mut().rust_mut().thumb_cancel.cancel();"))
     output.mkdir(parents=True, mode=0o700)
     for path, data in snapshots.items():
         target = output / "source" / path
@@ -300,12 +323,12 @@ def main():
     receipt = {"source": str(source), "argv": argv, "qt_exit": result.returncode,
                "exit": exit_code, "source_hashes": {p: sha(b) for p, b in snapshots.items()},
                "test_sha256": sha(Path(__file__).read_bytes()), "source_unchanged": unchanged,
-               "queued_apply_live_guard_static": queued_guard,
+               "queued_publication_guard_static": queued_guard, "guard_surface": "projection runtime" if has_projection else "legacy apply_live",
                "qml_sha256": sha(qml.read_bytes()), "log_sha256": sha(log.encode()),
                "scope": (__doc__ or "").strip(), "env": env}
     (output / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
     print(log, end="")
-    print("STATIC queued apply_live hold admission: " + ("PASS" if queued_guard else "FAIL"))
+    print("STATIC row-moving publication hold admission: " + ("PASS" if queued_guard else "FAIL"))
     print(json.dumps(receipt, indent=2))
     return exit_code
 

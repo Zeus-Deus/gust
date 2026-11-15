@@ -54,7 +54,7 @@ QtObject {
 }
 """
 
-FUNCTIONS = ["refreshChooserTarget", "chooserAccept", "chooserChecked", "chooserForgetCheck",
+FUNCTIONS = ["selectionSettling", "refreshChooserTarget", "chooserAccept", "chooserChecked", "chooserForgetCheck",
              "chooserAskReplace", "chooserReplaceConfirmed", "chooserAnswer", "chooserCancel",
              "chooserActivate", "chooserReturn", "chooserFits", "chooserMenu", "chooserFilterPage"]
 

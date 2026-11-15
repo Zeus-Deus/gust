@@ -22,6 +22,8 @@ TestCase {
         property var job: null
         function focusList() {}
         function qaDump(tag) {}
+        // Session saving is outside these tab-ownership checks.
+        function sessionChanged() {}
         onActiveTabChanged: {
             if (ready) {
 @ACTIVE_TAB_HANDLER@
@@ -46,7 +48,16 @@ TestCase {
             readonly property string tabLabel: location.substring(location.lastIndexOf("/") + 1)
             property int navigationCount: 0
             function navigate(path) { navigationCount++; location = path }
-            function navigate_token(token) { throw new Error("unexpected token navigation") }
+            // A new tab opens the folder being viewed by its raw token
+            // (DESIGN §2.2.1); ASCII fixture paths, hex as LocationKey writes it.
+            function location_token() {
+                let hex = ""
+                for (let i = 0; i < location.length; i++)
+                    hex += location.charCodeAt(i).toString(16).padStart(2, "0")
+                return "local:" + hex
+            }
+            property string navigatedToken: ""
+            function navigate_token(token) { navigationCount++; navigatedToken = token }
             function reload() { throw new Error("unexpected reload") }
             function job_running() { return false }
         }
@@ -95,6 +106,9 @@ TestCase {
         win.activateTab(1)
         win.newTab("")
         compare(tabList.count, 3)
+        compare(tabList.get(2).startPath, "token:local:2f666978747572652f5269676874",
+                "a new tab opens this folder by its raw token, not its label")
+        compare(tabs.objectAt(2).navigatedToken, "local:2f666978747572652f5269676874")
         compare(win.activePane, 1)
         compare(win.activeTab, 2)
         compare(win.paneTab[0], 0)

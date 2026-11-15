@@ -619,8 +619,394 @@ mod by_name_tests {
     }
 }
 
+fn collect_names_into<'a>(
+    names: impl Iterator<Item = &'a OsString>,
+    prepared: &mut HashSet<OsString>,
+    cancel: &impl crate::projection::Cancellation,
+) -> Result<(), crate::projection::ProjectionError> {
+    use crate::projection::{check_row, checkpoint};
+    checkpoint(cancel)?;
+    for (row, name) in names.enumerate() {
+        check_row(row, cancel)?;
+        prepared.insert(name.clone());
+    }
+    checkpoint(cancel)
+}
+
+/// Caller-owned selection preparation and retirement storage.
+///
+/// One scratch owns at most two name sets and one anchor. Supply a vacant
+/// scratch only after admitting a bounded retirement slot. On failure the
+/// partially prepared sets remain here; on a successful gesture replaced
+/// sets move here. Move this owner to the cleanup recipient before starting
+/// replacement CPU work. Core never clears or queues occupied scratch.
+#[derive(Debug, Default)]
+pub struct SelectionScratch {
+    storage: Selection,
+}
+
+impl SelectionScratch {
+    /// Empty retained allocations still require retirement.
+    pub fn is_vacant(&self) -> bool {
+        self.storage.names.capacity() == 0
+            && self.storage.pinned.capacity() == 0
+            && self.storage.anchor.is_none()
+    }
+
+    pub fn tracked_names(&self) -> usize {
+        self.storage
+            .names
+            .len()
+            .saturating_add(self.storage.pinned.len())
+            .saturating_add(usize::from(self.storage.anchor.is_some()))
+    }
+
+    fn require_vacant(&self) -> Result<(), crate::projection::ProjectionError> {
+        if self.is_vacant() {
+            Ok(())
+        } else {
+            Err(crate::projection::ProjectionError::ScratchOccupied)
+        }
+    }
+}
+
+fn find_name_cancellable(
+    names: &[OsString],
+    target: Option<&OsStr>,
+    cancel: &impl crate::projection::Cancellation,
+) -> Result<Option<usize>, crate::projection::ProjectionError> {
+    use crate::projection::{check_row, checkpoint};
+    checkpoint(cancel)?;
+    if let Some(target) = target {
+        for (row, name) in names.iter().enumerate() {
+            check_row(row, cancel)?;
+            if name == target {
+                return Ok(Some(row));
+            }
+        }
+    }
+    checkpoint(cancel)?;
+    Ok(None)
+}
+
+/// Worker-prepared selection totals. Presentation belongs to the app.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct SelectionSummary {
+    pub selected_count: usize,
+    pub known_bytes: u64,
+    pub missing_metadata: usize,
+}
+
 impl Selection {
-    /// `retain_existing` for a caller that already has the names.
+    /// Compatibility wrapper. Drops cancelled/replaced storage on the caller.
+    /// CPU projection workers must use the companion with admitted scratch.
+    pub fn select_all_by_name_cancellable(
+        &mut self,
+        names: &[OsString],
+        cancel: &impl crate::projection::Cancellation,
+    ) -> Result<(), crate::projection::ProjectionError> {
+        self.select_all_by_name_cancellable_with_scratch(
+            names,
+            &mut SelectionScratch::default(),
+            cancel,
+        )
+    }
+
+    /// Prepare atomically; replaced names and pins move into scratch.
+    pub fn select_all_by_name_cancellable_with_scratch(
+        &mut self,
+        names: &[OsString],
+        scratch: &mut SelectionScratch,
+        cancel: &impl crate::projection::Cancellation,
+    ) -> Result<(), crate::projection::ProjectionError> {
+        scratch.require_vacant()?;
+        collect_names_into(names.iter(), &mut scratch.storage.names, cancel)?;
+        std::mem::swap(&mut self.names, &mut scratch.storage.names);
+        std::mem::swap(&mut self.pinned, &mut scratch.storage.pinned);
+        Ok(())
+    }
+
+    /// Compatibility wrapper; use the scratch companion on CPU workers.
+    pub fn invert_by_name_cancellable(
+        &mut self,
+        visible: &[OsString],
+        cancel: &impl crate::projection::Cancellation,
+    ) -> Result<(), crate::projection::ProjectionError> {
+        self.invert_by_name_cancellable_with_scratch(
+            visible,
+            &mut SelectionScratch::default(),
+            cancel,
+        )
+    }
+
+    /// Invisible selections are dropped and anchor semantics are preserved.
+    /// Failure leaves self unchanged and partial names owned by scratch.
+    pub fn invert_by_name_cancellable_with_scratch(
+        &mut self,
+        visible: &[OsString],
+        scratch: &mut SelectionScratch,
+        cancel: &impl crate::projection::Cancellation,
+    ) -> Result<(), crate::projection::ProjectionError> {
+        use crate::projection::{check_row, checkpoint};
+        scratch.require_vacant()?;
+        checkpoint(cancel)?;
+        for (row, name) in visible.iter().enumerate() {
+            check_row(row, cancel)?;
+            if !self.names.contains(name.as_os_str()) {
+                scratch.storage.names.insert(name.clone());
+            }
+        }
+        checkpoint(cancel)?;
+        std::mem::swap(&mut self.names, &mut scratch.storage.names);
+        std::mem::swap(&mut self.pinned, &mut scratch.storage.pinned);
+        Ok(())
+    }
+
+    /// Compatibility wrapper; use the scratch companion on CPU workers.
+    pub fn set_band_cancellable(
+        &mut self,
+        base: &[OsString],
+        picked: &[OsString],
+        cancel: &impl crate::projection::Cancellation,
+    ) -> Result<(), crate::projection::ProjectionError> {
+        self.set_band_cancellable_with_scratch(
+            base,
+            picked,
+            &mut SelectionScratch::default(),
+            cancel,
+        )
+    }
+
+    /// Both input walks checkpoint. Replaced names and pins move to scratch.
+    pub fn set_band_cancellable_with_scratch(
+        &mut self,
+        base: &[OsString],
+        picked: &[OsString],
+        scratch: &mut SelectionScratch,
+        cancel: &impl crate::projection::Cancellation,
+    ) -> Result<(), crate::projection::ProjectionError> {
+        scratch.require_vacant()?;
+        collect_names_into(
+            base.iter().chain(picked.iter()),
+            &mut scratch.storage.names,
+            cancel,
+        )?;
+        std::mem::swap(&mut self.names, &mut scratch.storage.names);
+        std::mem::swap(&mut self.pinned, &mut scratch.storage.pinned);
+        Ok(())
+    }
+
+    /// Compatibility wrapper; use the scratch companion on CPU workers.
+    pub fn select_range_by_name_cancellable(
+        &mut self,
+        names: &[OsString],
+        cursor: usize,
+        mode: RangeMode,
+        cancel: &impl crate::projection::Cancellation,
+    ) -> Result<(), crate::projection::ProjectionError> {
+        self.select_range_by_name_cancellable_with_scratch(
+            names,
+            cursor,
+            mode,
+            &mut SelectionScratch::default(),
+            cancel,
+        )
+    }
+
+    /// Pins and anchor keep their original meanings, including pins outside
+    /// this visible list. Only the replaced selected set moves to scratch.
+    pub fn select_range_by_name_cancellable_with_scratch(
+        &mut self,
+        names: &[OsString],
+        cursor: usize,
+        mode: RangeMode,
+        scratch: &mut SelectionScratch,
+        cancel: &impl crate::projection::Cancellation,
+    ) -> Result<(), crate::projection::ProjectionError> {
+        scratch.require_vacant()?;
+        crate::projection::checkpoint(cancel)?;
+        if names.is_empty() {
+            return Ok(());
+        }
+        let cursor = cursor.min(names.len() - 1);
+        let anchor =
+            find_name_cancellable(names, self.anchor.as_deref(), cancel)?.unwrap_or(cursor);
+        self.prepare_range_into(
+            names,
+            anchor,
+            cursor,
+            mode,
+            &mut scratch.storage.names,
+            cancel,
+        )?;
+        std::mem::swap(&mut self.names, &mut scratch.storage.names);
+        Ok(())
+    }
+
+    /// Compatibility wrapper; use the scratch companion on CPU workers.
+    pub fn extend_by_name_cancellable(
+        &mut self,
+        names: &[OsString],
+        from: usize,
+        target: usize,
+        mode: RangeMode,
+        cancel: &impl crate::projection::Cancellation,
+    ) -> Result<(), crate::projection::ProjectionError> {
+        self.extend_by_name_cancellable_with_scratch(
+            names,
+            from,
+            target,
+            mode,
+            &mut SelectionScratch::default(),
+            cancel,
+        )
+    }
+
+    /// Anchor searches, base copies and range additions checkpoint. Failure
+    /// preserves self; success moves replaced names and anchor into scratch.
+    #[allow(clippy::too_many_arguments)] // Existing gesture plus explicit scratch and cancellation.
+    pub fn extend_by_name_cancellable_with_scratch(
+        &mut self,
+        names: &[OsString],
+        from: usize,
+        target: usize,
+        mode: RangeMode,
+        scratch: &mut SelectionScratch,
+        cancel: &impl crate::projection::Cancellation,
+    ) -> Result<(), crate::projection::ProjectionError> {
+        use crate::projection::checkpoint;
+        scratch.require_vacant()?;
+        checkpoint(cancel)?;
+        if names.is_empty() {
+            return Ok(());
+        }
+        let target = target.min(names.len() - 1);
+        scratch.storage.anchor = self.anchor.clone();
+        let anchor = match find_name_cancellable(names, self.anchor.as_deref(), cancel)? {
+            Some(row) => row,
+            None => match names.get(from) {
+                Some(name) => {
+                    scratch.storage.anchor = Some(name.clone());
+                    find_name_cancellable(names, Some(name), cancel)?.unwrap_or(target)
+                }
+                None => target,
+            },
+        };
+        self.prepare_range_into(
+            names,
+            anchor,
+            target,
+            mode,
+            &mut scratch.storage.names,
+            cancel,
+        )?;
+        checkpoint(cancel)?;
+        std::mem::swap(&mut self.names, &mut scratch.storage.names);
+        std::mem::swap(&mut self.anchor, &mut scratch.storage.anchor);
+        Ok(())
+    }
+
+    fn prepare_range_into(
+        &self,
+        names: &[OsString],
+        anchor: usize,
+        cursor: usize,
+        mode: RangeMode,
+        prepared: &mut HashSet<OsString>,
+        cancel: &impl crate::projection::Cancellation,
+    ) -> Result<(), crate::projection::ProjectionError> {
+        use crate::projection::{check_row, checkpoint};
+        let base = match mode {
+            RangeMode::Replace => &self.pinned,
+            RangeMode::Add => &self.names,
+        };
+        collect_names_into(base.iter(), prepared, cancel)?;
+        let (lo, hi) = (anchor.min(cursor), anchor.max(cursor));
+        for (row, name) in names[lo..=hi].iter().enumerate() {
+            check_row(row, cancel)?;
+            prepared.insert(name.clone());
+        }
+        checkpoint(cancel)
+    }
+
+    /// Compatibility wrapper; use the scratch companion on CPU workers.
+    pub fn clone_retain_visible(
+        &self,
+        entries: &[Entry],
+        visible: &[usize],
+        cancel: &impl crate::projection::Cancellation,
+    ) -> Result<Self, crate::projection::ProjectionError> {
+        self.clone_retain_visible_with_scratch(
+            entries,
+            visible,
+            &mut SelectionScratch::default(),
+            cancel,
+        )
+    }
+
+    /// Copy only surviving selected/pinned names and anchor. On error no
+    /// partial selection is destroyed: caller retains it in scratch. On
+    /// success the prepared selection is returned and scratch becomes vacant.
+    /// Invalid indices are errors, including for untouched selections.
+    pub fn clone_retain_visible_with_scratch(
+        &self,
+        entries: &[Entry],
+        visible: &[usize],
+        scratch: &mut SelectionScratch,
+        cancel: &impl crate::projection::Cancellation,
+    ) -> Result<Self, crate::projection::ProjectionError> {
+        use crate::projection::{check_row, checkpoint, entry_at};
+        scratch.require_vacant()?;
+        checkpoint(cancel)?;
+        for (row, &index) in visible.iter().enumerate() {
+            check_row(row, cancel)?;
+            let name = entry_at(entries, index)?.name.as_os_str();
+            if self.names.contains(name) {
+                scratch.storage.names.insert(name.to_os_string());
+            }
+            if self.pinned.contains(name) {
+                scratch.storage.pinned.insert(name.to_os_string());
+            }
+            if self.anchor.as_deref() == Some(name) {
+                scratch.storage.anchor = Some(name.to_os_string());
+            }
+        }
+        checkpoint(cancel)?;
+        Ok(std::mem::take(&mut scratch.storage))
+    }
+
+    /// Count selected displayed rows and sum known metadata sizes without
+    /// allocating names. Visible indices normally form a unique subset;
+    /// duplicate occurrences contribute once per displayed row. Unknown
+    /// metadata contributes to missing_metadata, never to known_bytes.
+    pub fn visible_summary(
+        &self,
+        entries: &[Entry],
+        visible: &[usize],
+        cancel: &impl crate::projection::Cancellation,
+    ) -> Result<SelectionSummary, crate::projection::ProjectionError> {
+        use crate::projection::{check_row, checkpoint, entry_at};
+        checkpoint(cancel)?;
+        let mut summary = SelectionSummary::default();
+        for (row, &index) in visible.iter().enumerate() {
+            check_row(row, cancel)?;
+            let entry = entry_at(entries, index)?;
+            if self.contains(&entry.name) {
+                summary.selected_count += 1;
+                match entry.meta {
+                    Some(meta) => {
+                        summary.known_bytes = summary.known_bytes.saturating_add(meta.size)
+                    }
+                    None => summary.missing_metadata += 1,
+                }
+            }
+        }
+        checkpoint(cancel)?;
+        Ok(summary)
+    }
+}
+
+impl Selection {
     /// True when there is nothing a reload could prune: no selected name,
     /// no pinned name, no anchor. Lets callers skip building a set of 100k
     /// names on every listing of an untouched folder.
@@ -628,6 +1014,51 @@ impl Selection {
         self.names.is_empty() && self.pinned.is_empty() && self.anchor.is_none()
     }
 
+    /// Drop selected, pinned and anchor names absent from the visible rows.
+    ///
+    /// Borrows raw names instead of cloning the listing. Expected work is
+    /// linear in visible rows plus selection capacity; scratch membership is
+    /// bounded by the smaller of visible rows and tracked names. Indices are
+    /// membership within this snapshot, never authority for a file operation.
+    /// Out-of-range indices contribute no name.
+    pub fn retain_visible(&mut self, entries: &[Entry], visible: &[usize]) {
+        if self.is_untouched() {
+            return;
+        }
+        let tracked = self
+            .names
+            .len()
+            .saturating_add(self.pinned.len())
+            .saturating_add(usize::from(self.anchor.is_some()));
+        let mut present = HashSet::with_capacity(visible.len().min(tracked));
+        // When the visible side is smaller, store it directly. Looking up
+        // every name in the selection first only adds work for Ctrl+A.
+        let keep_all_visible = visible.len() <= tracked;
+        for &index in visible {
+            let Some(entry) = entries.get(index) else {
+                continue;
+            };
+            let name = entry.name.as_os_str();
+            if keep_all_visible
+                || self.names.contains(name)
+                || self.pinned.contains(name)
+                || self.anchor.as_deref() == Some(name)
+            {
+                present.insert(name);
+            }
+        }
+        self.names.retain(|n| present.contains(n.as_os_str()));
+        self.pinned.retain(|n| present.contains(n.as_os_str()));
+        if self
+            .anchor
+            .as_ref()
+            .is_some_and(|a| !present.contains(a.as_os_str()))
+        {
+            self.anchor = None;
+        }
+    }
+
+    /// `retain_existing` for a caller that already has the names.
     pub fn retain_names(&mut self, names: &[OsString]) {
         let present: HashSet<&OsStr> = names.iter().map(|n| n.as_os_str()).collect();
         self.names.retain(|n| present.contains(n.as_os_str()));
@@ -635,6 +1066,139 @@ impl Selection {
         if let Some(a) = &self.anchor {
             if !present.contains(a.as_os_str()) {
                 self.anchor = None;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod retain_visible_tests {
+    use super::*;
+    use crate::entry::{EntryId, EntryKind};
+    use std::os::unix::ffi::OsStringExt;
+
+    fn entries() -> Vec<Entry> {
+        ["picked", "range", "anchor", "hidden", "replacement"]
+            .into_iter()
+            .map(|n| Entry::new(n.into(), EntryKind::File))
+            .collect()
+    }
+
+    #[test]
+    fn pruning_matches_names_for_selected_pinned_and_anchor_state() {
+        let entries = entries();
+        // Exhaust every visible subset and independently vary the anchor:
+        // empty selection does not imply an untouched anchor or pinned set.
+        for mask in 0..(1 << entries.len()) {
+            for anchor in [None, Some("anchor"), Some("deleted")] {
+                for selected in [false, true] {
+                    let mut actual = Selection::new();
+                    actual.toggle(OsStr::new("picked"));
+                    actual.toggle(OsStr::new("hidden"));
+                    actual.toggle(OsStr::new("deleted"));
+                    actual.names.insert("range".into());
+                    if !selected {
+                        // Pinned-only state can survive replacement helpers.
+                        actual.names.clear();
+                    }
+                    actual.anchor = anchor.map(OsString::from);
+                    let mut expected = actual.clone();
+                    let visible: Vec<_> = (0..entries.len())
+                        .filter(|i| mask & (1 << i) != 0)
+                        .collect();
+                    let names: Vec<_> = visible.iter().map(|&i| entries[i].name.clone()).collect();
+                    expected.retain_names(&names);
+                    actual.retain_visible(&entries, &visible);
+                    assert_eq!(actual.names, expected.names);
+                    assert_eq!(actual.pinned, expected.pinned);
+                    assert_eq!(actual.anchor, expected.anchor);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn hidden_or_deleted_picks_cannot_reappear_in_a_later_range() {
+        let entries = entries();
+        let mut s = Selection::new();
+        s.toggle(OsStr::new("picked"));
+        s.toggle(OsStr::new("hidden"));
+        s.toggle(OsStr::new("deleted"));
+        s.set_anchor(OsStr::new("hidden"));
+        s.retain_visible(&entries, &[0, 1, 2]);
+        assert_eq!(s.names, HashSet::from([OsString::from("picked")]));
+        assert_eq!(s.pinned, s.names);
+        assert!(s.anchor.is_none());
+        let visible: Vec<_> = entries.iter().take(3).collect();
+        s.select_range(&visible, 1, RangeMode::Replace);
+        assert_eq!(
+            s.resolve(&visible)
+                .iter()
+                .map(|e| e.name.as_os_str())
+                .collect::<Vec<_>>(),
+            [OsStr::new("picked"), OsStr::new("range")]
+        );
+    }
+
+    #[test]
+    fn anchor_only_and_untouched_states_prune_safely() {
+        let entries = entries();
+        let mut s = Selection::new();
+        s.retain_visible(&entries, &[usize::MAX]);
+        assert!(s.is_untouched());
+        s.set_anchor(OsStr::new("anchor"));
+        s.retain_visible(&entries, &[2, 2, usize::MAX]);
+        assert_eq!(s.anchor.as_deref(), Some(OsStr::new("anchor")));
+        s.retain_visible(&entries, &[]);
+        assert!(s.is_untouched());
+    }
+
+    #[test]
+    fn raw_names_survive_but_an_index_or_colliding_id_never_selects_a_replacement() {
+        let raw = OsString::from_vec(b"raw-\xff\n".to_vec());
+        let mut entries = entries();
+        entries.push(Entry::new(raw.clone(), EntryKind::File));
+        let mut s = Selection::new();
+        s.toggle(&raw);
+        s.toggle(OsStr::new("picked"));
+        // Selection follows names after a reorder, not the old row or ID.
+        entries.swap(0, 4);
+        entries[0].id = entries[4].id;
+        s.retain_visible(&entries, &[0, 5]);
+        assert_eq!(s.names, HashSet::from([raw.clone()]));
+        assert_eq!(s.pinned, s.names);
+        assert_eq!(s.anchor, None);
+        assert!(!s.contains(&entries[0].name));
+        assert_eq!(entries[0].id, entries[4].id);
+        assert!(entries.iter().all(|e| e.meta.is_none()));
+        // These APIs supply name membership only. No metadata/identity proof
+        // is created for operation admission, even for the same name.
+        entries[5].id = EntryId(0);
+        s.retain_visible(&entries, &[5]);
+        assert!(s.contains(&raw));
+        assert!(entries[5].meta.is_none());
+    }
+
+    #[test]
+    fn few_and_all_selected_scale_to_large_listings_without_changing_membership() {
+        let entries: Vec<_> = (0..100_000)
+            .map(|i| Entry::new(format!("file-{i:06}").into(), EntryKind::File))
+            .collect();
+        let visible: Vec<_> = (0..entries.len()).step_by(2).collect();
+        for all in [false, true] {
+            let mut s = Selection::new();
+            if all {
+                s.select_all_visible(&entries.iter().collect::<Vec<_>>());
+            } else {
+                s.toggle(&entries[0].name);
+                s.toggle(&entries[1].name);
+                s.set_anchor(&entries[1].name);
+            }
+            s.retain_visible(&entries, &visible);
+            assert_eq!(s.len(), if all { visible.len() } else { 1 });
+            assert!(s.anchor.is_none());
+            for (i, e) in entries.iter().enumerate() {
+                assert_eq!(s.contains(&e.name), i % 2 == 0 && (all || i == 0));
             }
         }
     }
@@ -713,5 +1277,483 @@ mod band_tests {
         assert_eq!(s.len(), 3);
         s.set_band(&base, &[]);
         assert!(s.contains(OsStr::new("keep")) && s.len() == 1);
+    }
+}
+
+#[cfg(test)]
+mod worker_selection_tests {
+    use super::*;
+    use crate::entry::EntryKind;
+    use std::os::unix::ffi::OsStringExt;
+
+    fn assert_same(a: &Selection, b: &Selection) {
+        assert_eq!(a.names, b.names);
+        assert_eq!(a.pinned, b.pinned);
+        assert_eq!(a.anchor, b.anchor);
+        assert_eq!(a.is_untouched(), b.is_untouched());
+    }
+
+    #[test]
+    fn worker_copy_matches_clone_then_prune_across_selection_gestures_and_deletions() {
+        let names: Vec<_> = [
+            b"a".as_slice(),
+            b"B",
+            b"c9",
+            b"c10",
+            b"\xff",
+            b"\xfe",
+            b".hidden",
+        ]
+        .iter()
+        .map(|n| OsString::from_vec(n.to_vec()))
+        .collect();
+        let entries: Vec<_> = names
+            .iter()
+            .map(|n| Entry::new(n.clone(), EntryKind::File))
+            .collect();
+        let mut selection = Selection::new();
+        let mut seed = 345678_u64;
+        for step in 0..250 {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let target = seed as usize % names.len();
+            match step % 7 {
+                0 => selection.toggle(&names[target]),
+                1 => selection.set_anchor(&names[target]),
+                2 => selection.select_range_by_name(&names, target, RangeMode::Replace),
+                3 => selection.select_range_by_name(&names, target, RangeMode::Add),
+                4 => selection.select_only(&names[target]),
+                5 => selection.clear(),
+                _ => selection.select_all_by_name(&names),
+            }
+            for mask in 0..1 << names.len() {
+                let visible: Vec<_> = (0..names.len())
+                    .rev()
+                    .filter(|i| mask & (1 << i) != 0)
+                    .collect();
+                let mut expected = selection.clone();
+                expected.retain_visible(&entries, &visible);
+                let actual = selection
+                    .clone_retain_visible(&entries, &visible, &|| false)
+                    .unwrap();
+                assert_same(&actual, &expected);
+                // Subsequent range replacement must preserve exactly the
+                // same Ctrl-picks and surviving anchor after target deletion.
+                let mut actual = actual;
+                actual.select_range_by_name(&names, target, RangeMode::Replace);
+                expected.select_range_by_name(&names, target, RangeMode::Replace);
+                assert_same(&actual, &expected);
+            }
+        }
+    }
+
+    #[test]
+    fn worker_prunes_anchor_only_and_preserves_duplicate_membership_semantics() {
+        let entries = vec![Entry::new("raw".into(), EntryKind::File)];
+        let mut selection = Selection::new();
+        selection.set_anchor(OsStr::new("raw"));
+        let surviving = selection
+            .clone_retain_visible(&entries, &[0, 0], &|| false)
+            .unwrap();
+        assert_same(&selection, &surviving);
+        assert!(selection
+            .clone_retain_visible(&entries, &[], &|| false)
+            .unwrap()
+            .is_untouched());
+    }
+}
+
+#[cfg(test)]
+mod worker_gesture_tests {
+    use super::*;
+    use crate::projection::ProjectionError;
+    use std::cell::Cell;
+    use std::os::unix::ffi::OsStringExt;
+
+    fn same(a: &Selection, b: &Selection) {
+        assert_eq!(a.names, b.names);
+        assert_eq!(a.pinned, b.pinned);
+        assert_eq!(a.anchor, b.anchor);
+    }
+
+    #[test]
+    fn worker_gestures_match_existing_semantics_including_missing_anchors_and_pins() {
+        let names: Vec<_> = [b"a".as_slice(), b"B", b"\xff", b"c9", b"c10", b"\xfe", b"a"]
+            .iter()
+            .map(|n| OsString::from_vec(n.to_vec()))
+            .collect();
+        let mut expected = Selection::new();
+        let mut actual = Selection::new();
+        let mut seed = 891_734_u64;
+        for step in 0usize..700 {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let cut = seed as usize % (names.len() + 1);
+            let visible = &names[cut..];
+            let from = (seed >> 5) as usize % (names.len() + 3);
+            let target = if step.is_multiple_of(17) {
+                usize::MAX
+            } else {
+                (seed >> 9) as usize % (names.len() + 3)
+            };
+            let mode = if step.is_multiple_of(2) {
+                RangeMode::Add
+            } else {
+                RangeMode::Replace
+            };
+            match step % 9 {
+                0 => {
+                    expected.select_all_by_name(visible);
+                    actual
+                        .select_all_by_name_cancellable(visible, &|| false)
+                        .unwrap();
+                }
+                1 => {
+                    expected.invert_by_name(visible);
+                    actual
+                        .invert_by_name_cancellable(visible, &|| false)
+                        .unwrap();
+                }
+                2 => {
+                    expected.set_band(&names[..cut], visible);
+                    actual
+                        .set_band_cancellable(&names[..cut], visible, &|| false)
+                        .unwrap();
+                }
+                3 => {
+                    expected.extend_by_name(visible, from, target, mode);
+                    actual
+                        .extend_by_name_cancellable(visible, from, target, mode, &|| false)
+                        .unwrap();
+                }
+                4 => {
+                    expected.select_range_by_name(visible, target, mode);
+                    actual
+                        .select_range_by_name_cancellable(visible, target, mode, &|| false)
+                        .unwrap();
+                }
+                5 => {
+                    let name = &names[from % names.len()];
+                    expected.toggle(name);
+                    actual.toggle(name);
+                }
+                6 => {
+                    let name = &names[from % names.len()];
+                    expected.set_anchor(name);
+                    actual.set_anchor(name);
+                }
+                7 => {
+                    expected.set_anchor(OsStr::new("deleted"));
+                    actual.set_anchor(OsStr::new("deleted"));
+                }
+                _ => {
+                    expected.clear();
+                    actual.clear();
+                }
+            }
+            same(&actual, &expected);
+        }
+    }
+
+    fn cancel_without_mutating(
+        seed: &Selection,
+        budget: usize,
+        run: impl Fn(&mut Selection, &dyn Fn() -> bool) -> Result<(), ProjectionError>,
+    ) {
+        let mut actual = seed.clone();
+        let calls = Cell::new(0);
+        let cancel = || {
+            calls.set(calls.get() + 1);
+            calls.get() == budget
+        };
+        assert_eq!(
+            run(&mut actual, &cancel),
+            Err(ProjectionError::Cancelled),
+            "checkpoint {budget}"
+        );
+        assert_eq!(calls.get(), budget);
+        same(&actual, seed);
+    }
+
+    #[test]
+    fn worker_gesture_pre_cancel_and_mid_work_cancellation_are_atomic() {
+        let names: Vec<_> = (0..16_385)
+            .map(|i| OsString::from(format!("file{i}")))
+            .collect();
+        let mut seed = Selection::new();
+        // A large selected set and pinned set make copying either side a
+        // directory-sized operation, even for a tiny resulting range.
+        for name in &names {
+            seed.toggle(name);
+        }
+        for budget in [1, 5, 35] {
+            cancel_without_mutating(&seed, budget, |s, c| {
+                s.select_all_by_name_cancellable(&names, &c)
+            });
+            cancel_without_mutating(&seed, budget, |s, c| {
+                s.invert_by_name_cancellable(&names, &c)
+            });
+            cancel_without_mutating(&seed, budget, |s, c| {
+                s.set_band_cancellable(&names[..100], &names[100..], &c)
+            });
+            cancel_without_mutating(&seed, budget, |s, c| {
+                s.extend_by_name_cancellable(&names, 0, 0, RangeMode::Replace, &c)
+            });
+            cancel_without_mutating(&seed, budget, |s, c| {
+                s.select_range_by_name_cancellable(&names, 0, RangeMode::Add, &c)
+            });
+        }
+        // Later budgets reach selected/pinned copies after the anchor scan,
+        // and then the range-addition phase after copying the base set.
+        for budget in [80, 145] {
+            cancel_without_mutating(&seed, budget, |s, c| {
+                s.extend_by_name_cancellable(&names, 0, 0, RangeMode::Replace, &c)
+            });
+            cancel_without_mutating(&seed, budget, |s, c| {
+                s.select_range_by_name_cancellable(&names, 0, RangeMode::Add, &c)
+            });
+        }
+        for run in [0, 1, 2, 3, 4] {
+            let mut empty = Selection::new();
+            let result = match run {
+                0 => empty.select_all_by_name_cancellable(&[], &|| true),
+                1 => empty.invert_by_name_cancellable(&[], &|| true),
+                2 => empty.set_band_cancellable(&[], &[], &|| true),
+                3 => empty.extend_by_name_cancellable(&[], 0, 0, RangeMode::Add, &|| true),
+                _ => empty.select_range_by_name_cancellable(&[], 0, RangeMode::Add, &|| true),
+            };
+            assert_eq!(result, Err(ProjectionError::Cancelled));
+        }
+    }
+}
+
+#[cfg(test)]
+mod scratch_handoff_tests {
+    use super::*;
+    use crate::{
+        entry::EntryKind,
+        projection::{Cancellation, ProjectionError},
+    };
+    use std::cell::Cell;
+    use std::sync::mpsc;
+
+    fn same(a: &Selection, b: &Selection) {
+        assert_eq!(a.names, b.names);
+        assert_eq!(a.pinned, b.pinned);
+        assert_eq!(a.anchor, b.anchor);
+    }
+
+    fn gesture(
+        kind: usize,
+        selection: &mut Selection,
+        names: &[OsString],
+        scratch: &mut SelectionScratch,
+        cancel: &impl Cancellation,
+    ) -> Result<(), ProjectionError> {
+        match kind {
+            0 => selection.select_all_by_name_cancellable_with_scratch(names, scratch, cancel),
+            1 => selection.invert_by_name_cancellable_with_scratch(names, scratch, cancel),
+            2 => selection.set_band_cancellable_with_scratch(
+                &names[..100],
+                &names[100..],
+                scratch,
+                cancel,
+            ),
+            3 => selection.select_range_by_name_cancellable_with_scratch(
+                names,
+                0,
+                RangeMode::Replace,
+                scratch,
+                cancel,
+            ),
+            _ => selection.extend_by_name_cancellable_with_scratch(
+                names,
+                0,
+                0,
+                RangeMode::Add,
+                scratch,
+                cancel,
+            ),
+        }
+    }
+
+    #[test]
+    fn errors_transfer_partial_storage_and_cannot_reuse_occupied_scratch() {
+        let entries: Vec<_> = (0..4097)
+            .map(|i| Entry::new(format!("file{i}").into(), EntryKind::File))
+            .collect();
+        let visible: Vec<_> = (0..entries.len()).collect();
+        let mut source = Selection::new();
+        for entry in &entries {
+            source.toggle(&entry.name);
+        }
+        let unchanged = source.clone();
+        let mut scratch = SelectionScratch::default();
+        let calls = Cell::new(0);
+        let cancel = || {
+            calls.set(calls.get() + 1);
+            calls.get() == 5
+        };
+        assert_eq!(
+            source
+                .clone_retain_visible_with_scratch(&entries, &visible, &mut scratch, &cancel)
+                .unwrap_err(),
+            ProjectionError::Cancelled
+        );
+        same(&source, &unchanged);
+        assert!(!scratch.is_vacant());
+        assert!(scratch.tracked_names() > 0);
+        assert!(scratch.tracked_names() <= source.names.len() + source.pinned.len() + 1);
+        let partial_names = scratch.storage.names.clone();
+        let partial_pins = scratch.storage.pinned.clone();
+        let retained = scratch.tracked_names();
+        assert_eq!(
+            source
+                .clone_retain_visible_with_scratch(&entries, &visible, &mut scratch, &|| false)
+                .unwrap_err(),
+            ProjectionError::ScratchOccupied
+        );
+        assert_eq!(scratch.storage.names, partial_names);
+        assert_eq!(scratch.storage.pinned, partial_pins);
+        assert_eq!(scratch.tracked_names(), retained);
+        // Non-cancellation errors hand off their partial output too.
+        let mut bad_scratch = SelectionScratch::default();
+        assert_eq!(
+            source
+                .clone_retain_visible_with_scratch(
+                    &entries,
+                    &[0, 1, usize::MAX],
+                    &mut bad_scratch,
+                    &|| false
+                )
+                .unwrap_err(),
+            ProjectionError::InvalidIndex {
+                index: usize::MAX,
+                len: entries.len()
+            }
+        );
+        assert_eq!(bad_scratch.storage.names.len(), 2);
+        same(&source, &unchanged);
+    }
+
+    #[test]
+    fn every_gesture_keeps_cancelled_partials_and_moves_replaced_sets_on_success() {
+        let names: Vec<_> = (0..16_385)
+            .map(|i| OsString::from(format!("file{i}")))
+            .collect();
+        let mut source = Selection::new();
+        for name in &names {
+            source.toggle(name);
+        }
+        for kind in 0..5 {
+            let mut original = source.clone();
+            if kind == 1 {
+                for name in names.iter().step_by(2) {
+                    original.toggle(name);
+                }
+            }
+            let mut actual = original.clone();
+            let mut scratch = SelectionScratch::default();
+            let calls = Cell::new(0);
+            let budget = if kind >= 3 { 80 } else { 5 };
+            let cancel = || {
+                calls.set(calls.get() + 1);
+                calls.get() == budget
+            };
+            assert_eq!(
+                gesture(kind, &mut actual, &names, &mut scratch, &cancel),
+                Err(ProjectionError::Cancelled)
+            );
+            same(&actual, &original);
+            assert!(!scratch.is_vacant());
+            assert!(scratch.tracked_names() <= names.len() * 2 + 1);
+            let mut scratch = SelectionScratch::default();
+            gesture(kind, &mut actual, &names, &mut scratch, &|| false).unwrap();
+            let mut expected = original.clone();
+            match kind {
+                0 => expected.select_all_by_name(&names),
+                1 => expected.invert_by_name(&names),
+                2 => expected.set_band(&names[..100], &names[100..]),
+                3 => expected.select_range_by_name(&names, 0, RangeMode::Replace),
+                _ => expected.extend_by_name(&names, 0, 0, RangeMode::Add),
+            }
+            same(&actual, &expected);
+            assert_eq!(scratch.storage.names, original.names);
+            if kind < 3 {
+                assert_eq!(scratch.storage.pinned, original.pinned);
+            } else {
+                assert!(scratch.storage.pinned.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn successful_clone_returns_storage_and_vacates_scratch() {
+        let entries = vec![Entry::new("raw".into(), EntryKind::File)];
+        let mut source = Selection::new();
+        source.toggle(&entries[0].name);
+        let mut scratch = SelectionScratch::default();
+        let prepared = source
+            .clone_retain_visible_with_scratch(&entries, &[0], &mut scratch, &|| false)
+            .unwrap();
+        same(&source, &prepared);
+        assert!(scratch.is_vacant());
+        assert_eq!(scratch.tracked_names(), 0);
+        // A zero-length set with allocation is still occupied.
+        scratch.storage.names.reserve(1000);
+        assert!(!scratch.is_vacant());
+        assert_eq!(scratch.tracked_names(), 0);
+        assert_eq!(
+            source.select_all_by_name_cancellable_with_scratch(&[], &mut scratch, &|| false),
+            Err(ProjectionError::ScratchOccupied)
+        );
+    }
+
+    #[test]
+    fn recipient_thread_destroys_retained_error_and_success_storage() {
+        let names: Vec<_> = (0..4097)
+            .map(|i| OsString::from(format!("file{i}")))
+            .collect();
+        let mut source = Selection::new();
+        for name in &names {
+            source.toggle(name);
+        }
+        let mut scratch = SelectionScratch::default();
+        source
+            .select_all_by_name_cancellable_with_scratch(&names, &mut scratch, &|| false)
+            .unwrap();
+        assert!(scratch.tracked_names() >= names.len() * 2);
+        let mut failed = SelectionScratch::default();
+        let calls = Cell::new(0);
+        assert_eq!(
+            source.set_band_cancellable_with_scratch(&names, &[], &mut failed, &|| {
+                calls.set(calls.get() + 1);
+                calls.get() == 5
+            }),
+            Err(ProjectionError::Cancelled)
+        );
+        assert!(failed.tracked_names() > 0);
+        let caller = std::thread::current().id();
+        // This test models a pre-admitted single-owner retirement slot.
+        let (send, recv) = mpsc::sync_channel::<SelectionScratch>(1);
+        let (allow, wait) = mpsc::sync_channel::<()>(0);
+        let (done, cleaned) = mpsc::sync_channel(0);
+        let recipient = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let held = recv.recv().unwrap();
+                let retained = held.tracked_names();
+                wait.recv().unwrap();
+                drop(held);
+                done.send((std::thread::current().id(), retained)).unwrap();
+            }
+        });
+        // The CPU call has returned and its old sets still belong to scratch.
+        for owner in [failed, scratch] {
+            send.send(owner).unwrap();
+            assert!(cleaned.try_recv().is_err());
+            allow.send(()).unwrap();
+            let (cleaned_on, retained) = cleaned.recv().unwrap();
+            assert_ne!(cleaned_on, caller);
+            assert!(retained > 0);
+        }
+        recipient.join().unwrap();
     }
 }

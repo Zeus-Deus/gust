@@ -329,44 +329,49 @@ fn cached_natural_sort_fits(entries: &[Entry]) -> bool {
         .is_some()
 }
 
-pub fn sort_entries(entries: &mut [Entry], spec: SortSpec) {
+/// Compare entries using the listing order, including directory grouping,
+/// missing metadata defaults, natural byte-name ties and sort direction.
+pub fn compare_entries(x: &Entry, y: &Entry, spec: SortSpec) -> std::cmp::Ordering {
     use std::cmp::Ordering;
-    let compare = |x: &Entry, y: &Entry| {
-        if spec.dirs_first {
-            let dx = x.kind == EntryKind::Dir;
-            let dy = y.kind == EntryKind::Dir;
-            if dx != dy {
-                return if dx {
-                    Ordering::Less
-                } else {
-                    Ordering::Greater
-                };
-            }
+    if spec.dirs_first {
+        let dx = x.kind == EntryKind::Dir;
+        let dy = y.kind == EntryKind::Dir;
+        if dx != dy {
+            return if dx {
+                Ordering::Less
+            } else {
+                Ordering::Greater
+            };
         }
-        let ord = match spec.field {
-            SortField::Name => natural_cmp(&x.name, &y.name),
-            SortField::Size => {
-                let sx = x.meta.map(|m| m.size).unwrap_or(0);
-                let sy = y.meta.map(|m| m.size).unwrap_or(0);
-                sx.cmp(&sy).then_with(|| natural_cmp(&x.name, &y.name))
-            }
-            SortField::Modified => {
-                let tx = x.meta.map(|m| m.mtime).unwrap_or(0);
-                let ty = y.meta.map(|m| m.mtime).unwrap_or(0);
-                tx.cmp(&ty).then_with(|| natural_cmp(&x.name, &y.name))
-            }
-            SortField::Kind => {
-                let ex = extension_of(&x.name);
-                let ey = extension_of(&y.name);
-                natural_cmp(ex, ey).then_with(|| natural_cmp(&x.name, &y.name))
-            }
-        };
-        if spec.ascending {
-            ord
-        } else {
-            ord.reverse()
+    }
+    let ord = match spec.field {
+        SortField::Name => natural_cmp(&x.name, &y.name),
+        SortField::Size => {
+            let sx = x.meta.map(|m| m.size).unwrap_or(0);
+            let sy = y.meta.map(|m| m.size).unwrap_or(0);
+            sx.cmp(&sy).then_with(|| natural_cmp(&x.name, &y.name))
+        }
+        SortField::Modified => {
+            let tx = x.meta.map(|m| m.mtime).unwrap_or(0);
+            let ty = y.meta.map(|m| m.mtime).unwrap_or(0);
+            tx.cmp(&ty).then_with(|| natural_cmp(&x.name, &y.name))
+        }
+        SortField::Kind => {
+            let ex = extension_of(&x.name);
+            let ey = extension_of(&y.name);
+            natural_cmp(ex, ey).then_with(|| natural_cmp(&x.name, &y.name))
         }
     };
+    if spec.ascending {
+        ord
+    } else {
+        ord.reverse()
+    }
+}
+
+pub fn sort_entries(entries: &mut [Entry], spec: SortSpec) {
+    use std::cmp::Ordering;
+    let compare = |x: &Entry, y: &Entry| compare_entries(x, y, spec);
     if spec.field == SortField::Name && entries.len() >= 1000 {
         // Metadata fills commonly revisit an already sorted snapshot. Avoid
         // allocating keys in that case, while still accepting unsorted input.

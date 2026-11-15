@@ -24,6 +24,8 @@ FocusScope {
     /// dialog answers with the selection, so there a click has to be a choice.
     property bool clickSelects: false
     property bool dragActive: false
+    /// A selection band is held down on empty space (press to release).
+    readonly property bool bandActive: gridBand.pressed
     /// Keyboard modifiers held during the drag: Ctrl copies, Shift moves.
     property int dragMods: 0
     property int dropRow: -1
@@ -90,6 +92,10 @@ FocusScope {
     }
     Timer { id: gridReport; interval: 40; onTriggered: root.reportRows() }
     onVisibleChanged: if (visible) gridReport.restart()
+
+    // Where the user was looking survives a re-sort, re-filter or live
+    // change that replaces the rows (DESIGN §2.2.1).
+    ViewportAnchor { view: grid }
 
     Rectangle {
         anchors.fill: parent
@@ -312,6 +318,13 @@ FocusScope {
                                 if (dx * dx + dy * dy < root.dragThreshold * root.dragThreshold)
                                     return
                                 root.dragStarted(index)
+                                // The pane may refuse (a selection still being applied):
+                                // this press then ends here, and its release is no click.
+                                if (!root.dragActive) {
+                                    armed = false
+                                    root.suppressClick = true
+                                    return
+                                }
                             }
                             const gp = mapToItem(grid.contentItem, mouse.x, mouse.y)
                             root.dropRow = grid.indexAt(gp.x, gp.y)
@@ -356,8 +369,10 @@ FocusScope {
                 textFormat: Text.PlainText
                 anchors.centerIn: parent
                 visible: grid.count === 0
+                // The query the rows on screen match, not one still being applied.
+                readonly property string shownQuery: (root.model && root.model.shown_filter) || ""
                 text: (root.model && root.model.empty_reason !== "") ? root.model.empty_reason
-                                  : (root.model ? root.model.filter : "").length > 0 ? "No match for \"" + (root.model ? root.model.filter : "") + "\""
+                                  : shownQuery.length > 0 ? "No match for \"" + shownQuery + "\""
                                                    : "This folder is empty"
                 color: Tokens.foregroundDim
                 font.family: Tokens.fontFamily
@@ -369,6 +384,7 @@ FocusScope {
         ScrollIndicator { target: grid }
 
         RubberBand {
+            id: gridBand
             anchors.fill: grid
             view: grid
             model: root.model

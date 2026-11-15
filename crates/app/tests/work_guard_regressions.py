@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Run the exact Main.qml close, tab-close and disconnect guards in Qt,
-and the actual InterruptedNotice and JobDrawer.
+the exact preference startup handoff, and actual InterruptedNotice, JobDrawer, SettingsPanel and HintStrip.
 
 Models are synthetic: their work is plain properties, so this proves the
 window logic, not DirModel's job handle or a real mount. `Qt.quit()` is the
@@ -21,6 +21,15 @@ from tab_model_regressions import block, replace_once
 TOKENS = """pragma Singleton
 import QtQuick
 QtObject {
+    readonly property color background: "#111111"
+    readonly property color foregroundDim: "#aaaaaa"
+    readonly property real selectedAlpha: 0.2
+    readonly property real borderAlpha: 0.5
+    readonly property int rowHeight: 26
+    readonly property int spaceXs: 4
+    readonly property int spaceXl: 24
+    readonly property int fontCaption: 12
+    readonly property int fontSubtitle: 18
     readonly property color menuBackground: "#111111"
     readonly property color foreground: "#eeeeee"
     readonly property color foregroundBright: "#ffffff"
@@ -69,6 +78,9 @@ def main():
     names = ["ui/Main.qml", "ui/tests/tst_work_guard.qml.in",
              "ui/InterruptedNotice.qml", "ui/tests/tst_interrupted_notice.qml",
              "ui/JobDrawer.qml", "ui/tests/tst_job_drawer.qml",
+             "ui/SettingsPanel.qml", "ui/tests/tst_settings_panel.qml",
+             "ui/tests/tst_preferences_startup.qml.in", "ui/tests/tst_preferences_notice.qml.in",
+             "ui/HintStrip.qml",
              "crates/app/tests/work_guard_regressions.py",
              "crates/app/tests/tab_model_regressions.py"]
     hashes = {n: hashlib.sha256((source / n).read_bytes()).hexdigest() for n in names}
@@ -76,21 +88,49 @@ def main():
     text = (source / "ui/Main.qml").read_text()
     confirm = text[text.index("        id: confirm\n"):]
     functions = [block(text, "function " + n + "(") for n in
-                 ["busyModels", "runningJobModels", "closeTab", "placeWorkBlocker", "refuseBusyDisconnect", "askRun"]]
-    timers = [block(text, "Timer {\n        id: " + n + "\n") for n in ["closeAfterCancel", "closeTabAfterCancel"]]
+                 ["busyModels", "runningJobModels", "closeTab", "placeWorkBlocker", "refuseBusyDisconnect", "askRun",
+                  "revisionAtLeast", "prefsClose", "sessionChanged", "saveSession", "prefsLaunchUntouched", "startWithPrefs", "restoreSession"]]
+    timers = [block(text, "Timer {\n        id: " + n + "\n") for n in ["closeAfterCancel", "closeTabAfterCancel", "prefsCloseDeadline", "sessionSaveTimer"]]
     fixture = (source / "ui/tests/tst_work_guard.qml.in").read_text()
     fixture = replace_once(fixture, "@CLOSING_HANDLER@", body(text, "onClosing: (close) =>"))
     fixture = replace_once(fixture, "@CONFIRM_ACCEPTED@", body(confirm, "onAccepted:"))
     fixture = replace_once(fixture, "@CONFIRM_REJECTED@", body(confirm, "onRejected:"))
-    fixture = replace_once(fixture, "@FUNCTIONS@", "\n".join(functions))
+    fixture = replace_once(fixture, "@CONFIRM_CLOSED@", body(confirm, "onClosed:"))
+    hooks = [line.strip() for line in text.splitlines()
+             if line.strip().startswith("readonly property string prefsError:")]
+    if len(hooks) != 1:
+        raise ValueError("Expected the production prefsError binding")
+    # The full preferences/startup surface is outside this close-guard seam.
+    # Bind the exact error expression to the same synthetic owner snapshot.
+    hooks.insert(0, "readonly property var prefs: JSON.parse(dirModel.settings_json())")
+    fixture = replace_once(fixture, "@FUNCTIONS@", "\n".join(functions + hooks))
     fixture = replace_once(fixture, "@TIMERS@", "\n".join(timers))
     if "Qt.quit()" not in fixture:
         raise ValueError("Expected the production quit call in the extracted guards")
     fixture = fixture.replace("Qt.quit()", "win.quitCalls += 1")
     qml = output / "tst_work_guard.qml"
     qml.write_text(fixture)
+    startup = (source / "ui/tests/tst_preferences_startup.qml.in").read_text()
+    startup = replace_once(startup, "@START_WITH_PREFS@", block(text, "function startWithPrefs("))
+    startup = replace_once(startup, "@PREFS_LAUNCH_UNTOUCHED@", block(text, "function prefsLaunchUntouched("))
+    startup = replace_once(startup, "@CAPTURE_LAUNCH@", block(text, "win.prefsLaunch ="))
+    (output / "tst_preferences_startup.qml").write_text(startup)
+    notice = (source / "ui/tests/tst_preferences_notice.qml.in").read_text()
+    bindings_start = text.index("    property int prefsTick: 0\n")
+    bindings_end = text.index("    function prefsNotified()")
+    bindings = block(text, "function revisionAtLeast(") + "\n" + text[bindings_start:bindings_end]
+    settings = text[text.index("        id: settingsPanel\n"):]
+    alerts = [line.strip() for line in text.splitlines() if line.strip().startswith("alert: win.alertText")]
+    if len(alerts) != 1:
+        raise ValueError("Expected the production hint alert binding")
+    notice = replace_once(notice, "@PREFS_BINDINGS@", bindings)
+    notice = replace_once(notice, "@HINT_ALERT@", alerts[0][len("alert: "):])
+    notice = replace_once(notice, "@SETTINGS_CHANGED@", body(settings, "onChanged: (key, value) =>"))
+    notice = replace_once(notice, "@SETTINGS_RETRY@", body(settings, "onRetryRequested:"))
+    (output / "tst_preferences_notice.qml").write_text(notice)
     for name in ["ui/InterruptedNotice.qml", "ui/tests/tst_interrupted_notice.qml",
-                 "ui/JobDrawer.qml", "ui/tests/tst_job_drawer.qml"]:
+                 "ui/JobDrawer.qml", "ui/tests/tst_job_drawer.qml",
+                 "ui/SettingsPanel.qml", "ui/tests/tst_settings_panel.qml", "ui/HintStrip.qml"]:
         shutil.copyfile(source / name, output / Path(name).name)
     module = output / "com/gust/app"
     module.mkdir(parents=True)
@@ -114,7 +154,7 @@ def main():
                     for n, h in hashes.items())
     receipt = {"argv": argv, "exit": p.returncode, "source_hashes": hashes,
                "source_unchanged": unchanged,
-               "scope": "exact Main.qml close/tab-close/disconnect guards and actual InterruptedNotice/JobDrawer; "
+               "scope": "exact Main.qml close/tab-close/disconnect guards and preference startup/capture, actual InterruptedNotice/JobDrawer/SettingsPanel/HintStrip and exact preferences notice/settings handlers; "
                         "models and theme synthetic, Qt.quit counted"}
     (output / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
     print(log, end="")

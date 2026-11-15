@@ -1,7 +1,7 @@
 //! Worker-only reuse of sorted local names; file metadata is always refreshed.
 
 use gust_core::entry::{Completeness, DirectorySnapshot, Entry, EntryKind};
-use gust_core::lister::{list_names, CancelToken};
+use gust_core::lister::{list_names, list_names_unordered, CancelToken};
 use gust_core::LocationKey;
 use std::collections::VecDeque;
 use std::ffi::OsString;
@@ -90,11 +90,29 @@ fn cache() -> &'static Mutex<Cache> {
     CACHE.get_or_init(|| Mutex::new(Cache::default()))
 }
 
+#[cfg(test)]
 pub fn list(
     key: &LocationKey,
     generation: u64,
     cancel: &CancelToken,
     reuse: bool,
+) -> DirectorySnapshot {
+    list_impl(key, generation, cancel, reuse, false)
+}
+pub fn list_unordered(
+    key: &LocationKey,
+    generation: u64,
+    cancel: &CancelToken,
+    reuse: bool,
+) -> DirectorySnapshot {
+    list_impl(key, generation, cancel, reuse, true)
+}
+fn list_impl(
+    key: &LocationKey,
+    generation: u64,
+    cancel: &CancelToken,
+    reuse: bool,
+    unordered: bool,
 ) -> DirectorySnapshot {
     let local = key.as_path().filter(|p| !gust_core::stall::needs_probe(p));
     let before = local.and_then(stamp);
@@ -110,13 +128,21 @@ pub fn list(
                     .collect();
                 if !cancel.is_cancelled() && stamp(path) == Some(before) {
                     snapshot.complete = Completeness::Complete;
-                    snapshot.settled = true;
+                    snapshot.settled = false;
+                    if !unordered {
+                        snapshot.sort_entries();
+                        snapshot.settled = true;
+                    }
                     return snapshot;
                 }
             }
         }
     }
-    let snapshot = list_names(key, generation, cancel, |_| {});
+    let snapshot = if unordered {
+        list_names_unordered(key, generation, cancel, |_| {})
+    } else {
+        list_names(key, generation, cancel, |_| {})
+    };
     if !cancel.is_cancelled() && snapshot.complete == Completeness::Complete {
         if let (Some(path), Some(before)) = (local, before) {
             if stamp(path) == Some(before) {

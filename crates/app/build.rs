@@ -32,6 +32,7 @@ fn main() {
         "ui/KeyMapPanel.qml",
         "ui/RubberBand.qml",
         "ui/WheelScroll.qml",
+        "ui/ViewportAnchor.qml",
         "ui/FileIcon.qml",
         "ui/Emblem.qml",
         "ui/DragTarget.qml",
@@ -50,6 +51,8 @@ fn main() {
 
     CxxQtBuilder::new_qml_module(module)
         .files(["src/bridge.rs"])
+        .include_dir("include")
+        .cpp_file("src/model_probe.cpp")
         .qt_module("Quick")
         .qt_module("Gui")
         .build();

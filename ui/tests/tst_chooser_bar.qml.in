@@ -18,6 +18,8 @@ Item {
         signal modelReset()
         property int cursor: 0
         property int count: 3
+        property bool selection_pending: false
+        property bool filter_pending: false
         property string location: "/home/a/Downloads"
         property string selection_text: ""
         property string tabLabel: "Downloads"
@@ -75,11 +77,14 @@ Item {
         function focusList() { if (!win.overlayUp) listFocus.forceActiveFocus() }
         function openChooserFilterMenu() { filterMenus += 1 }
         property int filterMenus: 0
+        property string alertText: ""
+        property bool prefsClosing: false
 
 @STATE@
 @FUNCTIONS@
 
         QtObject { id: quickLook; property bool open: false }
+        QtObject { id: settingsPanel; property bool open: false; function refocus() {} }
         QtObject { id: keyMapPanel; property bool open: false }
         QtObject { id: renameCard; property bool open: false }
 
@@ -148,6 +153,8 @@ Item {
             chooserFooter.name = name || ""
             fake.location = "/home/a/Downloads"
             fake.target = win.chooserTarget
+            fake.selection_pending = false
+            fake.filter_pending = false
             fake.checks = 0
             fake.accepts = []
             fake.navigated = []
@@ -288,6 +295,22 @@ Item {
             verify(!chooserBar.canAccept)
             win.chooserAccept()
             compare(fake.checks, 0)
+        }
+
+        function test_11b_accept_waits_for_displayed_projection_data() {
+            return [{ tag: "selection", key: "selection_pending" },
+                    { tag: "filter", key: "filter_pending" }]
+        }
+        function test_11b_accept_waits_for_displayed_projection(data) {
+            start("open", { kind: "file", name: "report.txt", count: 1 })
+            fake[data.key] = true
+            win.chooserAccept()
+            compare(fake.accepts.length, 0)
+            compare(win.quitCalls, 0)
+            fake[data.key] = false
+            win.chooserAccept()
+            compare(fake.accepts.length, 1)
+            compare(win.quitCalls, 1)
         }
 
         function test_12_open_answers_at_once() {
