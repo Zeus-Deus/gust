@@ -8,7 +8,6 @@
 use crate::admit;
 use crate::devices::{self, Endpoint, Failure};
 use gust_core::lister::CancelToken;
-use gust_ops::journal::ConflictPolicy;
 use gust_remote::helper::CallContext;
 use serde_json::{json, Map, Value};
 use std::path::PathBuf;
@@ -692,14 +691,9 @@ fn copy_one(
         }
     };
     at(Moment::Admitted);
-    match gust_ops::engine::copy_regular_file_with(
-        &src_dir,
-        &src_name,
-        &dst_dir,
-        &dst_name,
-        ConflictPolicy::Ask,
-        cancel,
-        on_bytes,
+    // The engine requires the file it opens to be this admitted one.
+    match gust_ops::engine::copy_admitted_file(
+        &src_dir, &src_name, s.identity, &dst_dir, &dst_name, cancel, on_bytes,
     ) {
         Ok(_) => One::Sent(dst_name.to_string_lossy().into_owned()),
         Err(OpError::Cancelled) => One::Cancelled,
@@ -707,6 +701,9 @@ fn copy_one(
             "A file with that name appeared on the device meanwhile; it was left alone.".into(),
         ),
         Err(OpError::Io(e)) => One::Failed(gust_ops::engine::plain_io_message_at(&e, dest)),
+        Err(OpError::Refused(why)) if why.contains("no longer the file") => {
+            One::Failed("It changed after it was admitted, so it was not sent.".into())
+        }
         Err(e) => One::Failed(e.to_string()),
     }
 }
@@ -805,6 +802,29 @@ mod tests {
         // the engine copies regular files only and never recurses.
         let c = case("admitted");
         only_first_arrived(&c, &run(&c, Moment::Admitted));
+        let _ = std::fs::remove_dir_all(&c.root);
+    }
+
+    #[test]
+    fn another_regular_file_put_at_the_name_after_admission_is_never_sent() {
+        let c = case("regular");
+        let cancel = CancelToken::new();
+        let call = Call {
+            cancel: &cancel,
+            report: &Quiet,
+        };
+        let copied = copy_files(&c.dest, &c.sources, &c.roots, false, &call, &mut |m, i| {
+            if m == Moment::Admitted && i == 1 {
+                let photo = c.home.join("photo.jpg");
+                std::fs::rename(&photo, c.home.join("aside.jpg")).unwrap();
+                std::fs::write(&photo, b"someone else's").unwrap();
+            }
+        });
+        only_first_arrived(&c, &copied);
+        assert!(copied.failed[0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("changed after it was admitted"));
         let _ = std::fs::remove_dir_all(&c.root);
     }
 

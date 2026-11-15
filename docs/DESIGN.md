@@ -2408,8 +2408,8 @@ not offered: they do not receive files.
   is it mounted or sent to. Waiting for Trust or unlock is bounded by the
   call's `wait_seconds` and reported once as progress, in §6.13.1's words.
 - **Sending is a copy and nothing else.** One regular file at a time goes
-  through the engine's single-file copy (`copy_regular_file_with`: staged,
-  published without replacement, never recursive). A taken name gets
+  through the engine's `copy_admitted_file` (staged, published without
+  replacement, never recursive). A taken name gets
   Gust's "(copy)" name, or is skipped; the engine itself runs with Ask, so
   a name taken later is a conflict, never a replacement or a fake copy.
   FAT names and the 4 GB limit follow `gust_ops::fat`. There is no move, replace,
@@ -2424,10 +2424,11 @@ not offered: they do not receive files.
   mount (§6.4.3 admission). One refused source refuses the whole call before
   any device is touched. For each file, everything that touches the
   device (the folder, the name clash) comes first; then the file is
-  admitted again as the same dev+inode; then the engine opens it without
-  following links, refuses anything but a regular file and checks that
-  what it opened is what it saw. No wait on the device, however long,
-  leaves room for a file to become a folder or another file. This is a
+  admitted again as the same dev+inode; then the engine requires its own
+  first look at the name to be that dev+inode, opens it without following
+  links, refuses anything but a regular file and checks that what it opened
+  is what it saw. The bytes copied are those of the admitted file, whatever
+  happens to the name meanwhile. This is a
   guardrail against a prompt-injected request, not a boundary: the agent
   already has a shell.
 - **Folders** on a device are relative, beneath the open device, resolved

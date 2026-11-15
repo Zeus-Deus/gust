@@ -445,6 +445,40 @@ pub(crate) fn stage_regular_file(
     )
 }
 
+/// Copy one regular file that was checked earlier, as `admitted` (its
+/// device and inode), into `dst_dir` without replacing anything.
+///
+/// The engine's own first look at the source must be that same file, and
+/// what it opens must match that look, so the bytes copied are those of the
+/// file that was admitted, whatever happens to the name in between. Never
+/// recursive: anything but a regular file is refused. A taken name is a
+/// conflict.
+pub fn copy_admitted_file(
+    src_dir: &DirHandle,
+    src_name: &OsStr,
+    admitted: (u64, u64),
+    dst_dir: &DirHandle,
+    dst_name: &OsStr,
+    cancel: &CancelToken,
+    on_bytes: &mut dyn FnMut(u64),
+) -> OpResult<u64> {
+    match stage_regular_file_checked(
+        src_dir,
+        src_name,
+        dst_dir,
+        dst_name,
+        ConflictPolicy::Ask,
+        cancel,
+        on_bytes,
+        true,
+        &mut crate::source_read::LocalMounts::default(),
+        Some(admitted),
+    )? {
+        None => Ok(0),
+        Some(staged) => staged.commit(dst_dir, dst_name),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn stage_regular_file_cached(
     src_dir: &DirHandle,
@@ -457,10 +491,36 @@ pub(crate) fn stage_regular_file_cached(
     durable: bool,
     sources: &mut crate::source_read::LocalMounts,
 ) -> OpResult<Option<Staged>> {
+    stage_regular_file_checked(
+        src_dir, src_name, dst_dir, dst_name, policy, cancel, on_bytes, durable, sources, None,
+    )
+}
+
+/// [`stage_regular_file_cached`], optionally requiring the source to be the
+/// file with this device and inode.
+#[allow(clippy::too_many_arguments)]
+fn stage_regular_file_checked(
+    src_dir: &DirHandle,
+    src_name: &OsStr,
+    dst_dir: &DirHandle,
+    dst_name: &OsStr,
+    policy: ConflictPolicy,
+    cancel: &CancelToken,
+    on_bytes: &mut dyn FnMut(u64),
+    durable: bool,
+    sources: &mut crate::source_read::LocalMounts,
+    admitted: Option<(u64, u64)>,
+) -> OpResult<Option<Staged>> {
     if cancel.checkpoint() {
         return Err(OpError::Cancelled);
     }
     let st = src_dir.stat_child(src_name)?;
+    let seen = FileIdentity::from_stat(&st);
+    if admitted.is_some_and(|admitted| (seen.dev, seen.ino) != admitted) {
+        return Err(OpError::Refused(
+            "the source is no longer the file that was checked; nothing was copied".into(),
+        ));
+    }
     match classify(&st) {
         FileClass::Regular => {}
         FileClass::Special => {
@@ -1020,6 +1080,29 @@ mod tests {
 
     fn handles(dir: &Path, name: &str) -> (DirHandle, OsString) {
         resolve_parent(&dir.join(name)).unwrap()
+    }
+
+    #[test]
+    fn an_admitted_copy_refuses_any_other_file_at_the_name() {
+        use std::os::unix::fs::MetadataExt;
+        let d = tmp("admitted");
+        fs::write(d.join("photo.jpg"), b"photo").unwrap();
+        let meta = fs::metadata(d.join("photo.jpg")).unwrap();
+        let admitted = (meta.dev(), meta.ino());
+        fs::create_dir(d.join("out")).unwrap();
+        // Another regular file now has the name, the admitted one moved aside.
+        fs::rename(d.join("photo.jpg"), d.join("aside.jpg")).unwrap();
+        fs::write(d.join("photo.jpg"), b"not the one").unwrap();
+        let (sd, sn) = handles(&d, "photo.jpg");
+        let (dd, dn) = handles(&d.join("out"), "photo.jpg");
+        let cancel = CancelToken::new();
+        let result = copy_admitted_file(&sd, &sn, admitted, &dd, &dn, &cancel, &mut |_| {});
+        assert!(matches!(result, Err(OpError::Refused(_))), "{result:?}");
+        assert!(!d.join("out/photo.jpg").exists());
+        // The admitted file itself is copied.
+        let (sd, sn) = handles(&d, "aside.jpg");
+        copy_admitted_file(&sd, &sn, admitted, &dd, &dn, &cancel, &mut |_| {}).unwrap();
+        assert_eq!(fs::read(d.join("out/photo.jpg")).unwrap(), b"photo");
     }
 
     #[test]
