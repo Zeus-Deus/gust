@@ -6,7 +6,9 @@
 
 use std::ffi::OsStr;
 use std::fs::File;
+use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 
 /// At most this many files per call.
@@ -17,6 +19,8 @@ pub const MAX_PATHS: usize = 64;
 pub struct Admitted {
     pub path: PathBuf,
     pub bytes: u64,
+    /// Device and inode at admission: the file sent must still be this one.
+    pub identity: (u64, u64),
 }
 
 /// Why a source was refused, in words the agent can repeat to a person.
@@ -95,6 +99,7 @@ pub fn source(raw: &str, roots: &[PathBuf]) -> Result<Admitted, Refusal> {
     Ok(Admitted {
         path: path.to_path_buf(),
         bytes: meta.len(),
+        identity: (meta.dev(), meta.ino()),
     })
 }
 
@@ -110,10 +115,16 @@ fn open_no_symlinks(path: &Path) -> std::io::Result<File> {
     Ok(File::from(fd))
 }
 
-/// A folder on a device, relative to the place the device is open at.
-/// Returns the absolute folder once it is known to be a real folder beneath
-/// `root`, reached without following any symbolic link.
-pub fn device_folder(root: &Path, raw: &str) -> Result<PathBuf, &'static str> {
+/// A folder on a device, relative to the place the device is open at, known
+/// to be a real folder beneath `root` and reached without following any
+/// symbolic link. `dir` is that folder, open: read it through `dir`, never
+/// by `path`, which a link could replace in the meantime.
+pub struct DeviceFolder {
+    pub path: PathBuf,
+    pub dir: OwnedFd,
+}
+
+pub fn device_folder(root: &Path, raw: &str) -> Result<DeviceFolder, &'static str> {
     let relative = Path::new(raw.trim_matches('/'));
     if raw.contains('\0') || raw.len() > 4096 {
         return Err("That folder name is not valid.");
@@ -124,25 +135,28 @@ pub fn device_folder(root: &Path, raw: &str) -> Result<PathBuf, &'static str> {
     {
         return Err("Give the folder as a path inside the device, without \".\" or \"..\".");
     }
-    if relative.as_os_str().is_empty() {
-        return Ok(root.to_path_buf());
-    }
     use rustix::fs::{Mode, OFlags, ResolveFlags};
-    let dir = rustix::fs::open(
-        root,
-        OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
-        Mode::empty(),
-    )
-    .map_err(|_| "The device's folder could not be opened.")?;
-    rustix::fs::openat2(
-        &dir,
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let top = rustix::fs::open(root, flags, Mode::empty())
+        .map_err(|_| "The device's folder could not be opened.")?;
+    if relative.as_os_str().is_empty() {
+        return Ok(DeviceFolder {
+            path: root.to_path_buf(),
+            dir: top,
+        });
+    }
+    let dir = rustix::fs::openat2(
+        &top,
         relative,
-        OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        flags,
         Mode::empty(),
         ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
     )
     .map_err(|_| "That folder does not exist on the device. List its folders first.")?;
-    Ok(root.join(relative))
+    Ok(DeviceFolder {
+        path: root.join(relative),
+        dir,
+    })
 }
 
 /// The first component of a relative device folder, if any.
@@ -220,11 +234,14 @@ mod tests {
         let outside = scratch("folder-outside");
         symlink(&outside, root.join("escape")).unwrap();
         assert_eq!(
-            device_folder(&root, "VLC/Movies").unwrap(),
+            device_folder(&root, "VLC/Movies").unwrap().path,
             root.join("VLC/Movies")
         );
-        assert_eq!(device_folder(&root, "/VLC/").unwrap(), root.join("VLC"));
-        assert_eq!(device_folder(&root, "").unwrap(), root);
+        assert_eq!(
+            device_folder(&root, "/VLC/").unwrap().path,
+            root.join("VLC")
+        );
+        assert_eq!(device_folder(&root, "").unwrap().path, root);
         assert!(device_folder(&root, "missing").is_err());
         assert!(device_folder(&root, "../x").is_err());
         assert!(device_folder(&root, "VLC/../VLC").is_err());

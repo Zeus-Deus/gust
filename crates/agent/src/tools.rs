@@ -11,7 +11,6 @@ use gust_ops::jobs::{self, Request};
 use gust_ops::journal::{ConflictPolicy, JobState};
 use gust_remote::helper::CallContext;
 use serde_json::{json, Map, Value};
-use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -30,7 +29,7 @@ pub struct Call<'a> {
 pub const INSTRUCTIONS: &str = "Send files from this computer to an iPhone, iPad, Android phone or USB drive plugged in by cable, or to the person's devices on Tailscale (Taildrop). Call list_devices first and use an id it returns.\n\nChoosing a route to an iPhone or iPad:\n- Any file, device on USB: send to its apple:… id with a folder from list_device_folders. Each folder is an app that accepts files (VLC, Documents…); the file opens in that app. This does not reach the Photos library.\n- Photos or videos the person wants in Photos: send to the device's taildrop:… entry. They then tap the Tailscale notification and Share › Save Image/Video. No route puts files into Photos without a tap.\n- needs_trust or needs_unlock: the person must unlock the device and tap Trust. If they are away from it, use its taildrop entry instead.\n\nSending only copies. An existing file on the device is never replaced: the new copy is renamed, or skipped if asked. Only regular files in the home folder, the temporary folder or on a removable drive can be sent; hidden files are refused.";
 
 pub fn definitions() -> Value {
-    let error_note = "On failure the result has isError true and one JSON text block {\"error\":{\"code\",\"message\",\"action\"}}.";
+    let error_note = "On failure the result has isError true and one JSON text block {\"error\":{\"code\",\"message\",\"action\",\"details\"?}}. When some files did arrive, details has this tool's result shape and lists them.";
     json!([
         {
             "name": "list_devices",
@@ -207,34 +206,47 @@ fn list_device_folders(args: &Map<String, Value>, call: &Call<'_>) -> Result<Val
     let root = endpoint.open(wait, call.cancel, &mut |words| {
         call.report.progress(0.0, None, &words)
     })?;
-    let dir = admit::device_folder(&root, path).map_err(|m| {
+    let folder = admit::device_folder(&root, path).map_err(|m| {
         Failure::new(
             "folder_not_found",
             m,
             "Call list_device_folders without a path and pick from its folders.",
         )
     })?;
-    let read = std::fs::read_dir(&dir).map_err(|_| {
+    let unreadable = || {
         Failure::new(
             "device_unavailable",
             "The folder could not be read.",
             "Check that the device is still connected and unlocked, then try again.",
         )
-    })?;
+    };
+    // Read through the descriptor that was checked, never by path again.
+    let dir = rustix::fs::Dir::read_from(&folder.dir).map_err(|_| unreadable())?;
     let base = path.trim_matches('/');
     let mut folders = Vec::new();
     let mut truncated = false;
-    for entry in read.flatten() {
+    for entry in dir {
         if call.cancel.is_cancelled() {
             break;
         }
-        let name = entry.file_name();
+        let Ok(entry) = entry else {
+            return Err(unreadable());
+        };
+        let raw = entry.file_name();
         // Hidden folders and names that are not text are not offered.
-        let Some(text) = name.to_str() else { continue };
-        if name.as_bytes().starts_with(b".") || text.chars().any(char::is_control) {
+        let Ok(text) = raw.to_str() else { continue };
+        if text.starts_with('.') || text.chars().any(char::is_control) {
             continue;
         }
-        if !entry.file_type().is_ok_and(|t| t.is_dir()) {
+        let is_dir = match entry.file_type() {
+            rustix::fs::FileType::Directory => true,
+            rustix::fs::FileType::Unknown => {
+                rustix::fs::statat(&folder.dir, raw, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)
+                    .is_ok_and(|st| rustix::fs::FileType::from_raw_mode(st.st_mode).is_dir())
+            }
+            _ => false,
+        };
+        if !is_dir {
             continue;
         }
         if folders.len() == MAX_FOLDERS {
@@ -277,9 +289,9 @@ fn send_files(args: &Map<String, Value>, call: &Call<'_>) -> Result<Value, Failu
         )));
     }
     let folder = string(args, "folder")?;
-    let policy = match string(args, "on_conflict")?.unwrap_or("rename") {
-        "rename" => ConflictPolicy::KeepBoth,
-        "skip" => ConflictPolicy::Skip,
+    let skip = match string(args, "on_conflict")?.unwrap_or("rename") {
+        "rename" => false,
+        "skip" => true,
         _ => return Err(invalid("on_conflict must be \"rename\" or \"skip\".")),
     };
     let wait = wait_seconds(args)?;
@@ -310,32 +322,71 @@ fn send_files(args: &Map<String, Value>, call: &Call<'_>) -> Result<Value, Failu
         Endpoint::Taildrop(target) => {
             taildrop(&endpoint, &target.address, target.online, &sources, call)
         }
-        _ => copy(&endpoint, folder, policy, wait, &sources, call),
+        _ => copy(&endpoint, folder, skip, wait, &sources, &roots, call),
     }
 }
 
-fn result(
-    endpoint: &Endpoint,
-    transport: &str,
+struct Outcome<'a> {
+    endpoint: &'a Endpoint,
+    transport: &'a str,
     sent: Vec<Value>,
     skipped: Vec<String>,
     failed: Vec<Value>,
-    next_step: Option<&str>,
+    next_step: Option<&'a str>,
     uncertain: bool,
-) -> Value {
-    let mut v = json!({
-        "device": endpoint.id(),
-        "transport": transport,
-        "sent": sent,
-        "skipped": skipped,
-        "failed": failed,
-        "lands_in": endpoint.lands_in(),
-        "delivery_uncertain": uncertain,
-    });
-    if let Some(n) = next_step {
-        v["next_step"] = json!(n);
+}
+
+impl Outcome<'_> {
+    /// Success only if nothing failed and delivery is certain. Otherwise an
+    /// error that still lists what arrived, so the agent can resend the rest.
+    fn finish(self) -> Result<Value, Failure> {
+        let failed = !self.failed.is_empty() || self.uncertain;
+        let reasons: Vec<String> = self
+            .failed
+            .iter()
+            .filter_map(|f| f["reason"].as_str().map(str::to_string))
+            .collect();
+        let none_sent = self.sent.is_empty();
+        let mut v = json!({
+            "device": self.endpoint.id(),
+            "transport": self.transport,
+            "sent": self.sent,
+            "skipped": self.skipped,
+            "failed": self.failed,
+            "lands_in": self.endpoint.lands_in(),
+            "delivery_uncertain": self.uncertain,
+        });
+        if let Some(n) = self.next_step {
+            v["next_step"] = json!(n);
+        }
+        if !failed {
+            return Ok(v);
+        }
+        let (code, action) = if self.uncertain {
+            (
+                "delivery_uncertain",
+                "Some files may have arrived. Check on the device before sending them again.",
+            )
+        } else if none_sent {
+            (
+                "transfer_failed",
+                "Nothing was sent. Check the device and its free space, then try again.",
+            )
+        } else {
+            (
+                "partially_sent",
+                "Files under sent arrived. Fix the cause, then send only the failed ones again.",
+            )
+        };
+        let mut message = reasons;
+        message.dedup();
+        let message = if message.is_empty() {
+            "The send did not complete.".to_string()
+        } else {
+            message.join("\n")
+        };
+        Err(Failure::new(code, message, action).with_details(v))
     }
-    v
 }
 
 fn display(p: &std::path::Path) -> String {
@@ -405,15 +456,16 @@ fn taildrop(
     };
     let next = "On an iPhone or iPad: tap the Tailscale notification; the file is in Files › Tailscale, and Share › Save Image or Save Video adds it to Photos.";
     match outcome {
-        Ok(_) => Ok(result(
+        Ok(_) => Outcome {
             endpoint,
-            "taildrop",
-            sources.iter().map(entry).collect(),
-            Vec::new(),
-            Vec::new(),
-            Some(next),
-            false,
-        )),
+            transport: "taildrop",
+            sent: sources.iter().map(entry).collect(),
+            skipped: Vec::new(),
+            failed: Vec::new(),
+            next_step: Some(next),
+            uncertain: false,
+        }
+        .finish(),
         Err(f) if f.accepted_files == 0 && !f.delivery_uncertain => Err(Failure::new(
             if f.error.code == gust_remote::helper::ErrorCode::Cancelled {
                 "cancelled"
@@ -429,15 +481,16 @@ fn taildrop(
                 .iter()
                 .map(|s| json!({"source": display(&s.path), "reason": f.error.message}))
                 .collect();
-            Ok(result(
+            Outcome {
                 endpoint,
-                "taildrop",
-                sources[..n].iter().map(entry).collect(),
-                Vec::new(),
+                transport: "taildrop",
+                sent: sources[..n].iter().map(entry).collect(),
+                skipped: Vec::new(),
                 failed,
-                Some(next),
-                f.delivery_uncertain,
-            ))
+                next_step: Some(next),
+                uncertain: f.delivery_uncertain,
+            }
+            .finish()
         }
     }
 }
@@ -445,9 +498,10 @@ fn taildrop(
 fn copy(
     endpoint: &Endpoint,
     folder: Option<&str>,
-    policy: ConflictPolicy,
+    skip: bool,
     wait: Duration,
     sources: &[admit::Admitted],
+    roots: &[PathBuf],
     call: &Call<'_>,
 ) -> Result<Value, Failure> {
     if endpoint.needs_folder() && folder.is_none_or(|f| admit::first_component(f).is_none()) {
@@ -460,13 +514,68 @@ fn copy(
     let root = endpoint.open(wait, call.cancel, &mut |words| {
         call.report.progress(0.0, None, &words)
     })?;
-    let dest = admit::device_folder(&root, folder.unwrap_or("")).map_err(|m| {
-        Failure::new(
-            "folder_not_found",
-            m,
-            "Call list_device_folders and pick one of its folders.",
-        )
-    })?;
+    let dest = admit::device_folder(&root, folder.unwrap_or(""))
+        .map_err(|m| {
+            Failure::new(
+                "folder_not_found",
+                m,
+                "Call list_device_folders and pick one of its folders.",
+            )
+        })?
+        .path;
+    // Waiting for Trust can take minutes: admit every source again, as the
+    // same file, immediately before the copy starts.
+    for s in sources {
+        let again = admit::source(&display(&s.path), roots);
+        if again.map(|a| a.identity) != Ok(s.identity) {
+            return Err(Failure::new(
+                "source_refused",
+                format!("{} changed while waiting for the device.", display(&s.path)),
+                "Nothing was sent. Check the file, then send again.",
+            ));
+        }
+    }
+    let mut request = Request::Copy {
+        sources: sources.iter().map(|s| s.path.clone()).collect(),
+        dest_dir: dest.clone(),
+    };
+    // "Skip" is decided here, before the job: a name taken later is then a
+    // conflict the job stops at, never a skip that looks like a copy.
+    let mut skipped = Vec::new();
+    if skip {
+        let taken: Vec<PathBuf> = jobs::conflicts(&request)
+            .into_iter()
+            .map(|c| c.source)
+            .collect();
+        skipped = taken.iter().map(|p| display(p)).collect();
+        let left: Vec<PathBuf> = sources
+            .iter()
+            .map(|s| s.path.clone())
+            .filter(|p| !taken.contains(p))
+            .collect();
+        if left.is_empty() {
+            return Outcome {
+                endpoint,
+                transport: "usb",
+                sent: Vec::new(),
+                skipped,
+                failed: Vec::new(),
+                next_step: None,
+                uncertain: false,
+            }
+            .finish();
+        }
+        request = Request::Copy {
+            sources: left,
+            dest_dir: dest,
+        };
+    }
+    let policy = if skip {
+        ConflictPolicy::Ask
+    } else {
+        ConflictPolicy::KeepBoth
+    };
+    let copying: Vec<PathBuf> = request.sources();
 
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let mut job = jobs::start_with(
@@ -475,10 +584,7 @@ fn copy(
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ),
-        Request::Copy {
-            sources: sources.iter().map(|s| s.path.clone()).collect(),
-            dest_dir: dest,
-        },
+        request,
         policy,
         None,
         None,
@@ -520,7 +626,7 @@ fn copy(
 
     let mut sent = Vec::new();
     let mut failed = Vec::new();
-    for s in sources {
+    for s in sources.iter().filter(|s| copying.contains(&s.path)) {
         let entry = record.entries.iter().find(|e| e.source == s.path);
         match entry {
             Some(e) if e.done => sent.push(json!({
@@ -540,25 +646,18 @@ fn copy(
         .chain(failed.iter())
         .filter_map(|v| v["source"].as_str().map(str::to_string))
         .collect();
-    let mut skipped = Vec::new();
-    for s in sources {
+    for s in sources.iter().filter(|s| copying.contains(&s.path)) {
         let p = display(&s.path);
-        if accounted.contains(&p) {
-            continue;
+        if !accounted.contains(&p) {
+            // Every source handed to the job is either recorded as copied or
+            // failed; anything else did not arrive.
+            let reason = if end.state == JobState::Confirmed {
+                "It was not copied.".to_string()
+            } else {
+                end.message.clone()
+            };
+            failed.push(json!({"source": p, "reason": reason}));
         }
-        if end.state == JobState::Confirmed {
-            skipped.push(p);
-        } else {
-            failed.push(json!({"source": p, "reason": end.message}));
-        }
-    }
-    if sent.is_empty() && !failed.is_empty() {
-        let reasons: Vec<&str> = failed.iter().filter_map(|f| f["reason"].as_str()).collect();
-        return Err(Failure::new(
-            "transfer_failed",
-            reasons.join("\n"),
-            "Nothing was sent. Check the device and its free space, then try again.",
-        ));
     }
     let next = match endpoint {
         Endpoint::Phone { phone, .. } if phone.kind == gust_remote::phones::PhoneKind::Apple => {
@@ -566,5 +665,14 @@ fn copy(
         }
         _ => None,
     };
-    Ok(result(endpoint, "usb", sent, skipped, failed, next, false))
+    Outcome {
+        endpoint,
+        transport: "usb",
+        sent,
+        skipped,
+        failed,
+        next_step: next,
+        uncertain: false,
+    }
+    .finish()
 }

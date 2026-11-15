@@ -15,7 +15,7 @@ use gust_core::lister::CancelToken;
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::io::{BufRead, Read, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -85,13 +85,27 @@ fn finish(era: Era, mut result: Value, cacheable: bool) -> Value {
     result
 }
 
+/// A running call: its number (so a finished worker removes only itself)
+/// and its cancel token.
+type Running = (u64, CancelToken);
+
 struct Server {
     out: Out,
     /// The revision `initialize` agreed on, for clients of that era.
     legacy: Option<&'static str>,
-    in_flight: Arc<Mutex<HashMap<String, CancelToken>>>,
-    sending: Arc<AtomicBool>,
+    /// Calls by request id. A cancelled call stops counting against the
+    /// limits at once, even if a stalled device keeps its worker blocked in
+    /// the kernel (§6.4.3): that worker will never write again.
+    in_flight: Arc<Mutex<HashMap<String, Running>>>,
+    /// The send that is running, if any: one at a time.
+    sending: Arc<Mutex<Option<Running>>>,
     workers: Vec<std::thread::JoinHandle<()>>,
+}
+
+static NEXT_CALL: AtomicU64 = AtomicU64::new(0);
+
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// Serve stdin/stdout until stdin closes. The exit status for `gust --mcp`.
@@ -153,12 +167,7 @@ pub fn serve(mut input: impl BufRead, output: Box<dyn Write + Send>) -> i32 {
         server.workers.retain(|w| !w.is_finished());
     }
     // The client is gone: stop everything, give workers a moment to stop.
-    for token in server
-        .in_flight
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .values()
-    {
+    for (_, token) in lock(&server.in_flight).values() {
         token.cancel();
     }
     let deadline = Instant::now() + SHUTDOWN_GRACE;
@@ -174,6 +183,21 @@ fn key(id: &Value) -> String {
 
 impl Server {
     fn message(&mut self, m: Map<String, Value>) {
+        if m.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
+            // Answer a malformed request; a malformed notification gets nothing.
+            if let Some(id) = m.get("id") {
+                let id = if id.is_string() || id.is_i64() || id.is_u64() {
+                    id.clone()
+                } else {
+                    Value::Null
+                };
+                write(
+                    &self.out,
+                    &error(&id, INVALID_REQUEST, "jsonrpc must be \"2.0\"", None),
+                );
+            }
+            return;
+        }
         let Some(method) = m.get("method").and_then(Value::as_str) else {
             // A response to a request; this server sends none.
             if !m.contains_key("result") && !m.contains_key("error") {
@@ -221,15 +245,14 @@ impl Server {
 
     fn notification(&mut self, method: &str, params: &Map<String, Value>) {
         if method == "notifications/cancelled" {
-            if let Some(id) = params.get("requestId") {
-                if let Some(t) = self
-                    .in_flight
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .get(&key(id))
-                {
-                    t.cancel();
-                }
+            let token = params
+                .get("requestId")
+                .and_then(|id| lock(&self.in_flight).get(&key(id)).map(|(_, t)| t.clone()));
+            if let Some(token) = token {
+                // Under the writer lock, like every write: a worker either
+                // finished writing before this, or sees the cancellation.
+                let _out = lock(&self.out);
+                token.cancel();
             }
         }
         // notifications/initialized and anything unknown need no answer.
@@ -293,7 +316,11 @@ impl Server {
                     }),
                 ))
             }
-            "ping" => Some(ok(id, json!({}))),
+            // Gone from 2026-07-28; kept for clients of the handshake era.
+            "ping" => Some(match self.era(id, &params) {
+                Ok(era) => ok(id, finish(era, json!({}), false)),
+                Err(e) => e,
+            }),
             "server/discover" => Some(match self.era(id, &params) {
                 Ok(Era::Modern) => {
                     let mut supported = vec![MODERN];
@@ -375,9 +402,14 @@ impl Server {
             ))
         };
         let cancel = CancelToken::new();
+        let number = NEXT_CALL.fetch_add(1, Ordering::Relaxed);
+        let is_send = name == "send_files";
         {
-            let mut in_flight = self.in_flight.lock().unwrap_or_else(|e| e.into_inner());
-            if in_flight.contains_key(&key(id)) {
+            let mut in_flight = lock(&self.in_flight);
+            if in_flight
+                .get(&key(id))
+                .is_some_and(|(_, t)| !t.is_cancelled())
+            {
                 return Some(error(
                     id,
                     INVALID_REQUEST,
@@ -385,18 +417,22 @@ impl Server {
                     None,
                 ));
             }
-            if in_flight.len() >= MAX_IN_FLIGHT {
+            if in_flight
+                .values()
+                .filter(|(_, t)| !t.is_cancelled())
+                .count()
+                >= MAX_IN_FLIGHT
+            {
                 return busy("Too many requests are running.");
             }
-            in_flight.insert(key(id), cancel.clone());
-        }
-        let is_send = name == "send_files";
-        if is_send && self.sending.swap(true, Ordering::AcqRel) {
-            self.in_flight
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .remove(&key(id));
-            return busy("Another send is still running.");
+            if is_send {
+                let mut sending = lock(&self.sending);
+                if sending.as_ref().is_some_and(|(_, t)| !t.is_cancelled()) {
+                    return busy("Another send is still running.");
+                }
+                *sending = Some((number, cancel.clone()));
+            }
+            in_flight.insert(key(id), (number, cancel.clone()));
         }
 
         let out = self.out.clone();
@@ -428,22 +464,16 @@ impl Server {
                     Err(_) => error(&reply_id, INTERNAL_ERROR, "Internal error", None),
                 };
                 {
-                    // Checked under the writer lock: once a cancellation is
-                    // seen, nothing more is written for this request.
-                    let mut w = out.lock().unwrap_or_else(|e| e.into_inner());
+                    // Checked under the writer lock, which cancellation also
+                    // takes: once it is seen, nothing more is written.
+                    let mut w = lock(&out);
                     if !cancel.is_cancelled() {
                         let mut line = reply.to_string();
                         line.push('\n');
                         let _ = w.write_all(line.as_bytes()).and_then(|_| w.flush());
                     }
                 }
-                in_flight
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .remove(&key(&reply_id));
-                if is_send {
-                    sending.store(false, Ordering::Release);
-                }
+                release(&in_flight, &sending, &reply_id, number);
             });
         match worker {
             Ok(w) => {
@@ -451,16 +481,28 @@ impl Server {
                 None
             }
             Err(_) => {
-                self.in_flight
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .remove(&key(id));
-                if is_send {
-                    self.sending.store(false, Ordering::Release);
-                }
+                release(&self.in_flight, &self.sending, id, number);
                 Some(error(id, INTERNAL_ERROR, "Could not start the tool", None))
             }
         }
+    }
+}
+
+/// Forget a finished call, unless its id or the send slot already belong
+/// to a newer one.
+fn release(
+    in_flight: &Mutex<HashMap<String, Running>>,
+    sending: &Mutex<Option<Running>>,
+    id: &Value,
+    number: u64,
+) {
+    let mut in_flight = lock(in_flight);
+    if in_flight.get(&key(id)).is_some_and(|(n, _)| *n == number) {
+        in_flight.remove(&key(id));
+    }
+    let mut sending = lock(sending);
+    if sending.as_ref().is_some_and(|(n, _)| *n == number) {
+        *sending = None;
     }
 }
 
@@ -471,10 +513,16 @@ fn tool_result(r: Result<Value, Failure>) -> Value {
             "structuredContent": v,
             "isError": false,
         }),
-        Err(f) => json!({
-            "content": [{"type": "text", "text": json!({"error": {"code": f.code, "message": f.message, "action": f.action}}).to_string()}],
-            "isError": true,
-        }),
+        Err(f) => {
+            let mut e = json!({"code": f.code, "message": f.message, "action": f.action});
+            if let Some(d) = f.details {
+                e["details"] = d;
+            }
+            json!({
+                "content": [{"type": "text", "text": json!({"error": e}).to_string()}],
+                "isError": true,
+            })
+        }
     }
 }
 

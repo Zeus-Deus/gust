@@ -101,6 +101,7 @@ if [[ "$*" == "file cp --targets" ]]; then
   printf '100.64.0.2\tAlex-iPad\n100.64.0.3\told-laptop\toffline\n'; exit 0
 fi
 if [[ "$1 $2 $3" == "file cp --name" && "$5" == "--" ]]; then
+  [[ "$4" == fail.jpg ]] && exit 1
   echo "$7" >> "$T/taildrop-calls"; cat "$6" > "$T/taildrop/$4"; exit 0
 fi
 exit 1
@@ -355,6 +356,17 @@ fn a_modern_client_discovers_the_server_and_protocol_errors_are_exact() {
     );
     assert_eq!(v["error"]["code"], -32602);
 
+    // ping belongs to the handshake era: a modern ping is validated and shaped.
+    let (v, _) = s.request("ping", json!({}));
+    assert_eq!(v["error"]["code"], -32602);
+    let (v, _) = s.request("ping", json!({"_meta": meta()}));
+    assert_eq!(v["result"]["resultType"], "complete");
+    // Not JSON-RPC 2.0: refused, not served.
+    s.raw(r#"{"id":"x","method":"server/discover","params":{}}"#);
+    let v = s.rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(v["error"]["code"], -32600);
+    assert_eq!(v["id"], "x");
+
     s.raw("{not json");
     let v = s.rx.recv_timeout(Duration::from_secs(5)).unwrap();
     assert_eq!(v["error"]["code"], -32700);
@@ -593,4 +605,56 @@ fn a_cancelled_call_gets_no_answer_and_stops_waiting_for_the_phone() {
     // …and the server keeps serving.
     let (v, _) = s.request("server/discover", json!({"_meta": meta()}));
     assert!(v.get("result").is_some());
+}
+
+fn error_details(result: &Value) -> Value {
+    let text = result["content"][0]["text"].as_str().unwrap();
+    serde_json::from_str::<Value>(text).unwrap()["error"]["details"].clone()
+}
+
+#[test]
+fn a_partial_taildrop_send_is_an_error_that_still_lists_what_arrived() {
+    let f = Fixture::new("partial");
+    let mut s = f.start();
+    let good = f.path("home/Pictures/beach.jpg");
+    let bad = f.path("home/Pictures/fail.jpg");
+    std::fs::write(&bad, b"x").unwrap();
+    let (r, _) = s.tool(
+        "send_files",
+        json!({"device": "taildrop:100.64.0.2", "paths": [good, bad]}),
+    );
+    // Taildrop cannot say whether a refused file partly arrived.
+    assert_eq!(error_code(&r), "delivery_uncertain");
+    let d = error_details(&r);
+    assert_eq!(d["sent"][0]["name"], "beach.jpg");
+    assert_eq!(d["failed"][0]["source"], json!(bad));
+    assert_eq!(d["delivery_uncertain"], true);
+}
+
+#[test]
+fn a_source_swapped_while_waiting_for_trust_is_refused_and_nothing_is_sent() {
+    let f = Fixture::new("swap");
+    let mut s = f.start();
+    let photo = f.path("home/Pictures/beach.jpg");
+    s.next += 1;
+    let id = s.next;
+    s.send(&json!({"jsonrpc": "2.0", "id": id, "method": "tools/call", "params": {
+        "name": "send_files",
+        "arguments": {"device": format!("apple:{UDID}"), "paths": [photo], "folder": "VLC", "wait_seconds": 60},
+        "_meta": meta(),
+    }}));
+    let asked = (0..100).any(|_| {
+        std::thread::sleep(Duration::from_millis(50));
+        f.path("gio-calls").exists()
+    });
+    assert!(asked);
+    // While the phone waits for Trust, the file becomes a folder of secrets.
+    std::fs::remove_file(&photo).unwrap();
+    std::fs::create_dir_all(photo.join(".ssh")).unwrap();
+    std::fs::write(photo.join(".ssh/id_ed25519"), b"secret").unwrap();
+    f.trust();
+    let (v, _) = s.response_to(id);
+    assert_eq!(error_code(&v["result"]), "source_refused");
+    let landed: Vec<_> = std::fs::read_dir(f.apps().join("VLC")).unwrap().collect();
+    assert!(landed.is_empty(), "a swapped source reached the phone");
 }

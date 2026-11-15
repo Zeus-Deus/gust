@@ -2410,25 +2410,46 @@ not offered: they do not receive files.
 - **Sending is a copy and nothing else.** Only `Request::Copy` is built, with
   KeepBoth ("rename") or Skip on a clash, through the ordinary job engine
   (staged, published without replacement). There is no move, replace,
-  merge, delete or eject, and no argument that could ask for one.
+  merge, delete or eject, and no argument that could ask for one. "Skip"
+  is decided before the job starts; the job then runs with Ask, so a name
+  taken later stops it as a conflict instead of reading as a copy.
+- **A failure is an error.** Any failed or uncertain file makes the call
+  `isError`; its `details` still list what arrived, so nothing is sent twice
+  blindly. Taildrop cannot tell whether a refused file partly arrived and
+  says `delivery_uncertain`.
 - **Sources** are at most 64 regular files, in the home folder, a removable
   drive mounted for this user, or the temporary folder; never a hidden path
   component, never through a symbolic link, never on a FUSE or network
   mount (§6.4.3 admission). One refused source refuses the whole call before
-  any device is touched. This is a guardrail against a prompt-injected
-  request, not a boundary: the agent already has a shell.
+  any device is touched. Every source is admitted again, as the same
+  dev+inode, after the device opens and immediately before the copy job
+  starts, so minutes spent waiting for Trust cannot turn a file into a
+  folder. This is a guardrail against a prompt-injected request, not a
+  boundary: the agent already has a shell, and the job still copies a
+  folder that appears in the instants between that check and its plan.
 - **Folders** on a device are relative, beneath the open device, resolved
-  without following links, and must already exist. Phones need one: an
+  without following links, and must already exist. A listing reads the
+  descriptor that was checked, never the path again. Phones need one: an
   iPhone or iPad accepts files only in an app's shared folder (`afc://…:3/`).
 - **No secret crosses the protocol.** A locked encrypted drive is refused
   with "unlock it in Gust".
 - **Every call has a cancel token**, set by `notifications/cancelled` or by
-  stdin closing. A cancelled call writes nothing further: the check and the
-  write share the output lock. One send runs at a time, four calls at most.
+  stdin closing. Cancelling takes the output lock and every write checks
+  under it, so a cancelled call writes nothing further. One send runs at a
+  time, four calls at most; a cancelled call stops counting at once. A
+  worker blocked in the kernel on a stalled phone cannot be interrupted
+  (§6.4.3) and stays blocked, but it holds no slot and will never write.
 - **Results say where the file is and what the person must still do.**
   Nothing sent from a computer enters the iOS Photos library by itself: USB
   reaches one app's shared folder, and Taildrop reaches Files › Tailscale
   after a tap on the notification, from where Share › Save adds it to Photos.
+
+**Known limit: publication on MTP may not be atomic.** The engine stages
+and renames, but gvfsd-fuse turns a rename into `g_file_move`, which on an
+MTP device without MoveObject falls back to copy-then-delete. A disconnect
+then can leave a partial file under its final name. This affects every
+Gust copy to an Android phone, not only agent sends; fixing it belongs in
+the engine (refuse or verify publication on such mounts).
 
 Proven with stand-ins over real pipes (`crates/agent/tests/mcp.rs`: a fake
 sysfs/udev tree, a `gio` that speaks the Trust protocol, `lsblk` and

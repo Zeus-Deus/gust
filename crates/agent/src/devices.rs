@@ -29,6 +29,8 @@ pub struct Failure {
     pub code: &'static str,
     pub message: String,
     pub action: String,
+    /// What did happen, for a call that partly succeeded.
+    pub details: Option<Value>,
 }
 
 impl Failure {
@@ -37,7 +39,13 @@ impl Failure {
             code,
             message: message.into(),
             action: action.into(),
+            details: None,
         }
+    }
+
+    pub fn with_details(mut self, details: Value) -> Self {
+        self.details = Some(details);
+        self
     }
 }
 
