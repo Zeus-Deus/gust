@@ -9,6 +9,7 @@ that looks like a native Quattro surface and never loses data.
 - `crates/ops`      copy/move/trash/rename, jobs, undo journal
 - `crates/remote`   mount manager: sshfs, gio, rclone, discovery
 - `crates/thumbs`   freedesktop cache + sandboxed thumbnailers
+- `crates/agent`    `gust --mcp`: MCP server for agent device transfers (no Qt)
 - `crates/app`      cxx-qt bridge, models, image provider, main
 - `ui/`             QML views; `ui/theme/` maps Omarchy tokens
 - `docs/DESIGN.md`  types and protocols shared between crates — change it first

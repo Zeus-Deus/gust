@@ -427,9 +427,15 @@ pub fn receive(home: &Path, ctx: &CallContext<'_>) -> Result<Received, RemoteErr
     Ok(Received { path: batch, files })
 }
 
+/// This account's Taildrop receivers, from the local daemon only: no peer is
+/// contacted, and nothing about shared folders is read.
+pub fn send_targets(ctx: &CallContext<'_>) -> Result<Vec<SendTarget>, RemoteError> {
+    parse_targets(&call(&["file", "cp", "--targets"], ctx)?)
+}
+
 /// Recheck eligibility immediately before sending, without contacting the peer.
 pub fn eligible_target(address: &str, ctx: &CallContext<'_>) -> Result<(), RemoteError> {
-    let targets = parse_targets(&call(&["file", "cp", "--targets"], ctx)?)?;
+    let targets = send_targets(ctx)?;
     if targets.iter().any(|t| t.address == address && t.online) {
         Ok(())
     } else {

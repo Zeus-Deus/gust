@@ -71,7 +71,7 @@ lint:
     # Rust lints, denied. Scoped to Gust's own crates: gust-app compiles
     # generated C++ against Qt headers, whose warnings are not ours to fix
     # and cannot be denied without failing on someone else's code.
-    cargo clippy --locked -p gust-core -p gust-ops -p gust-remote -p gust-thumbs \
+    cargo clippy --locked -p gust-core -p gust-ops -p gust-remote -p gust-thumbs -p gust-agent \
         --all-targets -- -D warnings
     # gust-app still has to compile cleanly, just without -D on Qt's headers.
     cargo clippy --locked -p gust-app
