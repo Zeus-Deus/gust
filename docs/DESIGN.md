@@ -2407,12 +2407,13 @@ not offered: they do not receive files.
   names a device is the explicit action §6.4 and §6.13.1 require: only then
   is it mounted or sent to. Waiting for Trust or unlock is bounded by the
   call's `wait_seconds` and reported once as progress, in §6.13.1's words.
-- **Sending is a copy and nothing else.** Only `Request::Copy` is built, with
-  KeepBoth ("rename") or Skip on a clash, through the ordinary job engine
-  (staged, published without replacement). There is no move, replace,
-  merge, delete or eject, and no argument that could ask for one. "Skip"
-  is decided before the job starts; the job then runs with Ask, so a name
-  taken later stops it as a conflict instead of reading as a copy.
+- **Sending is a copy and nothing else.** One regular file at a time goes
+  through the engine's single-file copy (`copy_regular_file_with`: staged,
+  published without replacement, never recursive). A taken name gets
+  Gust's "(copy)" name, or is skipped; the engine itself runs with Ask, so
+  a name taken later is a conflict, never a replacement or a fake copy.
+  FAT names and the 4 GB limit follow `gust_ops::fat`. There is no move, replace,
+  merge, delete or eject, and no argument that could ask for one.
 - **A failure is an error.** Any failed or uncertain file makes the call
   `isError`; its `details` still list what arrived, so nothing is sent twice
   blindly. Taildrop cannot tell whether a refused file partly arrived and
@@ -2421,13 +2422,14 @@ not offered: they do not receive files.
   drive mounted for this user, or the temporary folder; never a hidden path
   component, never through a symbolic link, never on a FUSE or network
   mount (§6.4.3 admission). One refused source refuses the whole call before
-  any device is touched. Each file is copied by a job of its own and
-  admitted again, as the same dev+inode, as the last step before that job,
-  after every call that touches the device, so a Trust wait, a stalled
-  phone or an earlier file's copy cannot turn a later file into a folder.
-  This is a guardrail against a prompt-injected request, not a boundary:
-  the agent already has a shell, and a job still copies a folder that
-  appears in the instant between that check and its plan.
+  any device is touched. For each file, everything that touches the
+  device (the folder, the name clash) comes first; then the file is
+  admitted again as the same dev+inode; then the engine opens it without
+  following links, refuses anything but a regular file and checks that
+  what it opened is what it saw. No wait on the device, however long,
+  leaves room for a file to become a folder or another file. This is a
+  guardrail against a prompt-injected request, not a boundary: the agent
+  already has a shell.
 - **Folders** on a device are relative, beneath the open device, resolved
   without following links, and must already exist. A listing reads the
   descriptor that was checked, never the path again. Phones need one: an

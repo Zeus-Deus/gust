@@ -1,18 +1,18 @@
 //! The three agent tools: their schemas and what they do.
 //!
-//! Sending is a copy and nothing else: only `Request::Copy` is built, with
-//! "keep both" or "skip" on a name clash. There is no move, replace, merge,
-//! delete or eject here (DESIGN §6.27).
+//! Sending is a copy and nothing else: one regular file at a time through
+//! the engine's single-file copy, with "keep both" or "skip" on a name
+//! clash. There is no move, replace, merge, delete or eject here
+//! (DESIGN §6.27).
 
 use crate::admit;
 use crate::devices::{self, Endpoint, Failure};
 use gust_core::lister::CancelToken;
-use gust_ops::jobs::{self, Request};
-use gust_ops::journal::{ConflictPolicy, JobState};
+use gust_ops::journal::ConflictPolicy;
 use gust_remote::helper::CallContext;
 use serde_json::{json, Map, Value};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 /// What a running tool may tell the client. `progress` must keep growing;
@@ -523,7 +523,7 @@ fn copy(
             )
         })?
         .path;
-    let copied = copy_files(&dest, sources, roots, skip, call, &mut |_| {});
+    let copied = copy_files(&dest, sources, roots, skip, call, &mut |_, _| {});
     let next = match endpoint {
         Endpoint::Phone { phone, .. } if phone.kind == gust_remote::phones::PhoneKind::Apple => {
             Some("Open the file from the app whose folder it was sent to.")
@@ -557,114 +557,157 @@ struct Copied {
     cancelled: bool,
 }
 
-/// Copy each source into `dest` with its own job. Each file is admitted
-/// again, as the same dev+inode, as the last step before its job: a Trust
-/// wait, a stalled phone or an earlier file's copy cannot turn a later file
-/// into a folder. `before_file` runs first for each file (tests use it).
+/// A moment in one file's copy, for tests to act at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Moment {
+    /// Before anything is done for the file.
+    BeforeFile,
+    /// After the destination is ready and the file was admitted again, just
+    /// before the engine opens it.
+    Admitted,
+}
+
+/// What became of one file.
+enum One {
+    Sent(String),
+    Skipped,
+    Failed(String),
+    Cancelled,
+}
+
+/// Copy each source into `dest`, one regular file at a time, through the
+/// engine's single-file copy: staged, published without replacement, and
+/// never recursive. Everything that touches the device (resolving the
+/// folder, the name clash) happens first; then the file is admitted again
+/// as the same dev+inode; then the engine opens it without following links,
+/// refuses anything but a regular file, and checks that what it opened is
+/// what it saw. So no wait on the device, however long, leaves room for a
+/// file to become a folder or another file.
 fn copy_files(
     dest: &std::path::Path,
     sources: &[admit::Admitted],
     roots: &[PathBuf],
     skip: bool,
     call: &Call<'_>,
-    before_file: &mut dyn FnMut(usize),
+    at: &mut dyn FnMut(Moment, usize),
 ) -> Copied {
-    let dest = dest.to_path_buf();
     let total: u64 = sources.iter().map(|s| s.bytes).sum();
+    let fstype = gust_core::stall::fstype_for(dest).unwrap_or_default();
     let mut base = 0u64;
-    let mut sent = Vec::new();
-    let mut skipped = Vec::new();
-    let mut failed = Vec::new();
-    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let mut out = Copied {
+        sent: Vec::new(),
+        skipped: Vec::new(),
+        failed: Vec::new(),
+        cancelled: false,
+    };
     for (i, s) in sources.iter().enumerate() {
-        before_file(i);
+        at(Moment::BeforeFile, i);
         let path = display(&s.path);
-        let request = Request::Copy {
-            sources: vec![s.path.clone()],
-            dest_dir: dest.clone(),
-        };
-        // "Skip" is decided before the job: a name taken later is then a
-        // conflict the job stops at, never a skip that looks like a copy.
-        if skip && !jobs::conflicts(&request).is_empty() {
-            skipped.push(path);
-            base += s.bytes;
-            continue;
-        }
-        if admit::source(&path, roots).map(|a| a.identity) != Ok(s.identity) {
-            failed.push(json!({"source": path, "reason": "It changed after it was admitted, so it was not sent."}));
-            base += s.bytes;
-            continue;
-        }
-        let mut job = jobs::start_with(
-            format!(
-                "agent-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::Relaxed)
-            ),
-            request,
-            if skip {
-                ConflictPolicy::Ask
-            } else {
-                ConflictPolicy::KeepBoth
-            },
-            None,
-            None,
-        );
-        if job.start_error().is_some() {
-            failed.push(
-                json!({"source": path, "reason": "Could not start the copy; nothing was changed."}),
+        let mut on_bytes = |done: u64| {
+            call.report.progress(
+                (base + done) as f64,
+                Some(total as f64),
+                &format!("Copying {} of {}…", i + 1, sources.len()),
             );
-            continue;
-        }
-        loop {
-            if call.cancel.is_cancelled() {
-                job.cancel();
-            }
-            let p = job.snapshot();
-            if p.is_finished() || p.state == JobState::Conflict {
-                break;
-            }
-            if p.bytes_done > 0 {
-                call.report.progress(
-                    (base + p.bytes_done) as f64,
-                    Some(total as f64),
-                    &format!("Copying {} of {}…", i + 1, sources.len()),
-                );
-            }
-            std::thread::sleep(Duration::from_millis(200));
-        }
-        let end = job.wait();
-        let entry = job
-            .record()
-            .entries
-            .into_iter()
-            .find(|e| e.source == s.path);
-        match entry {
-            Some(e) if e.done && end.state == JobState::Confirmed => sent.push(json!({
-                "source": path,
-                "name": e.destination.as_ref().and_then(|d| d.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
-                "bytes": s.bytes,
-            })),
-            Some(e) if e.error.is_some() => {
-                failed.push(json!({"source": path, "reason": e.error.unwrap_or_default()}))
-            }
-            _ => failed.push(json!({"source": path, "reason": if end.message.is_empty() { "It was not copied.".to_string() } else { end.message.clone() }})),
-        }
+        };
+        let one = copy_one(
+            s,
+            dest,
+            &fstype,
+            roots,
+            skip,
+            call.cancel,
+            &mut on_bytes,
+            &mut |m| at(m, i),
+        );
         base += s.bytes;
-        if end.state == JobState::Cancelled {
-            return Copied {
-                sent,
-                skipped,
-                failed,
-                cancelled: true,
-            };
+        match one {
+            One::Sent(name) => out
+                .sent
+                .push(json!({"source": path, "name": name, "bytes": s.bytes})),
+            One::Skipped => out.skipped.push(path),
+            One::Failed(reason) => out.failed.push(json!({"source": path, "reason": reason})),
+            One::Cancelled => {
+                out.cancelled = true;
+                return out;
+            }
         }
     }
-    Copied {
-        sent,
-        skipped,
-        failed,
-        cancelled: false,
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
+fn copy_one(
+    s: &admit::Admitted,
+    dest: &std::path::Path,
+    fstype: &str,
+    roots: &[PathBuf],
+    skip: bool,
+    cancel: &CancelToken,
+    on_bytes: &mut dyn FnMut(u64),
+    at: &mut dyn FnMut(Moment),
+) -> One {
+    use gust_ops::engine::OpError;
+    use std::ffi::OsString;
+    if cancel.is_cancelled() {
+        return One::Cancelled;
+    }
+    let Some(name) = s.path.file_name() else {
+        return One::Failed("It has no file name.".into());
+    };
+    // What the destination can hold, said before a byte is written.
+    let mut dst_name: OsString = if gust_ops::fat::is_fat(fstype) {
+        gust_ops::fat::safe_name(name).unwrap_or_else(|| name.to_os_string())
+    } else {
+        name.to_os_string()
+    };
+    if gust_ops::fat::has_size_limit(fstype) && s.bytes >= 4 * 1024 * 1024 * 1024 {
+        return One::Failed(
+            "It is 4 GB or larger, more than this drive's FAT format can hold in one file.".into(),
+        );
+    }
+    // The device first: the folder, anchored without following links, and
+    // the name clash.
+    let dst_dir = match gust_ops::anchor::resolve_parent(&dest.join(&dst_name)) {
+        Ok((dir, _)) => dir,
+        Err(_) => return One::Failed("The folder on the device could not be opened.".into()),
+    };
+    if dst_dir.stat_child(&dst_name).is_ok() {
+        if skip {
+            return One::Skipped;
+        }
+        match gust_ops::recursive::unique_copy_name(&dst_dir, &dst_name) {
+            Ok(free) => dst_name = free,
+            Err(e) => return One::Failed(e.to_string()),
+        }
+    }
+    // Then the file, as the last step before the engine.
+    if admit::source(&display(&s.path), roots).map(|a| a.identity) != Ok(s.identity) {
+        return One::Failed("It changed after it was admitted, so it was not sent.".into());
+    }
+    let (src_dir, src_name) = match gust_ops::anchor::resolve_parent(&s.path) {
+        Ok(parent) => parent,
+        Err(_) => {
+            return One::Failed("It changed after it was admitted, so it was not sent.".into())
+        }
+    };
+    at(Moment::Admitted);
+    match gust_ops::engine::copy_regular_file_with(
+        &src_dir,
+        &src_name,
+        &dst_dir,
+        &dst_name,
+        ConflictPolicy::Ask,
+        cancel,
+        on_bytes,
+    ) {
+        Ok(_) => One::Sent(dst_name.to_string_lossy().into_owned()),
+        Err(OpError::Cancelled) => One::Cancelled,
+        Err(OpError::Conflict(_)) => One::Failed(
+            "A file with that name appeared on the device meanwhile; it was left alone.".into(),
+        ),
+        Err(OpError::Io(e)) => One::Failed(gust_ops::engine::plain_io_message_at(&e, dest)),
+        Err(e) => One::Failed(e.to_string()),
     }
 }
 
@@ -677,9 +720,17 @@ mod tests {
         fn progress(&self, _: f64, _: Option<f64>, _: &str) {}
     }
 
-    #[test]
-    fn a_later_file_swapped_for_a_folder_during_an_earlier_copy_is_refused() {
-        let root = std::env::temp_dir().join(format!("gust-agent-copy-{}", std::process::id()));
+    struct Case {
+        root: PathBuf,
+        home: PathBuf,
+        dest: PathBuf,
+        roots: Vec<PathBuf>,
+        sources: Vec<admit::Admitted>,
+    }
+
+    fn case(tag: &str) -> Case {
+        let root =
+            std::env::temp_dir().join(format!("gust-agent-copy-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let (home, dest) = (root.join("home"), root.join("phone"));
         std::fs::create_dir_all(&home).unwrap();
@@ -687,36 +738,102 @@ mod tests {
         std::fs::write(home.join("first.bin"), b"first").unwrap();
         std::fs::write(home.join("photo.jpg"), b"photo").unwrap();
         let roots = vec![home.clone()];
-        let sources: Vec<admit::Admitted> = ["first.bin", "photo.jpg"]
+        let sources = ["first.bin", "photo.jpg"]
             .iter()
             .map(|n| admit::source(home.join(n).to_str().unwrap(), &roots).unwrap())
             .collect();
+        Case {
+            root,
+            home,
+            dest,
+            roots,
+            sources,
+        }
+    }
+
+    /// The second source becomes a folder of secrets.
+    fn swap(home: &std::path::Path) {
+        let photo = home.join("photo.jpg");
+        std::fs::remove_file(&photo).unwrap();
+        std::fs::create_dir_all(photo.join(".ssh")).unwrap();
+        std::fs::write(photo.join(".ssh/id_ed25519"), b"secret").unwrap();
+    }
+
+    fn run(c: &Case, at: Moment) -> Copied {
         let cancel = CancelToken::new();
         let call = Call {
             cancel: &cancel,
             report: &Quiet,
         };
-        // Once the first file is underway, the second becomes a folder of
-        // secrets, as a prompt-injected process might arrange.
-        let copied = copy_files(&dest, &sources, &roots, false, &call, &mut |i| {
-            if i == 1 {
-                let photo = home.join("photo.jpg");
-                std::fs::remove_file(&photo).unwrap();
-                std::fs::create_dir_all(photo.join(".ssh")).unwrap();
-                std::fs::write(photo.join(".ssh/id_ed25519"), b"secret").unwrap();
+        copy_files(&c.dest, &c.sources, &c.roots, false, &call, &mut |m, i| {
+            if m == at && i == 1 {
+                swap(&c.home);
             }
-        });
+        })
+    }
+
+    fn only_first_arrived(c: &Case, copied: &Copied) {
         assert_eq!(copied.sent.len(), 1, "{:?}", copied.sent);
         assert_eq!(copied.failed.len(), 1);
         assert_eq!(
             copied.failed[0]["source"],
-            json!(display(&home.join("photo.jpg")))
+            json!(display(&c.home.join("photo.jpg")))
         );
-        assert_eq!(std::fs::read(dest.join("first.bin")).unwrap(), b"first");
-        assert!(
-            !dest.join("photo.jpg").exists(),
-            "the swapped folder was copied"
+        assert_eq!(std::fs::read(c.dest.join("first.bin")).unwrap(), b"first");
+        let landed: Vec<_> = std::fs::read_dir(&c.dest)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name())
+            .collect();
+        assert_eq!(
+            landed,
+            [std::ffi::OsString::from("first.bin")],
+            "the swapped folder or its secrets arrived"
         );
-        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_later_file_swapped_for_a_folder_during_an_earlier_copy_is_refused() {
+        let c = case("earlier");
+        only_first_arrived(&c, &run(&c, Moment::BeforeFile));
+        let _ = std::fs::remove_dir_all(&c.root);
+    }
+
+    #[test]
+    fn a_file_swapped_after_its_last_admission_is_still_never_copied_as_a_folder() {
+        // Past every check this code makes, during the device's own waits:
+        // the engine copies regular files only and never recurses.
+        let c = case("admitted");
+        only_first_arrived(&c, &run(&c, Moment::Admitted));
+        let _ = std::fs::remove_dir_all(&c.root);
+    }
+
+    #[test]
+    fn a_taken_name_gets_a_copy_name_and_the_original_is_kept() {
+        let c = case("keepboth");
+        std::fs::write(c.dest.join("photo.jpg"), b"the phone's own").unwrap();
+        let cancel = CancelToken::new();
+        let call = Call {
+            cancel: &cancel,
+            report: &Quiet,
+        };
+        let copied = copy_files(
+            &c.dest,
+            &c.sources[1..],
+            &c.roots,
+            false,
+            &call,
+            &mut |_, _| {},
+        );
+        assert_eq!(copied.sent[0]["name"], "photo (copy).jpg");
+        assert_eq!(
+            std::fs::read(c.dest.join("photo.jpg")).unwrap(),
+            b"the phone's own"
+        );
+        assert_eq!(
+            std::fs::read(c.dest.join("photo (copy).jpg")).unwrap(),
+            b"photo"
+        );
+        let _ = std::fs::remove_dir_all(&c.root);
     }
 }
