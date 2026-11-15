@@ -70,15 +70,24 @@ def main():
     (output / "build.log").write_text(build.stdout + build.stderr)
     if build.returncode:
         raise RuntimeError("Fixture dependencies failed to build; see build.log")
+    # Cargo's build-dir layout (the default from Rust 1.100) keeps each
+    # crate's outputs in a directory of its own instead of one shared deps/,
+    # so every directory Cargo reports an artifact in is searched; that
+    # includes proc-macro libraries, which rustc needs to load the graph.
     libraries = {}
+    search = []
     for line in build.stdout.splitlines():
         artifact = json.loads(line)
         if artifact.get("reason") == "compiler-artifact":
             for filename in artifact.get("filenames", []):
+                directory = str(Path(filename).parent)
+                if directory not in search:
+                    search.append(directory)
                 if filename.endswith(".rlib"):
                     libraries[artifact["target"]["name"]] = filename
-    deps = Path(libraries["gust_core"]).parent / "deps"
-    externs = ["-L", f"dependency={deps}"]
+    externs = []
+    for directory in search:
+        externs.extend(["-L", f"dependency={directory}"])
     for alias, name in [("gust_core", "gust_core"), ("actual_ops", "gust_ops"), ("serde_json", "serde_json")]:
         externs.extend(["--extern", f"{alias}={libraries[name]}"])
     commands = [[rustc, *externs, "--edition=2021", "--test", str(generated), "-o", str(output / "probe")],
