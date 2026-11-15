@@ -134,6 +134,29 @@ scaling; CI runs 1, 1.5 and 2 with the selected Qt SDK's `qmltestrunner`
 
 ## Contained fixtures and native acceptance
 
+`python3 tests/view-navigation.py` loads the shipped Rows/Grid/Columns QML against
+a recording Qt list model and a deterministic theme service. It bounds shared
+cursor-property reads per step and checks current-item paint through far jumps
+and delegate reuse. Run again with `QT_SCALE_FACTOR=2`; `--observe` records an
+older revision without enforcing the new dependency bound. It requires PySide6;
+CI uses an isolated, pinned Qt Python environment. These component tests do not
+establish filesystem, CXX transport or real desktop input behavior.
+
+```sh
+python3 tests/qa-source-cancel.py --binary /path/to/release/gust --output /tmp/gust-source-cancel-fresh
+```
+
+This native journey needs unprivileged FUSE, its development headers, labwc,
+wlr-randr, grim, wtype and dbus-daemon. It starts its own compositor, bus, HOME
+and synthetic filesystem; it never drives the user's desktop or uses accounts.
+Output must be fresh and outside the checkout. It checks cursor navigation in
+all three views, repeated copy/move cancellation while source reads remain held,
+the process-wide reader bound and saturation refusal, partial staging cleanup,
+recovery, byte equality and identity-checked undo. Screenshots and raw receipts
+remain in that private output. Missing prerequisites return SKIP (77), and a busy
+QA lease returns TEMPFAIL (75). Neither is a pass. Blocked source metadata or
+destination I/O still has no cancellation deadline.
+
 `tests/make-fixture.sh` accepts only a fresh/empty owned directory below `/tmp`.
 It refuses existing data, traversal and symlink ancestry instead of deleting a
 caller-selected tree. Regression tests verify that refused destinations and

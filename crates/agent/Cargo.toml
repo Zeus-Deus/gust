@@ -1,0 +1,22 @@
+[package]
+name = "gust-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# `gust --mcp`: device transfers for AI agents (DESIGN §6.28). No Qt.
+
+[dependencies]
+gust-core.workspace = true
+gust-ops.workspace = true
+gust-remote.workspace = true
+rustix.workspace = true
+serde_json.workspace = true
+
+# Spawned by the protocol tests so they need neither Qt nor a display.
+# Not installed: Gust ships one binary, and `gust --mcp` is the entry point.
+[[bin]]
+name = "gust-mcp"
+path = "src/bin/gust-mcp.rs"
+test = false

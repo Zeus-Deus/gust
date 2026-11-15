@@ -18,7 +18,7 @@ import tempfile
 import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
-PACKAGES = ("gust-core", "gust-ops", "gust-remote", "gust-thumbs", "gust-testkit")
+PACKAGES = ("gust-core", "gust-ops", "gust-remote", "gust-thumbs", "gust-testkit", "gust-agent")
 MANUAL_BENCHMARK = "recursive::tests::copy_1000_small_files"
 RESULT = re.compile(
     r"^test result: (?:ok|FAILED)\. (\d+) passed; (\d+) failed; (\d+) ignored;",

@@ -112,9 +112,22 @@ The source recipe is prepared for review; this document does not claim a
 published release or registry package. [Release preparation](docs/release/README.md)
 describes immutable sources, checksums and installed-artifact checks.
 
+## Agent tools
+
+`gust --mcp` lets an AI agent send files to an iPhone, iPad, Android phone or
+USB drive plugged into this computer, or to your devices on Tailscale, without
+opening a window. It is a Model Context Protocol server on stdio:
+
+    claude mcp add --scope user gust -- gust --mcp
+
+It only copies: nothing on a device is replaced or deleted, and hidden files
+are never sent. Over USB, an iPhone or iPad accepts files into an app's own
+folder (VLC, Documents…), not into Photos; Taildrop delivers to the device's
+Tailscale inbox. See [DESIGN §6.28](docs/DESIGN.md).
+
 ## Layout
 
 `crates/core`: listing/search/theme; `crates/ops`: operations/recovery;
 `crates/remote`: connections; `crates/thumbs`: preview helpers;
-`crates/app`: Qt bridge/models; `ui/`: QML;
+`crates/agent`: `gust --mcp` agent tools; `crates/app`: Qt bridge/models; `ui/`: QML;
 [docs/DESIGN.md](docs/DESIGN.md): shared contracts; `tests/`: orchestration.

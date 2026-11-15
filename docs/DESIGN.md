@@ -74,6 +74,11 @@ settled order (the header shows a sorting indicator until settled).
 
 ## 4. Pane / Tab
 
+Cursor decoration in Rows, Grid and the active Columns list uses Qt's attached
+`isCurrentItem` state. The view's `currentIndex` follows the model cursor once;
+individual delegates must not bind to that shared cursor. This keeps a cursor
+step from reevaluating every live row's fill, border and accessibility state.
+
 Each tab owns: location, view mode, sort, selection set, keyboard cursor,
 scroll position and back/forward stack. **Selection set and keyboard cursor are
 different states.** An explicit user view choice is stored per `LocationKey`
@@ -1599,6 +1604,12 @@ on `/dev/bus/usb/<bus>/` says when something was plugged in or pulled.
   listing do not establish photo browsing or file-transfer qualification.
 - Eject leaves every folder of the phone the window is in, unmounts photos
   and app files, and is never forced; it refuses while a transfer runs.
+- GVfs's AFC and MTP backends cannot store permission bits, so `chmod`
+  through `fuse.gvfsd-fuse` answers "not supported". A copy onto such a
+  mount records no mode and still publishes; on every other filesystem, and
+  for every other error, a failed `chmod` still fails the copy before
+  publication. This is read from the GVfs source; no physical-device copy
+  has confirmed it yet.
 
 **Proven with stand-ins, not with a phone.** `just qa` §37 replaces sysfs,
 the udev database and `gio` with a fake tree and a script that speaks gio's
@@ -2470,6 +2481,89 @@ that file nothing is written and the dialog tiles like any other window.
 - `parent_window`: Qt has no public way to use an xdg-foreign handle, so a
   chooser is centred by the rule, not attached to its app.
 
+## 6.28 Agent tools (`gust --mcp`)
+
+`gust --mcp` is a headless Model Context Protocol server on stdin/stdout,
+handled before any Qt object exists (crate `gust-agent`). It serves revision
+2026-07-28 statelessly (each request carries its version and client
+capabilities in `_meta`; `server/discover` answers first) and the
+`initialize` handshake of 2025-11-25 and 2025-06-18 for older clients.
+stdout carries protocol messages only; the server exits when stdin closes.
+Install: `claude mcp add --scope user gust -- gust --mcp`.
+
+Three tools: `list_devices`, `list_device_folders`, `send_files`. A device is
+one way to reach one thing: a phone on USB (`apple:<udid>`,
+`android:<serial>`), a removable drive (`drive:<kernel name>`), or a Taildrop
+receiver (`taildrop:<address>`). Ids are matched against a fresh local scan
+and never turned into an address or URI. The same iPad on USB and on the
+tailnet is two devices; Gust does not guess that they are one. Cameras are
+not offered: they do not receive files.
+
+- **Listing contacts nothing.** It reads sysfs, the udev database, `gio
+  mount -li`, `lsblk` and the Tailscale daemon's target list. A call that
+  names a device is the explicit action §6.4 and §6.13.1 require: only then
+  is it mounted or sent to. Waiting for Trust or unlock is bounded by the
+  call's `wait_seconds` and reported once as progress, in §6.13.1's words.
+- **Sending is a copy and nothing else.** One regular file at a time goes
+  through the engine's `copy_admitted_file` (staged, published without
+  replacement, never recursive). A taken name gets
+  Gust's "(copy)" name, or is skipped; the engine itself runs with Ask, so
+  a name taken later is a conflict, never a replacement or a fake copy.
+  FAT names and the 4 GB limit follow `gust_ops::fat`. There is no move, replace,
+  merge, delete or eject, and no argument that could ask for one.
+- **A failure is an error.** Any failed or uncertain file makes the call
+  `isError`; its `details` still list what arrived, so nothing is sent twice
+  blindly. Taildrop cannot tell whether a refused file partly arrived and
+  says `delivery_uncertain`.
+- **Sources** are at most 64 regular files, in the home folder, a removable
+  drive mounted for this user, or the temporary folder; never a hidden path
+  component, never through a symbolic link, never on a FUSE or network
+  mount (§6.4.3 admission). One refused source refuses the whole call before
+  any device is touched. For each file, everything that touches the
+  device (the folder, the name clash) comes first; then the file is
+  admitted again as the same dev+inode; then the engine requires its own
+  first look at the name to be that dev+inode, opens it without following
+  links, refuses anything but a regular file and checks that what it opened
+  is what it saw. The bytes copied are those of the admitted file, whatever
+  happens to the name meanwhile. This is a
+  guardrail against a prompt-injected request, not a boundary: the agent
+  already has a shell.
+- **Folders** on a device are relative, beneath the open device, resolved
+  without following links, and must already exist. A listing reads the
+  descriptor that was checked, never the path again. Phones need one: an
+  iPhone or iPad accepts files only in an app's shared folder (`afc://…:3/`).
+- **No secret crosses the protocol.** A locked encrypted drive is refused
+  with "unlock it in Gust"; an unlocked one is mounted through its unlocked
+  contents (`Device::mount_target`), never the container.
+- **Every call has a cancel token**, set by `notifications/cancelled` or by
+  stdin closing. One thread writes stdout and drops a cancelled call's
+  messages before writing them (one already being written was already
+  sent), so a client that stops reading stdout never stops the server from
+  reading stdin or seeing it close; progress is dropped, not queued, past a
+  small backlog. At most 8 MiB of answers may wait: a client that keeps
+  asking without reading ends the session rather than growing it or losing
+  an answer it is owed. A call stays cancellable until its answer is written or
+  dropped, even when that answer is waiting behind a full stdout. One send
+  runs at a time, four calls at most; a call stops counting once it is
+  cancelled or its work is done. A
+  worker blocked in the kernel on a stalled phone cannot be interrupted
+  (§6.4.3) and stays blocked, but it holds no slot and will never write.
+- **Results say where the file is and what the person must still do.**
+  Nothing sent from a computer enters the iOS Photos library by itself: USB
+  reaches one app's shared folder, and Taildrop reaches Files › Tailscale
+  after a tap on the notification, from where Share › Save adds it to Photos.
+
+**Known limit: publication on MTP may not be atomic.** The engine stages
+and renames, but gvfsd-fuse turns a rename into `g_file_move`, which on an
+MTP device without MoveObject falls back to copy-then-delete. A disconnect
+then can leave a partial file under its final name. This affects every
+Gust copy to an Android phone, not only agent sends; fixing it belongs in
+the engine (refuse or verify publication on such mounts).
+
+Proven with stand-ins over real pipes (`crates/agent/tests/mcp.rs`: a fake
+sysfs/udev tree, a `gio` that speaks the Trust protocol, `lsblk` and
+`tailscale` scripts). Transfers to a physical phone remain unqualified.
+
 ## 7. Undo journal
 
 An undo entry records, per affected path: the expected identity
@@ -2723,9 +2817,26 @@ Callers retain the worker handle and any transfer/history ownership until they
 consume its actual completion; requesting cancellation grants no recovery or
 disconnect authority. Existing staging claims remain live through cleanup.
 
-Cancellation checkpoints cannot interrupt a blocked FUSE read, write, metadata,
-fsync, close or unlink. An outage can therefore delay both cancellation and
-process reaping until the transport returns or the filesystem reports failure.
+Regular copies read risky or unknown source mounts through a bounded source-only
+worker. Cancellation polls the pending read every 25 ms; the transfer worker can
+then discard its destination staging file while the source read remains held.
+At most four source workers may exist process-wide, including cancelled reads
+that have not returned. A saturated pool or failed spawn refuses the copy before
+creating destination staging; it never falls back to a blocking source read.
+Each worker holds one duplicated source descriptor and one 128 KiB buffer, never
+a destination descriptor, path or mutation authority. Its slot remains occupied
+through source close. Successful EOF readers retire before the next file starts;
+cancelled blocked reads are never joined. Known local sources keep direct reads.
+A transfer may reuse up to four local filesystem classifications, keyed by the verified
+source device ID. Each entry pins that filesystem with a duplicated descriptor,
+so its device ID cannot be recycled for a new remote filesystem. This is only a
+read-isolation decision, never publication, cleanup or Undo authority.
+The descriptors are released on eviction or at the end of that transfer;
+remote and unknown classifications are never cached as local.
+
+Cancellation checkpoints still cannot interrupt a blocked source open/metadata,
+destination write, fsync, close or unlink. An outage can therefore delay cleanup
+and process reaping until the transport returns or the filesystem reports failure.
 Helper deadlines do not impose transfer syscall or reaping deadlines. Neither
 force-unmount nor a synthetic terminal state is a cancellation mechanism.
 

@@ -432,10 +432,95 @@ pub(crate) fn stage_regular_file(
     on_bytes: &mut dyn FnMut(u64),
     durable: bool,
 ) -> OpResult<Option<Staged>> {
+    stage_regular_file_cached(
+        src_dir,
+        src_name,
+        dst_dir,
+        dst_name,
+        policy,
+        cancel,
+        on_bytes,
+        durable,
+        &mut crate::source_read::LocalMounts::default(),
+    )
+}
+
+/// Copy one regular file that was checked earlier, as `admitted` (its
+/// device and inode), into `dst_dir` without replacing anything.
+///
+/// The engine's own first look at the source must be that same file, and
+/// what it opens must match that look, so the bytes copied are those of the
+/// file that was admitted, whatever happens to the name in between. Never
+/// recursive: anything but a regular file is refused. A taken name is a
+/// conflict.
+pub fn copy_admitted_file(
+    src_dir: &DirHandle,
+    src_name: &OsStr,
+    admitted: (u64, u64),
+    dst_dir: &DirHandle,
+    dst_name: &OsStr,
+    cancel: &CancelToken,
+    on_bytes: &mut dyn FnMut(u64),
+) -> OpResult<u64> {
+    match stage_regular_file_checked(
+        src_dir,
+        src_name,
+        dst_dir,
+        dst_name,
+        ConflictPolicy::Ask,
+        cancel,
+        on_bytes,
+        true,
+        &mut crate::source_read::LocalMounts::default(),
+        Some(admitted),
+    )? {
+        None => Ok(0),
+        Some(staged) => staged.commit(dst_dir, dst_name),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn stage_regular_file_cached(
+    src_dir: &DirHandle,
+    src_name: &OsStr,
+    dst_dir: &DirHandle,
+    dst_name: &OsStr,
+    policy: ConflictPolicy,
+    cancel: &CancelToken,
+    on_bytes: &mut dyn FnMut(u64),
+    durable: bool,
+    sources: &mut crate::source_read::LocalMounts,
+) -> OpResult<Option<Staged>> {
+    stage_regular_file_checked(
+        src_dir, src_name, dst_dir, dst_name, policy, cancel, on_bytes, durable, sources, None,
+    )
+}
+
+/// [`stage_regular_file_cached`], optionally requiring the source to be the
+/// file with this device and inode.
+#[allow(clippy::too_many_arguments)]
+fn stage_regular_file_checked(
+    src_dir: &DirHandle,
+    src_name: &OsStr,
+    dst_dir: &DirHandle,
+    dst_name: &OsStr,
+    policy: ConflictPolicy,
+    cancel: &CancelToken,
+    on_bytes: &mut dyn FnMut(u64),
+    durable: bool,
+    sources: &mut crate::source_read::LocalMounts,
+    admitted: Option<(u64, u64)>,
+) -> OpResult<Option<Staged>> {
     if cancel.checkpoint() {
         return Err(OpError::Cancelled);
     }
     let st = src_dir.stat_child(src_name)?;
+    let seen = FileIdentity::from_stat(&st);
+    if admitted.is_some_and(|admitted| (seen.dev, seen.ino) != admitted) {
+        return Err(OpError::Refused(
+            "the source is no longer the file that was checked; nothing was copied".into(),
+        ));
+    }
     match classify(&st) {
         FileClass::Regular => {}
         FileClass::Special => {
@@ -480,6 +565,8 @@ pub(crate) fn stage_regular_file(
     }
     let expected_len = u64::try_from(st.st_size)
         .map_err(|_| OpError::Refused("source reported an invalid file size".into()))?;
+
+    let mut reader = crate::source_read::Reader::new(&src, st.st_dev, sources)?;
 
     let stage = staging_name(dst_name);
     // Record ownership BEFORE the file exists. A staging file with no claim is
@@ -537,7 +624,6 @@ pub(crate) fn stage_regular_file(
 
     let mut written = 0u64;
     let mut reported = 0u64;
-    let mut buf = vec![0u8; 128 * 1024];
 
     // Any failure from here on must remove the staging file. A disk that
     // filled up mid-copy would otherwise leave a partial file consuming the
@@ -558,7 +644,7 @@ pub(crate) fn stage_regular_file(
             let n = if early_eof {
                 0
             } else {
-                rustix::io::read(&src, &mut buf)?
+                reader.read(&src, cancel)?
             };
             if n == 0 {
                 break;
@@ -573,7 +659,7 @@ pub(crate) fn stage_regular_file(
                     n.min(off.saturating_add(publication_tests::WRITE_LIMIT.with(|v| v.get())));
                 #[cfg(not(test))]
                 let end = n;
-                let w = rustix::io::write(&dst, &buf[off..end])?;
+                let w = rustix::io::write(&dst, &reader.buffer[off..end])?;
                 if w == 0 {
                     return Err(OpError::Io(io::Error::new(
                         io::ErrorKind::WriteZero,
@@ -608,7 +694,11 @@ pub(crate) fn stage_regular_file(
             return Err(OpError::Cancelled);
         }
         let safe_mode = st.st_mode & 0o7777 & !0o6000;
-        rustix::fs::fchmod(&dst, Mode::from_bits_truncate(safe_mode))?;
+        if let Err(e) = rustix::fs::fchmod(&dst, Mode::from_bits_truncate(safe_mode)) {
+            if !mode_refusal_is_expected(e, dst_dir.fstype().as_deref()) {
+                return Err(e.into());
+            }
+        }
         // Colour tags travel with the copy (DESIGN §6.25), onto the staged
         // file, so they are there the moment it has its name.
         if cancel.checkpoint() {
@@ -624,6 +714,7 @@ pub(crate) fn stage_regular_file(
             }
             rustix::fs::fsync(&dst)?;
         }
+        reader.finish()?;
         Ok(())
     })();
 
@@ -646,6 +737,15 @@ pub(crate) fn stage_regular_file(
         identity,
         written,
     }))
+}
+
+/// GVfs exposes phones and cameras through `fuse.gvfsd-fuse`, whose AFC and
+/// MTP backends cannot store permission bits and answer `chmod` with "not
+/// supported". The bytes are already written and checked, so only that
+/// refusal, only there, is not a failure (DESIGN §6.13.1).
+fn mode_refusal_is_expected(e: rustix::io::Errno, fstype: Option<&str>) -> bool {
+    matches!(e, rustix::io::Errno::NOTSUP | rustix::io::Errno::NOSYS)
+        && fstype == Some("fuse.gvfsd-fuse")
 }
 
 /// Copy a symlink as a symlink — never by following it.
@@ -980,6 +1080,54 @@ mod tests {
 
     fn handles(dir: &Path, name: &str) -> (DirHandle, OsString) {
         resolve_parent(&dir.join(name)).unwrap()
+    }
+
+    #[test]
+    fn an_admitted_copy_refuses_any_other_file_at_the_name() {
+        use std::os::unix::fs::MetadataExt;
+        let d = tmp("admitted");
+        fs::write(d.join("photo.jpg"), b"photo").unwrap();
+        let meta = fs::metadata(d.join("photo.jpg")).unwrap();
+        let admitted = (meta.dev(), meta.ino());
+        fs::create_dir(d.join("out")).unwrap();
+        // Another regular file now has the name, the admitted one moved aside.
+        fs::rename(d.join("photo.jpg"), d.join("aside.jpg")).unwrap();
+        fs::write(d.join("photo.jpg"), b"not the one").unwrap();
+        let (sd, sn) = handles(&d, "photo.jpg");
+        let (dd, dn) = handles(&d.join("out"), "photo.jpg");
+        let cancel = CancelToken::new();
+        let result = copy_admitted_file(&sd, &sn, admitted, &dd, &dn, &cancel, &mut |_| {});
+        assert!(matches!(result, Err(OpError::Refused(_))), "{result:?}");
+        assert!(!d.join("out/photo.jpg").exists());
+        // The admitted file itself is copied.
+        let (sd, sn) = handles(&d, "aside.jpg");
+        copy_admitted_file(&sd, &sn, admitted, &dd, &dn, &cancel, &mut |_| {}).unwrap();
+        assert_eq!(fs::read(d.join("out/photo.jpg")).unwrap(), b"photo");
+    }
+
+    #[test]
+    fn only_a_phone_mount_may_refuse_permission_bits() {
+        use rustix::io::Errno;
+        assert!(mode_refusal_is_expected(
+            Errno::NOTSUP,
+            Some("fuse.gvfsd-fuse")
+        ));
+        assert!(mode_refusal_is_expected(
+            Errno::NOSYS,
+            Some("fuse.gvfsd-fuse")
+        ));
+        // Any other error, or the same error anywhere else, still fails the copy.
+        assert!(!mode_refusal_is_expected(
+            Errno::IO,
+            Some("fuse.gvfsd-fuse")
+        ));
+        assert!(!mode_refusal_is_expected(
+            Errno::ACCESS,
+            Some("fuse.gvfsd-fuse")
+        ));
+        assert!(!mode_refusal_is_expected(Errno::NOTSUP, Some("fuse.sshfs")));
+        assert!(!mode_refusal_is_expected(Errno::NOTSUP, Some("ext4")));
+        assert!(!mode_refusal_is_expected(Errno::NOTSUP, None));
     }
 
     #[test]

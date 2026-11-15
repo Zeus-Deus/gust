@@ -19,6 +19,7 @@ pub mod merge;
 pub mod permanent;
 pub mod rate;
 pub mod recursive;
+mod source_read;
 pub mod staging;
 pub mod tags;
 pub mod trash;
