@@ -156,14 +156,31 @@ pub(super) fn helper_path() -> Option<PathBuf> {
         return path.is_absolute().then_some(path).filter(|p| p.is_file());
     }
     let executable = std::env::current_exe().ok()?;
-    let directory = executable.parent()?;
-    [
-        directory.join("gust-archive-helper"),
-        directory.parent()?.join("gust-archive-helper"),
-        PathBuf::from("/usr/bin/gust-archive-helper"),
-    ]
-    .into_iter()
-    .find(|p| p.is_file())
+    helper_candidates(executable.parent()?)
+        .into_iter()
+        .find(|p| p.is_file())
+}
+
+/// Where the helper may be, for an executable in `directory`: beside it,
+/// one level up (Cargo's old `deps/`), the profile directory when the
+/// executable is a test in Cargo's per-crate build layout (the default from
+/// Rust 1.100: `<profile>/build/<package>/<hash>/out/`), then the system.
+fn helper_candidates(directory: &Path) -> Vec<PathBuf> {
+    const NAME: &str = "gust-archive-helper";
+    let mut candidates = vec![directory.join(NAME)];
+    if let Some(parent) = directory.parent() {
+        candidates.push(parent.join(NAME));
+    }
+    let build = directory.ancestors().nth(3);
+    if directory.file_name() == Some(std::ffi::OsStr::new("out"))
+        && build.and_then(Path::file_name) == Some(std::ffi::OsStr::new("build"))
+    {
+        if let Some(profile) = build.and_then(Path::parent) {
+            candidates.push(profile.join(NAME));
+        }
+    }
+    candidates.push(PathBuf::from("/usr/bin").join(NAME));
+    candidates
 }
 
 pub fn tool_available() -> bool {
@@ -1492,6 +1509,32 @@ pub fn create_with(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_helper_is_found_from_both_cargo_layouts_and_installed() {
+        let name = "gust-archive-helper";
+        let installed = Path::new("/usr/bin").join(name);
+        // Installed beside gust, or Cargo's old shared deps/.
+        assert_eq!(
+            helper_candidates(Path::new("/usr/bin")),
+            [
+                installed.clone(),
+                Path::new("/usr").join(name),
+                installed.clone()
+            ]
+        );
+        let old = helper_candidates(Path::new("/w/target/release/deps"));
+        assert!(old.contains(&Path::new("/w/target/release").join(name)));
+        // Per-crate build layout: the profile that built the test, whatever it is.
+        for profile in ["debug", "release", "bench"] {
+            let dir = Path::new("/w/t")
+                .join(profile)
+                .join("build/gust-ops/0123abcd/out");
+            assert!(helper_candidates(&dir).contains(&Path::new("/w/t").join(profile).join(name)));
+        }
+        // Only that exact shape: an "out" elsewhere adds nothing new.
+        assert_eq!(helper_candidates(Path::new("/home/me/out")).len(), 3);
+    }
+
     use super::*;
 
     #[test]

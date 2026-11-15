@@ -159,12 +159,6 @@ def main(argv):
     ledger = run / "skips.tsv"
     ledger.touch(mode=0o600)
     env = dict(os.environ, GUST_SKIP_LEDGER=str(ledger), CARGO_TERM_COLOR="never")
-    # Archive code finds its helper beside the running executable. Cargo's
-    # build-dir layout (the default from Rust 1.100) keeps test executables
-    # in per-crate directories, away from the helper Cargo builds into the
-    # profile directory, so name it unless the caller already did.
-    target = Path(os.environ.get("CARGO_TARGET_DIR") or ROOT / "target")
-    env.setdefault("GUST_ARCHIVE_HELPER", str((target / "debug" / "gust-archive-helper").absolute()))
     if required:
         env["GUST_ALL_REQUIRED"] = "1"
     # No live clipboard or remote fixture is enabled implicitly. Their owners
