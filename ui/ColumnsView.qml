@@ -31,6 +31,28 @@ FocusScope {
         }
         return out
     }
+    /// Where to click each folder or file shown in the parent and preview
+    /// columns, keyed by its raw path token, in window coordinates, with the
+    /// revision of the response that drew them (qa). Only delegates that
+    /// exist and are on screen; null while this view is hidden.
+    function columnsPreviewPoints() {
+        const s = root.side
+        if (!root.visible || !s) return null
+        const out = { revision: s.revision || "", parent: {}, peek: {} }
+        for (const [key, view, names] of [["parent", parentList, s.parent ? s.parent.names : []],
+                                          ["peek", peekList, s.peek && s.peek.kind === "dir" ? s.peek.names : []]]) {
+            if (!view.visible) continue
+            for (let i = 0; i < Math.min(view.count, names.length); i++) {
+                const it = view.itemAtIndex(i)
+                if (!it || !it.modelData || !it.modelData.token) continue
+                const c = it.mapToItem(view, it.width / 2, it.height / 2)
+                if (c.y < 0 || c.y >= view.height) continue
+                const g = it.mapToItem(null, it.width / 2, it.height / 2)
+                out[key][it.modelData.token] = [Math.round(g.x), Math.round(g.y)]
+            }
+        }
+        return out
+    }
     property bool dragActive: false
     /// Keyboard modifiers held during the drag: Ctrl copies, Shift moves.
     property int dragMods: 0
@@ -55,6 +77,10 @@ FocusScope {
         root.model.want_rows(first, Math.ceil(list.height / Tokens.rowHeight) + 1)
     }
     Timer { id: colsReport; interval: 40; onTriggered: root.reportRows() }
+
+    // Where the user was looking survives a re-sort, re-filter or live
+    // change that replaces the rows (DESIGN §2.2.1).
+    ViewportAnchor { view: list }
 
     // Parent and preview columns, filled on a worker (see request_columns).
     readonly property var side: {
@@ -188,9 +214,15 @@ FocusScope {
                             hoverEnabled: true
                             cursorShape: modelData.d ? Qt.PointingHandCursor : Qt.ArrowCursor
                             onClicked: {
+                                const side = root.side
                                 root.selectionTouched()
-                                if (!modelData.d || modelData.cur) return
-                                root.model.navigate(root.side.parent.path + "/" + modelData.n)
+                                if (!modelData.d || modelData.cur || !side) return
+                                // The folder's own byte token, never its label
+                                // joined to a path. The revision names the
+                                // response that drew this row, so a column
+                                // left over from another cursor row or folder
+                                // is refused rather than followed (§2.2.1).
+                                root.model.columns_navigate(modelData.token, side.revision)
                             }
                         }
                     }
@@ -329,6 +361,13 @@ FocusScope {
                                     if (dx * dx + dy * dy < 64)
                                         return
                                     root.dragStarted(index)
+                                    // The pane may refuse (a selection still being applied):
+                                    // this press then ends here, and its release is no click.
+                                    if (!root.dragActive) {
+                                        armed = false
+                                        root.suppressClick = true
+                                        return
+                                    }
                                 }
                                 const gp = mapToItem(list.contentItem, mouse.x, mouse.y)
                                 root.dropRow = list.indexAt(gp.x, gp.y)
@@ -439,7 +478,7 @@ FocusScope {
                             x: Tokens.rowPaddingX
                             anchors.verticalCenter: parent.verticalCenter
                             size: Math.round(Tokens.rowHeight * 0.6)
-                            look: Tokens.iconLook(modelData.d ? "d:" + root.model.entry_path(root.model.cursor) + "/" + modelData.n
+                            look: Tokens.iconLook(modelData.d ? "d:" + root.side.peek.path + "/" + modelData.n
                                                               : "f:" + modelData.n.toLowerCase())
                         }
                         Text {
@@ -459,10 +498,13 @@ FocusScope {
                             anchors.fill: parent
                             hoverEnabled: true
                             onClicked: {
-                                const here = root.model.entry_path(root.model.cursor)
+                                const side = root.side
                                 root.selectionTouched()
-                                if (modelData.d) root.model.navigate(here + "/" + modelData.n)
-                                else root.model.navigate(here)
+                                if (!side || !side.peek) return
+                                // A folder opens; a file opens the folder that
+                                // holds it. Tokens and revision as above.
+                                root.model.columns_navigate(modelData.d ? modelData.token : side.peek.token,
+                                                            side.revision)
                             }
                         }
                     }

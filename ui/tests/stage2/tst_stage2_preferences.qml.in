@@ -1,0 +1,91 @@
+import QtQuick
+import QtTest
+import com.gust.app
+
+Item {
+    id: top
+    width: 900
+    height: 700
+    QtObject {
+        id: dirModel
+        property string ack: "9007199254740993"
+        property string next: "9007199254740994"
+        property string response: ""
+        property int requests: 0
+        property int refreshes: 0
+        function settings_json() { return JSON.stringify({ ready: true, revision: "1", saved_revision: "1", integration_refresh: ack }) }
+        function preferences_refresh() { refreshes++; return next }
+        function set_default_file_manager(on) { requests++; return response }
+        function set_file_dialogs(on) { requests++; return response }
+        function set_omarchy_keys(on) { requests++; return response }
+    }
+    Item {
+        id: win
+        property string alertText: ""
+        property bool prefsStarted: true
+        property bool prefsClosing: false
+        function startWithPrefs(atLaunch) { fail("already started") }
+        function applySettings() {}
+        function qaDump(tag) {}
+        function prefsClose(event) {}
+@PREFS@
+@REVISION@
+    }
+    SettingsPanel {
+        id: settingsPanel
+        s: win.prefs
+        status: win.prefsStatus
+        error: win.prefsError
+@DEFAULT@
+@DIALOGS@
+@KEYS@
+    }
+    TestCase {
+        name: "Stage2IntegrationRefresh"
+        when: windowShown
+        function init() {
+            dirModel.ack = "9007199254740993"
+            dirModel.next = "9007199254740994"
+            dirModel.response = ""
+            dirModel.requests = 0
+            dirModel.refreshes = 0
+            settingsPanel.busyKey = ""
+            win.integrationRefreshTarget = ""
+            win.alertText = ""
+            win.prefsPublished()
+        }
+        function test_notification_does_not_release_an_unfinished_refresh_data() {
+            return [{tag:"default", row:6, key:"default"}, {tag:"dialogs", row:7, key:"file_dialogs"}, {tag:"keys", row:8, key:"omarchy_keys"}]
+        }
+        function test_notification_does_not_release_an_unfinished_refresh(data) {
+            settingsPanel.choose(data.row, "true")
+            compare(dirModel.requests, 1)
+            compare(settingsPanel.busyKey, data.key)
+            compare(win.integrationRefreshTarget, dirModel.next)
+            // Same handler as an ordinary preference admission or queued older notification.
+            win.prefsPublished()
+            compare(settingsPanel.busyKey, data.key)
+            settingsPanel.choose(data.row, "true")
+            settingsPanel.choose(6 + ((data.row - 5) % 3), "true")
+            compare(dirModel.requests, 1, "all integration actions wait for the answer")
+            dirModel.ack = dirModel.next
+            win.prefsPublished()
+            compare(settingsPanel.busyKey, "")
+            compare(win.integrationRefreshTarget, "")
+            settingsPanel.choose(data.row, "false")
+            compare(dirModel.requests, 2)
+        }
+        function test_coalesced_notification_reads_fresh_ack() {
+            settingsPanel.choose(6, "true")
+            win.prefsNotified()
+            dirModel.ack = dirModel.next
+            tryCompare(settingsPanel, "busyKey", "")
+        }
+        function test_refresh_admission_failure_is_visible() {
+            dirModel.next = ""
+            settingsPanel.choose(6, "true")
+            compare(settingsPanel.busyKey, "")
+            verify(win.alertText !== "")
+        }
+    }
+}

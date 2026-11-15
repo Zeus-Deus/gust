@@ -103,6 +103,9 @@ struct Model {
     directory: Option<PathBuf>,
     entries: Vec<Entry>,
     live_hold: bool,
+    selection_pending: bool,
+    defer_relist: bool,
+    live_dirty: bool,
     launched: Vec<PathBuf>,
     thread: Thread,
     /// What ran on the "GUI thread", and whether the change still counted
@@ -136,6 +139,9 @@ impl Model {
     }
     fn entry_at(&self, row: i32) -> Option<&Entry> { self.entries.get(usize::try_from(row).ok()?) }
     fn path_of_row(&self, row: i32) -> Option<PathBuf> { Some(self.directory.as_ref()?.join(&self.entry_at(row)?.name)) }
+    // The search runtime is outside this worker fixture. Exercise both
+    // decisions through the exact production reload method below.
+    fn defer_origin_relist(&self) -> bool { self.defer_relist }
 @FINISH_MODE_CHANGE@
 @RELOAD@
 @RUN_PREPARE@
@@ -164,6 +170,14 @@ impl Model {
     }
 }
 
+// Preserve the production guard's pub(super) visibility in a module.
+mod selection_guard {
+    use super::*;
+    impl Model {
+@REFUSE_PENDING_SELECTION@
+    }
+}
+
 fn model() -> (Model, mpsc::Receiver<Reply>) {
     REAL_IO.store(false, Ordering::SeqCst);
     PANIC.store(false, Ordering::SeqCst);
@@ -179,7 +193,8 @@ fn model() -> (Model, mpsc::Receiver<Reply>) {
         last_extra: UndoExtra::None, last_link: None, last_job: None,
         last_bulk_rename: Vec::new(), last_trashed_batch: Vec::new(),
         run_token: 0, pending_run: None, directory: None, entries: Vec::new(),
-        live_hold: false, launched: Vec::new(),
+        live_hold: false, selection_pending: false, defer_relist: false, live_dirty: false,
+        launched: Vec::new(),
         thread: Thread(tx),
         events: Vec::new(),
         done: Vec::new(),
@@ -339,6 +354,94 @@ fn prepared(m: &mut Model, row: i32) -> (i32, String) {
     let response = Pin::new(m).run_prepare(row);
     let value: serde_json::Value = serde_json::from_str(&response.0).unwrap();
     (value["token"].as_i64().unwrap() as i32, value["name"].as_str().unwrap().into())
+}
+
+#[test]
+fn pending_selection_refuses_permissions_without_work_and_accepts_after_publication() {
+    let f = Fixture::new();
+    let (mut m, replies) = model();
+    REAL_IO.store(true, Ordering::SeqCst);
+    let path = f.script("b.sh", 0o644);
+    m.perms_paths = vec![path.clone()];
+    m.selection_pending = true;
+    let refusal = QString::from("Selection is still being applied; wait and try again.");
+    assert_eq!(Pin::new(&mut m).permissions_apply(7, 0o100, 0), refusal);
+    assert_eq!(m.status, refusal);
+    assert!(!m.permissions_running());
+    assert!(!m.perms_work.touches(&f.0));
+    assert!(replies.try_recv().is_err());
+    assert!(m.last_modes.is_empty());
+    assert!(m.done.is_empty());
+    assert_eq!(mode(&path), 0o644);
+    assert_eq!(m.perms_paths, vec![path.clone()]);
+    m.selection_pending = false;
+    assert!(Pin::new(&mut m).permissions_apply(7, 0o100, 0).is_empty());
+    replies.recv_timeout(Duration::from_secs(5)).unwrap()(Pin::new(&mut m));
+    assert_eq!(mode(&path), 0o744);
+    assert_eq!(actual_ops::attrs::undo_modes(&m.last_modes).0, 1);
+    assert_eq!(mode(&path), 0o644);
+    assert!(!m.permissions_running());
+}
+
+#[test]
+fn pending_selection_preserves_the_run_prompt_until_it_can_be_accepted() {
+    for allow in [false, true] {
+        let f = Fixture::new();
+        let (mut m, replies) = model();
+        REAL_IO.store(true, Ordering::SeqCst);
+        let path = f.script("b.sh", if allow { 0o644 } else { 0o744 });
+        m.directory = Some(f.0.clone());
+        Pin::new(&mut m).reload();
+        let (token, _) = prepared(&mut m, 0);
+        m.selection_pending = true;
+        let refusal = QString::from("Selection is still being applied; wait and try again.");
+        assert_eq!(Pin::new(&mut m).run_prepare(0), refusal);
+        assert_eq!(m.run_token, token);
+        assert_eq!(Pin::new(&mut m).run_confirm(token, allow), refusal);
+        assert_eq!(m.status, refusal);
+        assert_eq!(m.pending_run.as_ref().unwrap().0.path, path);
+        assert!(!m.permissions_running());
+        assert!(m.launched.is_empty());
+        assert!(replies.try_recv().is_err());
+        assert_eq!(mode(&path), if allow { 0o644 } else { 0o744 });
+        m.selection_pending = false;
+        assert!(Pin::new(&mut m).run_confirm(token, allow).is_empty());
+        replies.recv_timeout(Duration::from_secs(5)).unwrap()(Pin::new(&mut m));
+        assert_eq!(m.launched, vec![path.clone()]);
+        assert_eq!(mode(&path), 0o744);
+        if allow {
+            assert_eq!(actual_ops::attrs::undo_modes(&m.last_modes).0, 1);
+            assert_eq!(mode(&path), 0o644);
+        }
+        assert!(!m.permissions_running());
+    }
+}
+
+#[test]
+fn permission_completion_defers_origin_reload_during_search_but_keeps_undo() {
+    let f = Fixture::new();
+    let (mut m, replies) = model();
+    REAL_IO.store(true, Ordering::SeqCst);
+    let path = f.script("b.sh", 0o644);
+    m.directory = Some(f.0.clone());
+    Pin::new(&mut m).reload();
+    let inserted = f.script("a.sh", 0o644);
+    m.perms_paths = vec![path.clone()];
+    m.defer_relist = true;
+    assert!(Pin::new(&mut m).permissions_apply(7, 0o100, 0).is_empty());
+    replies.recv_timeout(Duration::from_secs(5)).unwrap()(Pin::new(&mut m));
+    assert!(m.live_dirty);
+    assert_eq!(m.entries.len(), 1);
+    assert_eq!(m.path_of_row(0), Some(path.clone()));
+    assert_eq!(mode(&path), 0o744);
+    assert_eq!(actual_ops::attrs::undo_modes(&m.last_modes).0, 1);
+    assert_eq!(mode(&path), 0o644);
+    assert!(m.done[0].1.is_empty());
+    assert!(!m.permissions_running());
+    m.defer_relist = false;
+    Pin::new(&mut m).reload();
+    assert_eq!(m.entries.len(), 2);
+    assert_eq!(m.path_of_row(0), Some(inserted));
 }
 
 #[test]

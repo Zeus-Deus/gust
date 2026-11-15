@@ -4,11 +4,46 @@ import QtTest
 // Exact Main.qml close, tab-close and disconnect guards (inserted by
 // crates/app/tests/work_guard_regressions.py) against synthetic models.
 // A model's work is plain properties here; the real DirModel answers the
-// same questions from its job handle and archive claims.
+// same questions from its job handle and archive claims. Preferences are a
+// synthetic process-wide snapshot shared by every model, as in Rust, and the
+// session store keeps what a restart would read back.
 TestCase {
     name: "WorkGuard"
 
     component FakeModel: QtObject {
+        property var prefs: null
+        // As Rust: `error` carries the save failure, then any rejected choices.
+        function settings_json() {
+            const admission = [prefs.admission, prefs.sessionAdmission].filter(e => e !== "").join("; ")
+            const error = [prefs.error, admission].filter(e => e !== "").join("; ")
+            const out = { ready: prefs.ready, pending: prefs.pending, error: error, admission_error: admission,
+                          revision: prefs.revision, saved_revision: prefs.saved }
+            if (prefs.attempt !== "") out.completed_attempt = prefs.attempt
+            return JSON.stringify(out)
+        }
+        // Returns the admitted target; completion is asynchronous.
+        function preferences_flush() { prefs.flushes += 1; return prefs.revision }
+        function session_save(lines, active) { return prefs.sessionSave(lines, active) }
+        function session_json() { return prefs.sessionJson() }
+        // Where the tab is, and what prefsLaunchUntouched compares.
+        property string token: ""
+        property bool everActivated: true
+        property bool back: false
+        property bool show_hidden: false
+        property string filter: ""
+        property int cursor: 0
+        property int selected: 0
+        property string sort_field: "name"
+        property bool sort_ascending: true
+        property int reloads: 0
+        property var startedAt: []
+        function location_token() { return token }
+        function token_for(path) { return "path:" + path }
+        function can_go_back() { return back }
+        function sel_count() { return selected }
+        function reload() { reloads += 1 }
+        function toggle_hidden() { show_hidden = !show_hidden }
+        function start_at_token(t) { token = t; startedAt = startedAt.concat([t]) }
         property string status: "fixture status"
         property int runToken: 0
         property string runName: "b.sh"
@@ -43,9 +78,75 @@ TestCase {
         }
     }
 
-    FakeModel { id: modelA }
-    FakeModel { id: modelB }
-    FakeModel { id: modelC }
+    // Revisions are decimal u64 strings, beyond JS number precision here.
+    QtObject {
+        id: prefsFake
+        property bool ready: true
+        property bool pending: false
+        property string error: ""
+        // A rejected choice: never admitted, so no revision or flush covers it.
+        property string admission: ""
+        // Completed worker attempts; "" for a build that does not report them.
+        property string attempt: ""
+        property string revision: "9007199254740993"
+        property string saved: "9007199254740993"
+        property int flushes: 0
+        // An accepted change: a newer revision, not yet acknowledged.
+        function admit(r) { revision = r; pending = true }
+        function ack(r) { saved = r; pending = revision !== r; error = ""; bump() }
+        function fail(e) { error = e; bump() }
+        function bump() { if (attempt !== "") attempt = String(Number(attempt) + 1) }
+
+        // --- the tab session, as DirModel.session_save/session_json ---
+        property bool restoreTabs: true
+        // Why the next admission is refused ("" admits it).
+        property string sessionRefusal: ""
+        // Rust keeps a refusal among the rejected choices until admitted.
+        property string sessionAdmission: ""
+        property int sessionAdmits: 0
+        property var pendingSession: null
+        property string sessionRevision: ""
+        // Acknowledged on disk: what the next start reads back.
+        property var storedSession: null
+        function inc(s) {
+            const d = s.split("").map(Number)
+            let i = d.length - 1
+            while (i >= 0 && d[i] === 9) { d[i] = 0; i-- }
+            if (i < 0) d.unshift(1); else d[i] += 1
+            return d.join("")
+        }
+        function sessionSave(lines, active) {
+            const refusal = sessionRefusal !== "" ? sessionRefusal : !ready ? "preferences are still loading" : ""
+            if (refusal !== "") {
+                sessionAdmission = "Choice not accepted: " + refusal + "; reselect it to save"
+                return refusal
+            }
+            if (!restoreTabs) return ""
+            sessionAdmission = ""
+            revision = inc(revision); pending = true; sessionAdmits += 1
+            pendingSession = { lines: String(lines), active: active }
+            sessionRevision = revision
+            return ""
+        }
+        function sessionJson() {
+            if (!storedSession || !restoreTabs) return ""
+            const tabs = storedSession.lines.split("\n").map(l => {
+                const [token, view] = l.split(" ")
+                return { token: token, view: view, name: token }
+            })
+            return JSON.stringify({ tabs: tabs, active: storedSession.active })
+        }
+        onSavedChanged: {
+            if (pendingSession && win.revisionAtLeast(saved, sessionRevision)) {
+                storedSession = pendingSession
+                pendingSession = null
+            }
+        }
+    }
+
+    FakeModel { id: modelA; prefs: prefsFake }
+    FakeModel { id: modelB; prefs: prefsFake }
+    FakeModel { id: modelC; prefs: prefsFake }
 
     property var dirModel: modelA
 
@@ -54,6 +155,24 @@ TestCase {
         property bool closing: false
         property bool closeNow: false
         property int quitCalls: 0
+        property bool prefsClosing: false
+        property string prefsCloseTarget: ""
+        property string prefsCloseError: ""
+        property string prefsCloseAttempt: ""
+        property bool prefsQuitRequested: false
+        property string prefsLossAccepted: ""
+        property string prefsLossAsked: ""
+        property bool adminMode: false
+        // Main.qml's session state; its functions and timer are the real ones.
+        property bool sessionDirty: false
+        property string sessionSaveError: ""
+        property bool prefsStarted: true
+        property var prefsLaunch: ({})
+        property string viewMode: "rows"
+        property bool defaultShowHidden: false
+        function applySettings() {}
+        function applyRememberedView() {}
+        function refreshPanes() {}
         property var job: null
         property string alertText: ""
         property int activeTab: 0
@@ -69,7 +188,10 @@ TestCase {
         property var models: [modelA, modelB, modelC]
         property var dumps: []
         function qaDump(tag) { dumps = dumps.concat([tag]) }
-        function focusList() {}
+        // The probe's write-now before quitting; the dump itself is recorded above.
+        function qaFlush() {}
+        property int listFocuses: 0
+        function focusList() { listFocuses += 1 }
         function activateTab(i) {}
         function refreshPaneTabCount() {}
         function closePane(p) {}
@@ -82,11 +204,18 @@ TestCase {
         function handleClosing(close) {
 @CLOSING_HANDLER@
         }
-        function confirmAccepted() {
+        // ConfirmDialog emits accepted/rejected, then hides and emits closed.
+        function confirmAccepted() { acceptedHandler(); confirm.visible = false; closedHandler() }
+        function confirmRejected() { rejectedHandler(); confirm.visible = false; closedHandler() }
+        function acceptedHandler() {
 @CONFIRM_ACCEPTED@
         }
-        function confirmRejected() {
+        function rejectedHandler() {
 @CONFIRM_REJECTED@
+        }
+        // Main.qml's confirm onClosed; its Qt.callLater stays asynchronous.
+        function closedHandler() {
+@CONFIRM_CLOSED@
         }
 @FUNCTIONS@
     }
@@ -100,11 +229,19 @@ TestCase {
     }
     QtObject { id: hints; property string message: "" }
     QtObject {
+        id: settingsPanel
+        property bool open: false
+        property int refocuses: 0
+        function refocus() { refocuses += 1 }
+    }
+    QtObject {
         id: connectPanel
         property bool open: false
         property string title: ""
         property string body: ""
+        property int refocuses: 0
         function showFeedback(t, b, failed) { title = t; body = b; open = true }
+        function refocus() { refocuses += 1 }
     }
     QtObject {
         id: confirm
@@ -113,8 +250,9 @@ TestCase {
         property string body: ""
         property string confirmText: ""
         property bool dangerous: false
+        property bool visible: false
         property int opens: 0
-        function open(t, b, c, danger) { title = t; body = b; confirmText = c; dangerous = danger; opens += 1 }
+        function open(t, b, c, danger) { title = t; body = b; confirmText = c; dangerous = danger; opens += 1; visible = true }
     }
 @TIMERS@
 
@@ -126,13 +264,33 @@ TestCase {
         closeAfterCancel.stop(); closeAfterCancel.ticks = 0
         closeTabAfterCancel.stop(); closeTabAfterCancel.models = []
         tabList.clear()
-        for (let i = 0; i < 3; i++) tabList.append({slot: i, pane: 0})
+        for (let i = 0; i < 3; i++) tabList.append({slot: i, pane: 0, startPath: "", label: ""})
+        modelA.token = "tokA"; modelB.token = "tokB"; modelC.token = "tokC"
+        for (const m of win.models) {
+            m.everActivated = true; m.back = false; m.show_hidden = false; m.filter = ""; m.cursor = 0
+            m.selected = 0; m.sort_field = "name"; m.sort_ascending = true; m.reloads = 0; m.startedAt = []
+        }
+        dirModel = modelA
         win.tabViews = ["rows", "rows", "rows"]
         win.activeTab = 0
         win.closing = false; win.closeNow = false; win.quitCalls = 0
-        win.alertText = ""; win.dumps = []
-        confirm.purpose = "trash"; confirm.opens = 0
-        connectPanel.open = false
+        win.alertText = ""; win.dumps = []; win.listFocuses = 0
+        win.prefsClosing = false; win.prefsCloseTarget = ""; win.prefsCloseError = ""; win.prefsCloseAttempt = ""
+        win.prefsQuitRequested = false; win.prefsLossAccepted = ""; win.prefsLossAsked = ""
+        win.adminMode = false; win.prefsStarted = true; win.viewMode = "rows"; win.defaultShowHidden = false
+        win.sessionDirty = false; win.sessionSaveError = ""
+        prefsCloseDeadline.stop(); prefsCloseDeadline.expired = false
+        sessionSaveTimer.stop()
+        // Restore off by default: those tests count preference revisions,
+        // and a skipped session admits none. Session tests turn it on.
+        prefsFake.restoreTabs = false; prefsFake.sessionRefusal = ""; prefsFake.sessionAdmission = ""
+        prefsFake.sessionAdmits = 0; prefsFake.pendingSession = null; prefsFake.sessionRevision = ""
+        prefsFake.storedSession = null
+        prefsFake.ready = true; prefsFake.pending = false; prefsFake.error = ""; prefsFake.admission = ""; prefsFake.attempt = ""
+        prefsFake.revision = "9007199254740993"; prefsFake.saved = "9007199254740993"; prefsFake.flushes = 0
+        confirm.purpose = "trash"; confirm.opens = 0; confirm.visible = false
+        connectPanel.open = false; connectPanel.refocuses = 0
+        settingsPanel.open = false; settingsPanel.refocuses = 0
         hints.message = ""
     }
 
@@ -495,5 +653,780 @@ TestCase {
         compare(win.alertText, why)
         modelB.perms = false
         verify(!win.refuseBusyDisconnect("ssh", "nas"))
+    }
+
+    // --- preferences at close (DESIGN §2.1) ----------------------------------
+
+    // The system deadline passing; the real Timer is 3 s.
+    function expireDeadline() { prefsCloseDeadline.triggered() }
+    // The worker published: every tab's notification lands in prefsClose(null).
+    function published() { win.prefsClose(null) }
+    // Qt.quit() re-enters onClosing; the runner counts quits instead.
+    function closeEvent() { const c = {accepted: true}; win.handleClosing(c); return c }
+
+    function test_revisions_compare_as_u64_strings() {
+        verify(win.revisionAtLeast("9007199254740993", "9007199254740992"), "past 2^53 a JS number would call these equal")
+        verify(!win.revisionAtLeast("9007199254740992", "9007199254740993"))
+        verify(win.revisionAtLeast("18446744073709551615", "18446744073709551614"))
+        verify(!win.revisionAtLeast("18446744073709551614", "18446744073709551615"))
+        verify(win.revisionAtLeast("10", "9"), "longer is larger, not lexically smaller")
+        verify(!win.revisionAtLeast("9", "10"))
+        verify(win.revisionAtLeast("7", "7"))
+        verify(win.revisionAtLeast("0", ""))
+        verify(win.revisionAtLeast("007", "7"))
+    }
+
+    function test_saved_preferences_close_at_once_without_a_flush() {
+        const c = closeEvent()
+        compare(c.accepted, true)
+        compare(prefsFake.flushes, 0)
+        verify(!win.prefsClosing)
+    }
+
+    function test_preferences_still_loading_close_at_once() {
+        // Nothing can be accepted before the first load, so nothing is lost.
+        openLate()
+        prefsFake.pending = true
+        compare(closeEvent().accepted, true)
+        compare(prefsFake.flushes, 0)
+    }
+
+    function test_close_waits_for_the_acknowledged_revision() {
+        prefsFake.admit("9007199254740994")
+        const c = closeEvent()
+        compare(c.accepted, false, "an accepted but unsaved change holds the window")
+        compare(prefsFake.flushes, 1)
+        compare(win.prefsCloseTarget, "9007199254740994")
+        verify(win.prefsClosing)
+        verify(hints.message.indexOf("Saving settings") >= 0, hints.message)
+        compare(confirm.opens, 0)
+        // A publish that has not reached the target yet keeps waiting quietly.
+        published()
+        compare(win.quitCalls, 0)
+        compare(confirm.opens, 0)
+        prefsFake.ack("9007199254740994")
+        published()
+        compare(win.quitCalls, 1)
+        verify(!win.prefsClosing)
+        // Qt.quit() comes back through onClosing: nothing left, so it goes.
+        compare(closeEvent().accepted, true)
+        compare(prefsFake.flushes, 1)
+        compare(confirm.opens, 0)
+    }
+
+    function test_a_change_during_the_flush_extends_the_wait() {
+        prefsFake.admit("9007199254740994")
+        closeEvent()
+        prefsFake.admit("9007199254740995")
+        // The earlier target is acknowledged; the later change is not.
+        prefsFake.ack("9007199254740994")
+        verify(prefsFake.pending)
+        published()
+        compare(win.quitCalls, 0, "quitting on the older target would drop the newer change")
+        compare(win.prefsCloseTarget, "9007199254740995")
+        compare(prefsFake.flushes, 2)
+        prefsFake.ack("9007199254740995")
+        published()
+        compare(win.quitCalls, 1)
+    }
+
+    function test_the_debounced_tab_list_is_saved_before_the_check() {
+        prefsFake.restoreTabs = true
+        win.sessionChanged()
+        verify(sessionSaveTimer.running)
+        const c = closeEvent()
+        compare(prefsFake.sessionAdmits, 1)
+        verify(!sessionSaveTimer.running)
+        compare(c.accepted, false, "the admitted tab list is waited for")
+        verify(!win.sessionDirty)
+    }
+
+    function test_a_refused_tab_list_is_not_dropped_silently() {
+        prefsFake.restoreTabs = true
+        // Everything else is saved; only the final tab list was refused.
+        win.sessionChanged()
+        prefsFake.sessionRefusal = "preferences queue is full; wait for saving or retry flush"
+        const c = closeEvent()
+        compare(c.accepted, false)
+        compare(confirm.purpose, "closeprefs")
+        verify(confirm.body.indexOf("Tabs not saved: preferences queue is full") === 0, confirm.body)
+        verify(win.sessionDirty, "a refusal keeps the tabs dirty")
+        // A publish while the question is open does not quit behind it.
+        published()
+        compare(win.quitCalls, 0)
+        win.confirmAccepted()
+        compare(win.quitCalls, 1)
+        // Qt.quit re-enters: the same refused tabs are what was accepted.
+        compare(closeEvent().accepted, true, "not asked twice about the same loss")
+    }
+
+    function test_timeout_asks_and_only_close_anyway_loses_changes() {
+        prefsFake.admit("9007199254740994")
+        closeEvent()
+        expireDeadline()
+        compare(win.quitCalls, 0)
+        compare(confirm.purpose, "closeprefs")
+        compare(confirm.title, "Settings not saved")
+        verify(confirm.dangerous)
+        verify(confirm.body.indexOf("taking too long") >= 0, confirm.body)
+        verify(confirm.body.indexOf("may lose") >= 0, confirm.body)
+        // While the question is open, progress does not quit behind it.
+        published()
+        compare(win.quitCalls, 0)
+        win.confirmAccepted()
+        compare(win.quitCalls, 1)
+        compare(win.prefsLossAccepted, "9007199254740994\n\n")
+        const c = closeEvent()
+        compare(c.accepted, true, "the user's explicit choice")
+    }
+
+    function test_cancel_keeps_the_window_and_the_next_close_tries_again() {
+        prefsFake.admit("9007199254740994")
+        closeEvent()
+        expireDeadline()
+        win.confirmRejected()
+        compare(win.quitCalls, 0)
+        verify(!win.prefsClosing)
+        compare(win.prefsLossAccepted, "")
+        published()
+        compare(win.quitCalls, 0, "a cancelled close does not quit later on its own")
+        const opens = confirm.opens
+        compare(closeEvent().accepted, false)
+        compare(prefsFake.flushes, 2, "a new close asks the worker again")
+        compare(confirm.opens, opens, "and waits before asking")
+    }
+
+    function test_a_new_failure_asks_at_once() {
+        prefsFake.admit("9007199254740994")
+        closeEvent()
+        prefsFake.error = "Settings: permission denied"
+        published()
+        compare(confirm.purpose, "closeprefs")
+        verify(confirm.body.indexOf("permission denied") >= 0, confirm.body)
+        compare(win.quitCalls, 0)
+    }
+
+    function test_an_old_failure_gets_the_whole_deadline_to_recover() {
+        // The error was already there: a publish carrying it is not news
+        // about this flush, which retries the save.
+        prefsFake.admit("9007199254740994")
+        prefsFake.error = "Settings: permission denied"
+        closeEvent()
+        compare(prefsFake.flushes, 1)
+        published()
+        compare(confirm.opens, 0)
+        prefsFake.ack("9007199254740994")
+        published()
+        compare(win.quitCalls, 1)
+    }
+
+    function test_a_second_close_while_saving_offers_close_anyway() {
+        prefsFake.admit("9007199254740994")
+        closeEvent()
+        compare(confirm.opens, 0)
+        compare(closeEvent().accepted, false)
+        compare(confirm.purpose, "closeprefs", "a second request must not trap the user")
+        win.confirmAccepted()
+        compare(win.quitCalls, 1)
+    }
+
+    function test_stop_and_close_still_saves_preferences() {
+        modelB.running = true
+        prefsFake.admit("9007199254740994")
+        closeEvent()
+        compare(confirm.purpose, "close", "running work is asked about first")
+        compare(prefsFake.flushes, 0, "preferences wait until the work is settled")
+        win.confirmAccepted()
+        modelB.running = false
+        tickWindow(1)
+        compare(win.quitCalls, 1)
+        verify(win.closeNow)
+        // closeNow skips only the job wait, never the preferences flush.
+        compare(closeEvent().accepted, false)
+        compare(prefsFake.flushes, 1)
+        prefsFake.ack("9007199254740994")
+        published()
+        compare(win.quitCalls, 2)
+        compare(closeEvent().accepted, true)
+    }
+
+    function test_close_without_waiting_still_saves_preferences() {
+        modelA.running = true
+        prefsFake.admit("9007199254740994")
+        closeEvent()
+        win.confirmAccepted()
+        closeEvent()
+        compare(confirm.purpose, "closewait")
+        win.confirmAccepted()
+        compare(win.quitCalls, 1)
+        compare(closeEvent().accepted, false, "not waiting for a drive is not losing preferences")
+        compare(prefsFake.flushes, 1)
+        // A failure here asks again; cancelling restores the job guard.
+        expireDeadline()
+        compare(confirm.purpose, "closeprefs")
+        win.confirmRejected()
+        verify(!win.closeNow)
+        const c = closeEvent()
+        compare(c.accepted, false)
+        compare(confirm.purpose, "close", "the still-running transfer is asked about again")
+    }
+
+    // --- rejected choices and errors with nothing pending --------------------
+
+    readonly property string rejection: "Choice not accepted: preferences queue is full; reselect it to save"
+
+    function test_a_rejected_choice_with_nothing_pending_asks_at_once() {
+        // Every admitted revision is acknowledged; the rejected one never was.
+        prefsFake.admission = rejection
+        compare(prefsFake.pending, false)
+        compare(prefsFake.saved, prefsFake.revision)
+        const c = closeEvent()
+        compare(c.accepted, false, "an acknowledged revision does not cover a rejected choice")
+        compare(confirm.purpose, "closeprefs")
+        compare(confirm.opens, 1, "a flush cannot retry it, so there is nothing to wait for")
+        verify(confirm.body.indexOf(rejection) === 0, confirm.body)
+        verify(confirm.dangerous)
+        compare(win.quitCalls, 0)
+        compare(win.prefsLossAsked, "9007199254740993\n" + rejection + "\n")
+    }
+
+    function test_a_save_error_with_nothing_pending_still_holds_the_window() {
+        prefsFake.error = "Settings: unsafe file"
+        const c = closeEvent()
+        compare(c.accepted, false, "pending=false and saved_revision are not 'saved' while an error shows")
+        compare(prefsFake.flushes, 1, "a retry may clear it")
+        compare(confirm.opens, 0)
+        published()
+        compare(confirm.opens, 0, "the same error is not news without attempt counts")
+        expireDeadline()
+        compare(confirm.purpose, "closeprefs")
+        verify(confirm.body.indexOf("Settings: unsafe file") === 0, confirm.body)
+    }
+
+    function test_a_save_error_that_clears_closes() {
+        prefsFake.error = "Settings: unsafe file"
+        closeEvent()
+        prefsFake.error = ""
+        published()
+        compare(win.quitCalls, 1)
+        compare(confirm.opens, 0)
+        compare(closeEvent().accepted, true)
+    }
+
+    function test_still_loading_with_a_rejection_asks() {
+        prefsFake.ready = false
+        prefsFake.admission = "Choice not accepted: preferences are still loading; reselect it to save"
+        const c = closeEvent()
+        compare(c.accepted, false, "readiness is not a pass when a choice was refused")
+        compare(confirm.purpose, "closeprefs")
+        verify(confirm.body.indexOf("still loading") >= 0, confirm.body)
+    }
+
+    function test_repeated_close_never_bypasses_a_rejection() {
+        prefsFake.admission = rejection
+        for (let i = 1; i <= 3; i++) {
+            compare(closeEvent().accepted, false, "close " + i)
+            compare(confirm.purpose, "closeprefs")
+            compare(confirm.opens, i)
+            win.confirmRejected()
+            verify(!win.prefsClosing)
+            compare(win.prefsLossAccepted, "")
+            verify(hints.message.indexOf("Window kept open") === 0, hints.message)
+            verify(hints.message.indexOf("not saved") < 0, "the derived notice says that, and clears itself")
+            published()
+            compare(win.quitCalls, 0)
+        }
+    }
+
+    function test_choosing_again_recovers_and_closes_once_saved() {
+        prefsFake.admission = rejection
+        closeEvent()
+        win.confirmRejected()
+        // Reselected: admitted now, so the rejection is gone and a revision waits.
+        prefsFake.admission = ""
+        prefsFake.admit("9007199254740994")
+        compare(closeEvent().accepted, false)
+        compare(confirm.opens, 1, "an admitted change is waited for, not asked about")
+        prefsFake.ack("9007199254740994")
+        published()
+        compare(win.quitCalls, 1)
+        compare(closeEvent().accepted, true)
+    }
+
+    function test_a_rejection_waits_for_admitted_changes_first() {
+        prefsFake.admit("9007199254740994")
+        prefsFake.admission = rejection
+        closeEvent()
+        compare(confirm.opens, 0, "the admitted change gets its save before the question")
+        compare(prefsFake.flushes, 1)
+        prefsFake.ack("9007199254740994")
+        published()
+        compare(win.quitCalls, 0)
+        compare(confirm.purpose, "closeprefs")
+        compare(confirm.opens, 1, "nothing more can save the rejected choice: ask at once")
+        verify(confirm.body.indexOf(rejection) === 0, confirm.body)
+    }
+
+    function test_close_anyway_covers_only_what_it_showed() {
+        prefsFake.admission = rejection
+        closeEvent()
+        win.confirmAccepted()
+        compare(win.quitCalls, 1)
+        compare(win.prefsLossAccepted, "9007199254740993\n" + rejection + "\n")
+        // A transfer started before the quit landed: its guard still comes first.
+        modelB.running = true
+        compare(closeEvent().accepted, false)
+        compare(confirm.purpose, "close")
+        win.confirmAccepted()
+        compare(modelB.cancels, 1)
+        // While it stops, a later change is not what the user agreed to lose.
+        prefsFake.admit("9007199254740994")
+        modelB.running = false
+        tickWindow(1)
+        compare(win.quitCalls, 2)
+        compare(closeEvent().accepted, false)
+        verify(win.prefsClosing)
+        compare(prefsFake.flushes, 2)
+    }
+
+    function test_close_anyway_survives_the_stop_it_led_to() {
+        prefsFake.admission = rejection
+        closeEvent()
+        win.confirmAccepted()
+        modelB.running = true
+        closeEvent()
+        win.confirmAccepted()
+        modelB.running = false
+        tickWindow(1)
+        compare(closeEvent().accepted, true, "the state shown and accepted, unchanged: not asked twice")
+    }
+
+    function test_keeping_the_window_takes_back_close_anyway() {
+        prefsFake.admission = rejection
+        closeEvent()
+        win.confirmAccepted()
+        modelB.running = true
+        closeEvent()
+        win.confirmRejected()
+        compare(win.prefsLossAccepted, "")
+        modelB.running = false
+        const opens = confirm.opens
+        compare(closeEvent().accepted, false, "the same rejection is asked about again")
+        compare(confirm.purpose, "closeprefs")
+        compare(confirm.opens, opens + 1)
+        win.confirmRejected()
+        compare(win.prefsLossAccepted, "")
+    }
+
+    function test_close_anyway_records_the_question_not_a_later_snapshot() {
+        prefsFake.admit("9007199254740994")
+        closeEvent()
+        expireDeadline()
+        // Something admitted while the question was open is not covered.
+        prefsFake.admit("9007199254740995")
+        win.confirmAccepted()
+        compare(win.prefsLossAccepted, "9007199254740994\n\n")
+        compare(closeEvent().accepted, false)
+    }
+
+    function test_progress_never_replaces_another_question() {
+        prefsFake.admit("9007199254740994")
+        closeEvent()
+        // The window stays usable while it saves; the user asks to trash a file.
+        confirm.purpose = "trash"
+        confirm.open("Move to Trash?", "a.txt", "Move to Trash", false)
+        const opens = confirm.opens
+        expireDeadline()
+        prefsFake.fail("Settings: permission denied")
+        published()
+        compare(confirm.purpose, "trash", "the user's open question keeps its handler")
+        compare(confirm.opens, opens)
+        win.confirmRejected()
+        // onClosed asks on the next event-loop turn, not inside the handler.
+        compare(confirm.purpose, "trash")
+        tryCompare(confirm, "purpose", "closeprefs", 1000, "asked as soon as that question is gone")
+        verify(confirm.body.indexOf("Settings: permission denied") === 0, confirm.body)
+        compare(win.quitCalls, 0)
+    }
+
+    function test_progress_after_another_question_quits_when_saved() {
+        prefsFake.admit("9007199254740994")
+        closeEvent()
+        confirm.purpose = "trash"
+        confirm.open("Move to Trash?", "a.txt", "Move to Trash", false)
+        prefsFake.ack("9007199254740994")
+        published()
+        compare(win.quitCalls, 0, "not while the user is reading a question")
+        win.confirmRejected()
+        compare(win.quitCalls, 0, "deferred to the next event-loop turn")
+        tryCompare(win, "quitCalls", 1, 1000)
+    }
+
+    function test_an_unchanged_failure_is_news_after_a_later_attempt() {
+        prefsFake.attempt = "41"
+        prefsFake.admit("9007199254740994")
+        prefsFake.error = "Settings: permission denied"
+        closeEvent()
+        compare(win.prefsCloseAttempt, "41")
+        // Attempt 42 may have been running before the flush; it is not proof.
+        prefsFake.fail("Settings: permission denied")
+        published()
+        compare(confirm.opens, 0)
+        // Attempt 43 started after the flush and failed the same way.
+        prefsFake.fail("Settings: permission denied")
+        published()
+        compare(confirm.purpose, "closeprefs")
+        verify(confirm.body.indexOf("Settings: permission denied") === 0, confirm.body)
+        verify(prefsCloseDeadline.running === false)
+    }
+
+    function test_an_unchanged_failure_without_attempts_waits_for_the_deadline() {
+        prefsFake.admit("9007199254740994")
+        prefsFake.error = "Settings: permission denied"
+        closeEvent()
+        for (let i = 0; i < 3; i++) { prefsFake.fail("Settings: permission denied"); published() }
+        compare(confirm.opens, 0)
+        expireDeadline()
+        compare(confirm.purpose, "closeprefs")
+    }
+
+    function test_a_rejection_alone_does_not_read_as_a_new_failure() {
+        // A save failure, then a rejected choice appended by the worker.
+        prefsFake.admit("9007199254740994")
+        prefsFake.error = "Settings: permission denied"
+        prefsFake.admission = rejection
+        closeEvent()
+        compare(win.prefsCloseError, "Settings: permission denied")
+        published()
+        compare(confirm.opens, 0, "the same failure, still within the deadline")
+        // The save succeeds; only the rejection is left.
+        prefsFake.ack("9007199254740994")
+        published()
+        compare(confirm.purpose, "closeprefs")
+        verify(confirm.body.indexOf(rejection) === 0, confirm.body)
+    }
+
+    function test_a_quit_blocked_by_running_work_is_the_users_next_close() {
+        prefsFake.admit("9007199254740994")
+        closeEvent()
+        prefsFake.ack("9007199254740994")
+        published()
+        compare(win.quitCalls, 1)
+        verify(win.prefsQuitRequested)
+        modelC.running = true
+        compare(closeEvent().accepted, false)
+        compare(confirm.purpose, "close")
+        verify(!win.prefsQuitRequested, "a stale flag would make the next user close look automatic")
+    }
+
+    // --- keyboard after a question closes ------------------------------------
+
+    function test_keep_window_returns_the_keyboard_to_open_settings() {
+        // The native flow: Settings open, a save fails, Alt+F4, Escape.
+        settingsPanel.open = true
+        prefsFake.admit("9007199254740994")
+        prefsFake.error = "Settings: permission denied"
+        closeEvent()
+        closeEvent()
+        compare(confirm.purpose, "closeprefs")
+        win.confirmRejected()
+        verify(!win.prefsClosing)
+        compare(settingsPanel.refocuses, 1, "R must reach the panel, not the hidden button")
+        compare(connectPanel.refocuses, 0)
+    }
+
+    function test_a_closed_question_refocuses_by_priority() {
+        confirm.visible = false
+        const lists = win.listFocuses
+        connectPanel.open = true
+        settingsPanel.open = true
+        win.closedHandler()
+        compare(connectPanel.refocuses, 1, "the connect panel keeps its place first")
+        compare(settingsPanel.refocuses, 0)
+        connectPanel.open = false
+        win.closedHandler()
+        compare(settingsPanel.refocuses, 1)
+        compare(win.listFocuses, lists, "focusList is not asked while a panel is open")
+        settingsPanel.open = false
+        win.closedHandler()
+        compare(win.listFocuses, lists + 1)
+        compare(connectPanel.refocuses + settingsPanel.refocuses, 2)
+    }
+
+    // --- the tab session through loading, debounce and close (DESIGN §2.1) ---
+
+    // The 600 ms debounce elapsing.
+    function debounceExpires() { sessionSaveTimer.stop(); sessionSaveTimer.triggered() }
+    // A window opening before preferences have loaded, with one placeholder tab.
+    function openLate() {
+        prefsFake.ready = false
+        win.prefsStarted = false
+        tabList.clear()
+        tabList.append({slot: 0, pane: 0, startPath: "", label: ""})
+        win.tabViews = ["rows"]
+        win.activeTab = 0
+        win.prefsLaunch = { token: dirModel.location_token(), view: win.viewMode, hidden: dirModel.show_hidden,
+                            filter: dirModel.filter, cursor: dirModel.cursor, selected: dirModel.sel_count(),
+                            sortField: dirModel.sort_field, ascending: dirModel.sort_ascending }
+    }
+    function openTab(slot) {
+        tabList.append({slot: slot, pane: 0, startPath: "", label: ""})
+        win.tabViews.push("rows")
+    }
+    // The next start reads back what the worker acknowledged.
+    function restart() {
+        tabList.clear()
+        tabList.append({slot: 0, pane: 0, startPath: "", label: ""})
+        win.tabViews = ["rows"]
+        modelA.token = "home"; modelA.startedAt = []
+        win.prefsStarted = false
+        win.startWithPrefs(true)
+    }
+    readonly property var oldSession: ({ lines: "tokOld rows\ntokOld2 grid", active: 0 })
+
+    function test_delayed_load_keeps_the_users_tabs_through_an_expired_debounce() {
+        prefsFake.restoreTabs = true
+        openLate()
+        prefsFake.storedSession = oldSession
+        openTab(1)
+        win.sessionChanged()
+        debounceExpires()
+        compare(prefsFake.sessionAdmits, 0, "nothing can be admitted before loading")
+        verify(win.sessionDirty, "the expired debounce did not drop the change")
+        modelA.token = "tokA2"
+        win.sessionChanged()
+        debounceExpires()
+        verify(win.sessionDirty)
+        // Preferences arrive: the user's tabs are saved, last time's are not restored.
+        prefsFake.ready = true
+        win.startWithPrefs(false)
+        compare(modelA.startedAt.length, 0, "no old session over the user's tabs")
+        compare(tabList.count, 2)
+        compare(prefsFake.sessionAdmits, 1)
+        compare(prefsFake.pendingSession.lines, "tokA2 rows\ntokB rows")
+        verify(!win.sessionDirty)
+        prefsFake.ack(prefsFake.revision)
+        // The user's close captures the final tabs, then quits once saved.
+        compare(closeEvent().accepted, false)
+        compare(prefsFake.sessionAdmits, 2)
+        prefsFake.ack(prefsFake.revision)
+        published()
+        compare(win.quitCalls, 1)
+        compare(closeEvent().accepted, true)
+        compare(prefsFake.sessionAdmits, 2)
+        restart()
+        compare(modelA.startedAt, ["tokA2"])
+        compare(tabList.count, 2)
+        compare(tabList.get(1).startPath, "token:tokB")
+    }
+
+    function test_first_close_captures_after_the_debounce_fired_and_was_refused() {
+        prefsFake.restoreTabs = true
+        win.sessionChanged()
+        prefsFake.sessionRefusal = "preferences queue is full; wait for saving, then reselect this choice"
+        debounceExpires()
+        verify(win.sessionDirty)
+        compare(prefsFake.sessionAdmits, 0)
+        // The queue drains; the timer is long gone.
+        prefsFake.sessionRefusal = ""
+        verify(!sessionSaveTimer.running)
+        compare(closeEvent().accepted, false)
+        compare(prefsFake.sessionAdmits, 1, "the final tab list is captured anyway")
+        prefsFake.ack(prefsFake.revision)
+        published()
+        compare(win.quitCalls, 1)
+        compare(closeEvent().accepted, true)
+        compare(prefsFake.storedSession.lines, "tokA rows\ntokB rows\ntokC rows")
+    }
+
+    function test_preferences_quit_does_not_readmit_the_session() {
+        prefsFake.restoreTabs = true
+        win.sessionChanged()
+        closeEvent()
+        compare(prefsFake.sessionAdmits, 1)
+        prefsFake.ack(prefsFake.revision)
+        published()
+        compare(win.quitCalls, 1)
+        compare(closeEvent().accepted, true, "prefs' own quit re-enters: nothing new to admit")
+        // Late notifications after the quit neither quit again nor admit.
+        for (let i = 0; i < 3; i++) published()
+        compare(win.quitCalls, 1)
+        compare(prefsFake.sessionAdmits, 1, "no new revision for the re-entered close")
+        compare(prefsFake.flushes, 1)
+    }
+
+    function test_close_before_loading_reports_the_users_tabs_unsaved() {
+        prefsFake.restoreTabs = true
+        openLate()
+        openTab(1)
+        win.sessionChanged()
+        const c = closeEvent()
+        compare(c.accepted, false, "not claimed saved before preferences loaded")
+        compare(confirm.purpose, "closeprefs")
+        verify(confirm.body.indexOf("Tabs not saved: preferences are still loading") === 0, confirm.body)
+        compare(prefsFake.sessionAdmits, 0)
+    }
+
+    function test_an_untouched_start_never_saves_its_placeholder() {
+        prefsFake.restoreTabs = true
+        openLate()
+        prefsFake.storedSession = oldSession
+        // The first listing's location change marks the session, as in Main.
+        win.sessionChanged()
+        debounceExpires()
+        verify(!win.sessionDirty, "nothing of the user's to keep")
+        compare(closeEvent().accepted, true, "an untouched window closes before loading")
+        prefsFake.ready = true
+        win.startWithPrefs(false)
+        compare(modelA.startedAt, ["tokOld"], "last time's tabs come back")
+        compare(prefsFake.sessionAdmits, 0, "the placeholder never replaced them")
+        compare(prefsFake.storedSession, oldSession)
+    }
+
+    function test_a_rejected_session_stays_dirty_until_admitted() {
+        prefsFake.restoreTabs = true
+        prefsFake.sessionRefusal = "preferences queue is full; wait for saving, then reselect this choice"
+        win.sessionChanged()
+        debounceExpires()
+        verify(win.sessionDirty)
+        compare(win.sessionSaveError, prefsFake.sessionRefusal)
+        win.sessionChanged()
+        debounceExpires()
+        verify(win.sessionDirty, "still refused, still dirty")
+        prefsFake.sessionRefusal = ""
+        win.sessionChanged()
+        debounceExpires()
+        verify(!win.sessionDirty)
+        compare(win.sessionSaveError, "")
+        compare(prefsFake.sessionAdmits, 1)
+    }
+
+    function test_a_tab_change_during_the_flush_extends_the_wait() {
+        prefsFake.restoreTabs = true
+        prefsFake.admit("9007199254740994")
+        closeEvent()
+        compare(prefsFake.sessionAdmits, 1, "the close captured the tabs")
+        compare(win.prefsCloseTarget, "9007199254740995")
+        // The window stays usable; the user opens another folder meanwhile.
+        modelB.token = "tokB2"
+        win.sessionChanged()
+        prefsFake.ack("9007199254740995")
+        published()
+        compare(win.quitCalls, 0, "the newer tab list is not admitted yet")
+        compare(confirm.opens, 0)
+        debounceExpires()
+        compare(prefsFake.sessionAdmits, 2)
+        published()
+        compare(win.prefsCloseTarget, "9007199254740996")
+        compare(win.quitCalls, 0)
+        prefsFake.ack("9007199254740996")
+        published()
+        compare(win.quitCalls, 1)
+        compare(prefsFake.storedSession.lines, "tokA rows\ntokB2 rows\ntokC rows")
+    }
+
+    function test_a_tab_change_refused_during_the_flush_asks() {
+        prefsFake.restoreTabs = true
+        prefsFake.admit("9007199254740994")
+        closeEvent()
+        win.sessionChanged()
+        prefsFake.sessionRefusal = "preferences queue is full; wait for saving, then reselect this choice"
+        debounceExpires()
+        published()
+        compare(confirm.purpose, "closeprefs")
+        verify(confirm.body.indexOf("Tabs not saved: preferences queue is full") === 0, confirm.body)
+        compare(win.quitCalls, 0)
+    }
+
+    function test_a_user_close_during_the_flush_captures_a_pending_tab_change() {
+        prefsFake.restoreTabs = true
+        prefsFake.admit("9007199254740994")
+        closeEvent()
+        win.sessionChanged()
+        compare(prefsFake.sessionAdmits, 1)
+        // Asked again before the debounce: the change is admitted now.
+        compare(closeEvent().accepted, false)
+        compare(prefsFake.sessionAdmits, 2)
+        verify(!sessionSaveTimer.running)
+        compare(confirm.purpose, "closeprefs", "a second close still offers Close anyway")
+    }
+
+    function test_close_anyway_after_a_refusal_does_not_cover_a_later_admission() {
+        prefsFake.restoreTabs = true
+        win.sessionChanged()
+        prefsFake.sessionRefusal = "preferences queue is full; wait for saving, then reselect this choice"
+        closeEvent()
+        win.confirmAccepted()
+        compare(win.quitCalls, 1)
+        // A transfer guard intervenes; the queue drains before the next close.
+        modelB.running = true
+        closeEvent()
+        win.confirmAccepted()
+        prefsFake.sessionRefusal = ""
+        modelB.running = false
+        tickWindow(1)
+        compare(closeEvent().accepted, false, "the tabs are admitted now: wait for their save")
+        compare(prefsFake.sessionAdmits, 1)
+        prefsFake.ack(prefsFake.revision)
+        published()
+        compare(win.quitCalls, 3)
+    }
+
+    function test_admin_chooser_and_restore_off_are_intentional_skips() {
+        win.adminMode = true
+        win.sessionChanged()
+        compare(closeEvent().accepted, true)
+        verify(!win.sessionDirty)
+        compare(prefsFake.sessionAdmits, 0)
+        win.adminMode = false
+        // Restore off (and chooser windows) answer "" without admitting.
+        prefsFake.restoreTabs = false
+        win.sessionChanged()
+        compare(closeEvent().accepted, true)
+        verify(!win.sessionDirty)
+        compare(prefsFake.sessionAdmits, 0)
+    }
+
+    function test_the_first_user_close_captures_after_restore_was_enabled() {
+        // Restore off: the change was an intentional skip, so it is clean.
+        win.sessionChanged()
+        debounceExpires()
+        verify(!win.sessionDirty)
+        compare(prefsFake.sessionAdmits, 0)
+        // Restore turned on (here or by hand); nothing moves afterwards.
+        prefsFake.restoreTabs = true
+        verify(!win.sessionDirty)
+        verify(!sessionSaveTimer.running)
+        compare(closeEvent().accepted, false, "the user's close still captures the final tabs")
+        compare(prefsFake.sessionAdmits, 1)
+        prefsFake.ack(prefsFake.revision)
+        published()
+        compare(win.quitCalls, 1)
+        compare(closeEvent().accepted, true)
+        for (let i = 0; i < 3; i++) published()
+        compare(win.quitCalls, 1, "one self-quit")
+        compare(prefsFake.sessionAdmits, 1, "and no new admission after it")
+        compare(prefsFake.storedSession.lines, "tokA rows\ntokB rows\ntokC rows")
+    }
+
+    function test_a_second_close_while_waiting_admits_no_identical_session() {
+        prefsFake.restoreTabs = true
+        prefsFake.admit("9007199254740994")
+        closeEvent()
+        compare(prefsFake.sessionAdmits, 1)
+        compare(closeEvent().accepted, false)
+        compare(prefsFake.sessionAdmits, 1, "nothing changed since the first close captured it")
+        compare(confirm.purpose, "closeprefs")
+    }
+
+    function test_close_anyway_reentry_admits_no_identical_session() {
+        prefsFake.restoreTabs = true
+        prefsFake.admit("9007199254740994")
+        closeEvent()
+        expireDeadline()
+        win.confirmAccepted()
+        compare(win.quitCalls, 1)
+        compare(closeEvent().accepted, true, "the loss the user accepted, unchanged")
+        compare(prefsFake.sessionAdmits, 1)
     }
 }

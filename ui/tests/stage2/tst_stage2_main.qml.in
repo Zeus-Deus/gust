@@ -1,0 +1,246 @@
+import QtQuick
+import QtTest
+
+// Exact Main.qml functions and the live-hold binding (extracted by the
+// runner) around bounded fakes: a pending selection refuses every place that
+// counts, names or acts on the selection before Rust sees it, and the live
+// hold covers the rename card and drags from either pane (DESIGN §2.2.1).
+// Rust's own refusal of target-changing operations is not exercised here.
+Item {
+    id: top
+    width: 400
+    height: 300
+
+    QtObject { id: palette; property bool visible: false }
+    QtObject {
+        id: confirm
+        property bool visible: false
+        property string purpose: ""
+        property var opened: []
+        function open(title, body, action, hard) { opened.push(title) }
+    }
+    QtObject { id: connectionRecovery; property bool visible: false }
+    QtObject { id: settingsPanel; property bool open: false }
+    QtObject { id: trashPanel; property bool open: false }
+    QtObject { id: recentPanel; property bool open: false }
+    QtObject { id: connectPanel; property bool open: false }
+    QtObject { id: deviceSharing; property bool open: false }
+    QtObject {
+        id: contextMenu
+        property bool open: false
+        property var popups: []
+        function popup(x, y, items) { popups.push(items.map(i => i.label)) }
+    }
+    QtObject { id: conflictDialog; property bool visible: false }
+    QtObject { id: quickLook; property bool open: false; function hide() { open = false } }
+    QtObject {
+        id: prompt
+        property bool visible: false
+        property bool claimingFocus: false
+        property string mode: ""
+        property bool secret: false
+        property var opened: []
+        function openWith(title, text, hint, row) { opened.push(title) }
+    }
+    QtObject {
+        id: renameCard
+        property bool open: false
+        property var opened: []
+        function openWith(m, row, names) { opened.push(names) }
+    }
+    QtObject { id: paneA; property bool dragActive: false; property bool bandActive: false }
+    QtObject { id: paneBItem; property bool dragActive: false; property bool bandActive: false }
+    QtObject { id: paneBLoader; property var item: null }
+    QtObject {
+        id: chooserBar
+        property bool active: false
+        property string mode: ""
+        property string name: ""
+        property string error: ""
+        function focusName() {}
+    }
+    QtObject { id: hints; property string message: "" }
+    QtObject { id: tabList; property int count: 2 }
+    QtObject { id: tabs; function objectAt(i) { return i === 0 ? model : other } }
+    QtObject {
+        id: other
+        property var holds: []
+        function hold_live_updates(on) { holds.push(on) }
+    }
+    QtObject {
+        id: model
+        property bool selection_pending: false
+        property int count: 5
+        property int cursor: 2
+        property int selected: 3
+        property var calls: []
+        property var holds: []
+        function note(n) { calls.push(n) }
+        function sel_count() { note("sel_count"); return selected }
+        function bulk_names(c) { note("bulk_names"); return "a\nb\nc" }
+        function delete_needs_hard_confirm() { note("delete_needs_hard_confirm"); return false }
+        function target_name() { note("target_name"); return "x" }
+        function request_delete_total() { note("request_delete_total") }
+        function delete_action_label() { note("delete_action_label"); return "Move to Trash" }
+        function entry_name(r) { note("entry_name"); return "x" }
+        function entry_token(r) { note("entry_token"); return "local:" + (1000 + r).toString(16) }
+        function owner_text() { note("owner_text"); return "me" }
+        function chooser_accept(name) { note("chooser_accept"); return "fixture refusal" }
+        function is_dir(r) { note("is_dir"); return false }
+        function focus_row(r) { note("focus_row") }
+        function activate_selection() { note("activate_selection"); return "OK:Opened 3 items" }
+        function activate(r) { note("activate"); return "file" }
+        function hold_live_updates(on) { holds.push(on) }
+    }
+
+    Item {
+        id: win
+        property var dirModel: model
+        property string alertText: ""
+        property int pendingTrashRow: -1
+        property string deleteBody: ""
+        property var dumps: []
+        property var runs: []
+        property var menuIntent: null
+        function qaDump(tag) { dumps.push(tag) }
+        function qaFlush() {}
+        function askRun(row) { runs.push(row) }
+        function contextItems(row) {
+            return row < 0 ? [{ label: "New folder" }] : [{ label: "Open " + dirModel.sel_count() + " items" }]
+        }
+@HOLD@
+@HOLD_HANDLER@
+@FUNCTIONS@
+    }
+
+    TestCase {
+        name: "Stage2Main"
+        when: windowShown
+
+        readonly property string refusal: "Selection is still being applied; wait and try again."
+        readonly property var selectionReads: ["sel_count", "bulk_names", "target_name", "request_delete_total",
+                                               "delete_needs_hard_confirm", "chooser_accept",
+                                               "activate_selection", "activate", "owner_text"]
+
+        function init() {
+            model.selection_pending = false
+            model.calls = []
+            confirm.opened = []
+            prompt.opened = []
+            renameCard.opened = []
+            contextMenu.popups = []
+            win.alertText = ""
+            win.dumps = []
+            hints.message = ""
+            chooserBar.active = false
+            chooserBar.error = ""
+        }
+
+        function actions() {
+            return [
+                { tag: "trash", run: () => win.askTrash(), effect: () => confirm.opened.length },
+                { tag: "bulk-card", run: () => win.askBulkRename(), effect: () => renameCard.opened.length },
+                { tag: "bulk-pattern", run: () => win.askBulkPattern(), effect: () => prompt.opened.length },
+                { tag: "rename", run: () => win.askRename(), effect: () => renameCard.opened.length },
+                { tag: "owner", run: () => win.askOwner(), effect: () => prompt.opened.length },
+                { tag: "chooser-open", run: () => win.chooserAccept(),
+                  effect: () => model.calls.filter(c => c === "chooser_accept").length },
+                { tag: "open-many", run: () => win.activateRow(2),
+                  effect: () => model.calls.filter(c => c === "activate_selection").length }
+            ]
+        }
+
+        function test_refused_while_selection_pending_data() { return actions() }
+        function test_refused_while_selection_pending(data) {
+            model.selection_pending = true
+            data.run()
+            compare(data.effect(), 0, "nothing is prepared from the previous selection")
+            compare(model.calls.filter(c => selectionReads.indexOf(c) >= 0), [])
+            compare(win.alertText, refusal)
+            verify(win.dumps.indexOf("selection-pending") >= 0)
+        }
+
+        function test_proceeds_once_selection_lands_data() { return actions() }
+        function test_proceeds_once_selection_lands(data) {
+            data.run()
+            compare(data.effect(), 1)
+            verify(win.alertText !== refusal)
+            compare(win.dumps.indexOf("selection-pending"), -1)
+        }
+
+        function test_menu_labels_count_the_landed_selection() {
+            model.selected = 4
+            win.openContextMenu(2, 10, 10)
+            compare(contextMenu.popups, [["Open 4 items"]])
+            model.selected = 3
+        }
+
+        // A row menu asked for while a selection is pending waits for it
+        // (one intent; see tst_stage2_menu for the real-view journey) and
+        // is not refused: it must not refuse its own selection update.
+        function test_row_menu_waits_instead_of_refusing() {
+            model.selection_pending = true
+            win.openContextMenu(2, 10, 10)
+            compare(contextMenu.popups, [])
+            compare(win.alertText, "")
+            verify(win.menuIntent && win.menuIntent.row === 2)
+            verify(win.liveHold, "a waiting menu holds the rows it names")
+            win.menuIntent = null
+            verify(!win.liveHold)
+        }
+        function test_row_menu_opens_when_settled() {
+            win.openContextMenu(2, 10, 10)
+            compare(contextMenu.popups.length, 1)
+        }
+
+        function test_folder_menu_still_opens_while_pending() {
+            model.selection_pending = true
+            win.openContextMenu(-1, 10, 10)
+            compare(contextMenu.popups, [["New folder"]])
+            compare(win.alertText, "")
+        }
+
+        // --- live hold -------------------------------------------------------
+        function holders() {
+            return [
+                { tag: "rename-card", obj: renameCard, prop: "open" },
+                { tag: "pane-a-drag", obj: paneA, prop: "dragActive" },
+                { tag: "pane-a-band", obj: paneA, prop: "bandActive" },
+                { tag: "palette", obj: palette, prop: "visible" },
+                { tag: "confirm", obj: confirm, prop: "visible" },
+                { tag: "context-menu", obj: contextMenu, prop: "open" },
+                { tag: "quick-look", obj: quickLook, prop: "open" },
+                { tag: "prompt", obj: prompt, prop: "visible" },
+                { tag: "prompt-claiming", obj: prompt, prop: "claimingFocus" },
+                { tag: "conflict", obj: conflictDialog, prop: "visible" },
+                { tag: "settings", obj: settingsPanel, prop: "open" }
+            ]
+        }
+        function test_live_hold_data() { return holders() }
+        function test_live_hold(data) {
+            verify(!win.liveHold)
+            model.holds = []
+            other.holds = []
+            data.obj[data.prop] = true
+            verify(win.liveHold)
+            compare(model.holds, [true])
+            compare(other.holds, [true], "every tab's model holds")
+            data.obj[data.prop] = false
+            verify(!win.liveHold)
+            compare(model.holds, [true, false])
+        }
+        function test_live_hold_second_pane_drag() {
+            verify(!win.liveHold)
+            paneBLoader.item = paneBItem
+            verify(!win.liveHold)
+            paneBItem.dragActive = true
+            verify(win.liveHold)
+            paneBItem.dragActive = false
+            paneBItem.bandActive = true
+            verify(win.liveHold, "a band in the second pane holds too")
+            paneBLoader.item = null
+            verify(!win.liveHold, "a closed second pane holds nothing")
+            paneBItem.bandActive = false
+        }
+    }
+}

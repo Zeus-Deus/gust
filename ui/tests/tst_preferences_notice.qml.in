@@ -1,0 +1,195 @@
+import QtQuick
+import QtTest
+
+// The actual HintStrip with Main.qml's exact preference bindings (prefsTick
+// through prefsNotice, plus revisionAtLeast), its `alert:` chain and the
+// SettingsPanel onChanged/onRetryRequested bodies, all inserted by the
+// runner. The preferences snapshot is synthetic, as in tst_work_guard.
+TestCase {
+    id: test
+    name: "PreferencesNotice"
+    width: 900
+    height: 100
+    visible: true
+    when: windowShown
+
+    QtObject {
+        id: dirModel
+        property string notice: ""
+        property bool show_hidden: false
+        property bool ready: true
+        property bool pending: false
+        property string error: ""
+        property string admission: ""
+        property string revision: "9007199254740993"
+        property string saved: "9007199254740993"
+        property string setResult: ""
+        property int flushes: 0
+        function settings_json() {
+            const error = [dirModel.error, dirModel.admission].filter(e => e !== "").join("; ")
+            return JSON.stringify({ ready: ready, pending: pending, error: error, admission_error: admission,
+                                    revision: revision, saved_revision: saved })
+        }
+        function settings_set(key, value) { return setResult }
+        function preferences_flush() { flushes += 1; return revision }
+        function toggle_hidden() { show_hidden = !show_hidden }
+    }
+
+    Item {
+        id: win
+        property string alertText: ""
+        // Session stand-ins: saveSession's own semantics are tst_work_guard's.
+        property bool sessionDirty: false
+        property int sessionSaves: 0
+        property string sessionResult: ""
+        function saveSession() { sessionSaves += 1; if (sessionResult === "") sessionDirty = false; return sessionResult }
+        function applySettings() {}
+        function qaDump(tag) {}
+        function settingsChanged(key, value) {
+@SETTINGS_CHANGED@
+        }
+        function settingsRetry() {
+@SETTINGS_RETRY@
+        }
+@PREFS_BINDINGS@
+    }
+
+    QtObject { id: sessionSaveTimer; property bool running: false }
+
+    HintStrip {
+        id: hints
+        width: test.width
+        status: "12 items"
+        alert: @HINT_ALERT@
+    }
+
+    function init() {
+        dirModel.notice = ""; dirModel.ready = true; dirModel.pending = false; dirModel.error = ""
+        dirModel.admission = ""; dirModel.revision = "9007199254740993"; dirModel.saved = "9007199254740993"
+        dirModel.setResult = ""; dirModel.flushes = 0
+        win.alertText = ""; hints.message = ""
+        win.sessionDirty = false; win.sessionSaves = 0; win.sessionResult = ""; sessionSaveTimer.running = false
+        win.prefsTick += 1
+    }
+
+    // The worker published a snapshot (prefsPublished bumps the tick).
+    function published() { win.prefsTick += 1 }
+    function failSave() {
+        dirModel.revision = "9007199254740994"; dirModel.pending = true
+        dirModel.error = "Settings: Permission denied"; published()
+    }
+    function saveSucceeds() {
+        dirModel.saved = dirModel.revision; dirModel.pending = false; dirModel.error = ""; published()
+    }
+
+    function test_failed_then_retried_then_saved_clears_the_footer() {
+        failSave()
+        compare(win.prefsStatus, "unsaved")
+        compare(hints.displayText, "Settings not saved: Settings: Permission denied")
+        compare(win.alertText, "", "never copied into the generic alert")
+        hints.message = "Window kept open — Ctrl+, for settings"
+        win.settingsRetry()
+        compare(dirModel.flushes, 1)
+        compare(hints.message, "", "Retry is the next action: earlier words go")
+        compare(hints.displayText, "Settings not saved: Settings: Permission denied", "still unsaved until acknowledged")
+        saveSucceeds()
+        compare(win.prefsStatus, "saved")
+        compare(hints.displayText, "12 items")
+        verify(hints.displayText.indexOf("not saved") < 0)
+    }
+
+    function test_recovery_without_retry_clears_the_footer_too() {
+        failSave()
+        saveSucceeds()
+        compare(hints.displayText, "12 items")
+    }
+
+    function test_an_unrelated_alert_survives_async_recovery() {
+        failSave()
+        win.alertText = "Could not move to Trash: read-only"
+        compare(hints.displayText, "Could not move to Trash: read-only", "the operation's alert keeps precedence")
+        saveSucceeds()
+        compare(hints.displayText, "Could not move to Trash: read-only", "a save result does not clear it")
+        compare(win.alertText, "Could not move to Trash: read-only")
+    }
+
+    function test_the_notice_shows_once_an_unrelated_alert_is_cleared() {
+        failSave()
+        win.alertText = "Could not move to Trash: read-only"
+        win.alertText = ""
+        compare(hints.displayText, "Settings not saved: Settings: Permission denied")
+    }
+
+    function test_a_rejected_choice_is_noticed_and_choosing_again_clears_it() {
+        dirModel.admission = "Choice not accepted: preferences queue is full; reselect it to save"
+        published()
+        compare(win.prefsStatus, "unsaved")
+        verify(hints.displayText.indexOf("Settings not saved: Choice not accepted") === 0, hints.displayText)
+        // Chosen again and admitted: the setter's empty result clears the old alert.
+        win.alertText = "preferences queue is full"
+        dirModel.admission = ""
+        dirModel.revision = "9007199254740994"; dirModel.pending = true
+        win.settingsChanged("density", "roomy")
+        compare(win.alertText, "")
+        compare(win.prefsStatus, "saving")
+        compare(hints.displayText, "12 items", "saving is not an alert")
+        saveSucceeds()
+        compare(hints.displayText, "12 items")
+    }
+
+    function test_a_refused_setting_is_the_alert() {
+        hints.message = "Copied 3 items"
+        dirModel.setResult = "preferences are still loading"
+        win.settingsChanged("density", "roomy")
+        compare(win.alertText, "preferences are still loading")
+        compare(hints.message, "")
+        compare(hints.displayText, "preferences are still loading")
+    }
+
+    function test_a_problem_with_nothing_unsaved_is_not_an_alert() {
+        dirModel.error = "Views: unreadable"
+        published()
+        compare(win.prefsStatus, "problem")
+        compare(win.prefsNotice, "")
+        compare(hints.displayText, "12 items", "the Settings button and panel carry it")
+    }
+
+    function test_the_folder_notice_still_shows_when_settings_are_fine() {
+        dirModel.notice = "previews need bubblewrap"
+        compare(hints.displayText, "previews need bubblewrap")
+        failSave()
+        verify(hints.displayText.indexOf("Settings not saved") === 0, "unsaved settings outrank an ambient notice")
+    }
+
+    function test_retry_retries_refused_tabs_once_per_press() {
+        win.sessionDirty = true
+        win.sessionResult = "preferences queue is full"
+        win.settingsRetry()
+        compare(win.sessionSaves, 1)
+        compare(dirModel.flushes, 1)
+        verify(win.sessionDirty, "still refused")
+        win.settingsRetry()
+        compare(win.sessionSaves, 2, "each Retry asks once; nothing retries on its own")
+        win.sessionResult = ""
+        win.settingsRetry()
+        compare(win.sessionSaves, 3)
+        verify(!win.sessionDirty)
+        win.settingsRetry()
+        compare(win.sessionSaves, 3, "admitted: no further tab save")
+        compare(dirModel.flushes, 4)
+    }
+
+    function test_retry_with_clean_tabs_only_flushes() {
+        win.settingsRetry()
+        compare(win.sessionSaves, 0)
+        compare(dirModel.flushes, 1)
+    }
+
+    function test_retry_leaves_a_running_debounce_to_save() {
+        win.sessionDirty = true
+        sessionSaveTimer.running = true
+        win.settingsRetry()
+        compare(win.sessionSaves, 0, "the debounce saves it; no duplicate")
+        compare(dirModel.flushes, 1)
+    }
+}

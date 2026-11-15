@@ -1,6 +1,7 @@
 //! Contextual folder suggestions from known paths, without remote I/O.
+#[cfg(test)]
+use gust_core::entry::{Entry, EntryKind};
 use gust_core::{
-    entry::{Entry, EntryKind},
     jump::{Candidate, Source},
     mount_table::MountInfo,
 };
@@ -18,19 +19,25 @@ fn known() -> &'static Mutex<Vec<PathBuf>> {
 }
 
 /// Listing data is already in memory; remembering it must do no I/O.
+#[cfg(test)]
 pub fn remember(root: &Path, entries: &[Entry]) {
-    let mut paths = known().lock().unwrap_or_else(|e| e.into_inner());
-    paths.push(root.to_owned());
+    let mut paths = vec![root.to_path_buf()];
     paths.extend(
         entries
             .iter()
-            .filter(|e| e.kind == EntryKind::Dir && !e.is_hidden())
+            .filter(|entry| entry.kind == EntryKind::Dir && !entry.is_hidden())
             .take(256)
-            .map(|e| root.join(&e.name)),
+            .map(|entry| root.join(&entry.name)),
     );
+    remember_paths(&paths);
+}
+/// A worker-prepared bounded plan, admitted only once its listing publishes.
+pub fn remember_paths(pending: &[PathBuf]) {
+    let mut paths = known().lock().unwrap_or_else(|e| e.into_inner());
+    paths.extend(pending.iter().cloned());
     let mut seen = HashSet::new();
     paths.reverse();
-    paths.retain(|p| seen.insert(p.clone()));
+    paths.retain(|path| seen.insert(path.clone()));
     paths.truncate(MAX_KNOWN);
     paths.reverse();
 }

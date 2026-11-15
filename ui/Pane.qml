@@ -32,18 +32,26 @@ Item {
     /// A right-button drag was released: offer Copy, Move or Link here.
     signal dropMenu(int row, real x, real y)
     /// A single folder was dropped on the right-edge strip: show it in a
-    /// second pane (DESIGN §6.7).
-    signal openInSplit(string path)
+    /// second pane (DESIGN §6.7). `target` is "token:" + its raw path token.
+    signal openInSplit(string target, string label)
 
     /// Whether the right-edge strip is offered. The window allows it only
     /// while there is one pane, so a drop on the other pane always stays a
     /// copy or move.
     property bool canEdgeSplit: false
-    /// The folder being dragged, when the drag is exactly one folder.
+    /// The folder being dragged, when the drag is exactly one folder, as
+    /// "token:" + its raw path token (never its display path).
     property string dragFolder: ""
     property string dragFolderName: ""
     /// The pointer is over the strip right now.
     property bool overEdge: false
+    /// A drag from this pane is in flight, inside the window or handed to
+    /// another application. Rows must not move under it (Main's live hold).
+    readonly property bool dragActive: rowsView.dragActive || gridView.dragActive
+                                       || columnsView.dragActive || outward.Drag.active
+    /// A selection band is being drawn: its rectangle maps to rows by
+    /// position, so they must not move until the button is let go.
+    readonly property bool bandActive: rowsView.bandActive || gridView.bandActive
     readonly property real edgeWidth: Math.round(Math.max(Tokens.rowHeight * 4, pane.width * 0.12))
 
     /// The view the user is looking at, for focus and page-step maths.
@@ -76,14 +84,7 @@ Item {
         model: pane.model
         onActivated: (r) => pane.activated(r)
         onSelectionTouched: pane.selectionTouched()
-        onDragStarted: (r) => {
-            rowsView.dragActive = true
-            if (pane.model) pane.model.drag_begin(r)
-            pane.beginEdge(r)
-            outward.handedOff = false
-            ghost.begin(r)
-            pane.dragBegan()
-        }
+        onDragStarted: (r) => pane.startDrag(rowsView, r)
         // Say what a drop would do BEFORE the button is released, so the
         // operation and destination are never a surprise.
         onDropMovedOver: (r) => {
@@ -107,14 +108,7 @@ Item {
         model: pane.model
         onActivated: (r) => pane.activated(r)
         onSelectionTouched: pane.selectionTouched()
-        onDragStarted: (r) => {
-            gridView.dragActive = true
-            if (pane.model) pane.model.drag_begin(r)
-            pane.beginEdge(r)
-            outward.handedOff = false
-            ghost.begin(r)
-            pane.dragBegan()
-        }
+        onDragStarted: (r) => pane.startDrag(gridView, r)
         onDropMovedOver: (r) => {
             if (!pane.model) return
             const t = gridView.dragRight ? qsTr("Release for Copy, Move or Link")
@@ -136,14 +130,7 @@ Item {
         model: pane.model
         onActivated: (r) => pane.activated(r)
         onSelectionTouched: pane.selectionTouched()
-        onDragStarted: (r) => {
-            columnsView.dragActive = true
-            if (pane.model) pane.model.drag_begin(r)
-            pane.beginEdge(r)
-            outward.handedOff = false
-            ghost.begin(r)
-            pane.dragBegan()
-        }
+        onDragStarted: (r) => pane.startDrag(columnsView, r)
         onDropMovedOver: (r) => {
             if (!pane.model) return
             const t = columnsView.dragRight ? qsTr("Release for Copy, Move or Link")
@@ -156,6 +143,24 @@ Item {
         onDragMovedTo: (x, y) => { ghost.follow(columnsView, x, y); pane.trackEdge(columnsView, x, y); pane.maybeHandOff(columnsView, x, y) }
         onContextRequested: (r, x, y) => pane.contextRequested(r, x, y)
         onMiddleClicked: (r) => pane.openInNewTab(r)
+    }
+
+    /// Admit a drag the view has detected. While a selection the user just
+    /// made is still being applied the drag would carry the previous one, so
+    /// it does not start at all: no drag state, no ghost, nothing handed to
+    /// the model, and the same refusal Gust gives elsewhere (DESIGN §2.2.1).
+    function startDrag(view, row) {
+        if (!pane.model) return
+        if (pane.model.selection_pending) {
+            pane.dropFailed(pane.model, qsTr("Selection is still being applied; wait and try again."))
+            return
+        }
+        view.dragActive = true
+        pane.model.drag_begin(row)
+        pane.beginEdge(row)
+        outward.handedOff = false
+        ghost.begin(row)
+        pane.dragBegan()
     }
 
     /// A drop is an ordinary copy or move through the same engine as any
@@ -175,7 +180,8 @@ Item {
     function beginEdge(row) {
         pane.overEdge = false
         const one = !!pane.model && pane.model.drag_count() === 1 && pane.model.is_dir(row)
-        pane.dragFolder = one ? pane.model.entry_path(row) : ""
+        const token = one ? pane.model.entry_token(row) : ""
+        pane.dragFolder = token !== "" ? "token:" + token : ""
         pane.dragFolderName = one ? pane.model.entry_name(row) : ""
     }
     function trackEdge(view, x, y) {
@@ -195,18 +201,24 @@ Item {
     }
     /// A release over the strip: open the folder beside, move nothing.
     function takeEdgeDrop() {
-        const path = pane.overEdge ? pane.dragFolder : ""
+        const target = pane.overEdge ? pane.dragFolder : ""
         pane.overEdge = false
         pane.dragFolder = ""
-        if (path === "") return false
+        if (target === "") return false
         if (pane.model) pane.model.drag_end()
         pane.dropPreview("")
-        pane.openInSplit(path)
+        pane.openInSplit(target, pane.dragFolderName)
         return true
     }
     function rowPoints() {
         const v = currentView()
         return v.rowPoints ? v.rowPoints() : ({})
+    }
+    /// Columns view only (qa): its parsed side response, and click points for
+    /// the parent/preview entries by token. Null in Rows and Grid.
+    function columnsSide() { return viewMode === "columns" ? columnsView.side : null }
+    function columnsPreviewPoints() {
+        return viewMode === "columns" ? columnsView.columnsPreviewPoints() : null
     }
     /// How far the list is scrolled, in pixels (qa).
     function scrollTop() {
@@ -258,6 +270,63 @@ Item {
         width: Math.max(2, Tokens.borderWidth * 2)
         height: pane.height
         color: Tokens.accent
+    }
+
+    // An accepted sort, filter or selection change that is still being
+    // prepared (DESIGN §2.2.1). The header arrow and the filter field already
+    // show what was asked for; this says the rows have not caught up yet. It
+    // appears only once the wait outlasts a short motion beat, so a quick
+    // result never flickers it, and it never takes the mouse.
+    Rectangle {
+        id: pendingMark
+        objectName: "pendingMark"
+        readonly property string words: {
+            const m = pane.model
+            if (!m) return ""
+            const parts = []
+            if (m.sort_pending) parts.push(qsTr("Sorting…"))
+            if (m.filter_pending) parts.push(qsTr("Filtering…"))
+            if (m.selection_pending) parts.push(qsTr("Updating selection…"))
+            return parts.join("  ·  ")
+        }
+        property bool due: false
+        onWordsChanged: {
+            if (words === "") {
+                pendingDelay.stop()
+                due = false
+            } else if (!due && !pendingDelay.running) {
+                pendingDelay.start()
+            }
+        }
+        Timer {
+            id: pendingDelay
+            interval: Tokens.animFast
+            onTriggered: pendingMark.due = pendingMark.words !== ""
+        }
+        z: 40
+        enabled: false
+        visible: due && words !== ""
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+        anchors.margins: Tokens.spaceLg
+        width: pendingText.implicitWidth + Tokens.spaceLg * 2
+        height: pendingText.implicitHeight + Tokens.spaceSm * 2
+        radius: Tokens.radius
+        color: Tokens.withAlpha(Tokens.backgroundDark, 0.92)
+        border.width: Tokens.borderWidth
+        border.color: Tokens.withAlpha(Tokens.border, Tokens.borderAlpha)
+        Text {
+            id: pendingText
+            anchors.centerIn: parent
+            text: pendingMark.words
+            color: Tokens.foregroundDim
+            font.family: Tokens.fontFamily
+            font.pixelSize: Tokens.fontCaption
+            textFormat: Text.PlainText
+        }
+        Accessible.role: Accessible.StatusBar
+        Accessible.name: pendingMark.words
+        Accessible.ignored: !pendingMark.visible
     }
 
     Rectangle {
@@ -394,10 +463,11 @@ Item {
     function gustMode(d) {
         return pane.gustSource(d) ? d.source.transferMode : 0
     }
-    /// The folder a drop on `row` lands in: that folder, or this one.
-    function folderAt(row) {
+    /// The folder a drop on `row` lands in, that folder or this one, as its
+    /// raw path token: for Gust's own drags arriving from the other pane.
+    function folderTokenAt(row) {
         if (!pane.model) return ""
-        return row >= 0 && pane.model.is_dir(row) ? pane.model.entry_path(row) : pane.model.location
+        return row >= 0 && pane.model.is_dir(row) ? pane.model.entry_token(row) : pane.model.location_token()
     }
 
     // --- dropping IN from other windows and applications ----------------
@@ -451,7 +521,7 @@ Item {
             const src = pane.gustSource(drag)
             if (src) {
                 pane.dropPreview(src === pane.model ? pane.model.drag_preview(row, pane.gustMode(drag))
-                                 : src.drag_preview_into(pane.folderAt(row), pane.gustMode(drag)))
+                                 : src.drag_preview_into_token(pane.folderTokenAt(row), pane.gustMode(drag)))
                 return
             }
             // Ring the folder that would receive the drop.
@@ -470,7 +540,7 @@ Item {
                 const row = pane.currentView().rowAt ? pane.currentView().rowAt(drop.x, drop.y) : -1
                 drop.accept(Qt.CopyAction)
                 const e = src === pane.model ? pane.model.drag_drop_on_row(row, pane.gustMode(drop))
-                                             : src.drag_drop_into(pane.folderAt(row), pane.gustMode(drop))
+                                             : src.drag_drop_into_token(pane.folderTokenAt(row), pane.gustMode(drop))
                 if (e !== "") pane.dropFailed(src, e)
                 else pane.dropDone(src)
                 return

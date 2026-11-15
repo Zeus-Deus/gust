@@ -1,0 +1,378 @@
+import QtQuick
+import QtTest
+import com.gust.app
+
+// Releasing what a gesture holds (DESIGN §2.2.1): a right-button drag keeps
+// its model's drag (payload, rows held) until its Copy/Move/Link menu is
+// over, and the chosen action consumes the payload BEFORE it is let go; a
+// selection band holds row publication from press to release. The real Pane,
+// views and ContextMenu, with Main's exact drop-menu functions and branches,
+// contextMenu handlers, paneA handlers and live hold (extracted by the
+// runner). The fake model stands in for the bridge's drag hold.
+Item {
+    id: top
+    width: 900
+    height: 700
+
+    QtObject { id: palette; property bool visible: false }
+    QtObject {
+        id: confirm
+        property bool visible: false
+        property string purpose: ""
+        property string title: ""
+        function open(t, b, c, danger) { title = t; visible = true }
+    }
+    QtObject { id: connectionRecovery; property bool visible: false }
+    QtObject { id: settingsPanel; property bool open: false }
+    QtObject { id: trashPanel; property bool open: false }
+    QtObject { id: recentPanel; property bool open: false }
+    QtObject { id: connectPanel; property bool open: false }
+    QtObject { id: deviceSharing; property bool open: false }
+    QtObject { id: conflictDialog; property bool visible: false }
+    QtObject { id: quickLook; property bool open: false; function hide() { open = false } }
+    // The pattern prompt fades out: visible until its opacity reaches 0.
+    Item {
+        id: prompt
+        visible: false
+        property bool claimingFocus: false
+        property string errorText: ""
+        function close() { claimingFocus = false; fade.restart() }
+        Timer { id: fade; interval: Tokens.animFast; onTriggered: prompt.visible = false }
+    }
+    QtObject { id: hints; property string message: "" }
+    QtObject { id: paneBLoader; property var item: null }
+    QtObject { id: tabList; property int count: 2 }
+    QtObject { id: tabs; function objectAt(i) { return i === 0 ? fakeA : fakeB } }
+    FakeDirModel { id: fakeA }
+    FakeDirModel { id: fakeB }
+
+    Item {
+        id: win
+        property var dirModel: fakeA
+        property var paneAModel: fakeA
+        property string alertText: ""
+        property var dumps: []
+        property var transfers: []
+        property var actions: []
+        property var pendingRunModel: null
+        property string pendingRunToken: ""
+        function qaDump(tag) { dumps = dumps.concat([tag]) }
+        function focusPane(p) {}
+        function focusList() {}
+        function transferStarted(m, err, tag) { transfers = transfers.concat([[tag, err]]) }
+        function contextItems(row) {
+            return [{ label: "Copy", hint: "", action: "copy" }, { label: "Sub", hint: "", action: "sub" }]
+        }
+        // The drop branches are Main's own; "sub" stands for any action that
+        // reopens the menu as a submenu.
+        function runAction(a) {
+            actions = actions.concat([a])
+            if (a === "sub") { contextMenu.popup(20, 20, [{ label: "Inner", hint: "", action: "inner" }]); return }
+            if (a === "") {}
+@COPY_BRANCH@
+@DROP_COPY_BRANCH@
+@DROP_LINK_BRANCH@
+        }
+@HOLD@
+@HOLD_HANDLER@
+@DROP_MENU@
+@POPUP_MENU@
+@ASK_RUN@
+@BULK@
+        // Main's QuickLook.onRunRequested handler, as written.
+        function quickLookRun(row) @RUN_HANDLER@
+    }
+
+    Pane {
+        id: paneA
+        width: 600
+        height: 400
+        model: win.paneAModel
+        viewMode: "rows"
+@PANE_DROP_MENU@
+    }
+
+@CONTEXT_MENU@
+
+@RENAME_CARD@
+
+    TestCase {
+        name: "Stage2Release"
+        when: windowShown
+
+        function prepare(fake, n) {
+            const rows = Qt.createQmlObject("import QtQuick; ListModel {}", top)
+            for (let i = 0; i < n; i++)
+                rows.append({ name: "a" + i, isDir: i % 2 === 0, isSelected: false, iconKey: "",
+                              clipMark: "", isHidden: false, tagKeys: "", emblems: "",
+                              typeText: "", sizeText: "", modifiedText: "",
+                              isSymlink: false, linkOk: true, thumbUrl: "" })
+            fake.show(rows, 0)
+            fake.dragHold = false
+            fake.queuedFilter = null
+            fake.shown_filter = ""
+            fake.selection_pending = false
+            fake.selectionBarrier = false
+            fake.clearCalls()
+        }
+        function init() {
+            contextMenu.close()
+            if (renameCard.open) renameCard.close()
+            quickLook.open = false
+            confirm.visible = false
+            prompt.visible = false
+            prompt.claimingFocus = false
+            fakeA.queuedRelease = null
+            fakeB.queuedRelease = null
+            win.dropMenuModel = null
+            win.dropMenuRow = -1
+            win.paneAModel = fakeA
+            win.dirModel = fakeA
+            win.actions = []
+            win.transfers = []
+            paneA.viewMode = "rows"
+            prepare(fakeA, 6)
+            prepare(fakeB, 6)
+        }
+        function calls(fake, n) { return fake.calls.filter(c => c[0] === n) }
+        function rightDrag(data) {
+            paneA.viewMode = data.tag
+            const list = findChild(paneA, data.list)
+            tryVerify(() => !isPolishScheduled(list), 1000)
+            const it = list.itemAtIndex(1)
+            const target = list.itemAtIndex(2)
+            const to = target.mapFromItem(it, 0, 0)
+            mousePress(it, 10, 10, Qt.RightButton)
+            for (let i = 1; i <= 4; i++) mouseMove(it, 10 + i * 4, 10 + i * (target.y - it.y + 4) / 4, -1, Qt.RightButton)
+            const end = it.mapFromItem(target, target.width / 3, target.height / 2)
+            mouseMove(it, end.x, end.y, -1, Qt.RightButton)
+            mouseRelease(it, end.x, end.y, Qt.RightButton)
+            verify(contextMenu.open, "the Copy/Move/Link menu is up")
+            compare(win.dropMenuModel, fakeA)
+            verify(fakeA.dragHold, "the drag is still held while the menu is up")
+            compare(calls(fakeA, "drag_end"), [])
+        }
+        // Click the entry itself, once the menu has laid its rows out.
+        function clickItem(label) {
+            tryVerify(() => {
+                const ys = Object.values(contextMenu.itemPoints()).map(p => p[1])
+                return ys.length > 0 && new Set(ys).size === ys.length
+            }, 1000, "menu rows laid out")
+            const at = contextMenu.itemPoints()[label]
+            verify(at, label)
+            const before = win.actions.length
+            mouseClick(top, at[0], at[1])
+            compare(win.actions.length, before + 1, "the click picked an entry, not the dismiss area")
+        }
+        function views() {
+            return [{ tag: "rows", list: "rowsList" }, { tag: "grid", list: "iconGrid" },
+                    { tag: "columns", list: "columnsList" }]
+        }
+
+        function test_choice_consumes_payload_then_releases_data() {
+            const out = []
+            for (const v of views())
+                for (const c of [{ label: "Copy here", call: "drop_on_row" },
+                                 { label: "Move here", call: "drop_on_row" },
+                                 { label: "Link here", call: "drop_link_on_row" }])
+                    out.push({ tag: v.tag + "-" + c.label, view: v, label: c.label, call: c.call })
+            return out
+        }
+        function test_choice_consumes_payload_then_releases(data) {
+            rightDrag(data.view)
+            fakeA.publishFilter("next")
+            compare(fakeA.shown_filter, "", "held while the menu is up")
+            clickItem(data.label)
+            const names = fakeA.calls.map(c => c[0]).filter(n => n === data.call || n === "drag_end")
+            compare(names, [data.call, "drag_end"], "the action runs first, then the drag is let go")
+            const dropped = calls(fakeA, data.call)[0]
+            verify(dropped[dropped.length - 1] === true, "the action saw the held payload")
+            compare(calls(fakeA, "drag_end").length, 1)
+            compare(win.dropMenuModel, null)
+            compare(fakeA.shown_filter, "next", "the waiting publication lands")
+            verify(!win.liveHold)
+        }
+        function test_cancel_paths_release_once_data() {
+            const out = []
+            for (const v of views())
+                for (const how of ["cancel-item", "escape", "click-outside"])
+                    out.push({ tag: v.tag + "-" + how, view: v, how: how })
+            return out
+        }
+        function test_cancel_paths_release_once(data) {
+            rightDrag(data.view)
+            fakeA.publishFilter("next")
+            if (data.how === "cancel-item") clickItem("Cancel")
+            else if (data.how === "escape") keyClick(Qt.Key_Escape)
+            else mouseClick(top, top.width - 10, top.height - 10)
+            verify(!contextMenu.open)
+            compare(calls(fakeA, "drop_on_row"), [])
+            compare(calls(fakeA, "drop_link_on_row"), [])
+            compare(calls(fakeA, "drag_end").length, 1, "released exactly once")
+            compare(fakeA.shown_filter, "next", "the pane is not left blocked")
+            wait(20)
+            compare(calls(fakeA, "drag_end").length, 1)
+        }
+        function test_owner_survives_pane_model_change() {
+            rightDrag(views()[0])
+            win.paneAModel = fakeB          // the pane now shows another tab
+            keyClick(Qt.Key_Escape)
+            compare(calls(fakeA, "drag_end").length, 1, "the model that owns the drag lets go")
+            compare(calls(fakeB, "drag_end"), [])
+        }
+        function test_new_drop_menu_releases_previous() {
+            win.openDropMenu(fakeA, 1, 30, 30)
+            win.openDropMenu(fakeB, 2, 40, 40)
+            compare(calls(fakeA, "drag_end").length, 1)
+            compare(win.dropMenuModel, fakeB)
+            keyClick(Qt.Key_Escape)
+            compare(calls(fakeB, "drag_end").length, 1)
+        }
+        function test_ordinary_menus_unchanged() {
+            const finished = []
+            const watch = (a) => finished.push(a)
+            contextMenu.finished.connect(watch)
+            contextMenu.popup(30, 30, [{ label: "Sub", hint: "", action: "sub" }])
+            clickItem("Sub")
+            verify(contextMenu.open, "an action may still reopen the menu as a submenu")
+            compare(contextMenu.items[0].label, "Inner")
+            compare(finished, ["sub"])
+            keyClick(Qt.Key_Escape)
+            compare(finished, ["sub", ""])
+            contextMenu.finished.disconnect(watch)
+            compare(calls(fakeA, "drag_end"), [], "no drag to let go")
+        }
+
+        // --- an action resolves the rows its gesture was made on --------------
+        // Letting go of the live hold installs a waiting publication at once
+        // (fake.queuedRelease, a real Qt reset or layout); every action below
+        // must have captured its target before that can happen.
+        function filteredWithout(name) {
+            const rows = Qt.createQmlObject("import QtQuick; ListModel {}", top)
+            for (const n of fakeA.names)
+                if (n !== name)
+                    rows.append({ name: n, isDir: false, isSelected: false, iconKey: "",
+                                  clipMark: "", isHidden: false, tagKeys: "", emblems: "",
+                                  typeText: "", sizeText: "", modifiedText: "",
+                                  isSymlink: false, linkOk: true, thumbUrl: "" })
+            return rows
+        }
+        function holdNeverLapsed(fake) {
+            compare(calls(fake, "hold_live_updates").filter(c => c[1] === false).length, 0,
+                    "the live hold never lapsed before the target was taken")
+        }
+        function test_menu_copy_takes_target_before_waiting_filter_data() { return views() }
+        function test_menu_copy_takes_target_before_waiting_filter(data) {
+            paneA.viewMode = data.tag
+            const list = findChild(paneA, data.list)
+            tryVerify(() => !isPolishScheduled(list), 1000)
+            fakeA.cursor = 1
+            const a = fakeA.names[1], aToken = fakeA.tokens[1]
+            win.popupContextMenu(1, 40, 40, false)
+            verify(win.liveHold)
+            // A filter that drops A finished meanwhile and waits for the menu.
+            fakeA.queuedRelease = () => fakeA.publish(filteredWithout(a), 1, 2, {})
+            fakeA.clearCalls()
+            clickItem("Copy")
+            const copied = calls(fakeA, "clip_copy")
+            compare(copied.length, 1)
+            compare(copied[0][2], aToken, "Copy took the row the menu was opened on")
+            compare(copied[0][3], a)
+            const order = fakeA.calls.map(c => c[0]).filter(n => n === "clip_copy" || n === "hold_live_updates")
+            compare(order, ["clip_copy", "hold_live_updates"], "the hold is let go only after the action ran")
+            compare(fakeA.queuedRelease, null, "the waiting filter then lands")
+            verify(fakeA.names.indexOf(a) < 0)
+            verify(!win.liveHold)
+        }
+        function test_dismissed_menu_releases_at_once() {
+            win.popupContextMenu(1, 40, 40, false)
+            fakeA.queuedRelease = () => fakeA.publish(filteredWithout(fakeA.names[1]), 0, 2, {})
+            keyClick(Qt.Key_Escape)
+            compare(fakeA.queuedRelease, null, "nothing to carry out: the hold goes with the menu")
+            verify(!contextMenu.dispatching)
+        }
+        function test_submenu_keeps_holding() {
+            contextMenu.popup(30, 30, [{ label: "Sub", hint: "", action: "sub" }])
+            fakeA.queuedRelease = () => fakeA.publish(filteredWithout(fakeA.names[1]), 0, 2, {})
+            clickItem("Sub")
+            verify(contextMenu.open)
+            verify(fakeA.queuedRelease !== null, "a reopened submenu still holds the rows")
+            holdNeverLapsed(fakeA)
+            keyClick(Qt.Key_Escape)
+            compare(fakeA.queuedRelease, null)
+        }
+        function test_rename_card_applies_before_waiting_sort() {
+            fakeA.selectedNames = [fakeA.names[0], fakeA.names[1]]
+            const a = fakeA.names[0], b = fakeA.names[1]
+            renameCard.openWith(fakeA, 0, a + "\n" + b)
+            verify(win.liveHold)
+            // A descending sort finished meanwhile: it would put B above A.
+            fakeA.queuedRelease = () => fakeA.publishSort(true)
+            fakeA.clearCalls()
+            findChild(renameCard, "renameEditor").text = "first\nsecond"
+            renameCard.confirm()
+            verify(!renameCard.open)
+            const applied = calls(fakeA, "bulk_apply_names")
+            compare(applied.length, 1)
+            const map = JSON.parse(applied[0][1])
+            compare(map[a], "first", "A keeps the line written beside it")
+            compare(map[b], "second")
+            compare(fakeA.queuedRelease, null, "the sort lands after the rename")
+            verify(fakeA.names.indexOf(b) < fakeA.names.indexOf(a), "and really reordered (layout change)")
+        }
+        function test_quick_look_run_confirms_before_letting_go() {
+            quickLook.open = true
+            const token = fakeA.tokens[2]
+            fakeA.queuedRelease = () => fakeA.publish(filteredWithout(fakeA.names[2]), 0, 2, {})
+            fakeA.clearCalls()
+            win.quickLookRun(2)
+            compare(calls(fakeA, "run_prepare"), [["run_prepare", 2, token]])
+            compare(win.pendingRunToken, token, "the confirmation is for the previewed program")
+            verify(confirm.visible)
+            verify(!quickLook.open)
+            holdNeverLapsed(fakeA)
+            verify(fakeA.queuedRelease !== null, "the confirmation holds the rows now")
+            confirm.visible = false
+        }
+        function test_bulk_pattern_holds_until_confirmation() {
+            fakeA.selectedNames = [fakeA.names[0], fakeA.names[1]]
+            prompt.visible = true
+            prompt.claimingFocus = true
+            fakeA.queuedRelease = () => fakeA.publishSort(true)
+            fakeA.clearCalls()
+            win.bulkPreview("{name}-1")
+            verify(!prompt.claimingFocus)
+            tryVerify(() => confirm.visible, Tokens.animFast * 6, "the confirmation opens after the fade")
+            verify(!prompt.visible)
+            holdNeverLapsed(fakeA)
+            verify(fakeA.queuedRelease !== null, "rows held through the gap; the preview stays the plan")
+            verify(!win.bulkConfirmPending)
+            confirm.visible = false
+        }
+
+        // --- selection band holds row publication from press to release -----
+        function test_band_holds_until_release_data() {
+            return [{ tag: "rows" }, { tag: "grid" }]
+        }
+        function test_band_holds_until_release(data) {
+            paneA.viewMode = data.tag
+            const view = paneA.currentView()
+            const x = view.width / 2, y = view.height - 20
+            verify(!win.liveHold)
+            mousePress(view, x, y, Qt.LeftButton)
+            verify(paneA.bandActive, "pressed on empty space")
+            verify(win.liveHold)
+            compare(calls(fakeA, "hold_live_updates"), [["hold_live_updates", true]])
+            mouseMove(view, x - 40, y - 60, -1, Qt.LeftButton)
+            verify(win.liveHold, "still held while the rectangle grows")
+            verify(calls(fakeA, "band_update").length > 0)
+            mouseRelease(view, x - 40, y - 60, Qt.LeftButton)
+            verify(!paneA.bandActive)
+            verify(!win.liveHold)
+            compare(calls(fakeA, "hold_live_updates"),
+                    [["hold_live_updates", true], ["hold_live_updates", false]])
+            verify(!paneA.dragActive, "a band is not a file drag")
+            compare(paneA.ghostName(), "")
+        }
+    }
+}

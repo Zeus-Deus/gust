@@ -23,6 +23,8 @@ TestCase {
         property var models: [modelA, modelB, modelC, modelD]
         function focusList() {}
         function qaDump(tag) {}
+        // Session saving is outside these tab-ownership checks.
+        function sessionChanged() {}
         onActiveTabChanged: {
             if (ready) {
 @ACTIVE_TAB_HANDLER@

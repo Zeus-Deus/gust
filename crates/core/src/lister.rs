@@ -118,7 +118,29 @@ pub fn list_names(
     key: &LocationKey,
     generation: u64,
     cancel: &CancelToken,
+    on_chunk: impl FnMut(&DirectorySnapshot),
+) -> DirectorySnapshot {
+    list_names_inner(key, generation, cancel, on_chunk, true)
+}
+
+/// Names/types in directory order, without a final CPU sort. Complete raw
+/// input remains unsettled, including the terminal callback. The caller must
+/// prepare its visible order under CPU admission before publication.
+pub fn list_names_unordered(
+    key: &LocationKey,
+    generation: u64,
+    cancel: &CancelToken,
+    on_chunk: impl FnMut(&DirectorySnapshot),
+) -> DirectorySnapshot {
+    list_names_inner(key, generation, cancel, on_chunk, false)
+}
+
+fn list_names_inner(
+    key: &LocationKey,
+    generation: u64,
+    cancel: &CancelToken,
     mut on_chunk: impl FnMut(&DirectorySnapshot),
+    sort: bool,
 ) -> DirectorySnapshot {
     let mut snap = DirectorySnapshot::empty(key.clone(), generation);
 
@@ -182,10 +204,12 @@ pub fn list_names(
         }
     }
 
-    snap.sort_entries();
+    if sort {
+        snap.sort_entries();
+    }
     snap.complete = Completeness::Complete;
-    // Name sort settles immediately; size/mtime need the metadata pass.
-    snap.settled = !snap.sort_needs_metadata();
+    // Raw worker input cannot claim ordering readiness.
+    snap.settled = sort && !snap.sort_needs_metadata();
     on_chunk(&snap);
     snap
 }
@@ -249,11 +273,34 @@ pub fn is_mount_root(path: &Path) -> bool {
 /// on screen: a 100k folder whose sort does not depend on metadata settles
 /// on the first screenful instead of on 100k `stat` calls.
 pub fn fill_metadata(snap: &mut DirectorySnapshot, cancel: &CancelToken) {
-    let all: Vec<usize> = (0..snap.entries.len()).collect();
-    if fill_metadata_for(snap, &all, cancel) {
+    if fill_all_metadata(snap, cancel) {
         snap.sort_entries();
         snap.settled = true;
     }
+}
+
+/// Fill all metadata in place without sorting or building an index list.
+/// Raw input remains unsettled even when all metadata has been attempted;
+/// the caller tracks metadata readiness separately from CPU ordering readiness.
+/// Cancellation preserves completed patches and the original entry order.
+pub fn fill_metadata_unordered(snap: &mut DirectorySnapshot, cancel: &CancelToken) {
+    snap.settled = false;
+    fill_all_metadata(snap, cancel);
+}
+
+fn fill_all_metadata(snap: &mut DirectorySnapshot, cancel: &CancelToken) -> bool {
+    let Some(dir) = snap.key.as_path().map(|p| p.to_path_buf()) else {
+        return false;
+    };
+    for entry in &mut snap.entries {
+        if cancel.is_cancelled() {
+            return false;
+        }
+        if entry.meta.is_none() {
+            entry.meta = stat_entry(&dir, &entry.name, entry.kind);
+        }
+    }
+    !cancel.is_cancelled()
 }
 
 /// Fill metadata for the entries at `indices` only, leaving the rest `None`.
@@ -307,7 +354,7 @@ mod tests {
     use crate::entry::SortField;
     use std::fs;
 
-    fn tmpdir(tag: &str) -> std::path::PathBuf {
+    pub(super) fn tmpdir(tag: &str) -> std::path::PathBuf {
         let p = std::env::temp_dir().join(format!("gust-list-test-{tag}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&p);
         fs::create_dir_all(&p).unwrap();
@@ -488,5 +535,118 @@ mod tests {
         let read = snap.entries.iter().filter(|e| e.meta.is_some()).count();
         assert_eq!(read, FIRST_WINDOW);
         fs::remove_dir_all(&d).ok();
+    }
+}
+
+#[cfg(test)]
+mod unordered_tests {
+    use super::*;
+    use crate::entry::{compare_entries, SortField, SortSpec};
+    use std::collections::BTreeMap;
+    use std::fs;
+    use std::os::unix::ffi::OsStrExt;
+
+    #[test]
+    fn raw_listing_and_metadata_match_sorted_wrappers_without_claiming_order() {
+        let dir = super::tests::tmpdir("unordered");
+        for (name, contents) in [
+            (b"z10".as_slice(), b"abcdefgh".as_slice()),
+            (b"a9", b"1"),
+            (b".\xff", b"123"),
+        ] {
+            fs::write(dir.join(OsStr::from_bytes(name)), contents).unwrap();
+        }
+        fs::create_dir(dir.join("folder")).unwrap();
+        std::os::unix::fs::symlink("a9", dir.join("link")).unwrap();
+        let key = LocationKey::local(&dir);
+        let mut terminal = None;
+        let mut raw = list_names_unordered(&key, 42, &CancelToken::new(), |chunk| {
+            assert!(!chunk.settled);
+            if chunk.complete == Completeness::Complete {
+                terminal = Some(
+                    chunk
+                        .entries
+                        .iter()
+                        .map(|e| e.name.clone())
+                        .collect::<Vec<_>>(),
+                );
+            }
+        });
+        let mut sorted = list_names(&key, 42, &CancelToken::new(), |_| {});
+        assert_eq!(raw.complete, sorted.complete);
+        assert_eq!(raw.generation, sorted.generation);
+        assert!(!raw.settled);
+        assert!(sorted.settled);
+        assert_eq!(
+            terminal.unwrap(),
+            raw.entries
+                .iter()
+                .map(|e| e.name.clone())
+                .collect::<Vec<_>>()
+        );
+        let kinds = |entries: &[Entry]| {
+            entries
+                .iter()
+                .map(|e| (e.name.clone(), e.kind))
+                .collect::<BTreeMap<_, _>>()
+        };
+        assert_eq!(kinds(&raw.entries), kinds(&sorted.entries));
+        assert!(raw.entries.iter().all(|e| e.meta.is_none()));
+        // A deliberately reversed snapshot proves metadata never reorders it,
+        // independently of filesystem enumeration order.
+        raw.entries = sorted.entries.iter().rev().cloned().collect();
+        raw.sort = SortSpec {
+            field: SortField::Size,
+            ascending: true,
+            dirs_first: false,
+        };
+        sorted.sort = raw.sort;
+        let before: Vec<_> = raw.entries.iter().map(|e| e.name.clone()).collect();
+        fill_metadata_unordered(&mut raw, &CancelToken::new());
+        fill_metadata(&mut sorted, &CancelToken::new());
+        assert_eq!(
+            before,
+            raw.entries
+                .iter()
+                .map(|e| e.name.clone())
+                .collect::<Vec<_>>()
+        );
+        assert!(!raw.settled);
+        assert!(sorted.settled);
+        assert!(sorted.entries.windows(2).all(|pair| !compare_entries(
+            &pair[0],
+            &pair[1],
+            sorted.sort
+        )
+        .is_gt()));
+        let metadata = |entries: &[Entry]| {
+            entries
+                .iter()
+                .map(|e| (e.name.clone(), e.meta))
+                .collect::<BTreeMap<_, _>>()
+        };
+        assert_eq!(metadata(&raw.entries), metadata(&sorted.entries));
+        assert!(raw.entries.iter().all(|e| e.meta.is_some()));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn unordered_pre_cancel_preserves_order_and_does_not_claim_metadata_readiness() {
+        let dir = super::tests::tmpdir("unordered-cancel");
+        fs::write(dir.join("file"), b"contents").unwrap();
+        let key = LocationKey::local(&dir);
+        let mut raw = list_names_unordered(&key, 1, &CancelToken::new(), |_| {});
+        let cancel = CancelToken::new();
+        cancel.cancel();
+        raw.settled = true;
+        fill_metadata_unordered(&mut raw, &cancel);
+        assert!(!raw.settled);
+        assert_eq!(raw.entries[0].name, "file");
+        assert!(raw.entries[0].meta.is_none());
+        let cancelled =
+            list_names_unordered(&key, 1, &cancel, |_| panic!("cancelled listing callback"));
+        assert!(matches!(cancelled.complete, Completeness::Failed { .. }));
+        assert!(!cancelled.settled);
+        fs::remove_dir_all(dir).unwrap();
     }
 }

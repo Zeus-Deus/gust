@@ -26,6 +26,11 @@ Item {
     readonly property bool open: visible
 
     signal chosen(string action)
+    /// Once per menu, after it is over: the action picked, after chosen()
+    /// has run it, or "" when the menu was dismissed. closed() comes BEFORE
+    /// chosen() (so an action may reopen the menu as a submenu); cleanup that
+    /// must follow the action, such as releasing a right-drag, belongs here.
+    signal finished(string action)
     signal highlightMoved()
     onCurrentChanged: if (visible) highlightMoved()
     signal closed()
@@ -91,18 +96,30 @@ Item {
         return out
     }
 
+    property bool picking: false
+    /// True while a picked entry is being carried out: from before the menu
+    /// closes until its action and finished() have run. The window keeps rows
+    /// still through it, so the action resolves the rows the menu was opened
+    /// on, not a re-sort or re-filter that was waiting for the menu to go.
+    property bool dispatching: false
     function close() {
         if (!visible) return
         visible = false
         items = []
         closed()
+        if (!picking) finished("")
     }
 
     function pick(i) {
         if (!isPickable(i)) return
         const a = items[i].action
+        dispatching = true
+        picking = true
         close()
+        picking = false
         chosen(a)
+        finished(a)
+        dispatching = false
     }
 
     // Anything outside the menu dismisses it and does nothing else: a click
