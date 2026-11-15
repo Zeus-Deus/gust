@@ -5,9 +5,10 @@
 //! for older clients. One JSON message per line; stdout carries protocol
 //! messages and nothing else; the server exits when stdin closes.
 //!
-//! The main thread only reads. Each `tools/call` runs on its own worker with
-//! a cancel token that `notifications/cancelled` sets; a cancelled call sends
-//! nothing further, as the stdio transport requires.
+//! The main thread only reads, and one thread only writes. Each
+//! `tools/call` runs on its own worker with a cancel token that
+//! `notifications/cancelled` sets; the writer drops a cancelled call's
+//! messages before writing them, as the stdio transport requires.
 
 use crate::devices::Failure;
 use crate::tools::{self, Report};
@@ -15,7 +16,8 @@ use gust_core::lister::CancelToken;
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::io::{BufRead, Read, Write};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -50,14 +52,64 @@ enum Era {
     Legacy,
 }
 
-type Out = Arc<Mutex<Box<dyn Write + Send>>>;
+/// Progress is dropped, never queued, once this many messages wait.
+const PROGRESS_BACKLOG: usize = 64;
+
+/// stdout, written by one thread of its own: a client that stops reading
+/// stdout can stall that thread, never the one reading stdin, so requests,
+/// cancellations and stdin closing are always seen.
+#[derive(Clone)]
+struct Out {
+    tx: mpsc::Sender<(Option<CancelToken>, String)>,
+    pending: Arc<AtomicUsize>,
+}
+
+impl Out {
+    fn start(mut output: Box<dyn Write + Send>) -> Self {
+        let (tx, rx) = mpsc::channel::<(Option<CancelToken>, String)>();
+        let pending = Arc::new(AtomicUsize::new(0));
+        let left = pending.clone();
+        let _ = std::thread::Builder::new()
+            .name("gust-mcp-out".into())
+            .spawn(move || {
+                for (call, line) in rx {
+                    left.fetch_sub(1, Ordering::AcqRel);
+                    // A cancelled call's messages are dropped here, before a
+                    // byte of them is written. One already being written
+                    // when the cancellation arrives was already sent.
+                    if call.as_ref().is_some_and(CancelToken::is_cancelled) {
+                        continue;
+                    }
+                    // A closed stdout means the client is gone; stdin's EOF
+                    // ends the server.
+                    let _ = output
+                        .write_all(line.as_bytes())
+                        .and_then(|_| output.flush());
+                }
+            });
+        Out { tx, pending }
+    }
+
+    /// Queue one message; `call` is the request it belongs to, if any.
+    fn send(&self, message: &Value, call: Option<&CancelToken>) {
+        if call.is_some_and(CancelToken::is_cancelled) {
+            return;
+        }
+        let mut line = message.to_string();
+        line.push('\n');
+        self.pending.fetch_add(1, Ordering::AcqRel);
+        if self.tx.send((call.cloned(), line)).is_err() {
+            self.pending.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+
+    fn backlogged(&self) -> bool {
+        self.pending.load(Ordering::Acquire) >= PROGRESS_BACKLOG
+    }
+}
 
 fn write(out: &Out, message: &Value) {
-    let mut line = message.to_string();
-    line.push('\n');
-    let mut out = out.lock().unwrap_or_else(|e| e.into_inner());
-    // A closed stdout means the client is gone; stdin's EOF ends the loop.
-    let _ = out.write_all(line.as_bytes()).and_then(|_| out.flush());
+    out.send(message, None);
 }
 
 fn error(id: &Value, code: i64, message: &str, data: Option<Value>) -> Value {
@@ -115,7 +167,7 @@ pub fn run() -> i32 {
 
 pub fn serve(mut input: impl BufRead, output: Box<dyn Write + Send>) -> i32 {
     let mut server = Server {
-        out: Arc::new(Mutex::new(output)),
+        out: Out::start(output),
         legacy: None,
         in_flight: Arc::default(),
         sending: Arc::default(),
@@ -132,9 +184,8 @@ pub fn serve(mut input: impl BufRead, output: Box<dyn Write + Send>) -> i32 {
             Ok(_) => {}
         }
         if line.len() > LINE_LIMIT && line.last() != Some(&b'\n') {
-            // Drop the rest of the oversized line before reading on.
-            let mut rest = Vec::new();
-            if input.read_until(b'\n', &mut rest).is_err() {
+            // Drop the rest of the oversized line, a buffer at a time.
+            if !discard_line(&mut input) {
                 break;
             }
             write(
@@ -175,6 +226,24 @@ pub fn serve(mut input: impl BufRead, output: Box<dyn Write + Send>) -> i32 {
         std::thread::sleep(Duration::from_millis(20));
     }
     0
+}
+
+/// Skip input up to and including the next newline without keeping it.
+/// False when stdin ended or failed first.
+fn discard_line(input: &mut impl BufRead) -> bool {
+    loop {
+        let (used, found) = match input.fill_buf() {
+            Ok([]) | Err(_) => return false,
+            Ok(buf) => match buf.iter().position(|b| *b == b'\n') {
+                Some(i) => (i + 1, true),
+                None => (buf.len(), false),
+            },
+        };
+        input.consume(used);
+        if found {
+            return true;
+        }
+    }
 }
 
 fn key(id: &Value) -> String {
@@ -249,9 +318,6 @@ impl Server {
                 .get("requestId")
                 .and_then(|id| lock(&self.in_flight).get(&key(id)).map(|(_, t)| t.clone()));
             if let Some(token) = token {
-                // Under the writer lock, like every write: a worker either
-                // finished writing before this, or sees the cancellation.
-                let _out = lock(&self.out);
                 token.cancel();
             }
         }
@@ -463,16 +529,7 @@ impl Server {
                     Ok(r) => ok(&reply_id, finish(era, tool_result(r), false)),
                     Err(_) => error(&reply_id, INTERNAL_ERROR, "Internal error", None),
                 };
-                {
-                    // Checked under the writer lock, which cancellation also
-                    // takes: once it is seen, nothing more is written.
-                    let mut w = lock(&out);
-                    if !cancel.is_cancelled() {
-                        let mut line = reply.to_string();
-                        line.push('\n');
-                        let _ = w.write_all(line.as_bytes()).and_then(|_| w.flush());
-                    }
-                }
+                out.send(&reply, Some(&cancel));
                 release(&in_flight, &sending, &reply_id, number);
             });
         match worker {
@@ -544,13 +601,11 @@ impl Report for Progress {
         if let Some(t) = total.filter(|t| *t >= progress) {
             params["total"] = json!(t);
         }
-        let note = json!({"jsonrpc": "2.0", "method": "notifications/progress", "params": params});
-        let mut line = note.to_string();
-        line.push('\n');
-        let mut w = self.out.lock().unwrap_or_else(|e| e.into_inner());
-        if !self.cancel.is_cancelled() {
-            *last = Some(progress);
-            let _ = w.write_all(line.as_bytes()).and_then(|_| w.flush());
+        if self.cancel.is_cancelled() || self.out.backlogged() {
+            return;
         }
+        *last = Some(progress);
+        let note = json!({"jsonrpc": "2.0", "method": "notifications/progress", "params": params});
+        self.out.send(&note, Some(&self.cancel));
     }
 }

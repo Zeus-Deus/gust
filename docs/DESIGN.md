@@ -2422,9 +2422,9 @@ not offered: they do not receive files.
   component, never through a symbolic link, never on a FUSE or network
   mount (§6.4.3 admission). One refused source refuses the whole call before
   any device is touched. Every source is admitted again, as the same
-  dev+inode, after the device opens and immediately before the copy job
-  starts, so minutes spent waiting for Trust cannot turn a file into a
-  folder. This is a guardrail against a prompt-injected request, not a
+  dev+inode, as the last step before the copy job starts, after every call
+  that touches the device, so minutes spent waiting for Trust or a stalled
+  phone cannot turn a file into a folder. This is a guardrail against a prompt-injected request, not a
   boundary: the agent already has a shell, and the job still copies a
   folder that appears in the instants between that check and its plan.
 - **Folders** on a device are relative, beneath the open device, resolved
@@ -2434,9 +2434,12 @@ not offered: they do not receive files.
 - **No secret crosses the protocol.** A locked encrypted drive is refused
   with "unlock it in Gust".
 - **Every call has a cancel token**, set by `notifications/cancelled` or by
-  stdin closing. Cancelling takes the output lock and every write checks
-  under it, so a cancelled call writes nothing further. One send runs at a
-  time, four calls at most; a cancelled call stops counting at once. A
+  stdin closing. One thread writes stdout and drops a cancelled call's
+  messages before writing them (one already being written was already
+  sent), so a client that stops reading stdout never stops the server from
+  reading stdin or seeing it close; progress is dropped, not queued, past a
+  small backlog. One send runs at a time, four calls at most; a cancelled
+  call stops counting at once. A
   worker blocked in the kernel on a stalled phone cannot be interrupted
   (§6.4.3) and stays blocked, but it holds no slot and will never write.
 - **Results say where the file is and what the person must still do.**

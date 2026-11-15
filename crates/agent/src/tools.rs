@@ -523,18 +523,6 @@ fn copy(
             )
         })?
         .path;
-    // Waiting for Trust can take minutes: admit every source again, as the
-    // same file, immediately before the copy starts.
-    for s in sources {
-        let again = admit::source(&display(&s.path), roots);
-        if again.map(|a| a.identity) != Ok(s.identity) {
-            return Err(Failure::new(
-                "source_refused",
-                format!("{} changed while waiting for the device.", display(&s.path)),
-                "Nothing was sent. Check the file, then send again.",
-            ));
-        }
-    }
     let mut request = Request::Copy {
         sources: sources.iter().map(|s| s.path.clone()).collect(),
         dest_dir: dest.clone(),
@@ -576,6 +564,19 @@ fn copy(
         ConflictPolicy::KeepBoth
     };
     let copying: Vec<PathBuf> = request.sources();
+    // Waiting for Trust can take minutes: admit every source again, as the
+    // same file, as the last step before the job. Nothing between here and
+    // the job touches the device, which could stall.
+    for s in sources.iter().filter(|s| copying.contains(&s.path)) {
+        let again = admit::source(&display(&s.path), roots);
+        if again.map(|a| a.identity) != Ok(s.identity) {
+            return Err(Failure::new(
+                "source_refused",
+                format!("{} changed while waiting for the device.", display(&s.path)),
+                "Nothing was sent. Check the file, then send again.",
+            ));
+        }
+    }
 
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let mut job = jobs::start_with(

@@ -658,3 +658,42 @@ fn a_source_swapped_while_waiting_for_trust_is_refused_and_nothing_is_sent() {
     let landed: Vec<_> = std::fs::read_dir(f.apps().join("VLC")).unwrap().collect();
     assert!(landed.is_empty(), "a swapped source reached the phone");
 }
+
+#[test]
+fn an_oversized_message_is_refused_and_the_server_reads_on() {
+    let f = Fixture::new("oversized");
+    let mut s = f.start();
+    let big = "a".repeat(6 * 1024 * 1024);
+    s.raw(&big);
+    let v = s.rx.recv_timeout(Duration::from_secs(10)).unwrap();
+    assert_eq!(v["error"]["code"], -32600);
+    let (v, _) = s.request("server/discover", json!({"_meta": meta()}));
+    assert!(v.get("result").is_some());
+}
+
+#[test]
+fn a_client_that_stops_reading_stdout_cannot_keep_the_server_from_exiting() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_gust-mcp"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    // Far more answers than a pipe holds, and nobody reads them.
+    let mut stdin = child.stdin.take().unwrap();
+    for id in 0..100 {
+        let req = json!({"jsonrpc": "2.0", "id": id, "method": "tools/list", "params": {"_meta": meta()}});
+        writeln!(stdin, "{req}").unwrap();
+    }
+    drop(stdin);
+    let exited = (0..160).any(|_| {
+        std::thread::sleep(Duration::from_millis(50));
+        matches!(child.try_wait(), Ok(Some(_)))
+    });
+    let _ = child.kill();
+    let _ = child.wait();
+    assert!(
+        exited,
+        "a full stdout kept the server from seeing stdin close"
+    );
+}
