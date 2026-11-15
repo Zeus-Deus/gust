@@ -88,9 +88,24 @@ exit 1
 "#
             ),
         );
+        // lsblk answers with the drive a test planted, or none.
         script(
             &root.join("bin/lsblk"),
-            "#!/bin/sh\necho '{\"blockdevices\":[]}'\n",
+            &format!(
+                r#"#!/bin/sh
+if [ -f "{t}/lsblk.json" ]; then cat "{t}/lsblk.json"; else echo '{{"blockdevices":[]}}'; fi
+"#
+            ),
+        );
+        script(
+            &root.join("bin/udisksctl"),
+            &format!(
+                r#"#!/bin/sh
+echo "$*" >> "{t}/udisks-calls"
+[ "$1" = mount ] && {{ mkdir -p "{t}/drive/Movies"; echo "Mounted $3 at {t}/drive"; exit 0; }}
+exit 1
+"#
+            ),
         );
         script(
             &root.join("bin/tailscale"),
@@ -657,7 +672,13 @@ fn a_source_swapped_while_waiting_for_trust_is_refused_and_nothing_is_sent() {
     std::fs::write(photo.join(".ssh/id_ed25519"), b"secret").unwrap();
     f.trust();
     let (v, _) = s.response_to(id);
-    assert_eq!(error_code(&v["result"]), "source_refused");
+    assert_eq!(error_code(&v["result"]), "transfer_failed");
+    let d = error_details(&v["result"]);
+    assert_eq!(d["sent"], json!([]));
+    assert!(d["failed"][0]["reason"]
+        .as_str()
+        .unwrap()
+        .contains("changed after it was admitted"));
     let landed: Vec<_> = std::fs::read_dir(f.apps().join("VLC")).unwrap().collect();
     assert!(landed.is_empty(), "a swapped source reached the phone");
 }
@@ -738,4 +759,99 @@ fn an_answer_waiting_behind_a_full_stdout_can_still_be_cancelled() {
         !ids.contains(&json!("late")),
         "a cancelled answer was written"
     );
+}
+
+/// An encrypted USB stick as lsblk reports it: locked, unlocked, or
+/// unlocked and mounted at `mounted`.
+fn luks(f: &Fixture, unlocked: bool, mounted: Option<&Path>) {
+    let child = if unlocked {
+        let mp = mounted.map_or("null".to_string(), |p| format!("\"{}\"", p.display()));
+        format!(
+            r#","children":[{{"name":"SECRETS","path":"/dev/mapper/SECRETS","pkname":"sda","size":"48M","rm":false,"hotplug":false,"type":"crypt","fstype":"ext4","label":"inner","mountpoint":{mp}}}]"#
+        )
+    } else {
+        String::new()
+    };
+    std::fs::write(
+        f.path("lsblk.json"),
+        format!(r#"{{"blockdevices":[{{"name":"sda","path":"/dev/sda","pkname":null,"size":"64M","rm":true,"hotplug":false,"type":"disk","fstype":"crypto_LUKS","label":"SECRETS","mountpoint":null{child}}}]}}"#),
+    )
+    .unwrap();
+}
+
+#[test]
+fn an_encrypted_drive_opens_through_its_unlocked_contents_and_never_while_locked() {
+    let f = Fixture::new("luks");
+    let mut s = f.start();
+    let folders = |s: &mut Server| {
+        s.tool("list_device_folders", json!({"device": "drive:sda"}))
+            .0
+    };
+
+    luks(&f, false, None);
+    let (r, _) = s.tool("list_devices", json!({}));
+    let drive = structured(&r)["devices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["id"] == "drive:sda")
+        .cloned()
+        .unwrap();
+    assert_eq!(drive["state"], "needs_setup");
+    assert_eq!(error_code(&folders(&mut s)), "needs_setup");
+    assert!(
+        !f.path("udisks-calls").exists(),
+        "a locked drive was mounted"
+    );
+
+    // Unlocked, not mounted: mounted through the unlocked device.
+    luks(&f, true, None);
+    let out = structured(&folders(&mut s));
+    assert_eq!(
+        out["folders"],
+        json!([{"path": "Movies", "name": "Movies"}])
+    );
+    let calls = std::fs::read_to_string(f.path("udisks-calls")).unwrap();
+    assert_eq!(
+        calls.trim(),
+        "mount -b /dev/mapper/SECRETS --no-user-interaction"
+    );
+
+    // Unlocked and mounted: used where it is, nothing is mounted again.
+    std::fs::remove_file(f.path("udisks-calls")).unwrap();
+    luks(&f, true, Some(&f.path("drive")));
+    let out = structured(&folders(&mut s));
+    assert_eq!(
+        out["folders"],
+        json!([{"path": "Movies", "name": "Movies"}])
+    );
+    assert!(!f.path("udisks-calls").exists());
+}
+
+#[test]
+fn a_client_that_never_reads_answers_ends_the_session_instead_of_growing_it() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_gust-mcp"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let req =
+        json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {"_meta": meta()}});
+    // Each answer is several KiB: far past the server's bound, stdin open.
+    for _ in 0..4000 {
+        if writeln!(stdin, "{req}").is_err() {
+            break;
+        }
+    }
+    let status = (0..200).find_map(|_| {
+        std::thread::sleep(Duration::from_millis(50));
+        child.try_wait().ok().flatten()
+    });
+    let _ = child.kill();
+    let _ = child.wait();
+    drop(stdin);
+    let status = status.expect("the server kept queueing answers nobody read");
+    assert!(!status.success());
 }

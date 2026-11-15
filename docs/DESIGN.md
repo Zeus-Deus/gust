@@ -2421,24 +2421,28 @@ not offered: they do not receive files.
   drive mounted for this user, or the temporary folder; never a hidden path
   component, never through a symbolic link, never on a FUSE or network
   mount (§6.4.3 admission). One refused source refuses the whole call before
-  any device is touched. Every source is admitted again, as the same
-  dev+inode, as the last step before the copy job starts, after every call
-  that touches the device, so minutes spent waiting for Trust or a stalled
-  phone cannot turn a file into a folder. This is a guardrail against a prompt-injected request, not a
-  boundary: the agent already has a shell, and the job still copies a
-  folder that appears in the instants between that check and its plan.
+  any device is touched. Each file is copied by a job of its own and
+  admitted again, as the same dev+inode, as the last step before that job,
+  after every call that touches the device, so a Trust wait, a stalled
+  phone or an earlier file's copy cannot turn a later file into a folder.
+  This is a guardrail against a prompt-injected request, not a boundary:
+  the agent already has a shell, and a job still copies a folder that
+  appears in the instant between that check and its plan.
 - **Folders** on a device are relative, beneath the open device, resolved
   without following links, and must already exist. A listing reads the
   descriptor that was checked, never the path again. Phones need one: an
   iPhone or iPad accepts files only in an app's shared folder (`afc://…:3/`).
 - **No secret crosses the protocol.** A locked encrypted drive is refused
-  with "unlock it in Gust".
+  with "unlock it in Gust"; an unlocked one is mounted through its unlocked
+  contents (`Device::mount_target`), never the container.
 - **Every call has a cancel token**, set by `notifications/cancelled` or by
   stdin closing. One thread writes stdout and drops a cancelled call's
   messages before writing them (one already being written was already
   sent), so a client that stops reading stdout never stops the server from
   reading stdin or seeing it close; progress is dropped, not queued, past a
-  small backlog. A call stays cancellable until its answer is written or
+  small backlog. At most 8 MiB of answers may wait: a client that keeps
+  asking without reading ends the session rather than growing it or losing
+  an answer it is owed. A call stays cancellable until its answer is written or
   dropped, even when that answer is waiting behind a full stdout. One send
   runs at a time, four calls at most; a call stops counting once it is
   cancelled or its work is done. A

@@ -108,7 +108,7 @@ impl Endpoint {
                 (name.clone(), kind, "usb", state, detail)
             }
             Endpoint::Drive(d) => {
-                let (state, detail) = if d.encrypted && d.cleartext.is_none() {
+                let (state, detail) = if d.is_locked() {
                     ("needs_setup", "Encrypted and locked. Unlock it in Gust first; passwords never pass through this tool.".to_string())
                 } else if d.mount_point.is_some() {
                     ("ready", "Mounted.".to_string())
@@ -197,15 +197,17 @@ impl Endpoint {
                 if let Some(p) = &d.mount_point {
                     return Ok(p.clone());
                 }
-                if d.encrypted {
+                if d.is_locked() {
                     return Err(Failure::new(
                         "needs_setup",
                         "The drive is encrypted and locked.",
                         "Ask the person to unlock it in Gust, then send again.",
                     ));
                 }
+                // An unlocked encrypted drive mounts through its unlocked
+                // contents, not the container.
                 gust_remote::block::mount(
-                    &d.path,
+                    d.mount_target(),
                     &CallContext {
                         cancel,
                         timeout: Duration::from_secs(30),

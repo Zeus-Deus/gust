@@ -54,6 +54,10 @@ enum Era {
 
 /// Progress is dropped, never queued, once this many messages wait.
 const PROGRESS_BACKLOG: usize = 64;
+/// Bytes of answers that may wait for a client that is not reading stdout.
+/// Beyond this the client is not draining what it asks for: the session
+/// ends rather than growing without bound or dropping a required answer.
+const OUT_LIMIT: usize = 8 * 1024 * 1024;
 
 /// stdout, written by one thread of its own: a client that stops reading
 /// stdout can stall that thread, never the one reading stdin, so requests,
@@ -62,6 +66,7 @@ const PROGRESS_BACKLOG: usize = 64;
 struct Out {
     tx: mpsc::Sender<Queued>,
     pending: Arc<AtomicUsize>,
+    bytes: Arc<AtomicUsize>,
 }
 
 /// One line for stdout, the call it belongs to, and what to do once it has
@@ -76,12 +81,15 @@ impl Out {
     fn start(mut output: Box<dyn Write + Send>) -> Self {
         let (tx, rx) = mpsc::channel::<Queued>();
         let pending = Arc::new(AtomicUsize::new(0));
+        let bytes = Arc::new(AtomicUsize::new(0));
         let left = pending.clone();
+        let queued_bytes = bytes.clone();
         let _ = std::thread::Builder::new()
             .name("gust-mcp-out".into())
             .spawn(move || {
                 for q in rx {
                     left.fetch_sub(1, Ordering::AcqRel);
+                    queued_bytes.fetch_sub(q.line.len(), Ordering::AcqRel);
                     // A cancelled call's messages are dropped here, before a
                     // byte of them is written. One already being written
                     // when the cancellation arrives was already sent.
@@ -97,7 +105,7 @@ impl Out {
                     }
                 }
             });
-        Out { tx, pending }
+        Out { tx, pending, bytes }
     }
 
     /// Queue one message; `call` is the request it belongs to, if any.
@@ -122,6 +130,10 @@ impl Out {
     ) {
         let mut line = message.to_string();
         line.push('\n');
+        if self.bytes.fetch_add(line.len(), Ordering::AcqRel) + line.len() > OUT_LIMIT {
+            eprintln!("gust --mcp: the client stopped reading answers; closing the session.");
+            std::process::exit(1);
+        }
         self.pending.fetch_add(1, Ordering::AcqRel);
         let queued = Queued {
             call: call.cloned(),
@@ -130,6 +142,7 @@ impl Out {
         };
         if let Err(mpsc::SendError(q)) = self.tx.send(queued) {
             self.pending.fetch_sub(1, Ordering::AcqRel);
+            self.bytes.fetch_sub(q.line.len(), Ordering::AcqRel);
             if let Some(then) = q.then {
                 then();
             }
@@ -138,6 +151,7 @@ impl Out {
 
     fn backlogged(&self) -> bool {
         self.pending.load(Ordering::Acquire) >= PROGRESS_BACKLOG
+            || self.bytes.load(Ordering::Acquire) >= OUT_LIMIT / 2
     }
 }
 

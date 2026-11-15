@@ -523,157 +523,200 @@ fn copy(
             )
         })?
         .path;
-    let mut request = Request::Copy {
-        sources: sources.iter().map(|s| s.path.clone()).collect(),
-        dest_dir: dest.clone(),
-    };
-    // "Skip" is decided here, before the job: a name taken later is then a
-    // conflict the job stops at, never a skip that looks like a copy.
-    let mut skipped = Vec::new();
-    if skip {
-        let taken: Vec<PathBuf> = jobs::conflicts(&request)
-            .into_iter()
-            .map(|c| c.source)
-            .collect();
-        skipped = taken.iter().map(|p| display(p)).collect();
-        let left: Vec<PathBuf> = sources
-            .iter()
-            .map(|s| s.path.clone())
-            .filter(|p| !taken.contains(p))
-            .collect();
-        if left.is_empty() {
-            return Outcome {
-                endpoint,
-                transport: "usb",
-                sent: Vec::new(),
-                skipped,
-                failed: Vec::new(),
-                next_step: None,
-                uncertain: false,
-            }
-            .finish();
-        }
-        request = Request::Copy {
-            sources: left,
-            dest_dir: dest,
-        };
-    }
-    let policy = if skip {
-        ConflictPolicy::Ask
-    } else {
-        ConflictPolicy::KeepBoth
-    };
-    let copying: Vec<PathBuf> = request.sources();
-    // Waiting for Trust can take minutes: admit every source again, as the
-    // same file, as the last step before the job. Nothing between here and
-    // the job touches the device, which could stall.
-    for s in sources.iter().filter(|s| copying.contains(&s.path)) {
-        let again = admit::source(&display(&s.path), roots);
-        if again.map(|a| a.identity) != Ok(s.identity) {
-            return Err(Failure::new(
-                "source_refused",
-                format!("{} changed while waiting for the device.", display(&s.path)),
-                "Nothing was sent. Check the file, then send again.",
-            ));
-        }
-    }
-
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    let mut job = jobs::start_with(
-        format!(
-            "agent-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ),
-        request,
-        policy,
-        None,
-        None,
-    );
-    if job.start_error().is_some() {
-        return Err(Failure::new(
-            "transfer_failed",
-            "Could not start the copy; nothing was changed.",
-            "Try again.",
-        ));
-    }
-    loop {
-        if call.cancel.is_cancelled() {
-            job.cancel();
-        }
-        let s = job.snapshot();
-        if s.is_finished() || s.state == JobState::Conflict {
-            break;
-        }
-        if s.bytes_done > 0 {
-            let n = (s.entries_done + 1).min(s.entries_total.max(1));
-            call.report.progress(
-                s.bytes_done as f64,
-                Some(s.bytes_total as f64),
-                &format!("Copying {n} of {}…", s.entries_total.max(1)),
-            );
-        }
-        std::thread::sleep(Duration::from_millis(200));
-    }
-    let end = job.wait();
-    let record = job.record();
-    if end.state == JobState::Cancelled {
-        return Err(Failure::new(
-            "cancelled",
-            "Cancelled. Files already copied were kept.",
-            "Call list_device_folders to see what arrived.",
-        ));
-    }
-
-    let mut sent = Vec::new();
-    let mut failed = Vec::new();
-    for s in sources.iter().filter(|s| copying.contains(&s.path)) {
-        let entry = record.entries.iter().find(|e| e.source == s.path);
-        match entry {
-            Some(e) if e.done => sent.push(json!({
-                "source": display(&s.path),
-                "name": e.destination.as_ref().and_then(|d| d.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
-                "bytes": s.bytes,
-            })),
-            Some(e) => failed.push(json!({
-                "source": display(&s.path),
-                "reason": e.error.clone().unwrap_or_else(|| end.message.clone()),
-            })),
-            None => {}
-        }
-    }
-    let accounted: Vec<String> = sent
-        .iter()
-        .chain(failed.iter())
-        .filter_map(|v| v["source"].as_str().map(str::to_string))
-        .collect();
-    for s in sources.iter().filter(|s| copying.contains(&s.path)) {
-        let p = display(&s.path);
-        if !accounted.contains(&p) {
-            // Every source handed to the job is either recorded as copied or
-            // failed; anything else did not arrive.
-            let reason = if end.state == JobState::Confirmed {
-                "It was not copied.".to_string()
-            } else {
-                end.message.clone()
-            };
-            failed.push(json!({"source": p, "reason": reason}));
-        }
-    }
+    let copied = copy_files(&dest, sources, roots, skip, call, &mut |_| {});
     let next = match endpoint {
         Endpoint::Phone { phone, .. } if phone.kind == gust_remote::phones::PhoneKind::Apple => {
             Some("Open the file from the app whose folder it was sent to.")
         }
         _ => None,
     };
+    if copied.cancelled {
+        return Err(Failure::new(
+            "cancelled",
+            "Cancelled. Files already copied were kept.",
+            "Call list_device_folders to see what arrived.",
+        )
+        .with_details(json!({"sent": copied.sent})));
+    }
     Outcome {
         endpoint,
         transport: "usb",
-        sent,
-        skipped,
-        failed,
+        sent: copied.sent,
+        skipped: copied.skipped,
+        failed: copied.failed,
         next_step: next,
         uncertain: false,
     }
     .finish()
+}
+
+struct Copied {
+    sent: Vec<Value>,
+    skipped: Vec<String>,
+    failed: Vec<Value>,
+    cancelled: bool,
+}
+
+/// Copy each source into `dest` with its own job. Each file is admitted
+/// again, as the same dev+inode, as the last step before its job: a Trust
+/// wait, a stalled phone or an earlier file's copy cannot turn a later file
+/// into a folder. `before_file` runs first for each file (tests use it).
+fn copy_files(
+    dest: &std::path::Path,
+    sources: &[admit::Admitted],
+    roots: &[PathBuf],
+    skip: bool,
+    call: &Call<'_>,
+    before_file: &mut dyn FnMut(usize),
+) -> Copied {
+    let dest = dest.to_path_buf();
+    let total: u64 = sources.iter().map(|s| s.bytes).sum();
+    let mut base = 0u64;
+    let mut sent = Vec::new();
+    let mut skipped = Vec::new();
+    let mut failed = Vec::new();
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    for (i, s) in sources.iter().enumerate() {
+        before_file(i);
+        let path = display(&s.path);
+        let request = Request::Copy {
+            sources: vec![s.path.clone()],
+            dest_dir: dest.clone(),
+        };
+        // "Skip" is decided before the job: a name taken later is then a
+        // conflict the job stops at, never a skip that looks like a copy.
+        if skip && !jobs::conflicts(&request).is_empty() {
+            skipped.push(path);
+            base += s.bytes;
+            continue;
+        }
+        if admit::source(&path, roots).map(|a| a.identity) != Ok(s.identity) {
+            failed.push(json!({"source": path, "reason": "It changed after it was admitted, so it was not sent."}));
+            base += s.bytes;
+            continue;
+        }
+        let mut job = jobs::start_with(
+            format!(
+                "agent-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ),
+            request,
+            if skip {
+                ConflictPolicy::Ask
+            } else {
+                ConflictPolicy::KeepBoth
+            },
+            None,
+            None,
+        );
+        if job.start_error().is_some() {
+            failed.push(
+                json!({"source": path, "reason": "Could not start the copy; nothing was changed."}),
+            );
+            continue;
+        }
+        loop {
+            if call.cancel.is_cancelled() {
+                job.cancel();
+            }
+            let p = job.snapshot();
+            if p.is_finished() || p.state == JobState::Conflict {
+                break;
+            }
+            if p.bytes_done > 0 {
+                call.report.progress(
+                    (base + p.bytes_done) as f64,
+                    Some(total as f64),
+                    &format!("Copying {} of {}…", i + 1, sources.len()),
+                );
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        let end = job.wait();
+        let entry = job
+            .record()
+            .entries
+            .into_iter()
+            .find(|e| e.source == s.path);
+        match entry {
+            Some(e) if e.done && end.state == JobState::Confirmed => sent.push(json!({
+                "source": path,
+                "name": e.destination.as_ref().and_then(|d| d.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+                "bytes": s.bytes,
+            })),
+            Some(e) if e.error.is_some() => {
+                failed.push(json!({"source": path, "reason": e.error.unwrap_or_default()}))
+            }
+            _ => failed.push(json!({"source": path, "reason": if end.message.is_empty() { "It was not copied.".to_string() } else { end.message.clone() }})),
+        }
+        base += s.bytes;
+        if end.state == JobState::Cancelled {
+            return Copied {
+                sent,
+                skipped,
+                failed,
+                cancelled: true,
+            };
+        }
+    }
+    Copied {
+        sent,
+        skipped,
+        failed,
+        cancelled: false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Quiet;
+    impl Report for Quiet {
+        fn progress(&self, _: f64, _: Option<f64>, _: &str) {}
+    }
+
+    #[test]
+    fn a_later_file_swapped_for_a_folder_during_an_earlier_copy_is_refused() {
+        let root = std::env::temp_dir().join(format!("gust-agent-copy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (home, dest) = (root.join("home"), root.join("phone"));
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::write(home.join("first.bin"), b"first").unwrap();
+        std::fs::write(home.join("photo.jpg"), b"photo").unwrap();
+        let roots = vec![home.clone()];
+        let sources: Vec<admit::Admitted> = ["first.bin", "photo.jpg"]
+            .iter()
+            .map(|n| admit::source(home.join(n).to_str().unwrap(), &roots).unwrap())
+            .collect();
+        let cancel = CancelToken::new();
+        let call = Call {
+            cancel: &cancel,
+            report: &Quiet,
+        };
+        // Once the first file is underway, the second becomes a folder of
+        // secrets, as a prompt-injected process might arrange.
+        let copied = copy_files(&dest, &sources, &roots, false, &call, &mut |i| {
+            if i == 1 {
+                let photo = home.join("photo.jpg");
+                std::fs::remove_file(&photo).unwrap();
+                std::fs::create_dir_all(photo.join(".ssh")).unwrap();
+                std::fs::write(photo.join(".ssh/id_ed25519"), b"secret").unwrap();
+            }
+        });
+        assert_eq!(copied.sent.len(), 1, "{:?}", copied.sent);
+        assert_eq!(copied.failed.len(), 1);
+        assert_eq!(
+            copied.failed[0]["source"],
+            json!(display(&home.join("photo.jpg")))
+        );
+        assert_eq!(std::fs::read(dest.join("first.bin")).unwrap(), b"first");
+        assert!(
+            !dest.join("photo.jpg").exists(),
+            "the swapped folder was copied"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
