@@ -123,10 +123,10 @@ exit 1
         std::fs::write(self.path("trusted"), "").unwrap();
     }
 
-    fn start(&self) -> Server {
+    fn command(&self) -> Command {
         let r = &self.root;
-        let mut child = Command::new(env!("CARGO_BIN_EXE_gust-mcp"))
-            .env_clear()
+        let mut c = Command::new(env!("CARGO_BIN_EXE_gust-mcp"));
+        c.env_clear()
             .env("PATH", format!("{}:/usr/bin:/bin", r.join("bin").display()))
             .env("HOME", r.join("home"))
             .env("USER", "nobody-test")
@@ -138,9 +138,12 @@ exit 1
             .env("GUST_GIO", r.join("bin/gio"))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .unwrap();
+            .stderr(Stdio::inherit());
+        c
+    }
+
+    fn start(&self) -> Server {
+        let mut child = self.command().spawn().unwrap();
         let stdout = child.stdout.take().unwrap();
         let (tx, rx) = channel();
         std::thread::spawn(move || {
@@ -695,5 +698,44 @@ fn a_client_that_stops_reading_stdout_cannot_keep_the_server_from_exiting() {
     assert!(
         exited,
         "a full stdout kept the server from seeing stdin close"
+    );
+}
+
+#[test]
+fn an_answer_waiting_behind_a_full_stdout_can_still_be_cancelled() {
+    let f = Fixture::new("queued");
+    let mut child = f.command().spawn().unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    // Fill stdout while nobody reads it, so later answers queue.
+    for id in 0..100 {
+        let req = json!({"jsonrpc": "2.0", "id": id, "method": "tools/list", "params": {"_meta": meta()}});
+        writeln!(stdin, "{req}").unwrap();
+    }
+    let call = json!({"jsonrpc": "2.0", "id": "late", "method": "tools/call", "params": {
+        "name": "list_devices", "arguments": {}, "_meta": meta()}});
+    writeln!(stdin, "{call}").unwrap();
+    stdin.flush().unwrap();
+    // The tool finishes; its answer waits behind the full pipe. Cancel it.
+    std::thread::sleep(Duration::from_millis(1500));
+    let cancel = json!({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": "late"}});
+    let end = json!({"jsonrpc": "2.0", "id": "end", "method": "server/discover", "params": {"_meta": meta()}});
+    writeln!(stdin, "{cancel}\n{end}").unwrap();
+    stdin.flush().unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    let mut ids = Vec::new();
+    for line in BufReader::new(child.stdout.take().unwrap()).lines() {
+        let v: Value = serde_json::from_str(&line.unwrap()).unwrap();
+        ids.push(v["id"].clone());
+        if v["id"] == "end" {
+            break;
+        }
+    }
+    drop(stdin);
+    let _ = child.kill();
+    let _ = child.wait();
+    assert!(ids.contains(&json!("end")));
+    assert!(
+        !ids.contains(&json!("late")),
+        "a cancelled answer was written"
     );
 }

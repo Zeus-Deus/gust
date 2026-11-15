@@ -2438,8 +2438,10 @@ not offered: they do not receive files.
   messages before writing them (one already being written was already
   sent), so a client that stops reading stdout never stops the server from
   reading stdin or seeing it close; progress is dropped, not queued, past a
-  small backlog. One send runs at a time, four calls at most; a cancelled
-  call stops counting at once. A
+  small backlog. A call stays cancellable until its answer is written or
+  dropped, even when that answer is waiting behind a full stdout. One send
+  runs at a time, four calls at most; a call stops counting once it is
+  cancelled or its work is done. A
   worker blocked in the kernel on a stalled phone cannot be interrupted
   (§6.4.3) and stays blocked, but it holds no slot and will never write.
 - **Results say where the file is and what the person must still do.**

@@ -16,7 +16,7 @@ use gust_core::lister::CancelToken;
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::io::{BufRead, Read, Write};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -60,31 +60,41 @@ const PROGRESS_BACKLOG: usize = 64;
 /// cancellations and stdin closing are always seen.
 #[derive(Clone)]
 struct Out {
-    tx: mpsc::Sender<(Option<CancelToken>, String)>,
+    tx: mpsc::Sender<Queued>,
     pending: Arc<AtomicUsize>,
+}
+
+/// One line for stdout, the call it belongs to, and what to do once it has
+/// been written or dropped.
+struct Queued {
+    call: Option<CancelToken>,
+    line: String,
+    then: Option<Box<dyn FnOnce() + Send>>,
 }
 
 impl Out {
     fn start(mut output: Box<dyn Write + Send>) -> Self {
-        let (tx, rx) = mpsc::channel::<(Option<CancelToken>, String)>();
+        let (tx, rx) = mpsc::channel::<Queued>();
         let pending = Arc::new(AtomicUsize::new(0));
         let left = pending.clone();
         let _ = std::thread::Builder::new()
             .name("gust-mcp-out".into())
             .spawn(move || {
-                for (call, line) in rx {
+                for q in rx {
                     left.fetch_sub(1, Ordering::AcqRel);
                     // A cancelled call's messages are dropped here, before a
                     // byte of them is written. One already being written
                     // when the cancellation arrives was already sent.
-                    if call.as_ref().is_some_and(CancelToken::is_cancelled) {
-                        continue;
+                    if !q.call.as_ref().is_some_and(CancelToken::is_cancelled) {
+                        // A closed stdout means the client is gone; stdin's
+                        // EOF ends the server.
+                        let _ = output
+                            .write_all(q.line.as_bytes())
+                            .and_then(|_| output.flush());
                     }
-                    // A closed stdout means the client is gone; stdin's EOF
-                    // ends the server.
-                    let _ = output
-                        .write_all(line.as_bytes())
-                        .and_then(|_| output.flush());
+                    if let Some(then) = q.then {
+                        then();
+                    }
                 }
             });
         Out { tx, pending }
@@ -95,11 +105,34 @@ impl Out {
         if call.is_some_and(CancelToken::is_cancelled) {
             return;
         }
+        self.queue(message, call, None);
+    }
+
+    /// Queue a call's last message; `then` runs once it is written or
+    /// dropped, so the call stays cancellable while its answer waits.
+    fn send_last(&self, message: &Value, call: &CancelToken, then: Box<dyn FnOnce() + Send>) {
+        self.queue(message, Some(call), Some(then));
+    }
+
+    fn queue(
+        &self,
+        message: &Value,
+        call: Option<&CancelToken>,
+        then: Option<Box<dyn FnOnce() + Send>>,
+    ) {
         let mut line = message.to_string();
         line.push('\n');
         self.pending.fetch_add(1, Ordering::AcqRel);
-        if self.tx.send((call.cloned(), line)).is_err() {
+        let queued = Queued {
+            call: call.cloned(),
+            line,
+            then,
+        };
+        if let Err(mpsc::SendError(q)) = self.tx.send(queued) {
             self.pending.fetch_sub(1, Ordering::AcqRel);
+            if let Some(then) = q.then {
+                then();
+            }
         }
     }
 
@@ -137,20 +170,23 @@ fn finish(era: Era, mut result: Value, cacheable: bool) -> Value {
     result
 }
 
-/// A running call: its number (so a finished worker removes only itself)
-/// and its cancel token.
-type Running = (u64, CancelToken);
+/// A call: its number (so a finished one removes only itself), its cancel
+/// token, and whether its tool is still working (false once only its answer
+/// is left to write).
+type Running = (u64, CancelToken, Arc<AtomicBool>);
 
 struct Server {
     out: Out,
     /// The revision `initialize` agreed on, for clients of that era.
     legacy: Option<&'static str>,
-    /// Calls by request id. A cancelled call stops counting against the
-    /// limits at once, even if a stalled device keeps its worker blocked in
-    /// the kernel (§6.4.3): that worker will never write again.
+    /// Calls by request id, until their answer is written or dropped, so a
+    /// cancellation can still reach an answer waiting for stdout. Only calls
+    /// still working and not cancelled count against the limits: a stalled
+    /// device can keep a cancelled worker blocked in the kernel (§6.4.3),
+    /// but it will never write again.
     in_flight: Arc<Mutex<HashMap<String, Running>>>,
     /// The send that is running, if any: one at a time.
-    sending: Arc<Mutex<Option<Running>>>,
+    sending: Arc<Mutex<Option<(u64, CancelToken)>>>,
     workers: Vec<std::thread::JoinHandle<()>>,
 }
 
@@ -218,7 +254,7 @@ pub fn serve(mut input: impl BufRead, output: Box<dyn Write + Send>) -> i32 {
         server.workers.retain(|w| !w.is_finished());
     }
     // The client is gone: stop everything, give workers a moment to stop.
-    for (_, token) in lock(&server.in_flight).values() {
+    for (_, token, _) in lock(&server.in_flight).values() {
         token.cancel();
     }
     let deadline = Instant::now() + SHUTDOWN_GRACE;
@@ -314,9 +350,11 @@ impl Server {
 
     fn notification(&mut self, method: &str, params: &Map<String, Value>) {
         if method == "notifications/cancelled" {
-            let token = params
-                .get("requestId")
-                .and_then(|id| lock(&self.in_flight).get(&key(id)).map(|(_, t)| t.clone()));
+            let token = params.get("requestId").and_then(|id| {
+                lock(&self.in_flight)
+                    .get(&key(id))
+                    .map(|(_, t, _)| t.clone())
+            });
             if let Some(token) = token {
                 token.cancel();
             }
@@ -468,13 +506,14 @@ impl Server {
             ))
         };
         let cancel = CancelToken::new();
+        let working = Arc::new(AtomicBool::new(true));
         let number = NEXT_CALL.fetch_add(1, Ordering::Relaxed);
         let is_send = name == "send_files";
         {
             let mut in_flight = lock(&self.in_flight);
             if in_flight
                 .get(&key(id))
-                .is_some_and(|(_, t)| !t.is_cancelled())
+                .is_some_and(|(_, t, _)| !t.is_cancelled())
             {
                 return Some(error(
                     id,
@@ -485,7 +524,7 @@ impl Server {
             }
             if in_flight
                 .values()
-                .filter(|(_, t)| !t.is_cancelled())
+                .filter(|(_, t, working)| working.load(Ordering::Acquire) && !t.is_cancelled())
                 .count()
                 >= MAX_IN_FLIGHT
             {
@@ -498,7 +537,7 @@ impl Server {
                 }
                 *sending = Some((number, cancel.clone()));
             }
-            in_flight.insert(key(id), (number, cancel.clone()));
+            in_flight.insert(key(id), (number, cancel.clone(), working.clone()));
         }
 
         let out = self.out.clone();
@@ -529,8 +568,13 @@ impl Server {
                     Ok(r) => ok(&reply_id, finish(era, tool_result(r), false)),
                     Err(_) => error(&reply_id, INTERNAL_ERROR, "Internal error", None),
                 };
-                out.send(&reply, Some(&cancel));
-                release(&in_flight, &sending, &reply_id, number);
+                working.store(false, Ordering::Release);
+                release_send(&sending, number);
+                out.send_last(
+                    &reply,
+                    &cancel,
+                    Box::new(move || forget(&in_flight, &reply_id, number)),
+                );
             });
         match worker {
             Ok(w) => {
@@ -538,28 +582,32 @@ impl Server {
                 None
             }
             Err(_) => {
-                release(&self.in_flight, &self.sending, id, number);
+                release_send(&self.sending, number);
+                forget(&self.in_flight, id, number);
                 Some(error(id, INTERNAL_ERROR, "Could not start the tool", None))
             }
         }
     }
 }
 
-/// Forget a finished call, unless its id or the send slot already belong
-/// to a newer one.
-fn release(
-    in_flight: &Mutex<HashMap<String, Running>>,
-    sending: &Mutex<Option<Running>>,
-    id: &Value,
-    number: u64,
-) {
-    let mut in_flight = lock(in_flight);
-    if in_flight.get(&key(id)).is_some_and(|(n, _)| *n == number) {
-        in_flight.remove(&key(id));
-    }
+/// Free the send slot once a send's work is done, unless a newer send
+/// already holds it.
+fn release_send(sending: &Mutex<Option<(u64, CancelToken)>>, number: u64) {
     let mut sending = lock(sending);
     if sending.as_ref().is_some_and(|(n, _)| *n == number) {
         *sending = None;
+    }
+}
+
+/// Forget a call whose answer was written or dropped, unless its id already
+/// belongs to a newer call.
+fn forget(in_flight: &Mutex<HashMap<String, Running>>, id: &Value, number: u64) {
+    let mut in_flight = lock(in_flight);
+    if in_flight
+        .get(&key(id))
+        .is_some_and(|(n, _, _)| *n == number)
+    {
+        in_flight.remove(&key(id));
     }
 }
 
