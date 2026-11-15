@@ -326,6 +326,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "gust-agent"
+version = "0.1.0"
+dependencies = [
+ "gust-core",
+ "gust-ops",
+ "gust-remote",
+ "rustix",
+ "serde_json",
+]
+
+[[package]]
 name = "gust-app"
 version = "0.1.0"
 dependencies = [
@@ -335,6 +346,7 @@ dependencies = [
  "cxx-qt-lib",
  "dbus",
  "dbus-crossroads",
+ "gust-agent",
  "gust-core",
  "gust-ops",
  "gust-remote",

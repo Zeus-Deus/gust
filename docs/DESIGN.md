@@ -1604,6 +1604,12 @@ on `/dev/bus/usb/<bus>/` says when something was plugged in or pulled.
   listing do not establish photo browsing or file-transfer qualification.
 - Eject leaves every folder of the phone the window is in, unmounts photos
   and app files, and is never forced; it refuses while a transfer runs.
+- GVfs's AFC and MTP backends cannot store permission bits, so `chmod`
+  through `fuse.gvfsd-fuse` answers "not supported". A copy onto such a
+  mount records no mode and still publishes; on every other filesystem, and
+  for every other error, a failed `chmod` still fails the copy before
+  publication. This is read from the GVfs source; no physical-device copy
+  has confirmed it yet.
 
 **Proven with stand-ins, not with a phone.** `just qa` §37 replaces sysfs,
 the udev database and `gio` with a fake tree and a script that speaks gio's
@@ -2377,6 +2383,56 @@ selection count it is about, until the selection, the message or the
 folder changes; a partial result is an alert. In a small or zoomed window
 the choices scroll and their columns narrow and wrap; Cancel and Apply
 stay pinned below them, and the focused box is scrolled into view.
+
+## 6.27 Agent tools (`gust --mcp`)
+
+`gust --mcp` is a headless Model Context Protocol server on stdin/stdout,
+handled before any Qt object exists (crate `gust-agent`). It serves revision
+2026-07-28 statelessly (each request carries its version and client
+capabilities in `_meta`; `server/discover` answers first) and the
+`initialize` handshake of 2025-11-25 and 2025-06-18 for older clients.
+stdout carries protocol messages only; the server exits when stdin closes.
+Install: `claude mcp add --scope user gust -- gust --mcp`.
+
+Three tools: `list_devices`, `list_device_folders`, `send_files`. A device is
+one way to reach one thing: a phone on USB (`apple:<udid>`,
+`android:<serial>`), a removable drive (`drive:<kernel name>`), or a Taildrop
+receiver (`taildrop:<address>`). Ids are matched against a fresh local scan
+and never turned into an address or URI. The same iPad on USB and on the
+tailnet is two devices; Gust does not guess that they are one. Cameras are
+not offered: they do not receive files.
+
+- **Listing contacts nothing.** It reads sysfs, the udev database, `gio
+  mount -li`, `lsblk` and the Tailscale daemon's target list. A call that
+  names a device is the explicit action §6.4 and §6.13.1 require: only then
+  is it mounted or sent to. Waiting for Trust or unlock is bounded by the
+  call's `wait_seconds` and reported once as progress, in §6.13.1's words.
+- **Sending is a copy and nothing else.** Only `Request::Copy` is built, with
+  KeepBoth ("rename") or Skip on a clash, through the ordinary job engine
+  (staged, published without replacement). There is no move, replace,
+  merge, delete or eject, and no argument that could ask for one.
+- **Sources** are at most 64 regular files, in the home folder, a removable
+  drive mounted for this user, or the temporary folder; never a hidden path
+  component, never through a symbolic link, never on a FUSE or network
+  mount (§6.4.3 admission). One refused source refuses the whole call before
+  any device is touched. This is a guardrail against a prompt-injected
+  request, not a boundary: the agent already has a shell.
+- **Folders** on a device are relative, beneath the open device, resolved
+  without following links, and must already exist. Phones need one: an
+  iPhone or iPad accepts files only in an app's shared folder (`afc://…:3/`).
+- **No secret crosses the protocol.** A locked encrypted drive is refused
+  with "unlock it in Gust".
+- **Every call has a cancel token**, set by `notifications/cancelled` or by
+  stdin closing. A cancelled call writes nothing further: the check and the
+  write share the output lock. One send runs at a time, four calls at most.
+- **Results say where the file is and what the person must still do.**
+  Nothing sent from a computer enters the iOS Photos library by itself: USB
+  reaches one app's shared folder, and Taildrop reaches Files › Tailscale
+  after a tap on the notification, from where Share › Save adds it to Photos.
+
+Proven with stand-ins over real pipes (`crates/agent/tests/mcp.rs`: a fake
+sysfs/udev tree, a `gio` that speaks the Trust protocol, `lsblk` and
+`tailscale` scripts). Transfers to a physical phone remain unqualified.
 
 ## 7. Undo journal
 

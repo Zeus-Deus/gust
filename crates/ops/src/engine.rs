@@ -634,7 +634,11 @@ pub(crate) fn stage_regular_file_cached(
             return Err(OpError::Cancelled);
         }
         let safe_mode = st.st_mode & 0o7777 & !0o6000;
-        rustix::fs::fchmod(&dst, Mode::from_bits_truncate(safe_mode))?;
+        if let Err(e) = rustix::fs::fchmod(&dst, Mode::from_bits_truncate(safe_mode)) {
+            if !mode_refusal_is_expected(e, dst_dir.fstype().as_deref()) {
+                return Err(e.into());
+            }
+        }
         // Colour tags travel with the copy (DESIGN §6.25), onto the staged
         // file, so they are there the moment it has its name.
         if cancel.checkpoint() {
@@ -673,6 +677,15 @@ pub(crate) fn stage_regular_file_cached(
         identity,
         written,
     }))
+}
+
+/// GVfs exposes phones and cameras through `fuse.gvfsd-fuse`, whose AFC and
+/// MTP backends cannot store permission bits and answer `chmod` with "not
+/// supported". The bytes are already written and checked, so only that
+/// refusal, only there, is not a failure (DESIGN §6.13.1).
+fn mode_refusal_is_expected(e: rustix::io::Errno, fstype: Option<&str>) -> bool {
+    matches!(e, rustix::io::Errno::NOTSUP | rustix::io::Errno::NOSYS)
+        && fstype == Some("fuse.gvfsd-fuse")
 }
 
 /// Copy a symlink as a symlink — never by following it.
@@ -1007,6 +1020,31 @@ mod tests {
 
     fn handles(dir: &Path, name: &str) -> (DirHandle, OsString) {
         resolve_parent(&dir.join(name)).unwrap()
+    }
+
+    #[test]
+    fn only_a_phone_mount_may_refuse_permission_bits() {
+        use rustix::io::Errno;
+        assert!(mode_refusal_is_expected(
+            Errno::NOTSUP,
+            Some("fuse.gvfsd-fuse")
+        ));
+        assert!(mode_refusal_is_expected(
+            Errno::NOSYS,
+            Some("fuse.gvfsd-fuse")
+        ));
+        // Any other error, or the same error anywhere else, still fails the copy.
+        assert!(!mode_refusal_is_expected(
+            Errno::IO,
+            Some("fuse.gvfsd-fuse")
+        ));
+        assert!(!mode_refusal_is_expected(
+            Errno::ACCESS,
+            Some("fuse.gvfsd-fuse")
+        ));
+        assert!(!mode_refusal_is_expected(Errno::NOTSUP, Some("fuse.sshfs")));
+        assert!(!mode_refusal_is_expected(Errno::NOTSUP, Some("ext4")));
+        assert!(!mode_refusal_is_expected(Errno::NOTSUP, None));
     }
 
     #[test]

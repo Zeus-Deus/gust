@@ -369,6 +369,10 @@ fn main() {
     if args.first().map(OsString::as_os_str) == Some(OsStr::new("--dbus-service")) {
         std::process::exit(fm1::run());
     }
+    // Agent tools over stdio (Model Context Protocol): headless, no Qt.
+    if args.first().map(OsString::as_os_str) == Some(OsStr::new("--mcp")) {
+        std::process::exit(gust_agent::run());
+    }
     // Internal: the administrator window, started by `pkexec` from "Open as
     // administrator". Only ever root, and only with a display socket owned
     // by the user who authenticated (pkexec sets PKEXEC_UID).
@@ -387,6 +391,7 @@ fn main() {
         println!("gust --default [on|off]  set or restore the default file manager");
         println!("gust --bind-keys [on|off] make Super+Shift+F open gust (Omarchy)");
         println!("gust --file-dialogs [on|off] answer other apps' Open/Save dialogs");
+        println!("gust --mcp  serve device transfers to AI agents (MCP over stdio)");
         std::process::exit(0);
     }
 
