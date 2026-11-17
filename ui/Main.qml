@@ -2237,6 +2237,11 @@ Window {
         }
         else if (a === "permissions") win.askPermissions()
         else if (a === "new-file") win.askNewFile()
+        else if (a === "select-all") { dirModel.sel_all(); win.qaDump("select") }
+        else if (a === "undo") win.doUndo()
+        else if (a === "new-tab") win.newTab("")
+        else if (a === "palette") { palette.open(); return }
+        else if (a === "grep") { palette.openWith("grep "); return }
         else if (a === "invert-selection") { dirModel.sel_invert(); win.qaDump("select") }
         else if (a === "deselect-all") { dirModel.sel_clear(); win.qaDump("select") }
         else if (a === "owner") win.askOwner()
@@ -2535,6 +2540,60 @@ Window {
             { label: qsTr("Descending"), hint: mark(!asc), action: "sortdir-desc" }
         ])
         win.qaDump("sort-menu")
+    }
+
+    /// Undo the last change (Ctrl+Z and the More menu).
+    function doUndo() {
+        const label = dirModel.undo_label()
+        const err = dirModel.undo_last()
+        if (err === "") {
+            win.alertText = ""
+            hints.message = label === "Undo: remove the link" ? qsTr("Removed the link")
+                         : label === "Undo: remove the links" ? qsTr("Removed the links")
+                         : label === "Undo: put owners back" ? qsTr("Owners put back")
+                         : label === "Undo: remove the pasted image" ? qsTr("Removed the pasted image")
+                         : label === "Undo: put permissions back" ? qsTr("Permissions put back")
+                         : label === "Undo: restore the original name" ? qsTr("Restored the original name")
+                         : /^Undo: put \d+ names? back$/.test(label) ? qsTr("Names put back")
+                         : label === "Undo: put the tags back" ? qsTr("Tags put back")
+                         : label.startsWith("Undo: remove") ? "Copies removed"
+                         : label.startsWith("Undo: move") ? "Moved back"
+                         : "Restored from Trash"
+        } else {
+            win.alertText = "Cannot undo: " + err
+        }
+        win.qaDump("undo")
+    }
+
+    /// The toolbar's More menu, under its button: what the window can do
+    /// that has no button of its own, each with its key.
+    function openMoreMenu() {
+        if (!dirModel) return
+        if (quickLook.open) quickLook.hide()
+        win.alertText = ""
+        const sep = { separator: true }
+        const p = moreButton.mapToItem(null, 0, moreButton.height)
+        contextMenu.popup(p.x, p.y, [
+            { label: qsTr("New folder"), hint: "Ctrl+N", action: "new-folder" },
+            { label: qsTr("New file"), hint: "", action: "new-file" },
+            { label: qsTr("Paste"), hint: "Ctrl+V", action: "paste", enabled: dirModel.can_paste() },
+            sep,
+            { label: qsTr("Select all"), hint: "Ctrl+A", action: "select-all", enabled: dirModel.count > 0 },
+            { label: qsTr("Undo"), hint: "Ctrl+Z", action: "undo" },
+            sep,
+            { label: qsTr("New tab"), hint: "Ctrl+T", action: "new-tab" },
+            win.paneCount > 1
+                ? { label: qsTr("Close second pane"), hint: "F3", action: "unsplit" }
+                : { label: qsTr("Two panes side by side"), hint: "F3", action: "split" },
+            { label: dirModel.show_hidden ? qsTr("Hide hidden files") : qsTr("Show hidden files"),
+              hint: "Ctrl+H", action: "toggle-hidden" },
+            { label: qsTr("Reload"), hint: "Ctrl+R", action: "reload" },
+            sep,
+            { label: qsTr("Search inside files…"), hint: "", action: "grep" },
+            { label: qsTr("All commands…"), hint: ":", action: "palette" },
+            { label: qsTr("Keyboard shortcuts"), hint: "F1", action: "keys" }
+        ])
+        win.qaDump("more-menu")
     }
 
     /// Menu key / Shift+F10: the same menu, anchored under the cursor row.
@@ -2992,67 +3051,32 @@ Window {
                 spacing: Tokens.spaceSm
 
                 // Sidebar toggle — the visible restore control for the rail.
-                Rectangle {
-                    width: Tokens.controlHeight
-                    height: Tokens.controlHeight
-                    color: sbHover.hovered ? Tokens.withAlpha(Tokens.foreground, 0.1) : "transparent"
-                    radius: Tokens.radius
+                BarButton {
                     objectName: "sidebarToggle"
-                    HoverHandler { id: sbHover }
-                    Text {
-                        textFormat: Text.PlainText
-                        anchors.centerIn: parent
-                        text: "☰"
-                        color: Tokens.foreground
-                        font.family: Tokens.fontFamily
-                        font.pixelSize: Tokens.fontBody
-                    }
-                    MouseArea {
-                        anchors.fill: parent
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: win.sidebarVisible = !win.sidebarVisible
-                    }
-                    Accessible.role: Accessible.Button
-                    Accessible.name: win.sidebarVisible ? "Hide places sidebar" : "Show places sidebar"
+                    icon: "sidebar"
+                    label: win.sidebarVisible ? qsTr("Hide sidebar") : qsTr("Show sidebar")
+                    onClicked: win.sidebarVisible = !win.sidebarVisible
                 }
 
                 Repeater {
                     model: [
-                        { glyph: "‹", act: "back",    nm: "Back" },
-                        { glyph: "›", act: "forward", nm: "Forward" },
-                        { glyph: "↑", act: "up",      nm: "Up one folder" }
+                        { act: "back",    nm: qsTr("Back") },
+                        { act: "forward", nm: qsTr("Forward") },
+                        { act: "up",      nm: qsTr("Up one folder") }
                     ]
-                    delegate: Rectangle {
-                        width: Tokens.controlHeight
-                        height: Tokens.controlHeight
-                        radius: Tokens.radius
+                    delegate: BarButton {
                         objectName: "nav-" + modelData.act
-                        property bool enabledAct: modelData.act === "back" ? win.canBack
-                                                : modelData.act === "forward" ? win.canForward
-                                                : true
-                        color: navHover.hovered && enabledAct
-                               ? Tokens.withAlpha(Tokens.foreground, 0.1) : "transparent"
-                        HoverHandler { id: navHover }
-                        Text {
-                            textFormat: Text.PlainText
-                            anchors.centerIn: parent
-                            text: modelData.glyph
-                            color: parent.enabledAct ? Tokens.foreground : Tokens.withAlpha(Tokens.foreground, 0.3)
-                            font.family: Tokens.fontFamily
-                            font.pixelSize: Tokens.fontSubtitle
+                        icon: modelData.act
+                        label: modelData.nm
+                        available: modelData.act === "back" ? win.canBack
+                                 : modelData.act === "forward" ? win.canForward
+                                 : true
+                        onClicked: {
+                            if (modelData.act === "back") dirModel.go_back()
+                            else if (modelData.act === "forward") dirModel.go_forward()
+                            else dirModel.navigate_up()
+                            win.focusList()
                         }
-                        MouseArea {
-                            anchors.fill: parent
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: {
-                                if (modelData.act === "back") dirModel.go_back()
-                                else if (modelData.act === "forward") dirModel.go_forward()
-                                else dirModel.navigate_up()
-                                win.focusList()
-                            }
-                        }
-                        Accessible.role: Accessible.Button
-                        Accessible.name: modelData.nm
                     }
                 }
 
@@ -3074,6 +3098,30 @@ Window {
                 anchors.rightMargin: Tokens.spaceLg
                 anchors.verticalCenter: parent.verticalCenter
                 spacing: Tokens.spaceXs
+
+                // The everyday actions, one click away: they were reachable
+                // only by key or by right-clicking empty space, which a full
+                // list does not have.
+                BarButton {
+                    objectName: "searchButton"
+                    icon: "search"
+                    label: qsTr("Search")
+                    keys: "Ctrl+F"
+                    active: filterBar.searchActive
+                    onClicked: {
+                        if (filterBar.searchActive) win.closeSearch(false)
+                        else win.openSearch()
+                    }
+                }
+                BarButton {
+                    objectName: "newFolderButton"
+                    icon: "new-folder"
+                    label: qsTr("New folder")
+                    keys: "Ctrl+N"
+                    onClicked: win.askNewFolder()
+                }
+
+                Item { width: Tokens.spaceSm; height: 1 }
 
                 // Sort: what the list is ordered by, and a menu to change it,
                 // where Nautilus keeps the same control. Every view, not
@@ -3116,59 +3164,38 @@ Window {
 
                 Repeater {
                     model: [
-                        { m: "rows",    glyph: "▤", nm: "Rows view" },
-                        { m: "grid",    glyph: "▦", nm: "Grid view" },
-                        { m: "columns", glyph: "⫼", nm: "Columns view" }
+                        { m: "rows",    nm: qsTr("Rows view") },
+                        { m: "grid",    nm: qsTr("Grid view") },
+                        { m: "columns", nm: qsTr("Columns view") }
                     ]
-                    delegate: Rectangle {
-                        width: Tokens.controlHeight
-                        height: Tokens.controlHeight
+                    delegate: BarButton {
                         objectName: "viewswitch-" + modelData.m
-                        color: win.viewMode === modelData.m
-                               ? Tokens.withAlpha(Tokens.accent, 0.22)
-                               : (vsHover.hovered ? Tokens.withAlpha(Tokens.foreground, 0.1) : "transparent")
-                        border.width: win.viewMode === modelData.m ? Math.max(1, Tokens.borderWidth) : 0
-                        border.color: Tokens.accent
-                        radius: Tokens.radius
-
-                        HoverHandler { id: vsHover }
-
-                        Text {
-                            textFormat: Text.PlainText
-                            anchors.centerIn: parent
-                            text: modelData.glyph
-                            color: win.viewMode === modelData.m ? Tokens.foregroundBright : Tokens.foreground
-                            font.family: Tokens.fontFamily
-                            font.pixelSize: Tokens.fontBody
-                        }
-                        MouseArea {
-                            anchors.fill: parent
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: win.setView(modelData.m)
-                        }
-                        Accessible.role: Accessible.Button
-                        Accessible.name: modelData.nm
+                        icon: modelData.m
+                        label: modelData.nm
+                        active: win.viewMode === modelData.m
+                        onClicked: win.setView(modelData.m)
                     }
                 }
 
                 Item { width: Tokens.spaceSm; height: 1 }
 
+                // Everything else the window can do, in words.
+                BarButton {
+                    id: moreButton
+                    objectName: "moreButton"
+                    icon: "more"
+                    label: qsTr("More")
+                    onClicked: win.openMoreMenu()
+                }
+
                 // Settings: a visible control, never only a shortcut.
-                Rectangle {
+                BarButton {
                     objectName: "settingsButton"
-                    width: Tokens.controlHeight
-                    height: Tokens.controlHeight
-                    color: setHover.hovered ? Tokens.withAlpha(Tokens.foreground, 0.1) : "transparent"
-                    radius: Tokens.radius
-                    HoverHandler { id: setHover }
-                    Text {
-                        textFormat: Text.PlainText
-                        anchors.centerIn: parent
-                        text: "⛭"
-                        color: Tokens.foreground
-                        font.family: Tokens.fontFamily
-                        font.pixelSize: Tokens.fontBody
-                    }
+                    icon: "settings"
+                    label: win.prefsStatus === "unsaved" ? qsTr("Settings — not saved")
+                         : win.prefsStatus === "problem" ? qsTr("Settings — problem") : qsTr("Settings")
+                    keys: "Ctrl+,"
+                    onClicked: win.openSettings()
                     // A preferences failure stays visible here until a save
                     // succeeds: a failed sort or view save is otherwise silent.
                     Rectangle {
@@ -3182,15 +3209,6 @@ Window {
                         radius: Tokens.radius
                         color: Tokens.danger
                     }
-                    MouseArea {
-                        anchors.fill: parent
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: win.openSettings()
-                    }
-                    Accessible.role: Accessible.Button
-                    Accessible.name: win.prefsStatus === "unsaved" ? qsTr("Settings — not saved")
-                                     : win.prefsStatus === "problem" ? qsTr("Settings — problem") : qsTr("Settings")
-                    Accessible.description: win.prefsError
                 }
             }
         }
@@ -3908,25 +3926,7 @@ Window {
                     event.accepted = true; return
                 }
                 if (event.key === Qt.Key_Z) {
-                    const label = dirModel.undo_label()
-                    const err = dirModel.undo_last()
-                    if (err === "") {
-                        win.alertText = ""
-                        hints.message = label === "Undo: remove the link" ? qsTr("Removed the link")
-                                     : label === "Undo: remove the links" ? qsTr("Removed the links")
-                                     : label === "Undo: put owners back" ? qsTr("Owners put back")
-                                     : label === "Undo: remove the pasted image" ? qsTr("Removed the pasted image")
-                                     : label === "Undo: put permissions back" ? qsTr("Permissions put back")
-                                     : label === "Undo: restore the original name" ? qsTr("Restored the original name")
-                                     : /^Undo: put \d+ names? back$/.test(label) ? qsTr("Names put back")
-                                     : label === "Undo: put the tags back" ? qsTr("Tags put back")
-                                     : label.startsWith("Undo: remove") ? "Copies removed"
-                                     : label.startsWith("Undo: move") ? "Moved back"
-                                     : "Restored from Trash"
-                    } else {
-                        win.alertText = "Cannot undo: " + err
-                    }
-                    win.qaDump("undo")
+                    win.doUndo()
                     event.accepted = true; return
                 }
                 if (event.key === Qt.Key_C && (event.modifiers & Qt.ShiftModifier)) {
