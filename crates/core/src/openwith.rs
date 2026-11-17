@@ -221,13 +221,22 @@ impl Lookup {
     /// Every `mimeapps.list` in the mime-apps spec's lookup order: each
     /// directory's `<desktop>-mimeapps.list` before its plain one, the
     /// config directories before the (deprecated) `applications` ones.
-    fn mimeapps_files(&self) -> Vec<PathBuf> {
+    ///
+    /// Each comes with its directory's rank (0 is the highest precedence):
+    /// what a list adds or removes reaches desktop entries in directories of
+    /// the same or a lower precedence, never a higher one.
+    fn mimeapps_files(&self) -> Vec<(usize, PathBuf)> {
         let mut files = Vec::new();
-        for dir in self.config_dirs.iter().chain(&self.application_dirs) {
+        for (rank, dir) in self
+            .config_dirs
+            .iter()
+            .chain(&self.application_dirs)
+            .enumerate()
+        {
             for desktop in &self.desktops {
-                files.push(dir.join(format!("{desktop}-mimeapps.list")));
+                files.push((rank, dir.join(format!("{desktop}-mimeapps.list"))));
             }
-            files.push(dir.join("mimeapps.list"));
+            files.push((rank, dir.join("mimeapps.list")));
         }
         files
     }
@@ -252,26 +261,31 @@ pub fn handlers_in(mime: &str, look: &Lookup) -> Vec<Handler> {
     };
 
     let mut ids: Vec<String> = Vec::new();
-    let mut removed: Vec<String> = Vec::new();
-    // Added in a list that no higher list removes it from: a removal read
-    // later (lower precedence) cannot take such an association away.
-    let mut kept: Vec<String> = Vec::new();
+    // The highest-precedence directory (lowest rank) that removes each
+    // application for this type, and the highest that associates it: an
+    // explicit [Added Associations] entry, or a desktop entry's own MimeType
+    // as its directory's cache lists it.
+    let mut removed_at: BTreeMap<String, usize> = BTreeMap::new();
+    let mut source_at: BTreeMap<String, usize> = BTreeMap::new();
+    fn highest(map: &mut BTreeMap<String, usize>, id: &str, rank: usize) {
+        let at = map.entry(id.to_string()).or_insert(rank);
+        *at = (*at).min(rank);
+    }
     // Every [Default Applications] candidate, highest precedence first.
     let mut wanted: Vec<String> = Vec::new();
 
-    for file in look.mimeapps_files() {
+    for (rank, file) in look.mimeapps_files() {
         let Ok(text) = std::fs::read_to_string(&file) else {
             continue;
         };
         let (added, gone) = parse_mimeapps(&text, mime);
-        // A list's own removal outranks what the same list adds or names.
-        removed.extend(gone);
-        // Only an explicit [Added Associations] entry holds against a
-        // removal below it; being named as a default does not.
+        for id in &gone {
+            highest(&mut removed_at, id, rank);
+        }
+        // Being named as a default is not an association; only an explicit
+        // [Added Associations] entry is.
         for id in section_ids(&text, mime, "[Added Associations]") {
-            if !removed.contains(&id) && !kept.contains(&id) {
-                kept.push(id);
-            }
+            highest(&mut source_at, &id, rank);
         }
         wanted.extend(parse_mimeapps_default(&text, mime));
         for id in added {
@@ -281,9 +295,27 @@ pub fn handlers_in(mime: &str, look: &Lookup) -> Vec<Handler> {
         }
     }
 
-    // An application some list removes for this type is not associated with
-    // it, wherever the removal sits, unless a higher list added it back.
-    let dropped = |id: &String| removed.contains(id) && !kept.contains(id);
+    let mut cached: Vec<String> = Vec::new();
+    for (i, dir) in dirs.iter().enumerate() {
+        if let Ok(text) = std::fs::read_to_string(dir.join("mimeinfo.cache")) {
+            for id in parse_mimeinfo(&text, mime) {
+                highest(&mut source_at, &id, look.config_dirs.len() + i);
+                if !cached.contains(&id) {
+                    cached.push(id);
+                }
+            }
+        }
+    }
+
+    // A removal reaches associations made in its own directory or a lower
+    // one. One made in a higher directory survives it: the system's list
+    // cannot take away what the user's own desktop entry or list provides.
+    // (A list's own removal outranks what that same list adds.)
+    let dropped = |id: &String| match (removed_at.get(id), source_at.get(id)) {
+        (Some(removed), Some(source)) => source >= removed,
+        (Some(_), None) => true,
+        (None, _) => false,
+    };
     // Only [Default Applications] names a default: the first candidate that
     // is installed and whose association has not been removed. Being named
     // as the default does not itself undo a removal.
@@ -297,14 +329,9 @@ pub fn handlers_in(mime: &str, look: &Lookup) -> Vec<Handler> {
             ids.insert(0, id.clone());
         }
     }
-
-    for dir in dirs {
-        if let Ok(text) = std::fs::read_to_string(dir.join("mimeinfo.cache")) {
-            for id in parse_mimeinfo(&text, mime) {
-                if !ids.contains(&id) {
-                    ids.push(id);
-                }
-            }
+    for id in cached {
+        if !ids.contains(&id) {
+            ids.push(id);
         }
     }
 
@@ -694,6 +721,59 @@ mod tests {
         )
         .unwrap();
         assert_eq!(default_of(&look).as_deref(), Some("pinta.desktop"));
+        let found = handlers_in("image/png", &look);
+        assert!(found.iter().all(|h| h.id != "imv.desktop"), "{found:?}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_users_own_desktop_entry_survives_a_system_removal() {
+        // imv is installed in the USER's applications directory and declares
+        // the type there. The system's list removes imv and names pinta. A
+        // list reaches its own directory and lower ones, never a higher one:
+        // the user's entry, and the user's default, stand.
+        let (root, look) = fake_desktop("user-entry");
+        let user = &look.application_dirs[0];
+        std::fs::write(
+            user.join("imv.desktop"),
+            "[Desktop Entry]\nType=Application\nName=imv\nExec=imv %F\nMimeType=image/png;\n",
+        )
+        .unwrap();
+        std::fs::write(
+            user.join("mimeinfo.cache"),
+            "[MIME Cache]\nimage/png=imv.desktop;\n",
+        )
+        .unwrap();
+        std::fs::write(
+            look.config_dirs[0].join("mimeapps.list"),
+            "[Default Applications]\nimage/png=imv.desktop\n",
+        )
+        .unwrap();
+        std::fs::write(
+            look.application_dirs[1].join("mimeapps.list"),
+            "[Removed Associations]\nimage/png=imv.desktop\n\
+             [Default Applications]\nimage/png=pinta.desktop\n",
+        )
+        .unwrap();
+        assert_eq!(default_of(&look).as_deref(), Some("imv.desktop"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_removal_in_the_same_directory_as_the_entry_still_applies() {
+        // The user's own list removes the user's own entry.
+        let (root, look) = fake_desktop("same-dir");
+        let user = &look.application_dirs[0];
+        std::fs::write(
+            user.join("mimeinfo.cache"),
+            "[MIME Cache]\nimage/png=imv.desktop;\n",
+        )
+        .unwrap();
+        std::fs::write(
+            user.join("mimeapps.list"),
+            "[Removed Associations]\nimage/png=imv.desktop\n",
+        )
+        .unwrap();
         let found = handlers_in("image/png", &look);
         assert!(found.iter().all(|h| h.id != "imv.desktop"), "{found:?}");
         std::fs::remove_dir_all(&root).ok();
