@@ -2431,7 +2431,9 @@ The handler list is read from the freedesktop database directly:
    not-removed id under `[Default Applications]` in the mime-apps spec's
    lookup order: `<desktop>-mimeapps.list` then `mimeapps.list` in
    `$XDG_CONFIG_HOME`, `$XDG_CONFIG_DIRS`, then the `applications`
-   directories. `[Added Associations]` never names a default.
+   directories. `[Added Associations]` never names a default. A removal
+   anywhere drops the application for that type, default or not, unless a
+   higher list explicitly adds it.
 3. Each candidate's `.desktop` file supplies the name to show and the
    command to run.
 

@@ -149,16 +149,21 @@ pub fn parse_mimeapps(text: &str, mime: &str) -> (Vec<String>, Vec<String>) {
 /// Kept apart from [`parse_mimeapps`]: an added association makes an
 /// application a candidate, it does not make it the default.
 pub fn parse_mimeapps_default(text: &str, mime: &str) -> Vec<String> {
-    let mut in_defaults = false;
+    section_ids(text, mime, "[Default Applications]")
+}
+
+/// The ids one section of a `mimeapps.list` gives `mime`, in order.
+fn section_ids(text: &str, mime: &str, section: &str) -> Vec<String> {
+    let mut inside = false;
     let mut ids = Vec::new();
     for line in text.lines() {
         let t = line.trim();
         if t.starts_with('[') {
-            in_defaults = t == "[Default Applications]";
+            inside = t == section;
             continue;
         }
         match kv(t) {
-            Some((k, v)) if in_defaults && k.trim() == mime => ids.extend(
+            Some((k, v)) if inside && k.trim() == mime => ids.extend(
                 v.split(';')
                     .map(|s| s.trim())
                     .filter(|s| !s.is_empty())
@@ -248,26 +253,48 @@ pub fn handlers_in(mime: &str, look: &Lookup) -> Vec<Handler> {
 
     let mut ids: Vec<String> = Vec::new();
     let mut removed: Vec<String> = Vec::new();
-    let mut default_id: Option<String> = None;
+    // Added in a list that no higher list removes it from: a removal read
+    // later (lower precedence) cannot take such an association away.
+    let mut kept: Vec<String> = Vec::new();
+    // Every [Default Applications] candidate, highest precedence first.
+    let mut wanted: Vec<String> = Vec::new();
 
     for file in look.mimeapps_files() {
         let Ok(text) = std::fs::read_to_string(&file) else {
             continue;
         };
         let (added, gone) = parse_mimeapps(&text, mime);
+        // A list's own removal outranks what the same list adds or names.
         removed.extend(gone);
-        // Only [Default Applications] names a default, and only the first
-        // list to name one that is installed and has not been removed at
-        // this or a higher precedence.
-        if default_id.is_none() {
-            default_id = parse_mimeapps_default(&text, mime)
-                .into_iter()
-                .find(|id| !removed.contains(id) && entry(id).is_some());
+        // Only an explicit [Added Associations] entry holds against a
+        // removal below it; being named as a default does not.
+        for id in section_ids(&text, mime, "[Added Associations]") {
+            if !removed.contains(&id) && !kept.contains(&id) {
+                kept.push(id);
+            }
         }
+        wanted.extend(parse_mimeapps_default(&text, mime));
         for id in added {
             if !ids.contains(&id) {
                 ids.push(id);
             }
+        }
+    }
+
+    // An application some list removes for this type is not associated with
+    // it, wherever the removal sits, unless a higher list added it back.
+    let dropped = |id: &String| removed.contains(id) && !kept.contains(id);
+    // Only [Default Applications] names a default: the first candidate that
+    // is installed and whose association has not been removed. Being named
+    // as the default does not itself undo a removal.
+    let default_id = wanted
+        .into_iter()
+        .find(|id| !dropped(id) && entry(id).is_some());
+    // A default the user set for an application that does not declare the
+    // type (`xdg-mime default`) is still what the desktop opens it with.
+    if let Some(id) = &default_id {
+        if !ids.contains(id) {
+            ids.insert(0, id.clone());
         }
     }
 
@@ -286,8 +313,7 @@ pub fn handlers_in(mime: &str, look: &Lookup) -> Vec<Handler> {
     let mut out: Vec<Handler> = Vec::new();
     for id in ids {
         let is_default = default_id.as_deref() == Some(id.as_str());
-        // A removal in a lower-precedence list does not unseat the default.
-        if (removed.contains(&id) && !is_default) || seen.contains_key(&id) {
+        if dropped(&id) || seen.contains_key(&id) {
             continue;
         }
         if let Some((name, exec, terminal, _)) = entry(&id) {
@@ -647,6 +673,91 @@ mod tests {
         )
         .unwrap();
         assert_eq!(default_of(&look).as_deref(), Some("pinta.desktop"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_default_whose_association_is_removed_below_it_is_passed_over() {
+        // The user's list names imv; the system's list removes imv for the
+        // type and names pinta. Naming a default does not add an
+        // association, so imv is neither the default nor offered.
+        let (root, look) = fake_desktop("removed-below");
+        std::fs::write(
+            look.config_dirs[0].join("mimeapps.list"),
+            "[Default Applications]\nimage/png=imv.desktop\n",
+        )
+        .unwrap();
+        std::fs::write(
+            look.application_dirs[1].join("mimeapps.list"),
+            "[Removed Associations]\nimage/png=imv.desktop\n\
+             [Default Applications]\nimage/png=pinta.desktop\n",
+        )
+        .unwrap();
+        assert_eq!(default_of(&look).as_deref(), Some("pinta.desktop"));
+        let found = handlers_in("image/png", &look);
+        assert!(found.iter().all(|h| h.id != "imv.desktop"), "{found:?}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn an_association_added_above_a_removal_survives_it() {
+        // Same removal below, but the user's list also ADDS imv: an explicit
+        // association at higher precedence is not undone from below.
+        let (root, look) = fake_desktop("added-above");
+        std::fs::write(
+            look.config_dirs[0].join("mimeapps.list"),
+            "[Added Associations]\nimage/png=imv.desktop\n\
+             [Default Applications]\nimage/png=imv.desktop\n",
+        )
+        .unwrap();
+        std::fs::write(
+            look.application_dirs[1].join("mimeapps.list"),
+            "[Removed Associations]\nimage/png=imv.desktop\n\
+             [Default Applications]\nimage/png=pinta.desktop\n",
+        )
+        .unwrap();
+        assert_eq!(default_of(&look).as_deref(), Some("imv.desktop"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_removal_above_an_addition_wins() {
+        // The user removes imv; the system's list adds it and names it.
+        let (root, look) = fake_desktop("removed-above");
+        std::fs::write(
+            look.config_dirs[0].join("mimeapps.list"),
+            "[Removed Associations]\nimage/png=imv.desktop\n",
+        )
+        .unwrap();
+        std::fs::write(
+            look.application_dirs[1].join("mimeapps.list"),
+            "[Added Associations]\nimage/png=imv.desktop\n\
+             [Default Applications]\nimage/png=imv.desktop;pinta.desktop\n",
+        )
+        .unwrap();
+        assert_eq!(default_of(&look).as_deref(), Some("pinta.desktop"));
+        let found = handlers_in("image/png", &look);
+        assert!(found.iter().all(|h| h.id != "imv.desktop"), "{found:?}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_default_for_an_app_that_does_not_declare_the_type_is_honoured() {
+        // `xdg-mime default imv.desktop image/x-odd`: nothing lists imv for
+        // the type and nothing removes it. The desktop opens such a file
+        // with imv, so Gust must agree.
+        let (root, look) = fake_desktop("undeclared");
+        std::fs::write(
+            look.config_dirs[0].join("mimeapps.list"),
+            "[Default Applications]\nimage/x-odd=imv.desktop\n",
+        )
+        .unwrap();
+        let found = handlers_in("image/x-odd", &look);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(
+            found[0].is_default && found[0].id == "imv.desktop",
+            "{found:?}"
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 
