@@ -54,6 +54,8 @@ QtObject {
     readonly property int spaceLg: 16
     readonly property int fontSmall: 13
     readonly property int fontBody: 15
+    readonly property int fontHeading: 20
+    readonly property bool nerdGlyphs: false
     readonly property string fontFamily: "monospace"
     function withAlpha(c, a) { return Qt.rgba(c.r, c.g, c.b, a) }
 }
@@ -79,6 +81,7 @@ def main():
              "ui/InterruptedNotice.qml", "ui/tests/tst_interrupted_notice.qml",
              "ui/JobDrawer.qml", "ui/tests/tst_job_drawer.qml",
              "ui/SettingsPanel.qml", "ui/tests/tst_settings_panel.qml",
+             "ui/BarButton.qml", "ui/Glyph.qml",
              "ui/tests/tst_preferences_startup.qml.in", "ui/tests/tst_preferences_notice.qml.in",
              "ui/HintStrip.qml",
              "crates/app/tests/work_guard_regressions.py",
@@ -130,7 +133,8 @@ def main():
     (output / "tst_preferences_notice.qml").write_text(notice)
     for name in ["ui/InterruptedNotice.qml", "ui/tests/tst_interrupted_notice.qml",
                  "ui/JobDrawer.qml", "ui/tests/tst_job_drawer.qml",
-                 "ui/SettingsPanel.qml", "ui/tests/tst_settings_panel.qml", "ui/HintStrip.qml"]:
+                 "ui/SettingsPanel.qml", "ui/tests/tst_settings_panel.qml", "ui/HintStrip.qml",
+                 "ui/BarButton.qml", "ui/Glyph.qml"]:
         shutil.copyfile(source / name, output / Path(name).name)
     module = output / "com/gust/app"
     module.mkdir(parents=True)

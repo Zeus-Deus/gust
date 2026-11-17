@@ -150,4 +150,14 @@ TestCase {
         panel.refocus()
         verify(thief.activeFocus, "a closed panel does not take the keyboard")
     }
+
+    function test_the_close_button_closes_like_escape() {
+        panel.show()
+        verify(panel.open)
+        const close = findChild(panel, "settingsClose")
+        verify(close !== null)
+        compare(close.Accessible.name, "Close")
+        mouseClick(close)
+        verify(!panel.open)
+    }
 }
