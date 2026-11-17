@@ -84,8 +84,8 @@ Rectangle {
                     { k: "h", d: "up" },
                     { k: "Space", d: "quick look" },
                     { k: "/", d: "filter" },
-                    { k: ":", d: "command" },
-                    { k: "?", d: "keys" }
+                    { k: ":", d: "commands" },
+                    { k: "?", d: "shortcuts" }
                   ]
                 : [
                     { k: "↑ ↓", d: "move" },
@@ -93,8 +93,8 @@ Rectangle {
                     { k: "Backspace", d: "up" },
                     { k: "Space", d: "quick look" },
                     { k: "/", d: "filter" },
-                    { k: ":", d: "command" },
-                    { k: "F1", d: "keys" }
+                    { k: ":", d: "commands" },
+                    { k: "F1", d: "shortcuts" }
                   ]
 
             delegate: Row {

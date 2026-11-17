@@ -39,33 +39,35 @@ Item {
     signal dialogsRequested(bool on)
     signal closed()
 
+    // Titles and choices in everyday words: the title says what the row
+    // is about, the choices read as its answer, the note adds one fact.
     readonly property var rows: [
-        { key: "key_preset", title: qsTr("Keys"),
+        { key: "key_preset", title: qsTr("Shortcuts"),
           options: [["standard", qsTr("Standard")], ["vim", qsTr("Vim")],
                     ["mac", qsTr("Mac")], ["windows", qsTr("Windows")]],
-          note: qsTr("? shows every key") },
-        { key: "density", title: qsTr("Density"),
+          note: qsTr("F1 shows them all") },
+        { key: "density", title: qsTr("Row spacing"),
           options: [["compact", qsTr("Compact")], ["normal", qsTr("Normal")], ["roomy", qsTr("Roomy")]],
-          note: qsTr("Row height and spacing") },
+          note: "" },
         { key: "show_hidden", title: qsTr("Hidden files"),
           options: [["false", qsTr("Hide")], ["true", qsTr("Show")]],
-          note: qsTr("Ctrl+H per tab") },
+          note: qsTr("Ctrl+H switches it for one tab") },
         { key: "sidebar", title: qsTr("Sidebar"),
           options: [["true", qsTr("Show")], ["false", qsTr("Hide")]],
           note: "" },
-        { key: "restore_tabs", title: qsTr("Tabs at start"),
-          options: [["false", qsTr("Fresh")], ["true", qsTr("Reopen last")]],
+        { key: "restore_tabs", title: qsTr("When Gust opens"),
+          options: [["false", qsTr("One new tab")], ["true", qsTr("Last time's tabs")]],
           note: "" },
-        { key: "renderer", title: qsTr("Drawing"),
-          options: [["auto", qsTr("Automatic")], ["software", qsTr("Software")], ["gpu", qsTr("GPU")]],
+        { key: "renderer", title: qsTr("Graphics"),
+          options: [["auto", qsTr("Automatic")], ["software", qsTr("Software")], ["gpu", qsTr("Graphics card")]],
           note: "", live: "renderer" },
-        { key: "default", title: qsTr("Default app"),
-          options: [["true", qsTr("Use Gust")], ["false", qsTr("Previous app")]],
-          note: qsTr("For folders opened by other apps") },
-        { key: "file_dialogs", title: qsTr("Open/Save"),
+        { key: "default", title: qsTr("Default file manager"),
+          options: [["true", qsTr("Gust")], ["false", qsTr("Previous app")]],
+          note: qsTr("Opens folders from other apps") },
+        { key: "file_dialogs", title: qsTr("File pickers"),
           options: [["true", qsTr("Gust")], ["false", qsTr("Previous")]],
-          note: qsTr("Other apps' file dialogs") },
-        { key: "omarchy_keys", title: qsTr("Super+Shift+F"),
+          note: qsTr("The Open and Save windows of other apps") },
+        { key: "omarchy_keys", title: qsTr("Super+Shift+F opens"),
           options: [["true", qsTr("Gust")], ["false", qsTr("Omarchy default")]],
           note: "", live: "omarchy" }
     ]
@@ -164,8 +166,10 @@ Item {
                     // A row marked `live` takes its note from the snapshot.
                     readonly property string note: root.busyKey === modelData.key ? qsTr("Checking…")
                         : modelData.live === "renderer"
-                          ? qsTr("Next start. Now: ") + (root.s.renderer_now === "software" ? qsTr("software") : qsTr("GPU"))
-                        : modelData.live === "omarchy" ? (root.s.is_omarchy ? qsTr("Reversible") : qsTr("Needs Omarchy"))
+                          ? qsTr("Applies the next time Gust starts. Now: ")
+                            + (root.s.renderer_now === "software" ? qsTr("software") : qsTr("graphics card"))
+                        : modelData.live === "omarchy" ? (root.s.is_omarchy ? qsTr("You can switch back any time")
+                                                                            : qsTr("Needs Omarchy"))
                         : modelData.note
                     height: Tokens.controlHeight + (rowItem.note !== "" ? Tokens.fontCaption + Tokens.spaceXs : 0)
                     color: root.current === index
