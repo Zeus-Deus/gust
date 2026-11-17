@@ -295,11 +295,27 @@ pub fn handlers_in(mime: &str, look: &Lookup) -> Vec<Handler> {
         }
     }
 
+    // The rank of the directory holding the desktop entry that is actually
+    // used for `id`: the first applications directory that has one. A copy
+    // further down is shadowed, and so is everything said about it there.
+    let entry_rank = |id: &str| {
+        dirs.iter()
+            .position(|dir| dir.join(id).is_file())
+            .map(|i| look.config_dirs.len() + i)
+    };
+
     let mut cached: Vec<String> = Vec::new();
     for (i, dir) in dirs.iter().enumerate() {
+        let rank = look.config_dirs.len() + i;
         if let Ok(text) = std::fs::read_to_string(dir.join("mimeinfo.cache")) {
             for id in parse_mimeinfo(&text, mime) {
-                highest(&mut source_at, &id, look.config_dirs.len() + i);
+                // A cache describes the entries in its own directory. Its
+                // record for an entry the user has shadowed describes a
+                // file that is not the one in use.
+                if entry_rank(&id) != Some(rank) {
+                    continue;
+                }
+                highest(&mut source_at, &id, rank);
                 if !cached.contains(&id) {
                     cached.push(id);
                 }
@@ -311,10 +327,16 @@ pub fn handlers_in(mime: &str, look: &Lookup) -> Vec<Handler> {
     // one. One made in a higher directory survives it: the system's list
     // cannot take away what the user's own desktop entry or list provides.
     // (A list's own removal outranks what that same list adds.)
-    let dropped = |id: &String| match (removed_at.get(id), source_at.get(id)) {
-        (Some(removed), Some(source)) => source >= removed,
-        (Some(_), None) => true,
-        (None, _) => false,
+    // And a removal in a directory below the one holding the entry in use
+    // does not reach that entry at all.
+    let dropped = |id: &String| {
+        let Some(removed) = removed_at.get(id) else {
+            return false;
+        };
+        if entry_rank(id).is_some_and(|entry| *removed > entry) {
+            return false;
+        }
+        source_at.get(id).is_none_or(|source| source >= removed)
     };
     // Only [Default Applications] names a default: the first candidate that
     // is installed and whose association has not been removed. Being named
@@ -760,10 +782,71 @@ mod tests {
     }
 
     #[test]
+    fn a_shadowing_user_entry_is_out_of_reach_of_a_system_removal() {
+        // The user's own imv.desktop shadows the system's and declares no
+        // type; the user names it the default. The system directory still
+        // has its imv.desktop, a cache record for it, and a list that
+        // removes imv and names pinta. None of that describes the entry in
+        // use, so the user's default stands (and the stale cache record
+        // does not count as the user's entry declaring the type).
+        let (root, look) = fake_desktop("shadowed");
+        std::fs::write(
+            look.application_dirs[0].join("imv.desktop"),
+            "[Desktop Entry]\nType=Application\nName=my imv\nExec=imv --mine %F\n",
+        )
+        .unwrap();
+        std::fs::write(
+            look.config_dirs[0].join("mimeapps.list"),
+            "[Default Applications]\nimage/png=imv.desktop\n",
+        )
+        .unwrap();
+        std::fs::write(
+            look.application_dirs[1].join("mimeapps.list"),
+            "[Removed Associations]\nimage/png=imv.desktop\n\
+             [Default Applications]\nimage/png=pinta.desktop\n",
+        )
+        .unwrap();
+        assert_eq!(default_of(&look).as_deref(), Some("imv.desktop"));
+        let found = handlers_in("image/png", &look);
+        assert_eq!(found[0].name, "my imv", "the user's copy is the one used");
+        assert_eq!(
+            found.iter().filter(|h| h.id == "imv.desktop").count(),
+            1,
+            "{found:?}"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_user_removal_still_reaches_a_shadowing_user_entry() {
+        // The same shadowing entry, but the USER's list removes it: a list
+        // reaches entries in lower directories, the user's data dir included.
+        let (root, look) = fake_desktop("shadowed-removed");
+        std::fs::write(
+            look.application_dirs[0].join("imv.desktop"),
+            "[Desktop Entry]\nType=Application\nName=my imv\nExec=imv --mine %F\n",
+        )
+        .unwrap();
+        std::fs::write(
+            look.config_dirs[0].join("mimeapps.list"),
+            "[Default Applications]\nimage/png=imv.desktop;pinta.desktop\n\
+             [Removed Associations]\nimage/png=imv.desktop\n",
+        )
+        .unwrap();
+        assert_eq!(default_of(&look).as_deref(), Some("pinta.desktop"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
     fn a_removal_in_the_same_directory_as_the_entry_still_applies() {
         // The user's own list removes the user's own entry.
         let (root, look) = fake_desktop("same-dir");
         let user = &look.application_dirs[0];
+        std::fs::write(
+            user.join("imv.desktop"),
+            "[Desktop Entry]\nType=Application\nName=imv\nExec=imv %F\nMimeType=image/png;\n",
+        )
+        .unwrap();
         std::fs::write(
             user.join("mimeinfo.cache"),
             "[MIME Cache]\nimage/png=imv.desktop;\n",
