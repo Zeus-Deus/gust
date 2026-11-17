@@ -40,6 +40,19 @@ pub(crate) fn startup_argument(
     Some(Ok(PathBuf::from(arg)))
 }
 
+/// Was the window asked to start somewhere? The same reading of the
+/// arguments as [`startup_argument`], so `gust -- -x` counts: a place asked
+/// for must never be replaced by last time's tabs.
+pub(crate) fn names_a_place(args: impl IntoIterator<Item = OsString>) -> bool {
+    startup_argument(args).is_some()
+}
+
+/// Does putting the cursor on `name` need hidden files shown? The same rule
+/// the list uses to hide an entry.
+pub(crate) fn is_hidden_name(name: &OsStr) -> bool {
+    name.as_encoded_bytes().starts_with(b".")
+}
+
 /// Where a window starts: the folder, the entry to put the cursor on, and
 /// one line to show when the argument could not be honoured as given.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -298,5 +311,31 @@ mod tests {
             got.notice.as_deref(),
             Some("Could not open \"file://server/share\" — showing Home instead")
         );
+    }
+
+    fn os(args: &[&str]) -> Vec<OsString> {
+        args.iter().map(OsString::from).collect()
+    }
+
+    #[test]
+    fn a_place_after_the_terminator_still_counts_as_asked_for() {
+        // Last time's tabs must never replace a folder the user named,
+        // including one whose name starts with a dash.
+        assert!(names_a_place(os(&["--", "-x"])));
+        assert!(names_a_place(os(&["--renderer", "--", "-x"])));
+        assert!(names_a_place(os(&["/tmp"])));
+        assert!(names_a_place(os(&["file:///tmp"])));
+        // Options alone, or a bare terminator, name nothing.
+        assert!(!names_a_place(os(&[])));
+        assert!(!names_a_place(os(&["--dbus-service"])));
+        assert!(!names_a_place(os(&["--"])));
+    }
+
+    #[test]
+    fn a_dotfile_needs_hidden_files_shown_to_take_the_cursor() {
+        assert!(is_hidden_name(OsStr::new(".env")));
+        assert!(is_hidden_name(OsStr::from_bytes(b".\xff")));
+        assert!(!is_hidden_name(OsStr::new("a.env")));
+        assert!(!is_hidden_name(OsStr::new("")));
     }
 }

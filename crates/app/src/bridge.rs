@@ -1477,6 +1477,23 @@ pub(crate) fn startup() -> crate::cli::Startup {
     crate::cli::resolve_startup(&abs, &home())
 }
 
+impl DirModelRust {
+    /// The entry the cursor was asked to land on is a hidden one: show
+    /// hidden files in this window, or the list filters it out before the
+    /// cursor can find it (`gust ~/project/.env`, or another app's "Show in
+    /// folder" on a dotfile). This window only; the saved preference is not
+    /// touched.
+    fn reveal_focus(&mut self) {
+        if self
+            .focus_name
+            .as_deref()
+            .is_some_and(crate::cli::is_hidden_name)
+        {
+            self.show_hidden = true;
+        }
+    }
+}
+
 impl Default for DirModelRust {
     fn default() -> Self {
         let start = startup();
@@ -1487,6 +1504,7 @@ impl Default for DirModelRust {
         if model.focus_name.is_none() {
             model.focus_name = start.focus;
         }
+        model.reveal_focus();
         model.startup_notice = start.notice;
         // A window started by a tab detach picks up where the tab was:
         // history, selection, cursor, hidden files, view. Taken once (the
@@ -9163,9 +9181,7 @@ impl qobject::DirModel {
     fn session_json(&self) -> QString {
         if admin_session()
             || std::env::var_os("GUST_CHOOSER").is_some_and(|v| !v.is_empty())
-            || std::env::args_os()
-                .skip(1)
-                .any(|a| !a.to_string_lossy().starts_with('-'))
+            || crate::cli::names_a_place(std::env::args_os().skip(1))
         {
             return QString::default();
         }
