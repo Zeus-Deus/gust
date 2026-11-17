@@ -10,6 +10,14 @@
 //! which remembers what the user had, and every spawn of an application,
 //! opener or terminal goes through [`for_user_app`], which puts that back.
 //! Gust's own helpers and re-execs do not: they need those variables.
+//!
+//! A second Gust WINDOW (a detached tab) is a third case. What this process
+//! remembers about the user's values lives in this process; a new window
+//! that inherited Gust's own `QT_QUICK_BACKEND=software` would take it for
+//! the user's choice and hand it on to every application it opens. So a
+//! window is started through [`for_gust_window`]: the user's environment
+//! again, from which it makes and remembers its own choices, plus the
+//! instructions addressed to it.
 
 use std::ffi::{OsStr, OsString};
 use std::process::Command;
@@ -64,10 +72,23 @@ pub fn for_user_app(cmd: &mut Command) -> &mut Command {
     restore(cmd, &changed)
 }
 
+/// Give `cmd`, another Gust window, the environment the user started Gust
+/// with, so it decides its renderer and logging for itself and remembers
+/// the user's values correctly. Instructions for that window (`GUST_HANDOFF`,
+/// `GUST_SELECT`, …) are left as the caller set them.
+pub fn for_gust_window(cmd: &mut Command) -> &mut Command {
+    let changed = CHANGED.lock().unwrap_or_else(|e| e.into_inner());
+    restore_changed(cmd, &changed)
+}
+
 fn restore<'a>(cmd: &'a mut Command, changed: &[Changed]) -> &'a mut Command {
     for key in WINDOW_ONLY {
         cmd.env_remove(key);
     }
+    restore_changed(cmd, changed)
+}
+
+fn restore_changed<'a>(cmd: &'a mut Command, changed: &[Changed]) -> &'a mut Command {
     for (key, users) in changed {
         match users {
             Some(value) => cmd.env(key, value),
@@ -206,5 +227,77 @@ mod tests {
             "opengl|0|unset|yes"
         );
         std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// Gust → a detached Gust window → an application opened from it.
+    ///
+    /// The window is a script that does what a starting Gust does with
+    /// `QT_QUICK_BACKEND`: whatever it inherits it takes for the user's own
+    /// choice (and so passes on to the application); only when it inherits
+    /// nothing does it pick software for itself and withhold that from the
+    /// application. The first Gust's own "software" must therefore not reach
+    /// the window, while the instruction addressed to the window must.
+    #[test]
+    fn a_detached_window_starts_from_the_users_environment() {
+        let d = std::env::temp_dir().join(format!("gust-childenv-window-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let app = d.join("fake-app");
+        std::fs::write(
+            &app,
+            "#!/bin/sh\nprintf 'app:%s' \"${QT_QUICK_BACKEND-unset}\"\n",
+        )
+        .unwrap();
+        let window = d.join("fake-window");
+        std::fs::write(
+            &window,
+            format!(
+                "#!/bin/sh\nprintf 'window:%s|%s ' \"${{QT_QUICK_BACKEND-unset}}\" \"${{GUST_HANDOFF-unset}}\"\n\
+                 unset GUST_HANDOFF\nexec sh '{}'\n",
+                app.display()
+            ),
+        )
+        .unwrap();
+        let detach = |changed: &[Changed]| {
+            let mut cmd = Command::new("sh");
+            // The first Gust runs with its own choice in its environment.
+            cmd.arg(&window)
+                .env("QT_QUICK_BACKEND", "software")
+                .stdin(Stdio::null());
+            restore_changed(&mut cmd, changed);
+            cmd.env("GUST_HANDOFF", "/handoff");
+            String::from_utf8(cmd.output().unwrap().stdout).unwrap()
+        };
+        // The user had no backend set: neither the window nor the
+        // application it opens may see Gust's "software".
+        assert_eq!(
+            detach(&changed(&[("QT_QUICK_BACKEND", None)])),
+            "window:unset|/handoff app:unset"
+        );
+        // The user exported one: both see exactly that.
+        assert_eq!(
+            detach(&changed(&[("QT_QUICK_BACKEND", Some("opengl"))])),
+            "window:opengl|/handoff app:opengl"
+        );
+        // Without the restoration the window inherits Gust's choice and
+        // hands it on: the leak this guards against.
+        assert_eq!(detach(&[]), "window:software|/handoff app:software");
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn a_window_keeps_the_instructions_addressed_to_it() {
+        let mut cmd = Command::new("anything");
+        cmd.env("GUST_HANDOFF", "/handoff")
+            .env("GUST_READY_FILE", "/ready");
+        restore_changed(&mut cmd, &changed(&[("QT_QUICK_BACKEND", None)]));
+        assert_eq!(planned(&cmd, "QT_QUICK_BACKEND"), Some(None));
+        assert_eq!(
+            planned(&cmd, "GUST_HANDOFF"),
+            Some(Some(OsString::from("/handoff")))
+        );
+        assert_eq!(
+            planned(&cmd, "GUST_READY_FILE"),
+            Some(Some(OsString::from("/ready")))
+        );
     }
 }

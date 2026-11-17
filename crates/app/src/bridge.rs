@@ -3254,6 +3254,9 @@ impl qobject::DirModel {
                 .collect(),
             show_hidden: self.show_hidden,
         };
+        // The new window decides its renderer and logging from the user's
+        // own environment, not from what this window chose for itself.
+        gust_core::childenv::for_gust_window(&mut cmd);
         if handoff.write(&handoff_path).is_ok() {
             cmd.env("GUST_HANDOFF", &handoff_path);
         }
