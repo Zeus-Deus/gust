@@ -84,6 +84,10 @@ jobs:
         run: |
           python3 tests/grid-thumbnail.py
           QT_SCALE_FACTOR=2 python3 tests/grid-thumbnail.py
+      - name: Right-click menu in a short window (system Qt)
+        run: |
+          python3 tests/context-menu.py
+          QT_SCALE_FACTOR=2 python3 tests/context-menu.py
       - name: Cursor dependencies and recycled views (isolated Qt Python)
         run: |
           python3 -m venv "$RUNNER_TEMP/gust-view-python"
