@@ -32,7 +32,23 @@ Item {
     /// must follow the action, such as releasing a right-drag, belongs here.
     signal finished(string action)
     signal highlightMoved()
-    onCurrentChanged: if (visible) highlightMoved()
+    onCurrentChanged: {
+        if (!visible) return
+        reveal(current)
+        highlightMoved()
+    }
+
+    /// Scroll so entry `i` is inside the frame (keyboard travel in a menu
+    /// taller than the window).
+    function reveal(i) {
+        if (i < 0 || i >= items.length || !menu.scrolls) return
+        let top = padY
+        for (let k = 0; k < i; k++) top += items[k].separator ? sepH : rowH
+        const bottom = top + rowH
+        if (top - padY < scroller.contentY) scroller.contentY = top - padY
+        else if (bottom + padY > scroller.contentY + scroller.height)
+            scroller.contentY = bottom + padY - scroller.height
+    }
     signal closed()
 
     readonly property real rowH: Tokens.rowHeight
@@ -72,8 +88,13 @@ Item {
             wh = Math.max(wh, hintMetrics.advanceWidth)
         }
         menu.width = Math.ceil(Tokens.rowPaddingX * 2 + wl + (wh > 0 ? Tokens.spaceXxl * 2 + wh : 0))
-        menu.height = Math.ceil(h)
         const m = Tokens.spaceSm
+        // Never taller than the window: a long menu in a short (tiled) or
+        // zoomed window used to run off the bottom, taking its last
+        // entries (Move to Trash) out of reach. It scrolls instead.
+        menu.fullHeight = Math.ceil(h)
+        menu.height = Math.min(menu.fullHeight, Math.max(rowH + padY * 2, root.height - m * 2))
+        scroller.contentY = 0
         menu.x = Math.max(m, Math.min(px, root.width - menu.width - m))
         menu.y = py + menu.height + m <= root.height
                  ? py
@@ -158,13 +179,28 @@ Item {
         border.width: Math.max(1, Tokens.borderWidth)
         border.color: Tokens.border
         radius: Tokens.radius
+        /// The height every entry needs; `height` is capped to the window.
+        property real fullHeight: 0
+        readonly property bool scrolls: fullHeight > height + 1
 
         // Clicks inside the frame but between rows must not fall through
         // to the dismiss area.
         MouseArea { anchors.fill: parent; acceptedButtons: Qt.AllButtons }
 
+        Flickable {
+            id: scroller
+            objectName: "contextMenuScroller"
+            anchors.fill: parent
+            anchors.topMargin: Math.max(1, Tokens.borderWidth)
+            anchors.bottomMargin: Math.max(1, Tokens.borderWidth)
+            contentWidth: width
+            contentHeight: menu.fullHeight - Math.max(1, Tokens.borderWidth) * 2
+            interactive: menu.scrolls
+            boundsBehavior: Flickable.StopAtBounds
+            clip: menu.scrolls
+
         Column {
-            y: root.padY
+            y: root.padY - Math.max(1, Tokens.borderWidth)
             width: parent.width
 
             Repeater {
@@ -255,6 +291,25 @@ Item {
                     Accessible.name: modelData.label || ""
                 }
             }
+        }
+        }
+
+        // More above or below: a thin bar at the edge that has it.
+        Rectangle {
+            visible: menu.scrolls && !scroller.atYBeginning
+            anchors.top: parent.top
+            x: Tokens.spaceSm
+            width: parent.width - Tokens.spaceSm * 2
+            height: Math.max(2, Tokens.borderWidth * 2)
+            color: Tokens.accent
+        }
+        Rectangle {
+            visible: menu.scrolls && !scroller.atYEnd
+            anchors.bottom: parent.bottom
+            x: Tokens.spaceSm
+            width: parent.width - Tokens.spaceSm * 2
+            height: Math.max(2, Tokens.borderWidth * 2)
+            color: Tokens.accent
         }
     }
 }
