@@ -2444,7 +2444,9 @@ and `%i`/`%c`/`%k` are dropped — and every remaining word becomes one argv
 entry. A file called `; rm -rf ~` is one argument and nothing else.
 
 `Terminal=true` entries are launched through a terminal, because an editor
-with no terminal simply vanishes.
+with no terminal simply vanishes. That holds for a multi-file launch too, and
+the terminal is the desktop's own (`xdg-terminal-exec`) before `$TERMINAL` or
+a guess at an installed one.
 
 ### What it will not do
 
