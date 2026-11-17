@@ -1879,6 +1879,17 @@ fn open_failure_message(name: &str, has_handler: Option<bool>) -> String {
     }
 }
 
+/// Is any application set up for a file whose type, and what that type is a
+/// kind of, is `lineage`?
+///
+/// The desktop falls back from the specific type to the general: a patch
+/// (`text/x-diff`) opens in the editor associated only with `text/plain`.
+/// Looking at the exact type alone would report such a desktop as having no
+/// application, so absence is established only when the whole line is empty.
+fn association_exists(lineage: &[String], has_handler: impl Fn(&str) -> bool) -> bool {
+    lineage.iter().any(|kind| has_handler(kind))
+}
+
 /// Open through the desktop. An opener can start and still fail to open the
 /// file; that answer arrives on a worker and reaches the window as
 /// `place_done("open", …)`, so nothing here waits for it.
@@ -1898,8 +1909,13 @@ fn open_reporting(
             return;
         };
         // Still on the worker: the association lookup reads files.
-        let has_handler = qobject::DirModel::mime_of(&target)
-            .map(|mime| !gust_core::open::with::handlers_for(&mime).is_empty());
+        let has_handler = qobject::DirModel::mime_of(&target).map(|mime| {
+            let dirs = gust_core::open::with::application_dirs();
+            association_exists(
+                &gust_core::mimeparents::lineage_beside(&mime, &dirs),
+                |kind| !gust_core::open::with::handlers_for(kind).is_empty(),
+            )
+        });
         let message = open_failure_message(&name, has_handler);
         let _ = thread.queue(move |model| {
             model.place_done(
@@ -9918,7 +9934,33 @@ fn empty_reason_for(error: &str) -> String {
 
 #[cfg(test)]
 mod open_failure_message_tests {
-    use super::open_failure_message;
+    use super::{association_exists, open_failure_message};
+
+    /// A desktop whose only association is an editor for text/plain, a
+    /// `.patch` file of type text/x-diff, and a launch that failed: the
+    /// editor IS configured (through the type's parent), so the message
+    /// must not send the user to set one up.
+    #[test]
+    fn an_inherited_handler_that_failed_is_not_a_missing_app() {
+        let lineage = gust_core::mimeparents::lineage("text/x-diff", &[]);
+        let only_plain_text = |kind: &str| kind == "text/plain";
+        assert!(!only_plain_text("text/x-diff"), "no direct association");
+        let has = association_exists(&lineage, only_plain_text);
+        assert!(has);
+        let message = open_failure_message("fix.patch", Some(has));
+        assert!(
+            message.starts_with("Could not open \"fix.patch\""),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn no_app_is_claimed_only_when_the_whole_line_has_none() {
+        let lineage = gust_core::mimeparents::lineage("application/x-nothing", &[]);
+        assert!(!association_exists(&lineage, |_| false));
+        // A catch-all association for any file still counts as an app.
+        assert!(association_exists(&lineage, |kind| kind == "application/octet-stream"));
+    }
 
     #[test]
     fn a_missing_association_is_named_only_when_it_was_established() {
