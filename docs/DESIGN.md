@@ -716,7 +716,17 @@ the rollback is the part that must be right.
   after Gust claimed it, `--default off` leaves that newer choice alone
   rather than stamping an old value over it (§8: "uninstall/rollback
   preserves later edits").
-- Written atomically, and never as root.
+- **Gust is never its own predecessor.** A key that already names Gust
+  (set by `xdg-mime` or the desktop's chooser) is not claimed and not
+  recorded, so `--default off` leaves it as found and says the default was
+  not changed instead of announcing a restore.
+- Written atomically, and never as root. A `mimeapps.list` that is a
+  symbolic link (dotfile managers) is written through to its target, which
+  keeps its mode; a new file is owner-only.
+- `~/.config/<desktop>-mimeapps.list` for `$XDG_CURRENT_DESKTOP` is read
+  before `mimeapps.list`. It is never edited; when it sends folders
+  elsewhere, `--default on` names the file and says folders will still open
+  with that app.
 - The state file lives beside Gust's own config, not in the user's XDG
   defaults, so removing Gust cannot corrupt unrelated associations.
 
