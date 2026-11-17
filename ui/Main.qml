@@ -627,6 +627,14 @@ Window {
             win.qaDump("paste-image" + (message === "" ? "" : "-failed"))
             return
         }
+        if (op === "open") {
+            // The opener started, then found no application for the file:
+            // "Opened name" was premature, so take it back and say why.
+            if (hints.message === qsTr("Opened ") + name) hints.message = ""
+            win.alertText = message
+            win.qaDump("open-no-handler")
+            return
+        }
         if (!message.startsWith("ASKKEY:") && !message.startsWith("ASK:"))
             win.finishPlaceFeedback(op, name, message, owner)
         if (op === "tailnet-connect" && message.startsWith("ASKKEY:")) {

@@ -12,7 +12,8 @@ use std::path::{Path, PathBuf};
 pub mod media;
 #[path = "openwith.rs"]
 pub mod with;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
 
 /// Why an open was refused, in words a person can act on.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,12 +73,74 @@ pub fn command_for(opener: &str, path: &Path) -> Command {
     cmd
 }
 
+/// How soon after its start an opener's failure still means "nothing could
+/// open this". `xdg-open` can stay alive for as long as the application it
+/// started, so a later failure says something about that application, not
+/// about a missing handler.
+const NO_HANDLER_WINDOW: Duration = Duration::from_secs(5);
+
+/// What an opener's exit says about the open, if anything.
+///
+/// `xdg-open` exits 3 ("a required tool could not be found") or 4 ("the
+/// action failed") when no application can take the file. Other openers and
+/// other codes are not interpreted: guessing would invent errors.
+fn refusal_from_exit(opener: &str, code: Option<i32>, elapsed: Duration) -> Option<OpenRefusal> {
+    (opener == "xdg-open" && matches!(code, Some(3 | 4)) && elapsed <= NO_HANDLER_WINDOW)
+        .then_some(OpenRefusal::NoHandler)
+}
+
+/// Wait for a detached child on a worker thread, so the caller never blocks
+/// and the child never lingers as a zombie. `done` runs there with the exit
+/// code (`None` if a signal ended it) and how long the child lived.
+fn wait_detached(mut child: Child, done: impl FnOnce(Option<i32>, Duration) + Send + 'static) {
+    let started = Instant::now();
+    let _ = std::thread::Builder::new()
+        .name("gust-reap".into())
+        .spawn(move || {
+            if let Ok(status) = child.wait() {
+                done(status.code(), started.elapsed());
+            }
+        });
+}
+
+/// Reap a detached child in the background. Closing Gust still leaves the
+/// application running; only its exit status is collected.
+pub(crate) fn reap(child: Child) {
+    wait_detached(child, |_, _| {});
+}
+
+/// Reap an opener, and tell `on_refusal` if its exit says that nothing could
+/// open the file.
+fn watch_opener(
+    opener: &'static str,
+    child: Child,
+    on_refusal: impl FnOnce(OpenRefusal) + Send + 'static,
+) {
+    wait_detached(child, move |code, elapsed| {
+        if let Some(refusal) = refusal_from_exit(opener, code, elapsed) {
+            on_refusal(refusal);
+        }
+    });
+}
+
 /// Ask the desktop to open `path`.
 ///
 /// Returns the opener that accepted the request. The child is fully detached
 /// from Gust's stdio so a chatty handler cannot spam the terminal, and Gust
-/// does not wait for it.
+/// does not wait for it. An opener that starts and then finds no application
+/// is not reported here; [`open_with_desktop_reporting`] does that.
 pub fn open_with_desktop(path: &Path, mode: Option<u32>) -> Result<String, OpenRefusal> {
+    open_with_desktop_reporting(path, mode, |_| {})
+}
+
+/// [`open_with_desktop`], plus the answer that only arrives afterwards: an
+/// opener can start and still find no application for the file. `on_refusal`
+/// is then called once, on a worker thread, after this has returned `Ok`.
+pub fn open_with_desktop_reporting(
+    path: &Path,
+    mode: Option<u32>,
+    on_refusal: impl FnOnce(OpenRefusal) + Send + 'static,
+) -> Result<String, OpenRefusal> {
     if is_runnable(path, mode) {
         return Err(OpenRefusal::NeedsDeliberateRun);
     }
@@ -95,7 +158,10 @@ pub fn open_with_desktop(path: &Path, mode: Option<u32>) -> Result<String, OpenR
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         match cmd.spawn() {
-            Ok(_child) => return Ok(opener.to_string()),
+            Ok(child) => {
+                watch_opener(opener, child, on_refusal);
+                return Ok(opener.to_string());
+            }
             Err(e) => last_err = Some(e.to_string()),
         }
     }
@@ -247,7 +313,8 @@ pub fn open_terminal_here(dir: &Path) -> Result<String, OpenRefusal> {
         cmd.stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        if cmd.spawn().is_ok() {
+        if let Ok(child) = cmd.spawn() {
+            reap(child);
             return Ok("xdg-terminal-exec".into());
         }
     }
@@ -277,7 +344,8 @@ pub fn open_terminal_here(dir: &Path) -> Result<String, OpenRefusal> {
         cmd.stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        if cmd.spawn().is_ok() {
+        if let Ok(child) = cmd.spawn() {
+            reap(child);
             return Ok(term);
         }
     }
@@ -317,7 +385,8 @@ pub fn run_in_terminal(program: &str, args: &[&str]) -> Result<String, OpenRefus
         cmd.stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        if cmd.spawn().is_ok() {
+        if let Ok(child) = cmd.spawn() {
+            reap(child);
             return Ok(term);
         }
     }
@@ -465,6 +534,94 @@ mod tests {
         assert_eq!(args[0], "open");
         assert_eq!(args[1], "--", "a leading dash must not become a flag");
         assert_eq!(args[2], p.as_os_str());
+    }
+
+    /// A fake opener: a script in a temp dir, run by `sh` so the test never
+    /// executes a file it has just written (no ETXTBSY) and never starts a
+    /// real application.
+    fn fake_opener(tag: &str, body: &str) -> (PathBuf, Child) {
+        let d = std::env::temp_dir().join(format!("gust-opener-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let script = d.join("xdg-open");
+        std::fs::write(&script, format!("#!/bin/sh\n{body}\n")).unwrap();
+        let child = Command::new("sh")
+            .arg(&script)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        (d, child)
+    }
+
+    #[test]
+    fn an_opener_that_finds_no_application_reports_no_handler() {
+        for code in [3, 4] {
+            let (d, child) = fake_opener(&format!("none-{code}"), &format!("exit {code}"));
+            let (tx, rx) = std::sync::mpsc::channel();
+            watch_opener("xdg-open", child, move |refusal| {
+                let _ = tx.send(refusal);
+            });
+            assert_eq!(
+                rx.recv_timeout(Duration::from_secs(10)).ok(),
+                Some(OpenRefusal::NoHandler),
+                "xdg-open exit {code} means nothing could open the file"
+            );
+            std::fs::remove_dir_all(&d).ok();
+        }
+    }
+
+    #[test]
+    fn an_opener_that_succeeds_reports_nothing() {
+        let (d, child) = fake_opener("fine", "exit 0");
+        let (tx, rx) = std::sync::mpsc::channel::<OpenRefusal>();
+        watch_opener("xdg-open", child, move |refusal| {
+            let _ = tx.send(refusal);
+        });
+        // The sender is dropped unused once the opener has been reaped.
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(10)),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
+        );
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn only_a_prompt_xdg_open_failure_means_no_handler() {
+        let soon = Duration::from_millis(200);
+        assert_eq!(
+            refusal_from_exit("xdg-open", Some(3), soon),
+            Some(OpenRefusal::NoHandler)
+        );
+        assert_eq!(
+            refusal_from_exit("xdg-open", Some(4), soon),
+            Some(OpenRefusal::NoHandler)
+        );
+        for code in [Some(0), Some(1), Some(2), None] {
+            assert_eq!(refusal_from_exit("xdg-open", code, soon), None, "{code:?}");
+        }
+        // xdg-open may live as long as the application: a failure an hour in
+        // is that application ending badly, not a missing handler.
+        assert_eq!(
+            refusal_from_exit("xdg-open", Some(4), Duration::from_secs(3600)),
+            None
+        );
+        // Other openers' codes mean other things.
+        assert_eq!(refusal_from_exit("gio", Some(4), soon), None);
+    }
+
+    #[test]
+    fn a_detached_child_is_reaped_not_left_defunct() {
+        let (d, child) = fake_opener("reap", "exit 0");
+        let proc_entry = PathBuf::from(format!("/proc/{}", child.id()));
+        reap(child);
+        // A zombie keeps its /proc entry until its parent waits for it.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while proc_entry.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!proc_entry.exists(), "the child was never waited for");
+        std::fs::remove_dir_all(&d).ok();
     }
 
     #[test]

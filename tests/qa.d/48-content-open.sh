@@ -11,6 +11,8 @@ done
 cat > "$d48/.bin/xdg-open" <<'STUB'
 #!/bin/sh
 printf '%s\n' "$@" >> "$(dirname "$0")/opened"
+# Like the real one when no application can take the file.
+case "$1" in *.nohandler) exit 4 ;; esac
 STUB
 cat > "$d48/.bin/mpv" <<'STUB'
 #!/usr/bin/python3
@@ -38,6 +40,18 @@ for name in IMG_0001.JPG photo.HEIF clip.MOV memo.M4A report.PDF notes.txt; do
   fi
   expect "opening $name needs no Run confirmation" "d['confirmOpen']" "False"
 done
+
+# The opener starts, then finds no application: that must be said, not
+# left looking like a successful open.
+printf 'content fixture\n' > "$d48/orphan.nohandler"
+sleep 1
+key Escape; typ "orphan.nohandler"
+expect "cursor on orphan.nohandler" "d['model']['cursor_name']" "orphan.nohandler"
+key Return
+wait_for "'No app is set up' in d['alertText']" "True" 20 >/dev/null
+expect_contains "a file no application opens says so" "d['alertText']" 'No app is set up to open "orphan.nohandler"'
+shot 48-no-application
+key Escape
 
 key Escape; typ "IMG_0001.JPG"
 palette_run "Run program"

@@ -345,7 +345,8 @@ pub fn launch(handler: &Handler, path: &Path) -> Result<String, super::OpenRefus
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
-        .map(|_| handler.name.clone())
+        .map(super::reap)
+        .map(|()| handler.name.clone())
         .map_err(|e| super::OpenRefusal::Failed(e.to_string()))
 }
 
@@ -414,8 +415,9 @@ pub fn launch_many(handler: &Handler, paths: &[PathBuf]) -> MultiOpen {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
+            .map(super::reap)
         {
-            Ok(_) => MultiOpen::Together {
+            Ok(()) => MultiOpen::Together {
                 app: handler.name.clone(),
                 count: paths.len(),
             },

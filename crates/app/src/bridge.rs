@@ -1864,6 +1864,35 @@ fn human_time(mtime: i64) -> String {
     gust_core::properties::relative_time(mtime, now, offset)
 }
 
+/// Open through the desktop. An opener can start and still find no
+/// application; that answer arrives on a worker and reaches the window as
+/// `place_done("open", …)`, so nothing here waits for it.
+fn open_reporting(
+    thread: Option<cxx_qt::CxxQtThread<qobject::DirModel>>,
+    path: &Path,
+    mode: Option<u32>,
+) -> Result<String, gust_core::open::OpenRefusal> {
+    let name = path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    gust_core::open::open_with_desktop_reporting(path, mode, move |_no_handler| {
+        let Some(thread) = thread else {
+            return;
+        };
+        let message =
+            format!("No app is set up to open \"{name}\". Right-click → Open with… to choose one.");
+        let _ = thread.queue(move |model| {
+            model.place_done(
+                QString::from("open"),
+                QString::from(&name),
+                QString::from(&message),
+            );
+        });
+    })
+}
+
 impl qobject::DirModel {
     /// The Qt thread handle, or None before the object is fully constructed.
     fn qt_thread_handle(&self) -> Option<cxx_qt::CxxQtThread<qobject::DirModel>> {
@@ -2623,7 +2652,7 @@ impl qobject::DirModel {
         if gust_core::mime::needs_trusted_launch(&name, mode) {
             return QString::from("Programs are not started from here.");
         }
-        match gust_core::open::open_with_desktop(&p, mode) {
+        match open_reporting(self.qt_thread_handle(), &p, mode) {
             Ok(_) => QString::default(),
             Err(e) => QString::from(&e.to_string()),
         }
@@ -3325,7 +3354,7 @@ impl qobject::DirModel {
                         use std::os::unix::fs::PermissionsExt;
                         m.permissions().mode()
                     });
-                    if gust_core::open::open_with_desktop(p, mode).is_ok() {
+                    if open_reporting(self.as_ref().qt_thread_handle(), p, mode).is_ok() {
                         opened += 1;
                     }
                 }
@@ -6362,7 +6391,7 @@ impl qobject::DirModel {
                             })
                             .map_err(|error| error.to_string())
                     } else {
-                        gust_core::open::open_with_desktop(&path, mode)
+                        open_reporting(Some(thread.clone()), &path, mode)
                             .map(|_| ())
                             .map_err(|error| error.to_string())
                     };
@@ -6381,7 +6410,7 @@ impl qobject::DirModel {
         }
         // Non-media keeps its desktop handler; explicit Open with… also
         // remains available when a different media application is wanted.
-        match gust_core::open::open_with_desktop(path, mode) {
+        match open_reporting(self.as_ref().qt_thread_handle(), path, mode) {
             Ok(_opener) => QString::from("file"),
             Err(e) => QString::from(&format!("blocked:{e}")),
         }
