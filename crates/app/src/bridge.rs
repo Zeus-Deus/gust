@@ -1864,8 +1864,23 @@ fn human_time(mtime: i64) -> String {
     gust_core::properties::relative_time(mtime, now, offset)
 }
 
-/// Open through the desktop. An opener can start and still find no
-/// application; that answer arrives on a worker and reaches the window as
+/// What to tell the user when the desktop's opener reported failure.
+///
+/// The opener does not say why. Only when Gust itself found no application
+/// for the file's type (`Some(false)`) is the missing association named; an
+/// associated application that failed to start, or a type that could not be
+/// determined, is a plain "could not open" with the way to try another app.
+fn open_failure_message(name: &str, has_handler: Option<bool>) -> String {
+    match has_handler {
+        Some(false) => {
+            format!("No app is set up to open \"{name}\". Right-click → Open with… to choose one.")
+        }
+        _ => format!("Could not open \"{name}\". Right-click → Open with… to try another app."),
+    }
+}
+
+/// Open through the desktop. An opener can start and still fail to open the
+/// file; that answer arrives on a worker and reaches the window as
 /// `place_done("open", …)`, so nothing here waits for it.
 fn open_reporting(
     thread: Option<cxx_qt::CxxQtThread<qobject::DirModel>>,
@@ -1877,12 +1892,15 @@ fn open_reporting(
         .unwrap_or_default()
         .to_string_lossy()
         .into_owned();
-    gust_core::open::open_with_desktop_reporting(path, mode, move |_no_handler| {
+    let target = path.to_path_buf();
+    gust_core::open::open_with_desktop_reporting(path, mode, move |_failed| {
         let Some(thread) = thread else {
             return;
         };
-        let message =
-            format!("No app is set up to open \"{name}\". Right-click → Open with… to choose one.");
+        // Still on the worker: the association lookup reads files.
+        let has_handler = qobject::DirModel::mime_of(&target)
+            .map(|mime| !gust_core::open::with::handlers_for(&mime).is_empty());
+        let message = open_failure_message(&name, has_handler);
         let _ = thread.queue(move |model| {
             model.place_done(
                 QString::from("open"),
@@ -9896,6 +9914,28 @@ fn empty_reason_for(error: &str) -> String {
         "No such file or directory" => "This folder no longer exists".into(),
         "Permission denied" => "You don't have permission to open this folder".into(),
         _ => format!("Can't open this folder: {e}"),
+    }
+}
+
+#[cfg(test)]
+mod open_failure_message_tests {
+    use super::open_failure_message;
+
+    #[test]
+    fn a_missing_association_is_named_only_when_it_was_established() {
+        let none = open_failure_message("a.xyz", Some(false));
+        assert!(
+            none.starts_with("No app is set up to open \"a.xyz\""),
+            "{none}"
+        );
+        // An associated app that failed to start, or an unknown type, is not
+        // blamed on a missing association.
+        for has in [Some(true), None] {
+            let failed = open_failure_message("a.pdf", has);
+            assert!(failed.starts_with("Could not open \"a.pdf\""), "{failed}");
+            assert!(!failed.contains("No app is set up"), "{failed}");
+            assert!(failed.contains("Open with…"), "{failed}");
+        }
     }
 }
 

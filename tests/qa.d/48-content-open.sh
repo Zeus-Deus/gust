@@ -48,8 +48,10 @@ sleep 1
 key Escape; typ "orphan.nohandler"
 expect "cursor on orphan.nohandler" "d['model']['cursor_name']" "orphan.nohandler"
 key Return
-wait_for "'No app is set up' in d['alertText']" "True" 20 >/dev/null
-expect_contains "a file no application opens says so" "d['alertText']" 'No app is set up to open "orphan.nohandler"'
+wait_for "'orphan.nohandler' in d['alertText']" "True" 20 >/dev/null
+# "No app is set up to open …" when the type has no association, "Could not
+# open …" when it has one that failed: either way the file is named.
+expect_contains "a file the desktop could not open says so" "d['alertText']" 'open "orphan.nohandler"'
 shot 48-no-application
 key Escape
 

@@ -628,7 +628,7 @@ Window {
             return
         }
         if (op === "open") {
-            // The opener started, then found no application for the file:
+            // The opener started, then reported that it could not open the file:
             // "Opened name" was premature, so take it back and say why.
             if (hints.message === qsTr("Opened ") + name) hints.message = ""
             win.alertText = message
