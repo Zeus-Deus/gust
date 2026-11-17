@@ -329,8 +329,10 @@ fn main() {
     // Folder arguments are OS bytes, not necessarily Unicode. Checking a
     // CLI flag must not panic before byte-preserving folder admission.
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
-    if let Some(pos) = args.iter().position(|a| a == "--default") {
-        let mode = match args.get(pos + 1) {
+    // After `--` everything is a path, even one spelled like an option.
+    let flags = cli::flags(&args);
+    if let Some(pos) = flags.iter().position(|a| a == "--default") {
+        let mode = match flags.get(pos + 1) {
             None => "on",
             Some(value) => match value.to_str() {
                 Some(mode) => mode,
@@ -343,8 +345,8 @@ fn main() {
         std::process::exit(run_default(mode));
     }
     // Other apps' Open/Save dialogs through Gust (opt-in, reversible).
-    if let Some(pos) = args.iter().position(|a| a == "--file-dialogs") {
-        let mode = match args.get(pos + 1) {
+    if let Some(pos) = flags.iter().position(|a| a == "--file-dialogs") {
+        let mode = match flags.get(pos + 1) {
             None => "on",
             Some(value) => match value.to_str() {
                 Some(mode) => mode,
@@ -357,8 +359,8 @@ fn main() {
         std::process::exit(run_file_dialogs(mode));
     }
     // Omarchy: make Super+Shift+F open Gust (opt-in, reversible).
-    if let Some(pos) = args.iter().position(|a| a == "--bind-keys") {
-        let mode = match args.get(pos + 1) {
+    if let Some(pos) = flags.iter().position(|a| a == "--bind-keys") {
+        let mode = match flags.get(pos + 1) {
             None => "on",
             Some(value) => match value.to_str() {
                 Some(mode) => mode,
@@ -395,8 +397,9 @@ fn main() {
     if args.first().map(OsString::as_os_str) == Some(OsStr::new("--clip-serve")) {
         std::process::exit(gust_core::clipboard::serve_from_stdin());
     }
-    if args.iter().any(|a| a == "--help" || a == "-h") {
-        println!("gust [PATH]              open a folder");
+    if flags.iter().any(|a| a == "--help" || a == "-h") {
+        println!("gust [PATH]              open a folder, or a file in its folder");
+        println!("gust -- PATH             the same, for a path that starts with a dash");
         println!("gust --default [on|off]  set or restore the default file manager");
         println!("gust --bind-keys [on|off] make Super+Shift+F open gust (Omarchy)");
         println!("gust --file-dialogs [on|off] answer other apps' Open/Save dialogs");
