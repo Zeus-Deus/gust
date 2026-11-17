@@ -36,13 +36,16 @@ QtObject {
     readonly property int fontCaption: 10
     readonly property int fontSmall: 11
     readonly property int fontBody: 12
+    readonly property int fontSubtitle: 13
+    readonly property int fontHeading: 16
+    readonly property bool nerdGlyphs: true
     readonly property int radius: 0
     readonly property int animFast: 120
     readonly property string fontFamily: "monospace"
     function withAlpha(c, a) { return Qt.rgba(c.r, c.g, c.b, a) }
 }
 ''')
-    for name in ["Sidebar.qml", "DragTarget.qml", "WheelScroll.qml"]:
+    for name in ["Sidebar.qml", "Glyph.qml", "DragTarget.qml", "WheelScroll.qml"]:
         shutil.copyfile(source / "ui" / name, output / name)
     shutil.copyfile(source / "ui/tests/tst_sidebar.qml", output / "tst_sidebar.qml")
     (output / "home").mkdir()

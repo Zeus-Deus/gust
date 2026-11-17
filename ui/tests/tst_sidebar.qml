@@ -57,6 +57,23 @@ TestCase {
         compare(item.color, Tokens.withAlpha(Tokens.accent, 0.18))
     }
 
+    function test_every_row_has_its_icon_and_its_label_starts_after_it() {
+        const want = {"place:0": "home", "place:2": "downloads", "recent": "recent", "trash": "trash",
+                      "bookmark:0": "bookmark", "device:0": "drive", "remote:0": "computer"}
+        for (const key in want) {
+            const item = row(key)
+            verify(item !== null, key)
+            compare(item.icon, want[key])
+            verify(item.textInset > Tokens.rowPaddingX + Tokens.fontSubtitle, key + " label overlaps its icon")
+        }
+        // A cloud place and a phone are told apart at a glance.
+        sidebar.remotePlaces = [{name: "drive", kind: "cloud", path: "/run/gust/cloud", lost: false}]
+        sidebar.devices = [{name: "phone", label: "Phone", state: "ready", path: "", phone: true}]
+        waitForRendering(sidebar)
+        compare(row("remote:0").icon, "cloud")
+        compare(row("device:0").icon, "phone")
+    }
+
     function test_places_follow_location_without_pointer_hover() {
         selected("place:0")
         const point = sidebar.placePoints().Documents
