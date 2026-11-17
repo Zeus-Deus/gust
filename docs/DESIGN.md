@@ -2427,7 +2427,11 @@ The handler list is read from the freedesktop database directly:
    desktop entries that registered for it — a machine-readable index with
    no prose in it.
 2. `mimeapps.list` carries the user's own additions and removals, which
-   take precedence over the system cache.
+   take precedence over the system cache. The default is the first installed,
+   not-removed id under `[Default Applications]` in the mime-apps spec's
+   lookup order: `<desktop>-mimeapps.list` then `mimeapps.list` in
+   `$XDG_CONFIG_HOME`, `$XDG_CONFIG_DIRS`, then the `applications`
+   directories. `[Added Associations]` never names a default.
 3. Each candidate's `.desktop` file supplies the name to show and the
    command to run.
 
