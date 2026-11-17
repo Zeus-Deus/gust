@@ -73,20 +73,26 @@ pub fn command_for(opener: &str, path: &Path) -> Command {
     cmd
 }
 
-/// How soon after its start an opener's failure still means "nothing could
-/// open this". `xdg-open` can stay alive for as long as the application it
+/// How soon after its start an opener's failure still means "the open did
+/// not happen". `xdg-open` can stay alive for as long as the application it
 /// started, so a later failure says something about that application, not
-/// about a missing handler.
-const NO_HANDLER_WINDOW: Duration = Duration::from_secs(5);
+/// about the open.
+const OPEN_FAILED_WINDOW: Duration = Duration::from_secs(5);
+
+/// What `on_refusal` is told when the opener itself reports failure.
+pub const OPENER_REPORTED_FAILURE: &str = "the desktop could not open it";
 
 /// What an opener's exit says about the open, if anything.
 ///
 /// `xdg-open` exits 3 ("a required tool could not be found") or 4 ("the
-/// action failed") when no application can take the file. Other openers and
-/// other codes are not interpreted: guessing would invent errors.
+/// action failed") when the open did not happen. Neither says WHY: 4 is also
+/// what an installed, associated application that fails to start produces.
+/// So this is a plain failure, never [`OpenRefusal::NoHandler`]; a caller
+/// that wants to blame a missing association has to check for one. Other
+/// openers and other codes are not interpreted: guessing would invent errors.
 fn refusal_from_exit(opener: &str, code: Option<i32>, elapsed: Duration) -> Option<OpenRefusal> {
-    (opener == "xdg-open" && matches!(code, Some(3 | 4)) && elapsed <= NO_HANDLER_WINDOW)
-        .then_some(OpenRefusal::NoHandler)
+    (opener == "xdg-open" && matches!(code, Some(3 | 4)) && elapsed <= OPEN_FAILED_WINDOW)
+        .then(|| OpenRefusal::Failed(OPENER_REPORTED_FAILURE.into()))
 }
 
 /// Wait for a detached child on a worker thread, so the caller never blocks
@@ -109,8 +115,8 @@ pub(crate) fn reap(child: Child) {
     wait_detached(child, |_, _| {});
 }
 
-/// Reap an opener, and tell `on_refusal` if its exit says that nothing could
-/// open the file.
+/// Reap an opener, and tell `on_refusal` if its exit says the open did not
+/// happen.
 fn watch_opener(
     opener: &'static str,
     child: Child,
@@ -134,8 +140,10 @@ pub fn open_with_desktop(path: &Path, mode: Option<u32>) -> Result<String, OpenR
 }
 
 /// [`open_with_desktop`], plus the answer that only arrives afterwards: an
-/// opener can start and still find no application for the file. `on_refusal`
-/// is then called once, on a worker thread, after this has returned `Ok`.
+/// opener can start and still fail to open the file. `on_refusal` is then
+/// called once, on a worker thread, after this has returned `Ok`, with a
+/// [`OpenRefusal::Failed`]: the opener does not say whether an application
+/// was missing or merely failed to start.
 pub fn open_with_desktop_reporting(
     path: &Path,
     mode: Option<u32>,
@@ -555,7 +563,7 @@ mod tests {
     }
 
     #[test]
-    fn an_opener_that_finds_no_application_reports_no_handler() {
+    fn an_opener_that_reports_failure_is_a_failure_not_a_missing_app() {
         for code in [3, 4] {
             let (d, child) = fake_opener(&format!("none-{code}"), &format!("exit {code}"));
             let (tx, rx) = std::sync::mpsc::channel();
@@ -564,8 +572,8 @@ mod tests {
             });
             assert_eq!(
                 rx.recv_timeout(Duration::from_secs(10)).ok(),
-                Some(OpenRefusal::NoHandler),
-                "xdg-open exit {code} means nothing could open the file"
+                Some(OpenRefusal::Failed(OPENER_REPORTED_FAILURE.into())),
+                "xdg-open exit {code} means the open failed, not why"
             );
             std::fs::remove_dir_all(&d).ok();
         }
@@ -587,21 +595,21 @@ mod tests {
     }
 
     #[test]
-    fn only_a_prompt_xdg_open_failure_means_no_handler() {
+    fn only_a_prompt_xdg_open_failure_is_reported() {
         let soon = Duration::from_millis(200);
         assert_eq!(
             refusal_from_exit("xdg-open", Some(3), soon),
-            Some(OpenRefusal::NoHandler)
+            Some(OpenRefusal::Failed(OPENER_REPORTED_FAILURE.into()))
         );
         assert_eq!(
             refusal_from_exit("xdg-open", Some(4), soon),
-            Some(OpenRefusal::NoHandler)
+            Some(OpenRefusal::Failed(OPENER_REPORTED_FAILURE.into()))
         );
         for code in [Some(0), Some(1), Some(2), None] {
             assert_eq!(refusal_from_exit("xdg-open", code, soon), None, "{code:?}");
         }
         // xdg-open may live as long as the application: a failure an hour in
-        // is that application ending badly, not a missing handler.
+        // is that application ending badly, not a failed open.
         assert_eq!(
             refusal_from_exit("xdg-open", Some(4), Duration::from_secs(3600)),
             None
