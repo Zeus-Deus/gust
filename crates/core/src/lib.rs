@@ -24,6 +24,7 @@ pub mod lister;
 pub mod location;
 pub mod markdown;
 pub mod mime;
+pub mod mimeparents;
 pub mod mount_table;
 pub mod omarchy_keys;
 pub mod open;
