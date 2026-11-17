@@ -291,7 +291,7 @@ pub fn open_terminal_here(dir: &Path) -> Result<String, OpenRefusal> {
 /// constant and its arguments are passed as separate argv entries: no shell is
 /// involved, so nothing here can be turned into command injection, and no
 /// secret ever passes through Gust.
-pub fn run_in_terminal(program: &str, args: &[&str]) -> Result<String, OpenRefusal> {
+pub fn run_in_terminal(program: &str, args: &[impl AsRef<OsStr>]) -> Result<String, OpenRefusal> {
     if which(program).is_none() {
         return Err(OpenRefusal::NoHandler);
     }
@@ -365,7 +365,7 @@ mod tests {
         // slice of arguments, so there is no string for a shell to reparse.
         // This test fails to compile if that signature is ever loosened to
         // take one command line.
-        fn takes_argv(f: fn(&str, &[&str]) -> Result<String, OpenRefusal>) -> bool {
+        fn takes_argv<'a>(f: fn(&str, &[&'a str]) -> Result<String, OpenRefusal>) -> bool {
             let _ = f;
             true
         }
