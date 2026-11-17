@@ -36,6 +36,17 @@ fn is_gust(value: Option<&str>) -> bool {
     value.and_then(first_app) == Some(GUST_DESKTOP)
 }
 
+/// Is the value still what Gust wrote: Gust and nothing else? `gust.desktop`
+/// and GIO's `gust.desktop;` are; `gust.desktop;thunar.desktop;` is not,
+/// because someone has since added their own fallback to the list.
+fn is_only_gust(value: &str) -> bool {
+    let mut apps = value
+        .split(';')
+        .map(str::trim)
+        .filter(|app| !app.is_empty());
+    apps.next() == Some(GUST_DESKTOP) && apps.next().is_none()
+}
+
 /// What was set before Gust claimed these keys.
 ///
 /// `None` for a key means it had no association at all, which rollback must
@@ -259,7 +270,12 @@ pub fn plan_release(current: &MimeApps, prev: &PreviousDefaults) -> (MimeApps, V
             Some(now) if is_gust(Some(now)) && is_gust(old.as_deref()) => {
                 skipped.push(format!("{key} was already gust before it was claimed"));
             }
-            Some(now) if is_gust(Some(now)) => next.set(key, old.as_deref()),
+            Some(now) if is_only_gust(now) => next.set(key, old.as_deref()),
+            // Gust still leads, but the list was edited since: putting the
+            // old value back would throw away the fallbacks added to it.
+            Some(now) if is_gust(Some(now)) => {
+                skipped.push(format!("{key} was changed to {now} after it was claimed"));
+            }
             Some(other) => skipped.push(format!("{key} is now {other}")),
             None => {
                 // Nothing is set: another tool cleared it. Restoring our
@@ -583,6 +599,49 @@ x-scheme-handler/mailto=HEY.desktop
             restored.get("inode/directory"),
             None,
             "rollback invented an association that never existed"
+        );
+    }
+
+    #[test]
+    fn a_single_gust_entry_is_restored_however_it_is_spelled() {
+        for spelling in ["gust.desktop", "gust.desktop;", " gust.desktop ; "] {
+            let before =
+                MimeApps::parse("[Default Applications]\ninode/directory=nautilus.desktop\n");
+            let (claimed, prev) = plan_claim(&before);
+            let mut now = claimed.clone();
+            now.set("inode/directory", Some(spelling));
+            let (restored, skipped) = plan_release(&now, &prev);
+            assert_eq!(
+                restored.get("inode/directory").as_deref(),
+                Some("nautilus.desktop"),
+                "{spelling:?}"
+            );
+            assert!(
+                !skipped.iter().any(|s| s.starts_with("inode/directory")),
+                "{spelling:?}: {skipped:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn fallbacks_added_after_the_claim_survive_turning_it_off() {
+        // §8: rollback preserves later edits. Gust still leads the list,
+        // but the user has since added their own fallback to it.
+        let before = MimeApps::parse("[Default Applications]\ninode/directory=nautilus.desktop\n");
+        let (claimed, prev) = plan_claim(&before);
+        let mut later = claimed.clone();
+        later.set("inode/directory", Some("gust.desktop;thunar.desktop;"));
+        let (restored, skipped) = plan_release(&later, &prev);
+        assert_eq!(
+            restored.get("inode/directory").as_deref(),
+            Some("gust.desktop;thunar.desktop;"),
+            "the edited list must be left exactly as it is"
+        );
+        assert!(
+            skipped
+                .iter()
+                .any(|s| s.starts_with("inode/directory") && s.contains("thunar.desktop")),
+            "it must be reported as left alone: {skipped:?}"
         );
     }
 
