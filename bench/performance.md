@@ -143,3 +143,29 @@ cargo run --release -p gust-thumbs --example performance -- \
 Compare alternating release builds on the same fixture, preserve the raw output
 locally, and verify ordering before interpreting the timing. The listing
 example prints phase timings and an order checksum, without filenames.
+
+## Content search in plain text
+
+On a generated 32-file corpus, the median release time for the entire
+`grep_with_report` walk fell from 129.7 ms to 65.3 ms. Nine alternating-order
+pairs on the same warm tmpfs fixture all read 33,554,848 bytes and found all
+32 files. The ranges were 125.1–151.4 ms and 62.0–87.6 ms. This measures the
+Rust backend including file I/O, matching and snippet creation. The native
+search journey separately checked activation, deferred rename and byte-exact
+undo. The walk continues to report its existing partial-coverage status.
+
+To repeat, run the example on the same directory with both release builds.
+The query matches the final line in every file.
+
+```sh
+fixture=$(mktemp -d)
+python3 - "$fixture" <<'PY'
+from pathlib import Path
+import sys
+root = Path(sys.argv[1])
+line = b"Project notes about searching ordinary documentation and code.\n"
+for index in range(32):
+    (root / f"{index}.txt").write_bytes(line * 16644 + b"Find NEEDLE here\n")
+PY
+cargo run --locked --release -p gust-core --example bench_content_search -- "$fixture" needle
+```

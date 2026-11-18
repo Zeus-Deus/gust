@@ -49,6 +49,17 @@ fn unicode_simple_lower_matching_preserves_counts_and_one_based_lines() {
 }
 
 #[test]
+fn ascii_and_unicode_lines_keep_the_same_case_and_line_semantics() {
+    let mixed = "Kettle\nKETTLE\nunrelated\n";
+    for query in ["kettle", "Kettle"] {
+        let hit = matched(mixed.as_bytes(), query);
+        assert_eq!((hit.lines, hit.first_line), (2, 1));
+        assert_eq!(hit.snippet.unwrap().text, "Kettle");
+        assert!(!hit.ascii_fallback);
+    }
+}
+
+#[test]
 fn invalid_utf8_keeps_ascii_byte_behavior_instead_of_lossy_unicode_matching() {
     let bytes = b"CAF\xc3\x89 Needle \xff\n";
     let ascii = matched(bytes, "needle");

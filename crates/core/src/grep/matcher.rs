@@ -111,12 +111,15 @@ impl Matcher {
             truncated,
             ascii_fallback: valid.is_none(),
         };
+        let ascii_query = self.bytes.is_ascii();
         let mut offset = 0;
         for (index, line) in data.split(|b| *b == b'\n').enumerate() {
             if cancel.is_cancelled() {
                 return Err(ContentMatchError::Cancelled);
             }
-            let found = if valid.is_some() {
+            // Simple Unicode lowercase agrees with ASCII lowercase when both
+            // operands are ASCII. Mixed text still needs Unicode source offsets.
+            let found = if valid.is_some() && !(ascii_query && line.is_ascii()) {
                 self.unicode(std::str::from_utf8(line).unwrap(), cancel)?
             } else {
                 self.ascii(line, cancel)?
