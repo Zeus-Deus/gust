@@ -586,7 +586,7 @@ Window {
         prompt.secret = false
         prompt.mode = "share-user"
         prompt.openWith(qsTr("Username for that share"), "",
-                        qsTr("Leave empty if the share needs no account"))
+                        qsTr("Leave blank to try system credentials first, then guest access."))
         win.qaDump("share-prompt")
     }
 
@@ -4054,6 +4054,7 @@ Window {
         anchors.fill: parent
         property string mode: ""
         allowEmpty: mode === "share-user"
+        emptyAcceptText: mode === "share-user" ? qsTr("Connect automatically") : ""
         onVisibleChanged: win.qaDump("prompt")
         onClosed: { if (connectPanel.open) connectPanel.refocus(); else win.focusList() }
         onAccepted: (text) => {

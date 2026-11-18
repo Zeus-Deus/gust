@@ -56,6 +56,7 @@ Item {
         anchors.fill: parent
         property string mode: ""
         allowEmpty: mode === "share-user"
+        emptyAcceptText: mode === "share-user" ? "Connect automatically" : ""
         onAccepted: (text) => {
             submissions += 1
             submitted = text
@@ -86,10 +87,10 @@ Item {
             assert flow.property("submitted") == "smb://nas/public"
             key_event(key, repeat=True)
             key_event(key, repeat=True)
-            assert flow.property("submissions") == 1, f"{key} repeat selected Guest"
+            assert flow.property("submissions") == 1, f"{key} repeat submitted automatic login"
             key_event(key, QEvent.KeyRelease)
 
-        def check_guest():
+        def check_automatic_login():
             assert flow.property("submissions") == 2
             assert flow.property("submitted") == ""
 
@@ -97,15 +98,21 @@ Item {
             enter_username_step(key)
             key_event(key)
             key_event(key, QEvent.KeyRelease)
-            check_guest()
+            check_automatic_login()
 
         enter_username_step(Qt.Key_Return)
-        ok = next(item for item in flow.findChildren(QQuickItem) if item.property("text") == "OK")
-        center = ok.mapToScene(QPointF(ok.width() / 2, ok.height() / 2))
+        label = next(
+            item for item in flow.findChildren(QQuickItem)
+            if item.property("text") == "Connect automatically"
+        )
+        center = label.mapToScene(QPointF(label.width() / 2, label.height() / 2))
         QTest.mouseClick(view, Qt.LeftButton, Qt.NoModifier, center.toPoint())
-        check_guest()
+        check_automatic_login()
         view.close()
-    print("PASS: held Return and keypad Enter stay on Username; fresh keys and OK choose Guest")
+    print(
+        "PASS: held Return and keypad Enter stay on Username. "
+        "Fresh keys and Connect automatically submit the blank username."
+    )
 
 
 if __name__ == "__main__":

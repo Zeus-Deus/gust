@@ -15,6 +15,7 @@ FocusScope {
     property string hint: ""
     property string errorText: ""
     property bool allowEmpty: false
+    property string emptyAcceptText: ""
     // The row this prompt refers to; -1 when it is not about a row.
     property int targetRow: -1
 
@@ -208,7 +209,8 @@ FocusScope {
                         textFormat: Text.PlainText
                         id: okLabel
                         anchors.centerIn: parent
-                        text: qsTr("OK")
+                        text: root.allowEmpty && root.emptyAcceptText !== "" && field.text.trim() === ""
+                              ? root.emptyAcceptText : qsTr("OK")
                         color: Tokens.foregroundBright
                         font.family: Tokens.fontFamily
                         font.pixelSize: Tokens.fontBody

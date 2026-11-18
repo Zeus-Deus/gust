@@ -337,6 +337,8 @@ fn mount_command(share: &Share, password_empty: bool) -> Command {
         && share.domain.is_none()
         && password_empty
     {
+        // This answers an authentication prompt. GVfs may have already
+        // authenticated with session or keyring credentials before asking.
         command.arg("--anonymous");
     }
     command.arg(share.uri());
@@ -386,7 +388,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn guest_smb_mounts_explicitly_as_anonymous() {
+    fn automatic_smb_login_requests_guest_fallback() {
         let mut smb = parse_address("//nas/public", ShareKind::Smb).unwrap();
         let is_anonymous = |share: &Share, password_empty| {
             mount_command(share, password_empty)

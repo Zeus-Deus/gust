@@ -6,6 +6,10 @@
 //!
 //!   ./tests/smb-fixture.sh start
 //!   cargo test -p gust-remote --test smb_live -- --test-threads=1
+//!
+//! Set GUST_SMB_REQUIRED=1 and GUST_SMB_KEYRING_REQUIRED=1 to require the
+//! saved-login case. It needs dbus-run-session, gnome-keyring-daemon and
+//! secret-tool in addition to the Samba fixture.
 
 use gust_remote::shares::*;
 use std::time::Duration;
@@ -105,6 +109,121 @@ fn mount_for_test(share: &Share, pw: String) -> std::path::PathBuf {
     };
     assert!(wait_mounted(&mp), "mount point never became usable: {mp:?}");
     mp
+}
+
+/// The fixture requires a named account. Start a fresh session so saved
+/// credentials can be exercised without consulting the user's desktop bus
+/// or keyring. The password is stored in the temporary session collection.
+#[test]
+fn automatic_login_uses_the_saved_smb_account() {
+    use std::io::Write;
+    use std::os::unix::fs::DirBuilderExt;
+    use std::process::{Command, Stdio};
+
+    need_fixture!();
+    const CHILD: &str = "GUST_SMB_SAVED_LOGIN_CHILD";
+    let named = test_share();
+    if std::env::var_os(CHILD).is_some() {
+        let mut store = Command::new("timeout")
+            .args([
+                "10s",
+                "secret-tool",
+                "store",
+                "--label=Gust disposable SMB fixture",
+                "--collection=/org/freedesktop/secrets/collection/session",
+                "server",
+                &named.server,
+                "protocol",
+                "smb",
+                "user",
+                named.user.as_deref().unwrap(),
+                "domain",
+                named.domain.as_deref().unwrap(),
+                "xdg:schema",
+                "org.gnome.keyring.NetworkPassword",
+            ])
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        store
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(fixture_password().unwrap().as_bytes())
+            .unwrap();
+        assert!(
+            store.wait().unwrap().success(),
+            "could not seed the session keyring"
+        );
+
+        let automatic = parse_address(&named.uri(), ShareKind::Smb).unwrap();
+        let path = mount(
+            &automatic,
+            String::new(),
+            &runtime_dir(),
+            Duration::from_secs(25),
+        )
+        .expect("automatic login should mount the named-only fixture");
+        let actual = std::fs::read(path.join("hello.txt"));
+        unmount(&automatic).expect("disconnect the fixture share");
+        let expected = std::fs::read(std::path::Path::new(&fixture_root()).join("share/hello.txt"))
+            .expect("read the fixture's independent backing file");
+        assert_eq!(actual.expect("read through the saved account"), expected);
+        return;
+    }
+
+    for tool in ["dbus-run-session", "gnome-keyring-daemon", "secret-tool"] {
+        gust_testkit::skip_unless!(
+            gust_testkit::have(tool),
+            "SMB_KEYRING",
+            "missing session keyring fixture tool {tool}"
+        );
+    }
+    let root = std::env::temp_dir().join(format!("gust-smb-keyring-{}", std::process::id()));
+    let runtime = root.join("run");
+    let mut private = std::fs::DirBuilder::new();
+    private.mode(0o700);
+    private.create(&root).unwrap();
+    private.create(&runtime).unwrap();
+    let home = root.join("home");
+    std::fs::create_dir(&home).unwrap();
+    let output = Command::new("timeout")
+        .args(["--kill-after=2s", "45s", "dbus-run-session", "--"])
+        .arg(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "automatic_login_uses_the_saved_smb_account",
+            "--nocapture",
+        ])
+        .env_clear()
+        .env(
+            "PATH",
+            std::env::var_os("PATH").unwrap_or_else(|| "/usr/bin:/bin".into()),
+        )
+        .env("HOME", &home)
+        .env("XDG_RUNTIME_DIR", &runtime)
+        .env("LANG", "C.UTF-8")
+        .env("USER", named.user.unwrap())
+        .env(
+            "GUST_SMB_FIXTURE",
+            std::fs::canonicalize(fixture_root()).unwrap(),
+        )
+        .env("GUST_SMB_REQUIRED", "1")
+        .env(CHILD, "1")
+        .output()
+        .unwrap();
+    let _ = std::fs::remove_dir_all(home);
+    // A failed child can leave the GVfs FUSE mount visible for a moment.
+    // Only remove empty directories here so cleanup never traverses it.
+    let _ = std::fs::remove_dir(runtime.join("gvfs"));
+    let _ = std::fs::remove_dir(runtime);
+    let _ = std::fs::remove_dir(root);
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]

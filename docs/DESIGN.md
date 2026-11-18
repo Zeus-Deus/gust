@@ -2149,10 +2149,13 @@ never in a log line, and never in Gust's places file — which stores the
 server and share only. Re-connecting asks again, or the user's keyring
 answers; Gust does not become a second place their password lives.
 
-For an SMB guest share, leaving the username empty skips the password prompt
-and calls `gio mount --anonymous`. A named login continues to send credentials
-through stdin. Submitting the username by keyboard requires a fresh press, so
-holding Enter at the address step cannot select guest on the next step.
+For SMB, a blank username selects automatic login and skips Gust's password
+prompt. GVfs may use the session's Kerberos, cached, or keyring credentials.
+If GVfs prompts for authentication, `gio mount --anonymous` requests guest
+access. The username prompt describes that order before the user connects.
+Entering a username continues to send credentials through stdin. Submitting
+the username by keyboard requires a fresh press, so holding Enter at the
+address step cannot select automatic login on the next step.
 
 The GVfs SMB directory name identifies a server and share, but carries no
 login identity. If an SMB mount already exists, Gust shows its folder path
