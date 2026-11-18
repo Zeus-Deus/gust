@@ -170,9 +170,19 @@ is ASCII. Its median was 0.3 ms higher on this corpus, and the ranges overlap.
 To repeat from the root of the candidate checkout, build the same example twice.
 The baseline predates the example, so copy just its source into a detached
 baseline worktree. Separate target directories keep both executables available.
+The measurements used warm tmpfs. For the two corpora, choose a writable tmpfs
+with at least 65 MiB free. The recipe defaults to `/dev/shm` and checks the
+filesystem before building. The worktree and builds use the usual temporary
+directory, which can be on disk.
 
 ```bash
 set -eu
+fixture_parent=${GUST_BENCH_TMPFS:-/dev/shm}
+if [[ $(stat -f -c %T -- "$fixture_parent") != tmpfs ]]; then
+    echo "Set GUST_BENCH_TMPFS to a writable tmpfs directory." >&2
+    exit 1
+fi
+fixtures=$(mktemp -d -- "$fixture_parent/gust-content-search.XXXXXXXX")
 run=$(mktemp -d)
 git worktree add --detach "$run/baseline" f81702f11aad253e9dfdc541393de68cf225f897
 cp crates/core/examples/bench_content_search.rs "$run/baseline/crates/core/examples/"
@@ -184,7 +194,7 @@ for build in baseline candidate; do
         -p gust-core --example bench_content_search
 done
 
-python3 - "$run" <<'PYTHON'
+python3 - "$fixtures" <<'PYTHON'
 from pathlib import Path
 import sys
 
@@ -206,7 +216,7 @@ for fixture in final-line early-hit; do
         if (( round % 2 == 0 )); then order=(candidate baseline); fi
         for build in "${order[@]}"; do
             printf '%s %s %s ' "$fixture" "$round" "$build"
-            "$run/$build-target/release/examples/bench_content_search" "$run/$fixture" needle
+            "$run/$build-target/release/examples/bench_content_search" "$fixtures/$fixture" needle
         done
     done
 done
