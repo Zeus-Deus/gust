@@ -13,10 +13,9 @@ Rectangle {
     property string message: ""
     /// `message` says what an action just did to the selection itself
     /// ("Permissions changed on 3 items"), so it outranks the selection
-    /// count, which it is about, until either of them changes.
+    /// count until the user changes the selection or another action reports.
     property bool messageAboutSelection: false
     onMessageChanged: messageAboutSelection = false
-    onSelectionChanged: messageAboutSelection = false
     /// Live selection summary. Non-empty means a selection exists.
     property string selection: ""
     /// A message the user must actually read: a refusal, a failure, a reason

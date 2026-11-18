@@ -6802,7 +6802,7 @@ impl qobject::DirModel {
         let modes = std::mem::take(&mut self.as_mut().rust_mut().last_modes);
         if !modes.is_empty() {
             let (back, refused) = gust_ops::attrs::undo_modes(&modes);
-            self.as_mut().reload();
+            self.as_mut().reload_after_mode_change();
             let msg = if refused.is_empty() {
                 format!(
                     "Permissions put back on {back} item{}",
@@ -9268,6 +9268,21 @@ impl qobject::DirModel {
         }
     }
 
+    fn reload_after_mode_change(mut self: Pin<&mut Self>) {
+        let model = self.as_ref();
+        if model.requested_key != model.key {
+            return;
+        }
+        // Quick Look holds live updates. Refresh the mode even during that
+        // hold, preserving the current file across the full listing reset.
+        if !model.defer_origin_relist() && model.focus_name.is_none() {
+            if let Some(name) = model.entry_at(model.cursor).map(|entry| entry.name.clone()) {
+                self.as_mut().focus_on_name(name);
+            }
+        }
+        self.reload();
+    }
+
     /// Record a permissions outcome for Ctrl+Z and say what happened in the
     /// status line. "" unless nothing changed because every item failed.
     fn finish_mode_change(mut self: Pin<&mut Self>, out: gust_ops::attrs::ModeOutcome) -> QString {
@@ -9281,7 +9296,7 @@ impl qobject::DirModel {
             r.last_bulk_rename.clear();
             r.last_trashed_batch.clear();
         }
-        self.as_mut().reload();
+        self.as_mut().reload_after_mode_change();
         if !out.failed.is_empty() && n == 0 {
             return QString::from(&out.failed.join("; "));
         }

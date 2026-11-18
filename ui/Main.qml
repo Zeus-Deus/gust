@@ -3630,6 +3630,9 @@ Window {
             Connections {
                 target: dirModel
                 function onLocationChanged() { hints.message = "" }
+                function onSelection_pendingChanged() {
+                    if (dirModel.selection_pending) hints.messageAboutSelection = false
+                }
             }
         }
     }

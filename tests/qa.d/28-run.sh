@@ -77,6 +77,8 @@ ctrl z; sleep 1.0
 [[ "$(stat -c %a "$d28/plain.sh")" == 644 ]] && ok "Ctrl+Z takes the permission back" \
   || bad "Ctrl+Z left mode $(stat -c %a "$d28/plain.sh")"
 
+expect "undo keeps the cursor on the program it changed" "d['model']['cursor_name']" "plain.sh"
+
 say "28c · Properties holds the switch; content is refused"
 rm -f "$marker"
 key space; sleep 0.8
