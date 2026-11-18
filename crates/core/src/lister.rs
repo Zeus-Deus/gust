@@ -374,6 +374,7 @@ pub fn first_window(shown: &[usize], focus: Option<usize>, size: usize) -> Vec<u
 mod tests {
     use super::*;
     use crate::entry::SortField;
+    use std::collections::HashSet;
     use std::fs;
 
     pub(super) fn tmpdir(tag: &str) -> std::path::PathBuf {
@@ -545,12 +546,35 @@ mod tests {
     #[test]
     fn settling_a_big_name_sorted_folder_stats_one_screenful() {
         let d = tmpdir("window-big");
-        for i in 0..3000 {
-            fs::File::create(d.join(format!("n{i}"))).unwrap();
+        let file_count = 3000;
+        let mut expected = HashSet::with_capacity(file_count);
+        for i in 0..file_count {
+            let name = OsString::from(format!("n{i}"));
+            fs::File::create(d.join(&name)).unwrap();
+            expected.insert(name);
         }
         let key = LocationKey::local(&d);
-        let mut snap = list_names(&key, 1, &CancelToken::new(), |_| {});
+        let mut callbacks = Vec::new();
+        let mut snap = list_names(&key, 1, &CancelToken::new(), |snapshot| {
+            callbacks.push((snapshot.complete.clone(), snapshot.entries.len()));
+        });
+        assert_eq!(snap.complete, Completeness::Complete);
         assert!(snap.settled, "a name sort settles on names alone");
+        for entry in &snap.entries {
+            assert!(
+                expected.remove(&entry.name),
+                "unexpected or duplicate entry: {:?}",
+                entry.name
+            );
+        }
+        assert!(expected.is_empty(), "{} entries missing", expected.len());
+        assert_eq!(
+            callbacks,
+            [
+                (Completeness::Partial { seen: 2000 }, 2000),
+                (Completeness::Complete, file_count)
+            ]
+        );
         let shown: Vec<usize> = (0..snap.entries.len()).collect();
         let w = first_window(&shown, None, FIRST_WINDOW);
         fill_metadata_for(&mut snap, &w, &CancelToken::new());
