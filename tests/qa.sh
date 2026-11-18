@@ -797,14 +797,15 @@ echo "ordinary" > "$SW/keeper.txt"
 # Ownership comes from the claim store, never from the filename (the m41
 # data-loss fix): a crashed copy leaves a claim naming its file, its dev/ino
 # and a pid that is gone. Plant exactly that. Gust runs with HOME=$FIXTURE
-# and no XDG_STATE_HOME, so its claim store is here.
+# and XDG_STATE_HOME under that fixture, so its claim store is here.
 CLAIMS="$FIXTURE/.local/state/gust/staging-claims"
 mkdir -p "$CLAIMS"; chmod 700 "$CLAIMS"
 BOOT="$(cat /proc/sys/kernel/random/boot_id)"
 plant_claim() {  # <file> <pid>
-  local f="$1" pid="$2"
-  printf 'path=%s\nboot=%s\npid=%s\ndev=%s\nino=%s\n' \
-    "$f" "$BOOT" "$pid" "$(stat -c %d "$f")" "$(stat -c %i "$f")" \
+  local f="$1" pid="$2" path_hex
+  path_hex="$(printf '%s' "$f" | od -An -v -tx1 | tr -d ' \n')"
+  printf 'version=2\npath_hex=%s\nboot=%s\npid=%s\ndev=%s\nino=%s\nsince=%s\nnet=0\nwritten=0\n' \
+    "$path_hex" "$BOOT" "$pid" "$(stat -c %d "$f")" "$(stat -c %i "$f")" "$(stat -c %Y "$f")" \
     > "$CLAIMS/$pid-$(printf '%s' "$f" | sha1sum | cut -c1-16).claim"
 }
 printf 'partial' > "$SW/.gust-staging-999999-dead.pdf"
@@ -901,35 +902,42 @@ key Return
 wait_for "d['view']" "grid" 20 >/dev/null
 expect "grid view is active" "d['view']" "grid"
 
-# Give the sandboxed helper time to work.
-for _ in $(seq 1 15); do
-  C="$(find "$FIXTURE/.cache/thumbnails" -name '*.png' 2>/dev/null | wc -l)"
-  [[ "$C" -ge 2 ]] && break
-  sleep 1
-done
-
+# A source can have several cache sizes, and previous sections share this
+# cache. Resolve the freedesktop cache key for each specific fixture file.
 if command -v magick >/dev/null 2>&1 && command -v bwrap >/dev/null 2>&1; then
-  MADE="$(find "$FIXTURE/.cache/thumbnails" -name '*.png' 2>/dev/null | wc -l)"
-  [[ "$MADE" -ge 2 ]] \
-    && ok "the sandboxed helper produced $MADE thumbnail(s)" \
-    || bad "no thumbnail was produced (found $MADE)"
+  if python3 - "$TH" "$FIXTURE/.cache/thumbnails" <<'PYTHUMB'
+import hashlib
+import sys
+import time
+from pathlib import Path
 
-  # Every produced thumbnail must be a real, bounded PNG.
-  BADPNG=0
-  for f in $(find "$FIXTURE/.cache/thumbnails" -name '*.png' 2>/dev/null); do
-    head -c 8 "$f" | grep -q $'\x89PNG' || BADPNG=$((BADPNG+1))
-    SZ="$(stat -c %s "$f")"
-    [[ "$SZ" -gt 8388608 ]] && BADPNG=$((BADPNG+1))
-  done
-  [[ "$BADPNG" -eq 0 ]] \
-    && ok "every cached thumbnail is a real, size-bounded PNG" \
-    || bad "$BADPNG cached thumbnail(s) failed validation"
+pictures, cache = map(Path, sys.argv[1:])
+def thumbnails(name):
+    uri = (pictures / name).as_uri()
+    key = hashlib.md5(uri.encode()).hexdigest()
+    return [p for size in ("normal", "large", "x-large", "xx-large")
+            if (p := cache / size / (key + ".png")).is_file()]
 
-  # The count must not exceed the number of REAL images: a corrupt png, an
-  # svg, a text file and an executable must never produce one.
-  [[ "$MADE" -le 2 ]] \
-    && ok "refused: corrupt.png, logo.svg, notes.txt and program got no thumbnail" \
-    || bad "something unsafe was thumbnailed ($MADE > 2 real images)"
+deadline = time.monotonic() + 15
+for name in ("wide.png", "tall.jpg"):
+    while not (files := thumbnails(name)):
+        if time.monotonic() >= deadline:
+            sys.exit(f"missing thumbnail for {name}")
+        time.sleep(0.1)
+    for f in files:
+        with f.open("rb") as image:
+            if image.read(8) != b"\x89PNG\r\n\x1a\n" or f.stat().st_size > 8 * 1024 * 1024:
+                sys.exit(f"invalid cached thumbnail for {name}: {f}")
+
+for name in ("corrupt.png", "logo.svg", "notes.txt", "program"):
+    if thumbnails(name):
+        sys.exit(f"unexpected thumbnail for {name}")
+PYTHUMB
+  then
+    ok "both source images have bounded PNG thumbnails and the four refused files have none"
+  else
+    bad "thumbnail cache did not match the source files"
+  fi
 fi
 
 # The window must stay usable while thumbnails render.
