@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # Run Gust's SSHFS and WebDAV integration tests with disposable Linux peers.
 set -euo pipefail
+if (( EUID == 0 )); then
+    echo "Run the peer tests as an unprivileged user." >&2
+    exit 1
+fi
 cd "$(dirname "$0")/.."
 for tool in bwrap cargo python3 rclone ssh-keygen sshfs fusermount3 ss mountpoint; do
     command -v "$tool" >/dev/null || { echo "missing $tool" >&2; exit 77; }
@@ -25,7 +29,7 @@ PY
     )
     # UID 0 and mount capability exist only inside the new user namespace.
     # Share only system tools, the chosen test executable, and the FUSE device.
-    bwrap --unshare-all --uid 0 --gid 0 --cap-add CAP_SYS_ADMIN \
+    bwrap --unshare-all --unshare-user --uid 0 --gid 0 --cap-add CAP_SYS_ADMIN \
         --new-session --die-with-parent --ro-bind /usr /usr \
         --symlink usr/bin /bin --symlink usr/lib /lib --symlink usr/lib /lib64 \
         --proc /proc --dev /dev --dev-bind /dev/fuse /dev/fuse \
@@ -48,13 +52,25 @@ if [[ $1 == sshfs_live ]]; then
     sed 's/^/[127.0.0.1]:2222 /' "$fix/etc/host.pub" > "$fix/etc/known_hosts"
     rclone serve sftp "$peer" --addr 127.0.0.1:2222 --key "$fix/etc/host" \
         --user gust --authorized-keys "$fix/etc/id_test.pub" > /tmp/sftp.log 2>&1 &
-    echo $! > "$fix/etc/sshd.pid"
+    server=$!
+    echo "$server" > "$fix/etc/sshd.pid"
     for _ in {1..100}; do
+        kill -0 "$server" 2>/dev/null || break
         if ss -ltn | grep -q ':2222 '; then break; fi
         sleep 0.05
     done
+    if ! kill -0 "$server" 2>/dev/null || ! ss -ltn | grep -q ':2222 '; then
+        echo "SFTP peer failed to listen on port 2222" >&2
+        tail -n 40 /tmp/sftp.log >&2
+        exit 1
+    fi
 else
-    bash /rclone-fixture start
+    if ! bash /rclone-fixture start; then
+        for log in /tmp/gust-rclone-fixture/log/*.log; do
+            if [[ -f $log ]]; then tail -v -n 40 "$log" >&2; fi
+        done
+        exit 1
+    fi
 fi
 /suite --test-threads=1
 GUEST
