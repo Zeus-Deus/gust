@@ -3,13 +3,15 @@
 //! When an app shows an Open or Save dialog through the portal, the portal
 //! calls `org.freedesktop.impl.portal.FileChooser` here. Each call starts a
 //! Gust window in chooser mode (GUST_CHOOSER=open|open-many|open-folder|save).
-//! The service watches each child independently and answers when it exits.
-//! The caller can close its own chooser through its Request object.
+//! The service watches each child independently and collects its answer on
+//! a worker. A chooser ends when its caller closes it or disconnects.
 
-use std::collections::HashMap;
+use std::collections::{hash_map::Entry, HashMap};
 use std::os::fd::{BorrowedFd, OwnedFd};
-use std::path::PathBuf;
+use std::os::unix::net::UnixStream;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
 use dbus::arg::{PropMap, RefArg, Variant};
@@ -23,6 +25,8 @@ const NAME: &str = "org.freedesktop.impl.portal.desktop.gust";
 const PATH: &str = "/org/freedesktop/portal/desktop";
 const IFACE: &str = "org.freedesktop.impl.portal.FileChooser";
 const REQUEST: &str = "org.freedesktop.impl.portal.Request";
+const DBUS: &str = "org.freedesktop.DBus";
+const DBUS_PATH: &str = "/org/freedesktop/DBus";
 const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 const FALLBACK_INTERVAL: Duration = Duration::from_millis(20);
 
@@ -152,45 +156,138 @@ fn answer(bus: &Channel, msg: &Message, code: u32, picked: &[PathBuf]) {
     let _ = bus.send(msg.method_return().append2(code, results));
 }
 
-struct Chooser {
-    call: Option<Message>,
+struct Window {
     child: Child,
     exit_fd: Option<OwnedFd>,
-    result: PathBuf,
+    result: Option<PathBuf>,
 }
 
-impl Chooser {
-    fn cancel(&mut self, bus: &Channel) {
-        if let Some(call) = self.call.take() {
-            let _ = self.child.kill();
-            answer(bus, &call, 1, &[]);
-        }
-    }
-
-    fn finished(&mut self, bus: &Channel) -> bool {
-        let status = self.child.try_wait();
-        if matches!(status, Ok(None)) {
-            return false;
-        }
-        if let Some(call) = self.call.take() {
-            if matches!(status, Ok(Some(status)) if status.success()) {
-                let picked = gust_core::chooser::parse_result(&self.result);
-                answer(bus, &call, u32::from(picked.is_empty()), &picked);
-            } else {
-                answer(bus, &call, 2, &[]);
-            }
-        }
-        true
-    }
-}
-
-impl Drop for Chooser {
+impl Drop for Window {
     fn drop(&mut self) {
         if !matches!(self.child.try_wait(), Ok(Some(_))) {
             let _ = self.child.kill();
         }
-        let _ = std::fs::remove_file(&self.result);
+        if let Some(result) = self.result.take() {
+            // The service can also exit before this window has finished.
+            let _ = std::thread::Builder::new().spawn(move || {
+                let _ = std::fs::remove_file(result);
+            });
+        }
     }
+}
+
+type Reply = (u32, Vec<PathBuf>);
+
+struct ResultWorker {
+    ready: UnixStream,
+    reply: Receiver<Reply>,
+}
+
+impl ResultWorker {
+    fn start(result: &Path, code: u32) -> std::io::Result<Self> {
+        let (ready, notify) = UnixStream::pair()?;
+        let (send, reply) = mpsc::channel();
+        let result = result.to_owned();
+        std::thread::Builder::new()
+            .name("gust-chooser-result".into())
+            .spawn(move || {
+                let (code, picked) = if code == 0 {
+                    let picked = gust_core::chooser::parse_result(&result);
+                    (u32::from(picked.is_empty()), picked)
+                } else {
+                    (code, Vec::new())
+                };
+                let _ = std::fs::remove_file(result);
+                let _ = send.send((code, picked));
+                drop(send);
+                // Closing the peer wakes poll even when the reply was dropped.
+                drop(notify);
+            })?;
+        Ok(Self { ready, reply })
+    }
+}
+
+enum Progress {
+    Window(Window),
+    Result(ResultWorker),
+}
+
+struct Chooser {
+    call: Option<Message>,
+    progress: Progress,
+}
+
+impl Chooser {
+    /// Keep a cancelled window registered until its child can be reaped.
+    fn stop(&mut self) -> bool {
+        self.call = None;
+        if let Progress::Window(window) = &mut self.progress {
+            let _ = window.child.kill();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn finished(&mut self, bus: &Channel) -> bool {
+        let (code, picked) = match &mut self.progress {
+            Progress::Window(window) => {
+                let code = match window.child.try_wait() {
+                    Ok(None) => return false,
+                    Ok(Some(status)) if status.success() && self.call.is_some() => 0,
+                    _ => 2,
+                };
+                let result = window.result.as_deref().expect("window owns its result");
+                if let Ok(worker) = ResultWorker::start(result, code) {
+                    window.result = None;
+                    self.progress = Progress::Result(worker);
+                    return false;
+                }
+                (2, Vec::new())
+            }
+            Progress::Result(worker) => match worker.reply.try_recv() {
+                Ok(reply) => reply,
+                Err(TryRecvError::Empty) => return false,
+                Err(TryRecvError::Disconnected) => (2, Vec::new()),
+            },
+        };
+        if let Some(call) = self.call.take() {
+            answer(bus, &call, code, &picked);
+        }
+        true
+    }
+
+    fn poll_fd(&self) -> Option<PollFd<'_>> {
+        match &self.progress {
+            Progress::Window(window) => window
+                .exit_fd
+                .as_ref()
+                .map(|fd| PollFd::new(fd, PollFlags::IN)),
+            Progress::Result(worker) => Some(PollFd::new(&worker.ready, PollFlags::IN)),
+        }
+    }
+}
+
+fn watch_owners(conn: &Connection) -> Result<(), dbus::Error> {
+    let rule = dbus::message::MatchRule::new_signal(DBUS, "NameOwnerChanged")
+        .with_sender(DBUS)
+        .with_path(DBUS_PATH);
+    conn.add_match_no_cb(&rule.match_str())
+}
+
+fn disconnected_owner(msg: &Message) -> Option<&str> {
+    if msg.msg_type() == MessageType::Signal
+        && msg.sender().as_deref() == Some(DBUS)
+        && msg.path().as_deref() == Some(DBUS_PATH)
+        && msg.interface().as_deref() == Some(DBUS)
+        && msg.member().as_deref() == Some("NameOwnerChanged")
+    {
+        let (name, old, new) = msg.read3::<&str, &str, &str>().ok()?;
+        if name.starts_with(':') && old == name && new.is_empty() {
+            return Some(name);
+        }
+    }
+    None
 }
 
 fn handle(
@@ -199,22 +296,29 @@ fn handle(
     start: &StartChooser,
     msg: Message,
 ) {
+    if let Some(owner) = disconnected_owner(&msg) {
+        active.retain(|(sender, _), chooser| &**sender != owner || chooser.stop());
+        return;
+    }
     if msg.msg_type() != MessageType::MethodCall {
         return;
     }
     let iface = msg.interface();
     let member = msg.member().expect("D-Bus method calls have a member");
     if iface.as_deref() == Some(REQUEST) && &*member == "Close" {
-        if let Some(chooser) = msg
-            .path()
-            .and_then(|path| request_key(&msg, path))
-            .and_then(|key| active.get_mut(&key))
-        {
-            if !msg.get_no_reply() {
-                let _ = bus.send(msg.method_return());
+        if let Some(key) = msg.path().and_then(|path| request_key(&msg, path)) {
+            if let Entry::Occupied(mut entry) = active.entry(key) {
+                if !msg.get_no_reply() {
+                    let _ = bus.send(msg.method_return());
+                }
+                if let Some(call) = entry.get_mut().call.take() {
+                    answer(bus, &call, 1, &[]);
+                }
+                if !entry.get_mut().stop() {
+                    entry.remove();
+                }
+                return;
             }
-            chooser.cancel(bus);
-            return;
         }
     }
     let kind = match &*member {
@@ -229,7 +333,7 @@ fn handle(
             answer(bus, &msg, 2, &[]);
             return;
         };
-        let std::collections::hash_map::Entry::Vacant(slot) = active.entry(key) else {
+        let Entry::Vacant(slot) = active.entry(key) else {
             answer(bus, &msg, 2, &[]);
             return;
         };
@@ -241,9 +345,11 @@ fn handle(
             .and_then(|pid| pidfd_open(pid, PidfdFlags::empty()).ok());
         slot.insert(Chooser {
             call: Some(msg),
-            child,
-            exit_fd,
-            result,
+            progress: Progress::Window(Window {
+                child,
+                exit_fd,
+                result: Some(result),
+            }),
         });
     } else if !msg.get_no_reply() {
         if let Some(reply) = channel::default_reply(&msg) {
@@ -257,11 +363,13 @@ fn serve(bus: &Channel, start: &StartChooser) -> Result<(), ()> {
     let mut last_activity = Instant::now();
     loop {
         bus.read_write(Some(Duration::ZERO))?;
-        while let Some(msg) = bus.pop_message() {
-            handle(bus, &mut active, start, msg);
-            last_activity = Instant::now();
-        }
         let count = active.len();
+        while let Some(msg) = bus.pop_message() {
+            if msg.msg_type() == MessageType::MethodCall {
+                last_activity = Instant::now();
+            }
+            handle(bus, &mut active, start, msg);
+        }
         active.retain(|_, chooser| !chooser.finished(bus));
         if count != active.len() {
             last_activity = Instant::now();
@@ -272,7 +380,7 @@ fn serve(bus: &Channel, start: &StartChooser) -> Result<(), ()> {
                 return Ok(());
             }
             Some(remaining)
-        } else if active.values().any(|chooser| chooser.exit_fd.is_none()) {
+        } else if active.values().any(|chooser| chooser.poll_fd().is_none()) {
             Some(FALLBACK_INTERVAL)
         } else {
             None
@@ -288,12 +396,7 @@ fn serve(bus: &Channel, start: &StartChooser) -> Result<(), ()> {
         }
         let mut fds = Vec::with_capacity(1 + active.len());
         fds.push(PollFd::from_borrowed_fd(socket, events));
-        fds.extend(active.values().filter_map(|chooser| {
-            chooser
-                .exit_fd
-                .as_ref()
-                .map(|fd| PollFd::new(fd, PollFlags::IN))
-        }));
+        fds.extend(active.values().filter_map(Chooser::poll_fd));
         let timeout = timeout.map(|d| Timespec {
             tv_sec: d.as_secs() as i64,
             tv_nsec: d.subsec_nanos().into(),
@@ -313,6 +416,10 @@ pub fn run() -> i32 {
     };
     bus.set_watch_enabled(true);
     let conn = Connection::from(bus);
+    if let Err(error) = watch_owners(&conn) {
+        eprintln!("gust: could not watch chooser owners: {error}");
+        return 1;
+    }
     if !matches!(
         conn.request_name(NAME, false, false, true),
         Ok(RequestNameReply::PrimaryOwner)
@@ -328,7 +435,8 @@ mod tests {
     use super::*;
     use dbus::blocking::BlockingSender;
     use std::fs;
-    use std::io::{BufRead, BufReader};
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
     use std::sync::mpsc;
 
     const TIMEOUT: Duration = Duration::from_secs(10);
@@ -340,6 +448,37 @@ mod tests {
             let _ = self.0.kill();
             let _ = self.0.wait();
         }
+    }
+
+    fn private_bus() -> (Bus, String) {
+        let mut daemon = Bus(Command::new("dbus-daemon")
+            .args(["--session", "--nofork", "--nopidfile", "--print-address=1"])
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("dbus-daemon is required for the portal integration test"));
+        let mut address = String::new();
+        BufReader::new(daemon.0.stdout.take().unwrap())
+            .read_line(&mut address)
+            .unwrap();
+        (daemon, address.trim().to_owned())
+    }
+
+    fn service(
+        address: &str,
+        start: impl Fn(gust_core::chooser::Request, &str) -> std::io::Result<(Child, PathBuf)>
+            + Send
+            + 'static,
+    ) -> std::thread::JoinHandle<()> {
+        let mut bus = Channel::open_private(address).unwrap();
+        bus.register().unwrap();
+        bus.set_watch_enabled(true);
+        let conn = Connection::from(bus);
+        watch_owners(&conn).unwrap();
+        assert_eq!(
+            conn.request_name(NAME, false, false, true).unwrap(),
+            RequestNameReply::PrimaryOwner
+        );
+        std::thread::spawn(move || assert_eq!(serve(conn.channel(), &start), Err(())))
     }
 
     fn open(caller: &Connection, path: &str, method: &str) -> u32 {
@@ -365,7 +504,8 @@ mod tests {
             let remaining = deadline.saturating_duration_since(Instant::now());
             assert!(!remaining.is_zero(), "no cancellation reply");
             if let Some(reply) = caller.channel().blocking_pop_message(remaining).unwrap() {
-                if reply.get_reply_serial() == Some(serial) {
+                if let Some(actual_serial) = reply.get_reply_serial() {
+                    assert_eq!(actual_serial, serial, "unexpected chooser reply");
                     let (status, results): (u32, PropMap) = reply.read2().unwrap();
                     assert_eq!(status, 1);
                     assert!(results.is_empty());
@@ -375,48 +515,37 @@ mod tests {
         }
     }
 
-    fn wait_reaped(pid: u32) {
-        let proc = PathBuf::from(format!("/proc/{pid}"));
+    fn wait_for<T>(mut ready: impl FnMut() -> Option<T>, complaint: &str) -> T {
         let deadline = Instant::now() + TIMEOUT;
-        while proc.exists() {
-            assert!(Instant::now() < deadline, "chooser child was not reaped");
+        loop {
+            if let Some(value) = ready() {
+                return value;
+            }
+            assert!(Instant::now() < deadline, "{complaint}");
             std::thread::sleep(Duration::from_millis(10));
         }
     }
 
+    fn wait_reaped(pid: u32) {
+        let proc = PathBuf::from(format!("/proc/{pid}"));
+        wait_for(
+            || (!proc.exists()).then_some(()),
+            "chooser child was not reaped",
+        );
+    }
+
     #[test]
     fn request_close_only_ends_the_callers_chooser() {
-        let mut daemon = Bus(Command::new("dbus-daemon")
-            .args(["--session", "--nofork", "--nopidfile", "--print-address=1"])
-            .stdout(Stdio::piped())
-            .spawn()
-            .expect("dbus-daemon is required for the portal integration test"));
-        let mut address = String::new();
-        BufReader::new(daemon.0.stdout.take().unwrap())
-            .read_line(&mut address)
-            .unwrap();
-        let address = address.trim();
-        let caller = Connection::new_address(address).unwrap();
-        let other = Connection::new_address(address).unwrap();
-        let mut bus = Channel::open_private(address).unwrap();
-        bus.register().unwrap();
-        bus.set_watch_enabled(true);
-        let conn = Connection::from(bus);
-        assert_eq!(
-            conn.request_name(NAME, false, false, true).unwrap(),
-            RequestNameReply::PrimaryOwner
-        );
-
+        let (daemon, address) = private_bus();
+        let caller = Connection::new_address(&address).unwrap();
+        let other = Connection::new_address(&address).unwrap();
         let (started, children) = mpsc::channel();
-        let service = std::thread::spawn(move || {
+        let service = service(&address, move |_, _| {
             // The bus and child lifecycles are real. A sleeping child stands in
             // for an open window so this runs on a display-free CI worker.
-            let start = move |_: gust_core::chooser::Request, _: &str| {
-                let child = Command::new("/usr/bin/sleep").arg("60").spawn()?;
-                started.send(child.id()).unwrap();
-                Ok((child, PathBuf::new()))
-            };
-            assert_eq!(serve(conn.channel(), &start), Err(()));
+            let child = Command::new("/usr/bin/sleep").arg("60").spawn()?;
+            started.send(child.id()).unwrap();
+            Ok((child, PathBuf::new()))
         });
 
         let first = "/org/freedesktop/portal/desktop/request/test/open";
@@ -435,6 +564,104 @@ mod tests {
         close(&caller, second).unwrap();
         assert_cancelled(&caller, save_serial);
         wait_reaped(save_child);
+
+        open(&caller, first, "OpenFile");
+        let departed_child = children.recv_timeout(TIMEOUT).unwrap();
+        let other_serial = open(&other, first, "OpenFile");
+        let other_child = children.recv_timeout(TIMEOUT).unwrap();
+        drop(caller);
+        wait_reaped(departed_child);
+        assert!(fs::exists(format!("/proc/{other_child}")).unwrap());
+        close(&other, first).unwrap();
+        assert_cancelled(&other, other_serial);
+        wait_reaped(other_child);
+
+        drop(daemon);
+        service.join().unwrap();
+    }
+
+    #[test]
+    fn a_stalled_result_does_not_block_close_or_replace_a_new_request() {
+        use rustix::fs::{mkfifoat, Mode, OFlags, CWD};
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let workspace =
+            std::env::temp_dir().join(format!("gust-portal-{}-{stamp}", std::process::id()));
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&workspace)
+            .unwrap();
+        let pipe = workspace.join("result");
+        mkfifoat(CWD, &pipe, Mode::RUSR | Mode::WUSR).unwrap();
+
+        let (daemon, address) = private_bus();
+        let caller = Connection::new_address(&address).unwrap();
+        let other = Connection::new_address(&address).unwrap();
+        let (started, children) = mpsc::channel();
+        let first_launch = std::cell::Cell::new(true);
+        let result = pipe.clone();
+        let service = service(&address, move |_, _| {
+            let (child, path) = if first_launch.replace(false) {
+                (Command::new("/usr/bin/true").spawn()?, result.clone())
+            } else {
+                (
+                    Command::new("/usr/bin/sleep").arg("60").spawn()?,
+                    PathBuf::new(),
+                )
+            };
+            started.send(child.id()).unwrap();
+            Ok((child, path))
+        });
+
+        let first = "/org/freedesktop/portal/desktop/request/test/open";
+        let second = "/org/freedesktop/portal/desktop/request/test/save";
+        let first_serial = open(&caller, first, "OpenFile");
+        let first_child = children.recv_timeout(TIMEOUT).unwrap();
+        wait_reaped(first_child);
+        // The nonblocking writer opens only once the result read has
+        // reached the pipe. Keeping it open holds the worker in that read.
+        let mut writer = wait_for(
+            || match fs::OpenOptions::new()
+                .write(true)
+                .custom_flags(OFlags::NONBLOCK.bits() as i32)
+                .open(&pipe)
+            {
+                Ok(writer) => Some(writer),
+                Err(error)
+                    if error.raw_os_error() == Some(rustix::io::Errno::NXIO.raw_os_error()) =>
+                {
+                    None
+                }
+                Err(error) => panic!("could not open the result pipe: {error}"),
+            },
+            "chooser did not start reading its result",
+        );
+
+        let second_serial = open(&other, second, "SaveFile");
+        let second_child = children.recv_timeout(TIMEOUT).unwrap();
+        close(&other, second).unwrap();
+        assert_cancelled(&other, second_serial);
+        wait_reaped(second_child);
+
+        close(&caller, first).unwrap();
+        assert_cancelled(&caller, first_serial);
+        let retry_serial = open(&caller, first, "OpenFile");
+        let retry_child = children.recv_timeout(TIMEOUT).unwrap();
+        writer.write_all(b"/late-result\0").unwrap();
+        drop(writer);
+        wait_for(
+            || (!pipe.exists()).then_some(()),
+            "late result was not cleaned up",
+        );
+        assert!(fs::exists(format!("/proc/{retry_child}")).unwrap());
+        close(&caller, first).unwrap();
+        assert_cancelled(&caller, retry_serial);
+        wait_reaped(retry_child);
+        fs::remove_dir(workspace).unwrap();
 
         drop(daemon);
         service.join().unwrap();
