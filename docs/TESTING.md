@@ -55,6 +55,10 @@ must instrument new fixture early returns. Individual fixture flags such as
 `GUST_SSHFS_REQUIRED=1` and `GUST_PREVIEWS_REQUIRED=1` remain supported by their
 owning crates. No fixture service or live clipboard is enabled implicitly.
 
+The app test suite needs `dbus-daemon` for its display-free chooser
+cancellation test. The test starts a private bus and checks that closing one
+request reaps its child while another chooser keeps running.
+
 Use minimal selectors and the shared `/tmp/gust-build.lock` for compilation in
 this development environment. `tests/release-gates.py` acquires it nonblockingly
 around Rust/model checks; `packaging/build-artifact.py` owns it for release builds.

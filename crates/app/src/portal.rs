@@ -2,22 +2,29 @@
 //!
 //! When an app shows an Open or Save dialog through the portal, the portal
 //! calls `org.freedesktop.impl.portal.FileChooser` here. Each call starts a
-//! Gust window in chooser mode (GUST_CHOOSER=open|open-many|open-folder|save)
-//! and waits for it on its own thread, so several dialogs can be open at
-//! once. The window writes the pick to a private result file; nothing
-//! written means the user cancelled.
+//! Gust window in chooser mode (GUST_CHOOSER=open|open-many|open-folder|save).
+//! The service watches each child independently and answers when it exits.
+//! The caller can close its own chooser through its Request object.
 
-use std::sync::mpsc;
-use std::time::Duration;
+use std::collections::HashMap;
+use std::os::fd::{BorrowedFd, OwnedFd};
+use std::path::PathBuf;
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
 
 use dbus::arg::{PropMap, RefArg, Variant};
-use dbus::blocking::Connection;
-use dbus::channel::{MatchingReceiver, Sender};
-use dbus::Message;
+use dbus::blocking::{stdintf::org_freedesktop_dbus::RequestNameReply, Connection};
+use dbus::channel::{self, BusType, Channel};
+use dbus::{Message, MessageType};
+use rustix::event::{poll, PollFd, PollFlags, Timespec};
+use rustix::process::{pidfd_open, Pid, PidfdFlags};
 
 const NAME: &str = "org.freedesktop.impl.portal.desktop.gust";
 const PATH: &str = "/org/freedesktop/portal/desktop";
 const IFACE: &str = "org.freedesktop.impl.portal.FileChooser";
+const REQUEST: &str = "org.freedesktop.impl.portal.Request";
+const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+const FALLBACK_INTERVAL: Duration = Duration::from_millis(20);
 
 /// The options the chooser uses, read with typed reads straight from the
 /// message. (Reading them through `PropMap`/`RefArg` mangles an `ay` inside
@@ -55,18 +62,18 @@ fn read_options(it: &mut dbus::arg::Iter) -> Option<Options> {
     Some(o)
 }
 
-/// Run one chooser window to completion; returns the picked paths.
-fn choose(req: gust_core::chooser::Request, title: &str) -> Vec<std::path::PathBuf> {
-    let Ok(exe) = std::env::current_exe() else {
-        return Vec::new();
-    };
+type StartChooser = dyn Fn(gust_core::chooser::Request, &str) -> std::io::Result<(Child, PathBuf)>;
+
+fn start_chooser(
+    req: gust_core::chooser::Request,
+    title: &str,
+) -> std::io::Result<(Child, PathBuf)> {
+    let exe = std::env::current_exe()?;
     let dir = std::env::var_os("XDG_RUNTIME_DIR")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(std::env::temp_dir)
         .join("gust");
-    if std::fs::create_dir_all(&dir).is_err() {
-        return Vec::new();
-    }
+    std::fs::create_dir_all(&dir)?;
     let result = dir.join(format!(
         "chooser-{}-{}",
         std::process::id(),
@@ -76,7 +83,7 @@ fn choose(req: gust_core::chooser::Request, title: &str) -> Vec<std::path::PathB
             .unwrap_or(0)
     ));
     let _ = std::fs::remove_file(&result);
-    let mut cmd = std::process::Command::new(exe);
+    let mut cmd = Command::new(exe);
     if let Some(f) = &req.folder {
         cmd.arg(f);
     }
@@ -84,36 +91,33 @@ fn choose(req: gust_core::chooser::Request, title: &str) -> Vec<std::path::PathB
         .env("GUST_CHOOSER_RESULT", &result)
         .env("GUST_CHOOSER_TITLE", title)
         .env_remove("GUST_SELECT")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
     match &req.name {
         Some(n) => cmd.env("GUST_CHOOSER_NAME", n),
         None => cmd.env_remove("GUST_CHOOSER_NAME"),
     };
-    let Ok(mut child) = cmd.spawn() else {
-        return Vec::new();
-    };
-    let _ = child.wait();
-    let picked = gust_core::chooser::parse_result(&result);
-    let _ = std::fs::remove_file(&result);
-    picked
+    Ok((cmd.spawn()?, result))
 }
 
-fn handle(msg: &Message, kind: &str) -> (u32, PropMap) {
+type RequestKey = (dbus::strings::BusName<'static>, dbus::Path<'static>);
+
+fn request_key(msg: &Message, path: dbus::Path<'_>) -> Option<RequestKey> {
+    Some((msg.sender()?.into_static(), path.into_static()))
+}
+
+fn read_request(
+    msg: &Message,
+    kind: &str,
+) -> Option<(RequestKey, gust_core::chooser::Request, String)> {
     // (o handle, s app_id, s parent_window, s title, a{sv} options)
     let mut it = msg.iter_init();
-    let (Some(_), Some(_app), Some(_parent), Some(title)) = (
-        it.read::<dbus::Path>().ok(),
-        it.read::<String>().ok(),
-        it.read::<String>().ok(),
-        it.read::<String>().ok(),
-    ) else {
-        return (2, PropMap::new());
-    };
-    let Some(options) = read_options(&mut it) else {
-        return (2, PropMap::new());
-    };
+    let key = request_key(msg, it.read::<dbus::Path>().ok()?)?;
+    let _app = it.read::<String>().ok()?;
+    let _parent = it.read::<String>().ok()?;
+    let title = it.read::<String>().ok()?;
+    let options = read_options(&mut it)?;
     if std::env::var_os("GUST_PORTAL_DEBUG").is_some() {
         eprintln!(
             "gust portal: dir={} multiple={} folder={:?} name={:?}",
@@ -133,80 +137,191 @@ fn handle(msg: &Message, kind: &str) -> (u32, PropMap) {
         options.current_folder,
         options.current_name,
     );
-    let picked = choose(req, &title);
-    let mut results = PropMap::new();
-    if picked.is_empty() {
-        // 1 = cancelled by the user.
-        return (1, results);
+    Some((key, req, title))
+}
+
+fn answer(bus: &Channel, msg: &Message, code: u32, picked: &[PathBuf]) {
+    if msg.get_no_reply() {
+        return;
     }
-    let uris = gust_core::chooser::answer_uris(&picked);
-    results.insert("uris".into(), Variant(Box::new(uris) as Box<dyn RefArg>));
-    (0, results)
+    let mut results = PropMap::new();
+    if code == 0 {
+        let uris = gust_core::chooser::answer_uris(picked);
+        results.insert("uris".into(), Variant(Box::new(uris) as Box<dyn RefArg>));
+    }
+    let _ = bus.send(msg.method_return().append2(code, results));
+}
+
+struct Chooser {
+    call: Option<Message>,
+    child: Child,
+    exit_fd: Option<OwnedFd>,
+    result: PathBuf,
+}
+
+impl Chooser {
+    fn cancel(&mut self, bus: &Channel) {
+        if let Some(call) = self.call.take() {
+            let _ = self.child.kill();
+            answer(bus, &call, 1, &[]);
+        }
+    }
+
+    fn finished(&mut self, bus: &Channel) -> bool {
+        let status = self.child.try_wait();
+        if matches!(status, Ok(None)) {
+            return false;
+        }
+        if let Some(call) = self.call.take() {
+            if matches!(status, Ok(Some(status)) if status.success()) {
+                let picked = gust_core::chooser::parse_result(&self.result);
+                answer(bus, &call, u32::from(picked.is_empty()), &picked);
+            } else {
+                answer(bus, &call, 2, &[]);
+            }
+        }
+        true
+    }
+}
+
+impl Drop for Chooser {
+    fn drop(&mut self) {
+        if !matches!(self.child.try_wait(), Ok(Some(_))) {
+            let _ = self.child.kill();
+        }
+        let _ = std::fs::remove_file(&self.result);
+    }
+}
+
+fn handle(
+    bus: &Channel,
+    active: &mut HashMap<RequestKey, Chooser>,
+    start: &StartChooser,
+    msg: Message,
+) {
+    if msg.msg_type() != MessageType::MethodCall {
+        return;
+    }
+    let iface = msg.interface();
+    let member = msg.member().expect("D-Bus method calls have a member");
+    if iface.as_deref() == Some(REQUEST) && &*member == "Close" {
+        if let Some(chooser) = msg
+            .path()
+            .and_then(|path| request_key(&msg, path))
+            .and_then(|key| active.get_mut(&key))
+        {
+            if !msg.get_no_reply() {
+                let _ = bus.send(msg.method_return());
+            }
+            chooser.cancel(bus);
+            return;
+        }
+    }
+    let kind = match &*member {
+        "OpenFile" => Some("open"),
+        "SaveFile" => Some("save"),
+        _ => None,
+    };
+    if let Some(kind) =
+        kind.filter(|_| iface.as_deref() == Some(IFACE) && msg.path().is_some_and(|p| &*p == PATH))
+    {
+        let Some((key, request, title)) = read_request(&msg, kind) else {
+            answer(bus, &msg, 2, &[]);
+            return;
+        };
+        let std::collections::hash_map::Entry::Vacant(slot) = active.entry(key) else {
+            answer(bus, &msg, 2, &[]);
+            return;
+        };
+        let Ok((child, result)) = start(request, &title) else {
+            answer(bus, &msg, 2, &[]);
+            return;
+        };
+        let exit_fd = Pid::from_raw(child.id() as i32)
+            .and_then(|pid| pidfd_open(pid, PidfdFlags::empty()).ok());
+        slot.insert(Chooser {
+            call: Some(msg),
+            child,
+            exit_fd,
+            result,
+        });
+    } else if !msg.get_no_reply() {
+        if let Some(reply) = channel::default_reply(&msg) {
+            let _ = bus.send(reply);
+        }
+    }
+}
+
+fn serve(bus: &Channel, start: &StartChooser) -> Result<(), ()> {
+    let mut active = HashMap::new();
+    let mut last_activity = Instant::now();
+    loop {
+        bus.read_write(Some(Duration::ZERO))?;
+        while let Some(msg) = bus.pop_message() {
+            handle(bus, &mut active, start, msg);
+            last_activity = Instant::now();
+        }
+        let count = active.len();
+        active.retain(|_, chooser| !chooser.finished(bus));
+        if count != active.len() {
+            last_activity = Instant::now();
+        }
+        let timeout = if active.is_empty() {
+            let remaining = IDLE_TIMEOUT.saturating_sub(last_activity.elapsed());
+            if remaining.is_zero() {
+                return Ok(());
+            }
+            Some(remaining)
+        } else if active.values().any(|chooser| chooser.exit_fd.is_none()) {
+            Some(FALLBACK_INTERVAL)
+        } else {
+            None
+        };
+
+        let watch = bus.watch();
+        // The private D-Bus connection owns this socket for the entire poll,
+        // and this loop is its sole reader.
+        let socket = unsafe { BorrowedFd::borrow_raw(watch.fd) };
+        let mut events = PollFlags::IN;
+        if watch.write || bus.has_messages_to_send() {
+            events |= PollFlags::OUT;
+        }
+        let mut fds = Vec::with_capacity(1 + active.len());
+        fds.push(PollFd::from_borrowed_fd(socket, events));
+        fds.extend(active.values().filter_map(|chooser| {
+            chooser
+                .exit_fd
+                .as_ref()
+                .map(|fd| PollFd::new(fd, PollFlags::IN))
+        }));
+        let timeout = timeout.map(|d| Timespec {
+            tv_sec: d.as_secs() as i64,
+            tv_nsec: d.subsec_nanos().into(),
+        });
+        if let Err(error) = poll(&mut fds, timeout.as_ref()) {
+            if error != rustix::io::Errno::INTR {
+                return Err(());
+            }
+        }
+    }
 }
 
 pub fn run() -> i32 {
-    let Ok(conn) = Connection::new_session() else {
+    let Ok(mut bus) = Channel::get_private(BusType::Session) else {
         eprintln!("gust: no session bus");
         return 1;
     };
-    if conn.request_name(NAME, false, true, true).is_err() {
-        eprintln!("gust: {NAME} is already owned");
+    bus.set_watch_enabled(true);
+    let conn = Connection::from(bus);
+    if !matches!(
+        conn.request_name(NAME, false, false, true),
+        Ok(RequestNameReply::PrimaryOwner)
+    ) {
+        eprintln!("gust: could not own {NAME}");
         return 1;
     }
-    // Replies are sent from worker threads through this channel, because a
-    // chooser window can stay open for minutes and must not block others.
-    let (tx, rx) = mpsc::channel::<Message>();
-    let pending: std::sync::Arc<std::sync::atomic::AtomicUsize> = Default::default();
-    {
-        let pending = pending.clone();
-        conn.start_receive(
-            dbus::message::MatchRule::new_method_call(),
-            Box::new(move |msg, conn| {
-                let member = msg.member().map(|m| m.to_string()).unwrap_or_default();
-                let right = msg.interface().is_some_and(|i| &*i == IFACE)
-                    && msg.path().is_some_and(|p| &*p == PATH);
-                let kind = match member.as_str() {
-                    "OpenFile" if right => "open",
-                    "SaveFile" if right => "save",
-                    _ => {
-                        if msg.get_no_reply() {
-                            return true;
-                        }
-                        let _ = conn.send(msg.error(
-                            &"org.freedesktop.DBus.Error.UnknownMethod".into(),
-                            &std::ffi::CString::new("not supported").unwrap(),
-                        ));
-                        return true;
-                    }
-                };
-                let tx = tx.clone();
-                let pending = pending.clone();
-                pending.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                std::thread::spawn(move || {
-                    let (code, results) = handle(&msg, kind);
-                    let reply = msg.method_return().append2(code, results);
-                    let _ = tx.send(reply);
-                    pending.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-                });
-                true
-            }),
-        );
-    }
-    // Exit after a quiet minute with nothing open; the portal restarts us.
-    let mut idle = 0u32;
-    loop {
-        let _ = conn.process(Duration::from_millis(250));
-        while let Ok(reply) = rx.try_recv() {
-            let _ = conn.send(reply);
-            idle = 0;
-        }
-        if pending.load(std::sync::atomic::Ordering::SeqCst) == 0 {
-            idle += 1;
-            if idle >= 240 {
-                return 0;
-            }
-        } else {
-            idle = 0;
-        }
-    }
+    i32::from(serve(conn.channel(), &start_chooser).is_err())
 }
+
+#[cfg(test)]
+mod tests;
