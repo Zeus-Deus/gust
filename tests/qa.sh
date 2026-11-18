@@ -334,17 +334,31 @@ rm -f /tmp/gust-fixture-EXECUTED
 
 # Record the actual opener arguments. A desktop handler can otherwise take
 # focus and receive the rest of the suite's input, including undo shortcuts.
+opener_fail() {
+  bad "$1"
+  printf '%s\n' "${RESULTS[@]}" > "$OUTDIR/results.txt"
+  exit 1
+}
+opener_expect() {
+  local label="$1" expr="$2" want="$3"
+  wait_for "$expr" "$want" || opener_fail "$label: expected '$want', got '$(state "$expr")'"
+  ok "$label"
+}
+
 opener_bin="$OPEN/.opener"
-mkdir "$opener_bin"
-cat > "$opener_bin/xdg-open" <<'OPENER'
+mkdir "$opener_bin" || opener_fail "could not create the opener directory"
+cat > "$opener_bin/xdg-open" <<'OPENER' || opener_fail "could not write the opener recorder"
 #!/bin/sh
 printf '%s\0' "$@" >> "$0.args"
 OPENER
-chmod +x "$opener_bin/xdg-open"
+chmod +x "$opener_bin/xdg-open" || opener_fail "could not make the opener executable"
+# Exercise the interpreter and the actual fixture filesystem before pressing Enter.
+"$opener_bin/xdg-open" probe || opener_fail "could not run the opener recorder"
+rm "$opener_bin/xdg-open.args" || opener_fail "could not reset the opener receipt"
 QA_PATH_PREPEND="$opener_bin" start_gust "$OPEN" || exit 1
-wait_for "d['model']['settled']" "True" >/dev/null
+wait_for "d['model']['settled']" "True" || opener_fail "the opener fixture did not settle"
 key Home
-expect "the document is focused" "d['model']['cursor_name']" "document.txt"
+opener_expect "the document is focused" "d['model']['cursor_name']" "document.txt"
 key Return
 for _ in {1..50}; do
   [[ -s "$opener_bin/xdg-open.args" ]] && break
@@ -352,26 +366,27 @@ for _ in {1..50}; do
 done
 cmp -s "$opener_bin/xdg-open.args" <(printf '%s\0' "$OPEN/document.txt") \
   && ok "the desktop opener received the exact document path" \
-  || bad "the desktop opener did not receive exactly the document path"
+  || opener_fail "the desktop opener did not receive exactly the document path"
 
 for script in noexec.sh trap.sh; do
   key Down
-  expect "cursor on $script" "d['model']['cursor_name']" "$script"
+  opener_expect "cursor on $script" "d['model']['cursor_name']" "$script"
   key Return
+  opener_expect "a confirmation is visible for $script" "d['confirmOpen']" "True"
   if [[ "$script" == noexec.sh ]]; then
-    expect "an unpermitted script asks first" "d['confirmTitle']" "Allow noexec.sh to run?"
+    opener_expect "an unpermitted script asks first" "d['confirmTitle']" "Allow noexec.sh to run?"
   else
-    expect "an executable script asks first" "d['confirmTitle']" "Run trap.sh?"
+    opener_expect "an executable script asks first" "d['confirmTitle']" "Run trap.sh?"
   fi
   key Escape
-  expect "the prompt was dismissed" "d['confirmOpen']" "False"
+  opener_expect "the prompt was dismissed" "d['confirmOpen']" "False"
 done
 [[ ! -f /tmp/gust-fixture-EXECUTED ]] \
   && ok "opening either script executed nothing" \
   || bad "opening a script executed it"
 cmp -s "$opener_bin/xdg-open.args" <(printf '%s\0' "$OPEN/document.txt") \
   && ok "only the document reached the opener" \
-  || bad "the opener received an unexpected file"
+  || opener_fail "the opener received an unexpected file"
 start_gust "$FIXTURE" || exit 1
 
 say "10h · Multi-select acts on exactly what is selected"
