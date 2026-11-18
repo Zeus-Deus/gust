@@ -5,7 +5,10 @@
 
 use crate::entry::{Completeness, DirectorySnapshot, Entry, EntryKind, Metadata};
 use crate::location::LocationKey;
+use rustix::fs::{open, statat, AtFlags, FileType, Mode, OFlags, RawDir};
+use rustix::io::Errno;
 use std::ffi::{OsStr, OsString};
+use std::mem::MaybeUninit;
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
@@ -154,43 +157,62 @@ fn list_names_inner(
         }
     };
 
-    let rd = match std::fs::read_dir(path) {
-        Ok(rd) => rd,
-        Err(e) => {
+    let fd = match open(
+        path,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) {
+        Ok(fd) => fd,
+        Err(error) => {
             snap.complete = Completeness::Failed {
-                error: format!("{e}"),
+                error: std::io::Error::from(error).to_string(),
             };
             return snap;
         }
     };
 
-    for item in rd {
+    // Reuse one directory buffer and allocate the name directly into the
+    // snapshot. The borrowed raw record never outlives the next read.
+    let mut buffer = [MaybeUninit::uninit(); 32 * 1024];
+    let mut dir = RawDir::new(&fd, &mut buffer);
+    loop {
         if cancel.is_cancelled() {
             snap.complete = Completeness::Failed {
                 error: "cancelled".into(),
             };
             return snap;
         }
-        let item = match item {
-            Ok(i) => i,
-            Err(_) => continue, // a single unreadable entry must not kill the listing
-        };
-        // file_type() here is from d_type / lstat: it does NOT follow symlinks.
-        let kind = match item.file_type() {
-            Ok(ft) => {
-                if ft.is_dir() {
-                    EntryKind::Dir
-                } else if ft.is_symlink() {
-                    EntryKind::Symlink
-                } else if ft.is_file() {
-                    EntryKind::File
-                } else {
-                    EntryKind::Special
-                }
+        let item = match dir.next() {
+            Some(Ok(item)) => item,
+            Some(Err(Errno::INTR)) => continue,
+            Some(Err(error)) => {
+                snap.complete = Completeness::Failed {
+                    error: std::io::Error::from(error).to_string(),
+                };
+                return snap;
             }
-            Err(_) => EntryKind::Unknown,
+            None => break,
         };
-        let name = OsString::from_vec(item.file_name().into_vec());
+        let name = item.file_name();
+        if matches!(name.to_bytes(), b"." | b"..") {
+            continue;
+        }
+        let mut file_type = item.file_type();
+        if file_type == FileType::Unknown {
+            // Some filesystems omit d_type. Match DirEntry::file_type's
+            // fallback without following symlinks or reopening the path.
+            if let Ok(stat) = statat(&fd, name, AtFlags::SYMLINK_NOFOLLOW) {
+                file_type = FileType::from_raw_mode(stat.st_mode);
+            }
+        }
+        let kind = match file_type {
+            FileType::Directory => EntryKind::Dir,
+            FileType::Symlink => EntryKind::Symlink,
+            FileType::RegularFile => EntryKind::File,
+            FileType::Unknown => EntryKind::Unknown,
+            _ => EntryKind::Special,
+        };
+        let name = OsString::from_vec(name.to_bytes().to_vec());
         snap.entries.push(Entry::new(name, kind));
 
         if snap.entries.len().is_multiple_of(CHUNK) {
