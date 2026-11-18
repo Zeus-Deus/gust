@@ -14,7 +14,6 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/.." && pwd)"
-FIXTURE="${GUST_FIXTURE:-/tmp/gust-fixture}"
 OUTDIR="${1:-${GUST_QA_OUT:-/tmp/gust-qa}}"
 BIN="${GUST_BIN:-$REPO/target/debug/gust}"
 LOG="$OUTDIR/gust.log"
@@ -284,14 +283,10 @@ else
 fi
 
 say "fixture"
-# A run killed mid-section can leave a bind mount or a mode-000 folder in the
-# fixture (qa §31 makes both), and make-fixture's rm -rf then fails on them.
-if [[ -d "$FIXTURE" ]]; then
-  grep -F " $FIXTURE/" /proc/self/mountinfo | awk '{print $5}' | sort -r \
-    | while read -r m; do sudo -n umount "$m" 2>/dev/null; done
-  chmod -R u+rwx "$FIXTURE" 2>/dev/null
-fi
-"$HERE/make-fixture.sh" "$FIXTURE" >/dev/null
+# A completed or interrupted run may still contain evidence or mounts.
+# Honour explicit roots only when the fixture builder admits them.
+FIXTURE="${GUST_FIXTURE:-$(mktemp -d /tmp/gust-fixture.XXXXXXXX)}" || exit 1
+"$HERE/make-fixture.sh" "$FIXTURE" >/dev/null || exit 1
 mkdir -p "$FIXTURE/.local/share" "$FIXTURE/.cache"
 rm -f /tmp/gust-fixture-EXECUTED
 [[ -d "$FIXTURE/Projects" ]] && ok "fixture built at $FIXTURE" || bad "fixture missing"
