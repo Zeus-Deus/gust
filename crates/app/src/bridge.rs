@@ -4248,9 +4248,6 @@ impl qobject::DirModel {
 
     fn cloud_connect(mut self: Pin<&mut Self>, name: QString) -> QString {
         let name = name.to_string();
-        if !gust_remote::cloud::rclone_available() {
-            return QString::from(gust_remote::cloud::CloudError::NotInstalled.message());
-        }
         let Some(mp) = Self::cloud_mount_point(&name) else {
             return QString::from("That name cannot be used for a place.");
         };
@@ -4258,7 +4255,7 @@ impl qobject::DirModel {
         let sock = Self::cloud_rc_socket(&name);
         let label = name.clone();
         self.as_mut().place_op("cloud-connect", name.clone(), format!("Connecting to {name}…"), move || {
-            // The remote must be one the installed rclone actually has.
+            // The same worker call checks both helper and remote availability.
             match gust_remote::cloud::list_remotes(None) {
                 Ok(remotes) if remotes.iter().any(|r| r.name == name) => {}
                 Ok(_) => {
@@ -4323,9 +4320,10 @@ impl qobject::DirModel {
                     return PlaceOutcome::Failed(format!("Could not start rclone: {e}"));
                 }
             };
-            // A mount appears asynchronously. Watch both the mount point and
-            // the child: if rclone gives up first, say so.
-            for _ in 0..60 {
+            // A mount appears asynchronously. Check the kernel's mount table
+            // frequently during startup, and report a child exit right away.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+            loop {
                 if gust_remote::mount::is_mounted(&mp) {
                     // Reap the child from a detached thread so it never
                     // becomes a zombie when it eventually exits.
@@ -4340,7 +4338,11 @@ impl qobject::DirModel {
                         "Could not connect to {name}: rclone stopped ({status}). Check it with: rclone lsd {name}:"
                     ));
                 }
-                std::thread::sleep(std::time::Duration::from_millis(250));
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                if remaining.is_zero() {
+                    break;
+                }
+                std::thread::sleep(remaining.min(std::time::Duration::from_millis(20)));
             }
             // Still nothing: leave nothing running behind.
             let _ = child.kill();
