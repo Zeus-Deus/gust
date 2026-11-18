@@ -332,46 +332,47 @@ cp "$OPEN/trap.sh" "$OPEN/noexec.sh"; chmod 644 "$OPEN/noexec.sh"
 echo "plain text" > "$OPEN/document.txt"
 rm -f /tmp/gust-fixture-EXECUTED
 
-vm wtype -M ctrl -k l -m ctrl >/dev/null 2>&1; sleep 0.8
-typ "$OPEN"; key Return
-wait_for "d['model']['location']" "$OPEN" >/dev/null
-
-key Home              # document.txt sorts first
+# Record the actual opener arguments. A desktop handler can otherwise take
+# focus and receive the rest of the suite's input, including undo shortcuts.
+opener_bin="$OPEN/.opener"
+mkdir "$opener_bin"
+cat > "$opener_bin/xdg-open" <<'OPENER'
+#!/bin/sh
+printf '%s\0' "$@" >> "$0.args"
+OPENER
+chmod +x "$opener_bin/xdg-open"
+QA_PATH_PREPEND="$opener_bin" start_gust "$OPEN" || exit 1
+wait_for "d['model']['settled']" "True" >/dev/null
+key Home
+expect "the document is focused" "d['model']['cursor_name']" "document.txt"
 key Return
-sleep 1.5
-if [[ "$(state "d['hintStatus']")" == *"Opened"* ]]; then
-  ok "a document is handed to the desktop opener  ($(state "d['hintStatus']"))"
-else
-  bad "document did not open (hint='$(state "d['hintStatus']")')"
-fi
+for _ in {1..50}; do
+  [[ -s "$opener_bin/xdg-open.args" ]] && break
+  sleep 0.1
+done
+cmp -s "$opener_bin/xdg-open.args" <(printf '%s\0' "$OPEN/document.txt") \
+  && ok "the desktop opener received the exact document path" \
+  || bad "the desktop opener did not receive exactly the document path"
 
-key Down              # noexec.sh — a script WITHOUT the executable bit
-key Return
-sleep 1.2
-if [[ "$(state "d['hintStatus']")" == *"Run"* || "$(state "d['hintStatus']")" == *"executable"* ]]; then
-  ok "a script without +x still needs a deliberate Run"
-else
-  bad "a non-executable script was not refused (hint='$(state "d['hintStatus']")')"
-fi
-
-key Down              # trap.sh — executable
-key Return
-sleep 1.2
-if [[ "$(state "d['hintStatus']")" == *"Run"* || "$(state "d['hintStatus']")" == *"executable"* ]]; then
-  ok "an executable is refused by plain activation"
-else
-  bad "an executable was not refused (hint='$(state "d['hintStatus']")')"
-fi
-
+for script in noexec.sh trap.sh; do
+  key Down
+  expect "cursor on $script" "d['model']['cursor_name']" "$script"
+  key Return
+  if [[ "$script" == noexec.sh ]]; then
+    expect "an unpermitted script asks first" "d['confirmTitle']" "Allow noexec.sh to run?"
+  else
+    expect "an executable script asks first" "d['confirmTitle']" "Run trap.sh?"
+  fi
+  key Escape
+  expect "the prompt was dismissed" "d['confirmOpen']" "False"
+done
 [[ ! -f /tmp/gust-fixture-EXECUTED ]] \
-  && ok "SECURITY: no file was executed by opening it" \
-  || bad "SECURITY FAILURE: activation executed a file"
-
-# Opening a document really launches the system's handler. Close what this
-# case started, or instances pile up across runs — 47 were alive before this
-# was added, and they made a later assertion blame the wrong thing.
-pkill -f "nvim $OPEN" 2>/dev/null || true
-sleep 0.3
+  && ok "opening either script executed nothing" \
+  || bad "opening a script executed it"
+cmp -s "$opener_bin/xdg-open.args" <(printf '%s\0' "$OPEN/document.txt") \
+  && ok "only the document reached the opener" \
+  || bad "the opener received an unexpected file"
+start_gust "$FIXTURE" || exit 1
 
 say "10h · Multi-select acts on exactly what is selected"
 SEL="$FIXTURE/multi"
