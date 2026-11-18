@@ -591,6 +591,12 @@ Window {
     }
 
     function shareUserEntered(text) {
+        if (text.trim() === "") {
+            prompt.close()
+            win.connectShare(win.shareAddress, "", "")
+            win.shareAddress = ""
+            return
+        }
         win.shareUser = text
         // The only masked prompt in Gust. The value goes straight to GIO
         // and is not kept afterwards.
@@ -4047,6 +4053,7 @@ Window {
         id: prompt
         anchors.fill: parent
         property string mode: ""
+        allowEmpty: mode === "share-user"
         onVisibleChanged: win.qaDump("prompt")
         onClosed: { if (connectPanel.open) connectPanel.refocus(); else win.focusList() }
         onAccepted: (text) => {

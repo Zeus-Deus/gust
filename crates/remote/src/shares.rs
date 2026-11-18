@@ -212,9 +212,7 @@ pub fn mount(
         return Ok(mount_point);
     }
 
-    let mut child = Command::new("gio")
-        .arg("mount")
-        .arg(share.uri())
+    let mut child = mount_command(share, password.is_empty())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -267,6 +265,20 @@ pub fn mount(
 ///
 /// Matches on GIO's *error identity* where it can, and falls back to the
 /// last line. Deliberately does NOT try to interpret a translated prompt.
+fn mount_command(share: &Share, password_empty: bool) -> Command {
+    let mut command = Command::new("gio");
+    command.arg("mount");
+    if share.kind == ShareKind::Smb
+        && share.user.is_none()
+        && share.domain.is_none()
+        && password_empty
+    {
+        command.arg("--anonymous");
+    }
+    command.arg(share.uri());
+    command
+}
+
 fn classify(err: &str) -> ShareError {
     let lower = err.to_lowercase();
     if lower.contains("password") && lower.contains("incorrect")
@@ -304,6 +316,22 @@ pub fn unmount(share: &Share) -> Result<(), ShareError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn guest_smb_mounts_explicitly_as_anonymous() {
+        let mut smb = parse_address("//nas/public", ShareKind::Smb).unwrap();
+        let is_anonymous = |share: &Share, password_empty| {
+            mount_command(share, password_empty)
+                .get_args()
+                .any(|arg| arg == "--anonymous")
+        };
+        assert!(is_anonymous(&smb, true));
+        assert!(!is_anonymous(&smb, false));
+        smb.user = Some("reader".into());
+        assert!(!is_anonymous(&smb, true));
+        let nfs = parse_address("nfs://nas/export", ShareKind::Nfs).unwrap();
+        assert!(!is_anonymous(&nfs, true));
+    }
 
     #[test]
     fn the_forms_people_actually_type_are_accepted() {

@@ -2149,6 +2149,10 @@ never in a log line, and never in Gust's places file — which stores the
 server and share only. Re-connecting asks again, or the user's keyring
 answers; Gust does not become a second place their password lives.
 
+For an SMB guest share, leaving the username empty skips the password prompt
+and calls `gio mount --anonymous`. A named login continues to send credentials
+through stdin.
+
 ### NFS asks for nothing
 
 NFS authorises by **address**, not by account: an export lists the clients
@@ -2164,7 +2168,7 @@ test is what caught it.
 
 ### What is deliberately not built
 
-Anonymous/guest shares and LAN discovery via Avahi.
+LAN discovery via Avahi.
 
 ## 6.15 Archives
 
