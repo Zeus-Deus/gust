@@ -115,8 +115,20 @@ fn a_write_through_a_remote_place_reaches_the_backend() {
 
     // Independently verified: read the backing file, not the mount.
     let backing = PathBuf::from(FIXTURE).join("chroot/shared/written-by-gust.txt");
-    let body = std::fs::read_to_string(&backing).expect("the backend never received the file");
-    assert_eq!(body, "round trip", "the backend content does not match");
+    // SSHFS can release the file asynchronously after the local close. Give
+    // the peer time to publish it, while requiring its exact independent bytes.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let bytes = std::fs::read(&backing);
+        if bytes.as_deref().is_ok_and(|body| body == b"round trip") {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the backend did not publish the expected bytes: {bytes:?}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
 
     let _ = std::fs::remove_file(&written);
     unmount(&mp).expect("unmount failed");
