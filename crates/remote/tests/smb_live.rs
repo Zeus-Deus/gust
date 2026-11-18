@@ -97,6 +97,7 @@ fn ensure_unmounted(share: &Share) {
 fn mount_for_test(share: &Share, pw: String) -> std::path::PathBuf {
     let mp = match mount(share, pw, &runtime_dir(), Duration::from_secs(30)) {
         Ok(mp) => mp,
+        Err(ShareError::AlreadyMounted(mp)) => mp,
         Err(ShareError::Refused(m)) if m.contains("already mounted") => {
             share.mount_point(&runtime_dir())
         }

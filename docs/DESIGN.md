@@ -2151,7 +2151,18 @@ answers; Gust does not become a second place their password lives.
 
 For an SMB guest share, leaving the username empty skips the password prompt
 and calls `gio mount --anonymous`. A named login continues to send credentials
-through stdin.
+through stdin. Submitting the username by keyboard requires a fresh press, so
+holding Enter at the address step cannot select guest on the next step.
+
+The GVfs SMB directory name identifies a server and share, but carries no
+login identity. If an SMB mount already exists, Gust shows its folder path
+without opening it. The user can open that path in the address bar to use the
+existing connection, or disconnect it before retrying. A failed SMB mount
+command never takes the presence of a directory as proof of a successful
+login. After GIO accepts an SMB mount, Gust briefly waits for the GVfs
+folder to become usable before opening it. During a quick reconnect, the FUSE
+path can return an I/O error even after GIO can list the share. NFS can
+reuse an existing mount because it has no login step.
 
 ### NFS asks for nothing
 

@@ -2,7 +2,8 @@
   "required": {
     "bsdtar": "libarchive", "bwrap": "bubblewrap", "curl": "curl", "openssl": "openssl",
     "ffmpeg": "ffmpeg", "ffprobe": "ffmpeg", "ffmpegthumbnailer": "ffmpegthumbnailer",
-    "fusermount3": "fuse3", "gio": "glib2", "ls": "coreutils", "true": "coreutils", "timeout": "coreutils",
+    "fusermount3": "fuse3", "gio": "glib2", "ls": "coreutils",
+    "test": "coreutils", "timeout": "coreutils", "true": "coreutils",
     "lsblk": "util-linux", "prlimit": "util-linux", "magick": "imagemagick",
     "mpv": "mpv", "pdftoppm": "poppler", "pdfinfo": "poppler", "pw-play": "pipewire-audio",
     "rclone": "rclone", "ssh": "openssh", "ssh-keygen": "openssh", "ssh-keyscan": "openssh",

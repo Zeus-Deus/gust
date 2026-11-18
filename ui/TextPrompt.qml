@@ -148,7 +148,7 @@ FocusScope {
                             root.close()
                             event.accepted = true
                         } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
-                            if (root.allowEmpty || field.text.length > 0)
+                            if (!event.isAutoRepeat && (root.allowEmpty || field.text.length > 0))
                                 root.accepted(field.text)
                             event.accepted = true
                         }
