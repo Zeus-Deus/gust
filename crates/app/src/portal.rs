@@ -149,9 +149,17 @@ pub fn run() -> i32 {
         eprintln!("gust: no session bus");
         return 1;
     };
-    if conn.request_name(NAME, false, true, true).is_err() {
-        eprintln!("gust: {NAME} is already owned");
-        return 1;
+    use dbus::blocking::stdintf::org_freedesktop_dbus::RequestNameReply;
+    match conn.request_name(NAME, false, true, true) {
+        Ok(RequestNameReply::PrimaryOwner | RequestNameReply::AlreadyOwner) => {}
+        Ok(_) => {
+            eprintln!("gust: {NAME} is already owned");
+            return 1;
+        }
+        Err(error) => {
+            eprintln!("gust: could not acquire {NAME}: {error}");
+            return 1;
+        }
     }
     // Replies are sent from worker threads through this channel, because a
     // chooser window can stay open for minutes and must not block others.
