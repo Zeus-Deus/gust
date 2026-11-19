@@ -144,55 +144,216 @@ pub fn parse_mimeapps(text: &str, mime: &str) -> (Vec<String>, Vec<String>) {
     (added, removed)
 }
 
+/// The ids `[Default Applications]` names for `mime`, most preferred first.
+///
+/// Kept apart from [`parse_mimeapps`]: an added association makes an
+/// application a candidate, it does not make it the default.
+pub fn parse_mimeapps_default(text: &str, mime: &str) -> Vec<String> {
+    section_ids(text, mime, "[Default Applications]")
+}
+
+/// The ids one section of a `mimeapps.list` gives `mime`, in order.
+fn section_ids(text: &str, mime: &str, section: &str) -> Vec<String> {
+    let mut inside = false;
+    let mut ids = Vec::new();
+    for line in text.lines() {
+        let t = line.trim();
+        if t.starts_with('[') {
+            inside = t == section;
+            continue;
+        }
+        match kv(t) {
+            Some((k, v)) if inside && k.trim() == mime => ids.extend(
+                v.split(';')
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string()),
+            ),
+            _ => {}
+        }
+    }
+    ids
+}
+
+/// Where associations and desktop entries are read from.
+///
+/// Passed in rather than read from the environment inside the lookup, so the
+/// precedence rules can be tested against a made-up desktop.
+#[derive(Debug, Clone, Default)]
+pub struct Lookup {
+    /// `$XDG_CONFIG_HOME`, then each of `$XDG_CONFIG_DIRS`.
+    pub config_dirs: Vec<PathBuf>,
+    /// The `applications` directories, the user's own first.
+    pub application_dirs: Vec<PathBuf>,
+    /// `$XDG_CURRENT_DESKTOP`, lowercased, in the order given.
+    pub desktops: Vec<String>,
+}
+
+impl Lookup {
+    pub fn from_env() -> Self {
+        let mut config_dirs = Vec::new();
+        if let Some(cfg) = std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+        {
+            config_dirs.push(cfg);
+        }
+        let system = std::env::var("XDG_CONFIG_DIRS").unwrap_or_else(|_| "/etc/xdg".into());
+        config_dirs.extend(
+            system
+                .split(':')
+                .filter(|s| !s.is_empty())
+                .map(PathBuf::from),
+        );
+        let desktops = std::env::var("XDG_CURRENT_DESKTOP")
+            .unwrap_or_default()
+            .split(':')
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_ascii_lowercase())
+            .collect();
+        Lookup {
+            config_dirs,
+            application_dirs: application_dirs(),
+            desktops,
+        }
+    }
+
+    /// Every `mimeapps.list` in the mime-apps spec's lookup order: each
+    /// directory's `<desktop>-mimeapps.list` before its plain one, the
+    /// config directories before the (deprecated) `applications` ones.
+    ///
+    /// Each comes with its directory's rank (0 is the highest precedence):
+    /// what a list adds or removes reaches desktop entries in directories of
+    /// the same or a lower precedence, never a higher one.
+    fn mimeapps_files(&self) -> Vec<(usize, PathBuf)> {
+        let mut files = Vec::new();
+        for (rank, dir) in self
+            .config_dirs
+            .iter()
+            .chain(&self.application_dirs)
+            .enumerate()
+        {
+            for desktop in &self.desktops {
+                files.push((rank, dir.join(format!("{desktop}-mimeapps.list"))));
+            }
+            files.push((rank, dir.join("mimeapps.list")));
+        }
+        files
+    }
+}
+
 /// Every application that can open `mime`, best first.
 pub fn handlers_for(mime: &str) -> Vec<Handler> {
-    let dirs = application_dirs();
+    handlers_in(mime, &Lookup::from_env())
+}
 
-    // The user's own list first, then each system cache.
+/// [`handlers_for`] against an explicit set of directories.
+pub fn handlers_in(mime: &str, look: &Lookup) -> Vec<Handler> {
+    let dirs = &look.application_dirs;
+
+    // First directory holding the entry wins, so a user's copy masks the
+    // system's (including masking it out with Hidden=true).
+    let entry = |id: &str| {
+        let text = dirs
+            .iter()
+            .find_map(|dir| std::fs::read_to_string(dir.join(id)).ok())?;
+        parse_desktop_entry(&text)
+    };
+
     let mut ids: Vec<String> = Vec::new();
-    let mut removed: Vec<String> = Vec::new();
-    let mut default_id: Option<String> = None;
-
-    for dir in &dirs {
-        if let Ok(text) = std::fs::read_to_string(dir.join("mimeapps.list")) {
-            let (added, gone) = parse_mimeapps(&text, mime);
-            if default_id.is_none() {
-                default_id = added.first().cloned();
-            }
-            for id in added {
-                if !ids.contains(&id) {
-                    ids.push(id);
-                }
-            }
-            removed.extend(gone);
-        }
+    // The highest-precedence directory (lowest rank) that removes each
+    // application for this type, and the highest that associates it: an
+    // explicit [Added Associations] entry, or a desktop entry's own MimeType
+    // as its directory's cache lists it.
+    let mut removed_at: BTreeMap<String, usize> = BTreeMap::new();
+    let mut source_at: BTreeMap<String, usize> = BTreeMap::new();
+    fn highest(map: &mut BTreeMap<String, usize>, id: &str, rank: usize) {
+        let at = map.entry(id.to_string()).or_insert(rank);
+        *at = (*at).min(rank);
     }
-    // Also the XDG config location, which is where most desktops write it.
-    if let Some(cfg) = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
-    {
-        if let Ok(text) = std::fs::read_to_string(cfg.join("mimeapps.list")) {
-            let (added, gone) = parse_mimeapps(&text, mime);
-            if default_id.is_none() {
-                default_id = added.first().cloned();
+    // Every [Default Applications] candidate, highest precedence first.
+    let mut wanted: Vec<String> = Vec::new();
+
+    for (rank, file) in look.mimeapps_files() {
+        let Ok(text) = std::fs::read_to_string(&file) else {
+            continue;
+        };
+        let (added, gone) = parse_mimeapps(&text, mime);
+        for id in &gone {
+            highest(&mut removed_at, id, rank);
+        }
+        // Being named as a default is not an association; only an explicit
+        // [Added Associations] entry is.
+        for id in section_ids(&text, mime, "[Added Associations]") {
+            highest(&mut source_at, &id, rank);
+        }
+        wanted.extend(parse_mimeapps_default(&text, mime));
+        for id in added {
+            if !ids.contains(&id) {
+                ids.push(id);
             }
-            for id in added {
-                if !ids.contains(&id) {
-                    ids.push(id);
-                }
-            }
-            removed.extend(gone);
         }
     }
 
-    for dir in &dirs {
+    // The rank of the directory holding the desktop entry that is actually
+    // used for `id`: the first applications directory that has one. A copy
+    // further down is shadowed, and so is everything said about it there.
+    let entry_rank = |id: &str| {
+        dirs.iter()
+            .position(|dir| dir.join(id).is_file())
+            .map(|i| look.config_dirs.len() + i)
+    };
+
+    let mut cached: Vec<String> = Vec::new();
+    for (i, dir) in dirs.iter().enumerate() {
+        let rank = look.config_dirs.len() + i;
         if let Ok(text) = std::fs::read_to_string(dir.join("mimeinfo.cache")) {
             for id in parse_mimeinfo(&text, mime) {
-                if !ids.contains(&id) {
-                    ids.push(id);
+                // A cache describes the entries in its own directory. Its
+                // record for an entry the user has shadowed describes a
+                // file that is not the one in use.
+                if entry_rank(&id) != Some(rank) {
+                    continue;
+                }
+                highest(&mut source_at, &id, rank);
+                if !cached.contains(&id) {
+                    cached.push(id);
                 }
             }
+        }
+    }
+
+    // A removal reaches associations made in its own directory or a lower
+    // one. One made in a higher directory survives it: the system's list
+    // cannot take away what the user's own desktop entry or list provides.
+    // (A list's own removal outranks what that same list adds.)
+    // And a removal in a directory below the one holding the entry in use
+    // does not reach that entry at all.
+    let dropped = |id: &String| {
+        let Some(removed) = removed_at.get(id) else {
+            return false;
+        };
+        if entry_rank(id).is_some_and(|entry| *removed > entry) {
+            return false;
+        }
+        source_at.get(id).is_none_or(|source| source >= removed)
+    };
+    // Only [Default Applications] names a default: the first candidate that
+    // is installed and whose association has not been removed. Being named
+    // as the default does not itself undo a removal.
+    let default_id = wanted
+        .into_iter()
+        .find(|id| !dropped(id) && entry(id).is_some());
+    // A default the user set for an application that does not declare the
+    // type (`xdg-mime default`) is still what the desktop opens it with.
+    if let Some(id) = &default_id {
+        if !ids.contains(id) {
+            ids.insert(0, id.clone());
+        }
+    }
+    for id in cached {
+        if !ids.contains(&id) {
+            ids.push(id);
         }
     }
 
@@ -200,26 +361,20 @@ pub fn handlers_for(mime: &str) -> Vec<Handler> {
     let mut seen: BTreeMap<String, Handler> = BTreeMap::new();
     let mut out: Vec<Handler> = Vec::new();
     for id in ids {
-        if removed.contains(&id) || seen.contains_key(&id) {
+        let is_default = default_id.as_deref() == Some(id.as_str());
+        if dropped(&id) || seen.contains_key(&id) {
             continue;
         }
-        for dir in &dirs {
-            let path = dir.join(&id);
-            let Ok(text) = std::fs::read_to_string(&path) else {
-                continue;
+        if let Some((name, exec, terminal, _)) = entry(&id) {
+            let h = Handler {
+                is_default,
+                id: id.clone(),
+                name,
+                exec,
+                terminal,
             };
-            if let Some((name, exec, terminal, _)) = parse_desktop_entry(&text) {
-                let h = Handler {
-                    is_default: default_id.as_deref() == Some(id.as_str()),
-                    id: id.clone(),
-                    name,
-                    exec,
-                    terminal,
-                };
-                seen.insert(id.clone(), h.clone());
-                out.push(h);
-            }
-            break;
+            seen.insert(id.clone(), h.clone());
+            out.push(h);
         }
     }
     // The default first; everything else keeps discovery order.
@@ -507,6 +662,342 @@ mod tests {
         let (added, removed) = parse_mimeapps(text, "image/png");
         assert_eq!(added, vec!["pinta.desktop"]);
         assert_eq!(removed, vec!["chromium.desktop"]);
+    }
+
+    /// A made-up desktop under a temp dir: a user config dir, a user data
+    /// dir and a system data dir, with three installed image viewers.
+    fn fake_desktop(tag: &str) -> (PathBuf, Lookup) {
+        let root = std::env::temp_dir().join(format!("gust-openwith-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let look = Lookup {
+            config_dirs: vec![root.join("config"), root.join("etc-xdg")],
+            application_dirs: vec![
+                root.join("data/applications"),
+                root.join("usr-share/applications"),
+            ],
+            desktops: Vec::new(),
+        };
+        for d in look.config_dirs.iter().chain(&look.application_dirs) {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let system = &look.application_dirs[1];
+        for app in ["imv", "pinta", "chromium"] {
+            std::fs::write(
+                system.join(format!("{app}.desktop")),
+                format!("[Desktop Entry]\nType=Application\nName={app}\nExec={app} %F\n"),
+            )
+            .unwrap();
+        }
+        std::fs::write(
+            system.join("mimeinfo.cache"),
+            "[MIME Cache]\nimage/png=chromium.desktop;imv.desktop;pinta.desktop;\n",
+        )
+        .unwrap();
+        (root, look)
+    }
+
+    fn default_of(look: &Lookup) -> Option<String> {
+        let found = handlers_in("image/png", look);
+        let marked: Vec<&Handler> = found.iter().filter(|h| h.is_default).collect();
+        assert!(marked.len() <= 1, "one default at most: {found:?}");
+        if let Some(d) = marked.first() {
+            assert_eq!(found[0].id, d.id, "the default is listed first");
+        }
+        marked.first().map(|h| h.id.clone())
+    }
+
+    #[test]
+    fn the_users_default_beats_the_systems() {
+        // Omarchy ships /usr/share/applications/mimeapps.list; choosing
+        // another viewer writes ~/.config/mimeapps.list, and that must win.
+        let (root, look) = fake_desktop("user-wins");
+        std::fs::write(
+            look.application_dirs[1].join("mimeapps.list"),
+            "[Default Applications]\nimage/png=imv.desktop\n",
+        )
+        .unwrap();
+        std::fs::write(
+            look.config_dirs[0].join("mimeapps.list"),
+            "[Default Applications]\nimage/png=pinta.desktop\n",
+        )
+        .unwrap();
+        assert_eq!(default_of(&look).as_deref(), Some("pinta.desktop"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_default_whose_association_is_removed_below_it_is_passed_over() {
+        // The user's list names imv; the system's list removes imv for the
+        // type and names pinta. Naming a default does not add an
+        // association, so imv is neither the default nor offered.
+        let (root, look) = fake_desktop("removed-below");
+        std::fs::write(
+            look.config_dirs[0].join("mimeapps.list"),
+            "[Default Applications]\nimage/png=imv.desktop\n",
+        )
+        .unwrap();
+        std::fs::write(
+            look.application_dirs[1].join("mimeapps.list"),
+            "[Removed Associations]\nimage/png=imv.desktop\n\
+             [Default Applications]\nimage/png=pinta.desktop\n",
+        )
+        .unwrap();
+        assert_eq!(default_of(&look).as_deref(), Some("pinta.desktop"));
+        let found = handlers_in("image/png", &look);
+        assert!(found.iter().all(|h| h.id != "imv.desktop"), "{found:?}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_users_own_desktop_entry_survives_a_system_removal() {
+        // imv is installed in the USER's applications directory and declares
+        // the type there. The system's list removes imv and names pinta. A
+        // list reaches its own directory and lower ones, never a higher one:
+        // the user's entry, and the user's default, stand.
+        let (root, look) = fake_desktop("user-entry");
+        let user = &look.application_dirs[0];
+        std::fs::write(
+            user.join("imv.desktop"),
+            "[Desktop Entry]\nType=Application\nName=imv\nExec=imv %F\nMimeType=image/png;\n",
+        )
+        .unwrap();
+        std::fs::write(
+            user.join("mimeinfo.cache"),
+            "[MIME Cache]\nimage/png=imv.desktop;\n",
+        )
+        .unwrap();
+        std::fs::write(
+            look.config_dirs[0].join("mimeapps.list"),
+            "[Default Applications]\nimage/png=imv.desktop\n",
+        )
+        .unwrap();
+        std::fs::write(
+            look.application_dirs[1].join("mimeapps.list"),
+            "[Removed Associations]\nimage/png=imv.desktop\n\
+             [Default Applications]\nimage/png=pinta.desktop\n",
+        )
+        .unwrap();
+        assert_eq!(default_of(&look).as_deref(), Some("imv.desktop"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_shadowing_user_entry_is_out_of_reach_of_a_system_removal() {
+        // The user's own imv.desktop shadows the system's and declares no
+        // type; the user names it the default. The system directory still
+        // has its imv.desktop, a cache record for it, and a list that
+        // removes imv and names pinta. None of that describes the entry in
+        // use, so the user's default stands (and the stale cache record
+        // does not count as the user's entry declaring the type).
+        let (root, look) = fake_desktop("shadowed");
+        std::fs::write(
+            look.application_dirs[0].join("imv.desktop"),
+            "[Desktop Entry]\nType=Application\nName=my imv\nExec=imv --mine %F\n",
+        )
+        .unwrap();
+        std::fs::write(
+            look.config_dirs[0].join("mimeapps.list"),
+            "[Default Applications]\nimage/png=imv.desktop\n",
+        )
+        .unwrap();
+        std::fs::write(
+            look.application_dirs[1].join("mimeapps.list"),
+            "[Removed Associations]\nimage/png=imv.desktop\n\
+             [Default Applications]\nimage/png=pinta.desktop\n",
+        )
+        .unwrap();
+        assert_eq!(default_of(&look).as_deref(), Some("imv.desktop"));
+        let found = handlers_in("image/png", &look);
+        assert_eq!(found[0].name, "my imv", "the user's copy is the one used");
+        assert_eq!(
+            found.iter().filter(|h| h.id == "imv.desktop").count(),
+            1,
+            "{found:?}"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_user_removal_still_reaches_a_shadowing_user_entry() {
+        // The same shadowing entry, but the USER's list removes it: a list
+        // reaches entries in lower directories, the user's data dir included.
+        let (root, look) = fake_desktop("shadowed-removed");
+        std::fs::write(
+            look.application_dirs[0].join("imv.desktop"),
+            "[Desktop Entry]\nType=Application\nName=my imv\nExec=imv --mine %F\n",
+        )
+        .unwrap();
+        std::fs::write(
+            look.config_dirs[0].join("mimeapps.list"),
+            "[Default Applications]\nimage/png=imv.desktop;pinta.desktop\n\
+             [Removed Associations]\nimage/png=imv.desktop\n",
+        )
+        .unwrap();
+        assert_eq!(default_of(&look).as_deref(), Some("pinta.desktop"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_removal_in_the_same_directory_as_the_entry_still_applies() {
+        // The user's own list removes the user's own entry.
+        let (root, look) = fake_desktop("same-dir");
+        let user = &look.application_dirs[0];
+        std::fs::write(
+            user.join("imv.desktop"),
+            "[Desktop Entry]\nType=Application\nName=imv\nExec=imv %F\nMimeType=image/png;\n",
+        )
+        .unwrap();
+        std::fs::write(
+            user.join("mimeinfo.cache"),
+            "[MIME Cache]\nimage/png=imv.desktop;\n",
+        )
+        .unwrap();
+        std::fs::write(
+            user.join("mimeapps.list"),
+            "[Removed Associations]\nimage/png=imv.desktop\n",
+        )
+        .unwrap();
+        let found = handlers_in("image/png", &look);
+        assert!(found.iter().all(|h| h.id != "imv.desktop"), "{found:?}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn an_association_added_above_a_removal_survives_it() {
+        // Same removal below, but the user's list also ADDS imv: an explicit
+        // association at higher precedence is not undone from below.
+        let (root, look) = fake_desktop("added-above");
+        std::fs::write(
+            look.config_dirs[0].join("mimeapps.list"),
+            "[Added Associations]\nimage/png=imv.desktop\n\
+             [Default Applications]\nimage/png=imv.desktop\n",
+        )
+        .unwrap();
+        std::fs::write(
+            look.application_dirs[1].join("mimeapps.list"),
+            "[Removed Associations]\nimage/png=imv.desktop\n\
+             [Default Applications]\nimage/png=pinta.desktop\n",
+        )
+        .unwrap();
+        assert_eq!(default_of(&look).as_deref(), Some("imv.desktop"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_removal_above_an_addition_wins() {
+        // The user removes imv; the system's list adds it and names it.
+        let (root, look) = fake_desktop("removed-above");
+        std::fs::write(
+            look.config_dirs[0].join("mimeapps.list"),
+            "[Removed Associations]\nimage/png=imv.desktop\n",
+        )
+        .unwrap();
+        std::fs::write(
+            look.application_dirs[1].join("mimeapps.list"),
+            "[Added Associations]\nimage/png=imv.desktop\n\
+             [Default Applications]\nimage/png=imv.desktop;pinta.desktop\n",
+        )
+        .unwrap();
+        assert_eq!(default_of(&look).as_deref(), Some("pinta.desktop"));
+        let found = handlers_in("image/png", &look);
+        assert!(found.iter().all(|h| h.id != "imv.desktop"), "{found:?}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_default_for_an_app_that_does_not_declare_the_type_is_honoured() {
+        // `xdg-mime default imv.desktop image/x-odd`: nothing lists imv for
+        // the type and nothing removes it. The desktop opens such a file
+        // with imv, so Gust must agree.
+        let (root, look) = fake_desktop("undeclared");
+        std::fs::write(
+            look.config_dirs[0].join("mimeapps.list"),
+            "[Default Applications]\nimage/x-odd=imv.desktop\n",
+        )
+        .unwrap();
+        let found = handlers_in("image/x-odd", &look);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(
+            found[0].is_default && found[0].id == "imv.desktop",
+            "{found:?}"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn an_added_association_is_offered_but_is_not_the_default() {
+        let (root, look) = fake_desktop("added");
+        std::fs::write(
+            look.config_dirs[0].join("mimeapps.list"),
+            "[Added Associations]\nimage/png=pinta.desktop;\n",
+        )
+        .unwrap();
+        assert_eq!(default_of(&look), None, "nothing named a default");
+        let found = handlers_in("image/png", &look);
+        assert!(found.iter().any(|h| h.id == "pinta.desktop"));
+
+        std::fs::write(
+            look.config_dirs[0].join("mimeapps.list"),
+            "[Added Associations]\nimage/png=pinta.desktop;\n\
+             [Default Applications]\nimage/png=imv.desktop\n",
+        )
+        .unwrap();
+        assert_eq!(default_of(&look).as_deref(), Some("imv.desktop"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn the_current_desktops_own_list_comes_before_the_generic_one() {
+        let (root, mut look) = fake_desktop("desktop");
+        look.desktops = vec!["hyprland".into(), "wlroots".into()];
+        std::fs::write(
+            look.config_dirs[0].join("mimeapps.list"),
+            "[Default Applications]\nimage/png=imv.desktop\n",
+        )
+        .unwrap();
+        std::fs::write(
+            look.config_dirs[0].join("wlroots-mimeapps.list"),
+            "[Default Applications]\nimage/png=chromium.desktop\n",
+        )
+        .unwrap();
+        assert_eq!(default_of(&look).as_deref(), Some("chromium.desktop"));
+        // Desktops are tried in the order $XDG_CURRENT_DESKTOP lists them.
+        std::fs::write(
+            look.config_dirs[0].join("hyprland-mimeapps.list"),
+            "[Default Applications]\nimage/png=pinta.desktop\n",
+        )
+        .unwrap();
+        assert_eq!(default_of(&look).as_deref(), Some("pinta.desktop"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_default_that_is_not_installed_or_was_removed_is_passed_over() {
+        let (root, look) = fake_desktop("skip");
+        // Uninstalled first choice: the next id on the same line wins.
+        std::fs::write(
+            look.config_dirs[0].join("mimeapps.list"),
+            "[Default Applications]\nimage/png=gone.desktop;pinta.desktop;\n",
+        )
+        .unwrap();
+        assert_eq!(default_of(&look).as_deref(), Some("pinta.desktop"));
+
+        // A removed one is skipped too, and the next list is consulted.
+        std::fs::write(
+            look.config_dirs[0].join("mimeapps.list"),
+            "[Default Applications]\nimage/png=pinta.desktop\n\
+             [Removed Associations]\nimage/png=pinta.desktop;\n",
+        )
+        .unwrap();
+        std::fs::write(
+            look.application_dirs[1].join("mimeapps.list"),
+            "[Default Applications]\nimage/png=imv.desktop\n",
+        )
+        .unwrap();
+        assert_eq!(default_of(&look).as_deref(), Some("imv.desktop"));
+        let found = handlers_in("image/png", &look);
+        assert!(found.iter().all(|h| h.id != "pinta.desktop"));
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
