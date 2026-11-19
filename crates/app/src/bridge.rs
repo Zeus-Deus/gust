@@ -6500,24 +6500,14 @@ impl qobject::DirModel {
         let Some(path) = self.key.as_path() else {
             return list;
         };
-        // Each crumb is "path\tlabel". Inside a mounted place the bar starts
-        // at the place ("nas / Shared"), not at "/ run / user / 1000 / …".
-        let (start, first_label) = match place_of(path) {
-            Some((root, label)) => (root, label),
-            None => (PathBuf::from("/"), "/".to_string()),
-        };
-        let rest = path.strip_prefix(&start).unwrap_or(path);
-        let mut acc = start.clone();
-        list.append(QString::from(&format!(
-            "{}\t{first_label}",
-            start.to_string_lossy()
-        )));
-        for c in rest.components() {
-            acc.push(c);
-            let label = gust_core::location::escape_for_display(c.as_os_str());
+        // Each crumb is "path\tlabel". The bar starts at "Home" inside the
+        // home folder and at the place inside a mounted one ("nas / Shared"),
+        // not at "/ home / sam / …" or "/ run / user / 1000 / …".
+        let home = PathBuf::from(self.home_path.to_string());
+        for (folder, label) in gust_core::location::crumbs(path, &home, place_of(path)) {
             list.append(QString::from(&format!(
                 "{}\t{label}",
-                acc.to_string_lossy()
+                folder.to_string_lossy()
             )));
         }
         list
