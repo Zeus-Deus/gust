@@ -19,10 +19,6 @@ Item {
     /// [{label, hint, action, danger, enabled}] or {separator: true}
     property var items: []
     property int current: -1
-    // Where the pointer was when the menu appeared; hover counts only
-    // once it has moved away from there.
-    property bool pointerSeen: false
-    property point pointerOrigin: Qt.point(0, 0)
     readonly property bool open: visible
 
     signal chosen(string action)
@@ -32,7 +28,24 @@ Item {
     /// must follow the action, such as releasing a right-drag, belongs here.
     signal finished(string action)
     signal highlightMoved()
-    onCurrentChanged: if (visible) highlightMoved()
+    onCurrentChanged: {
+        if (!visible) return
+        reveal(current)
+        highlightMoved()
+    }
+
+    /// Keep the scroll offset in range and the current entry inside the frame.
+    function reveal(i) {
+        let y = scroller.contentY
+        if (i >= 0 && i < items.length) {
+            let top = 0
+            for (let k = 0; k < i; k++) top += items[k].separator ? sepH : rowH
+            const bottom = top + rowH + 2 * padY
+            if (top < y) y = top
+            else if (bottom > y + menu.height) y = bottom - menu.height
+        }
+        scroller.contentY = Math.max(0, Math.min(y, menu.fullHeight - menu.height))
+    }
     signal closed()
 
     readonly property real rowH: Tokens.rowHeight
@@ -71,18 +84,16 @@ Item {
             hintMetrics.text = list[i].hint || ""
             wh = Math.max(wh, hintMetrics.advanceWidth)
         }
-        menu.width = Math.ceil(Tokens.rowPaddingX * 2 + wl + (wh > 0 ? Tokens.spaceXxl * 2 + wh : 0))
-        menu.height = Math.ceil(h)
-        const m = Tokens.spaceSm
-        menu.x = Math.max(m, Math.min(px, root.width - menu.width - m))
-        menu.y = py + menu.height + m <= root.height
-                 ? py
-                 : Math.max(m, py - menu.height)
+        menu.preferredWidth = Math.ceil(Tokens.rowPaddingX * 2 + wl + (wh > 0 ? Tokens.spaceXxl * 2 + wh : 0))
+        menu.fullHeight = Math.ceil(h)
+        scroller.contentY = 0
         current = -1
-        pointerSeen = false
+        hover.seen = false
         visible = true
         keys.forceActiveFocus()
     }
+
+    function horizontalEdges() { return [menu.x, menu.x + menu.width] }
 
     /// Centre of each entry by label, in window coordinates (qa).
     function itemPoints() {
@@ -131,6 +142,23 @@ Item {
         onWheel: root.close()
     }
 
+    // Track motion in window coordinates. A row moving under a parked
+    // pointer during scrolling or resizing must preserve keyboard selection.
+    HoverHandler {
+        id: hover
+        property bool seen: false
+        property point lastPosition
+        onPointChanged: {
+            const p = point.position
+            if (seen && Math.abs(p.x - lastPosition.x) + Math.abs(p.y - lastPosition.y) < 3) return
+            lastPosition = p
+            if (!seen) { seen = true; return }
+            const local = entries.mapFromItem(root, p)
+            const entry = scroller.contains(scroller.mapFromItem(root, p)) ? entries.childAt(local.x, local.y) : null
+            root.current = entry && root.isPickable(entry.index) ? entry.index : -1
+        }
+    }
+
     Item {
         id: keys
         focus: true
@@ -154,27 +182,61 @@ Item {
     Rectangle {
         id: menu
         objectName: "contextMenu"
+        property real preferredWidth: 0
+        width: Math.min(preferredWidth, Math.max(0, root.width - 2 * Tokens.spaceSm))
+        x: Math.max(Tokens.spaceSm, Math.min(root.lastAt.x, root.width - width - Tokens.spaceSm))
         color: Tokens.menuBackground
         border.width: Math.max(1, Tokens.borderWidth)
         border.color: Tokens.border
         radius: Tokens.radius
+        /// The height every entry needs; `height` is capped to the window.
+        property real fullHeight: 0
+        height: Math.min(fullHeight, Math.max(0, root.height - 2 * Tokens.spaceSm))
+        // Prefer to open below the anchor. A resize can put even the anchor
+        // outside the window, so clamp the flipped position at both edges.
+        readonly property real maxY: root.height - height - Tokens.spaceSm
+        y: Math.max(Tokens.spaceSm, root.lastAt.y <= maxY ? root.lastAt.y
+                                                          : Math.min(root.lastAt.y - height, maxY))
+        readonly property bool scrolls: fullHeight > height
 
         // Clicks inside the frame but between rows must not fall through
         // to the dismiss area.
-        MouseArea { anchors.fill: parent; acceptedButtons: Qt.AllButtons }
+        MouseArea {
+            anchors.fill: parent
+            acceptedButtons: Qt.AllButtons
+            // At a scroll limit the Flickable passes on further wheel ticks.
+            onWheel: (wheel) => { wheel.accepted = true }
+        }
+
+        Flickable {
+            id: scroller
+            objectName: "contextMenuScroller"
+            anchors.fill: parent
+            anchors.topMargin: Math.max(1, Tokens.borderWidth)
+            anchors.bottomMargin: Math.max(1, Tokens.borderWidth)
+            contentWidth: width
+            contentHeight: menu.fullHeight - Math.max(1, Tokens.borderWidth) * 2
+            interactive: menu.scrolls
+            boundsBehavior: Flickable.StopAtBounds
+            clip: menu.scrolls
+            onHeightChanged: if (root.visible) root.reveal(root.current)
 
         Column {
-            y: root.padY
+            id: entries
+            y: root.padY - Math.max(1, Tokens.borderWidth)
             width: parent.width
 
             Repeater {
                 id: menuRepeater
                 model: root.items
                 delegate: Item {
+                    id: entry
                     required property var modelData
                     required property int index
                     width: menu.width
                     height: modelData.separator ? root.sepH : root.rowH
+                    readonly property real textBudget: Math.max(0, width - 2 * Tokens.rowPaddingX
+                                                                - (shortcut.text ? Tokens.spaceSm : 0))
 
                     Rectangle {
                         visible: modelData.separator === true
@@ -204,10 +266,14 @@ Item {
                     }
 
                     Text {
+                        id: entryLabel
+                        objectName: "menuLabel"
                         textFormat: Text.PlainText
                         visible: !modelData.separator
                         anchors.verticalCenter: parent.verticalCenter
                         x: Tokens.rowPaddingX
+                        width: entry.textBudget - shortcut.width
+                        elide: Text.ElideRight
                         text: modelData.label || ""
                         font.family: Tokens.fontFamily
                         font.pixelSize: Tokens.fontBody
@@ -217,11 +283,19 @@ Item {
                              : Tokens.foreground
                     }
                     Text {
+                        id: shortcut
+                        objectName: "menuShortcut"
                         textFormat: Text.PlainText
                         visible: !modelData.separator && (modelData.hint || "") !== ""
                         anchors.verticalCenter: parent.verticalCenter
                         anchors.right: parent.right
                         anchors.rightMargin: Tokens.rowPaddingX
+                        // Share a crowded row. A short action or shortcut leaves
+                        // its unused space to the other column.
+                        width: Math.min(implicitWidth, Math.max(entry.textBudget / 2,
+                                                               entry.textBudget - entryLabel.implicitWidth))
+                        horizontalAlignment: Text.AlignRight
+                        elide: Text.ElideRight
                         text: modelData.hint || ""
                         font.family: Tokens.fontFamily
                         font.pixelSize: Tokens.fontSmall
@@ -231,23 +305,7 @@ Item {
                     MouseArea {
                         visible: !modelData.separator
                         anchors.fill: parent
-                        hoverEnabled: true
                         acceptedButtons: Qt.LeftButton | Qt.RightButton
-                        // Movement, not mere presence: a menu opened by the
-                        // keyboard can appear under a resting pointer, and
-                        // that pointer must not pick the entry Enter runs.
-                        onPositionChanged: (mouse) => {
-                            const g = mapToItem(root, mouse.x, mouse.y)
-                            if (!root.pointerSeen) {
-                                root.pointerSeen = true
-                                root.pointerOrigin = g
-                                return
-                            }
-                            if (Math.abs(g.x - root.pointerOrigin.x) + Math.abs(g.y - root.pointerOrigin.y) < 3)
-                                return
-                            root.current = root.isPickable(index) ? index : -1
-                        }
-                        onExited: if (root.current === index) root.current = -1
                         onClicked: root.pick(index)
                     }
 
@@ -255,6 +313,25 @@ Item {
                     Accessible.name: modelData.label || ""
                 }
             }
+        }
+        }
+
+        // More above or below: a thin bar at the edge that has it.
+        Rectangle {
+            visible: menu.scrolls && !scroller.atYBeginning
+            anchors.top: parent.top
+            x: Tokens.spaceSm
+            width: parent.width - Tokens.spaceSm * 2
+            height: Math.max(2, Tokens.borderWidth * 2)
+            color: Tokens.accent
+        }
+        Rectangle {
+            visible: menu.scrolls && !scroller.atYEnd
+            anchors.bottom: parent.bottom
+            x: Tokens.spaceSm
+            width: parent.width - Tokens.spaceSm * 2
+            height: Math.max(2, Tokens.borderWidth * 2)
+            color: Tokens.accent
         }
     }
 }

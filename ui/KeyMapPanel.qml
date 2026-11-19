@@ -71,6 +71,19 @@ Item {
         clip: true
         MouseArea { anchors.fill: parent; onClicked: root.hide() }
 
+        // A visible way out: Escape and a click outside were the only ones.
+        BarButton {
+            objectName: "keyMapClose"
+            anchors.top: parent.top
+            anchors.right: parent.right
+            anchors.margins: Tokens.spaceSm
+            z: 1
+            icon: "close"
+            label: qsTr("Close")
+            keys: "Esc"
+            onClicked: root.hide()
+        }
+
         Column {
             id: content
             anchors.left: parent.left

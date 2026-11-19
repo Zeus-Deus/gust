@@ -1,7 +1,7 @@
 import QtQuick
 import com.gust.app
 
-// Settings — five choices, each one row, each a set of clickable options.
+// Settings — one row of clickable options per preference.
 // Everything shown here is honoured: nothing is listed that Gust ignores.
 // A choice shows as soon as it is accepted; the preferences worker saves it
 // to ~/.config/gust/settings.toml, and the status line says "Saved" only
@@ -13,6 +13,8 @@ Item {
     z: 60
 
     property bool open: false
+    readonly property alias closeButton: close
+    readonly property alias scrollY: body.contentY
     // Parsed DirModel.settings_json(), bound by the window (never assigned
     // here, so every published snapshot arrives).
     property var s: ({})
@@ -75,12 +77,29 @@ Item {
     function show() {
         root.current = 0
         root.open = true
+        body.contentY = 0
         keys.forceActiveFocus()
         // A click that opened the panel is still being delivered; take the
         // keyboard again once it has finished, or Escape goes to the list.
         Qt.callLater(() => keys.forceActiveFocus())
     }
     function hide() { root.open = false; root.closed() }
+    // The desktop probe clicks only options wholly inside the clipped viewport.
+    function visibleOptionPoints() {
+        const points = {}
+        const row = rowRepeater.itemAt(current)
+        if (!row) return points
+        for (let i = 0; i < row.buttons.count; ++i) {
+            const button = row.buttons.itemAt(i)
+            if (!button) continue
+            const p = button.mapToItem(body, 0, 0)
+            if (p.x < 0 || p.x + button.width > body.width ||
+                p.y < 0 || p.y + button.height > body.height) continue
+            const center = button.mapToItem(null, button.width / 2, button.height / 2)
+            points[button.modelData[0]] = [Math.round(center.x), Math.round(center.y)]
+        }
+        return points
+    }
     /// Take the keyboard back after something shown over the panel (a
     /// confirmation) goes, on the row the user was on.
     function refocus() { if (root.open) keys.forceActiveFocus() }
@@ -102,12 +121,39 @@ Item {
         else if (r.key === "file_dialogs") root.dialogsRequested(value === "true")
         else root.changed(r.key, value)
     }
+    function revealSelection() {
+        const row = rowRepeater.itemAt(current)
+        if (!row) return
+        // Show the title and note too when the row fits. In a taller row,
+        // only the selected button needs to follow the keyboard.
+        let target = row
+        if (row.height > body.height) {
+            const value = valueOf(row.modelData.key)
+            const index = row.modelData.options.findIndex(option => option[0] === value)
+            target = row.buttons.itemAt(Math.max(0, index))
+            if (!target) return
+        }
+        const y = target.mapToItem(body.contentItem, 0, 0).y
+        if (y < body.contentY) body.contentY = y
+        else if (y + target.height > body.contentY + body.height)
+            body.contentY = y + target.height - body.height
+    }
+    function moveRow(dir) {
+        root.current = Math.max(0, Math.min(root.rows.length - 1, root.current + dir))
+        revealSelection()
+    }
+    function revealAfterLayout(key) {
+        const row = rowRepeater.itemAt(root.current)
+        if (row && row.modelData.key === key) Qt.callLater(row.revealIfCurrent)
+    }
     function step(dir) {
         const r = root.rows[root.current]
         const cur = valueOf(r.key)
         let i = r.options.findIndex(o => o[0] === cur)
         i = Math.max(0, Math.min(r.options.length - 1, i + dir))
         if (r.options[i][0] !== cur) choose(root.current, r.options[i][0])
+        // Applying a preference can change the layout (for example, density).
+        revealAfterLayout(r.key)
     }
 
     Rectangle {
@@ -121,8 +167,8 @@ Item {
         focus: root.open
         Keys.onPressed: (event) => {
             if (event.key === Qt.Key_Escape) { root.hide(); event.accepted = true }
-            else if (event.key === Qt.Key_Down || event.key === Qt.Key_J) { root.current = Math.min(root.rows.length - 1, root.current + 1); event.accepted = true }
-            else if (event.key === Qt.Key_Up || event.key === Qt.Key_K) { root.current = Math.max(0, root.current - 1); event.accepted = true }
+            else if (event.key === Qt.Key_Down || event.key === Qt.Key_J) { root.moveRow(1); event.accepted = true }
+            else if (event.key === Qt.Key_Up || event.key === Qt.Key_K) { root.moveRow(-1); event.accepted = true }
             else if (event.key === Qt.Key_Right || event.key === Qt.Key_L) { root.step(1); event.accepted = true }
             else if (event.key === Qt.Key_Left || event.key === Qt.Key_H) { root.step(-1); event.accepted = true }
             else if (event.key === Qt.Key_R && root.failed) { root.retryRequested(); event.accepted = true }
@@ -133,152 +179,228 @@ Item {
         id: panel
         anchors.centerIn: parent
         width: Math.min(parent.width - Tokens.spaceXl * 4, Math.round(Tokens.rowHeight * 26))
-        height: col.implicitHeight + Tokens.spaceXl * 2
+        readonly property real verticalInset: Math.min(Tokens.spaceSm, root.height / 16)
+        readonly property real bottomInset: Math.min(Tokens.spaceXl, root.height / 8)
+        height: Math.min(root.height - verticalInset * 2,
+                         header.height + col.implicitHeight + verticalInset * 2 + bottomInset)
         color: Tokens.backgroundDark
         border.width: Math.max(1, Tokens.borderWidth)
         border.color: Tokens.withAlpha(Tokens.border, Tokens.borderAlpha)
         MouseArea { anchors.fill: parent }   // clicks inside do not close
 
-        Column {
-            id: col
+        Item {
+            id: header
+            anchors.top: parent.top
             anchors.left: parent.left
             anchors.right: parent.right
-            anchors.top: parent.top
-            anchors.margins: Tokens.spaceXl
-            spacing: Tokens.spaceSm
+            anchors.topMargin: panel.verticalInset
+            anchors.leftMargin: Tokens.spaceXl
+            anchors.rightMargin: Tokens.spaceSm
+            // Leave the scrolling options most of the window even at large type and spacing.
+            height: Math.min(Math.max(heading.implicitHeight, Tokens.controlHeight), root.height / 4)
 
             Text {
+                id: heading
+                anchors.verticalCenter: parent.verticalCenter
                 textFormat: Text.PlainText
                 text: qsTr("Settings")
                 color: Tokens.foregroundBright
                 font.family: Tokens.fontFamily
                 font.pixelSize: Tokens.fontSubtitle
             }
-            Item { width: 1; height: Tokens.spaceSm }
+            BarButton {
+                id: close
+                objectName: "settingsClose"
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                width: height
+                height: header.height
+                icon: "close"
+                label: qsTr("Close")
+                keys: "Esc"
+                onClicked: root.hide()
+            }
+        }
 
-            Repeater {
-                model: root.open ? root.rows : []
-                delegate: Rectangle {
-                    id: rowItem
-                    required property var modelData
-                    required property int index
-                    width: col.width
-                    // A row marked `live` takes its note from the snapshot.
-                    readonly property string note: root.busyKey === modelData.key ? qsTr("Checking…")
-                        : modelData.live === "renderer"
-                          ? qsTr("Applies the next time Gust starts. Now: ")
-                            + (root.s.renderer_now === "software" ? qsTr("software") : qsTr("graphics card"))
-                        : modelData.live === "omarchy" ? (root.s.is_omarchy ? qsTr("You can switch back any time")
-                                                                            : qsTr("Needs Omarchy"))
-                        : modelData.note
-                    height: Tokens.controlHeight + (rowItem.note !== "" ? Tokens.fontCaption + Tokens.spaceXs : 0)
-                    color: root.current === index
-                           ? Tokens.withAlpha(Tokens.selectedBackground, Math.max(Tokens.selectedAlpha, 0.14))
-                           : "transparent"
-                    Rectangle {
-                        visible: root.current === rowItem.index
-                        width: Math.max(2, Tokens.borderWidth * 2)
-                        height: parent.height
-                        color: Tokens.accent
-                    }
+        Flickable {
+            id: body
+            objectName: "settingsBody"
+            anchors.top: header.bottom
+            anchors.bottom: parent.bottom
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.margins: Tokens.spaceXl
+            anchors.topMargin: panel.verticalInset
+            anchors.bottomMargin: panel.bottomInset
+            contentWidth: width
+            contentHeight: col.implicitHeight
+            flickableDirection: Flickable.VerticalFlick
+            boundsBehavior: Flickable.StopAtBounds
+            clip: true
 
-                    Text {
-                        textFormat: Text.PlainText
-                        id: title
-                        x: Tokens.spaceSm
-                        y: Math.round((Tokens.controlHeight - height) / 2)
-                        width: Math.round(Tokens.rowHeight * 5)
-                        text: modelData.title
-                        color: Tokens.foreground
-                        font.family: Tokens.fontFamily
-                        font.pixelSize: Tokens.fontBody
-                    }
-                    Text {
-                        textFormat: Text.PlainText
-                        x: Tokens.spaceSm
-                        y: Tokens.controlHeight - Tokens.spaceXs
-                        objectName: "settingsNote-" + rowItem.modelData.key
-                        visible: rowItem.note !== ""
-                        text: rowItem.note
-                        color: Tokens.foregroundDim
-                        font.family: Tokens.fontFamily
-                        font.pixelSize: Tokens.fontCaption
-                    }
-                    Row {
-                        anchors.right: parent.right
-                        anchors.rightMargin: Tokens.spaceSm
-                        y: Math.round((Tokens.controlHeight - height) / 2)
-                        spacing: Tokens.spaceXs
-                        Repeater {
-                            model: rowItem.modelData.options
-                            delegate: Rectangle {
-                                required property var modelData
-                                readonly property bool chosen: root.valueOf(rowItem.modelData.key) === modelData[0]
-                                width: optLabel.implicitWidth + Tokens.spaceLg * 2
-                                height: Tokens.controlHeight - Tokens.spaceSm
-                                // Same treatment as the palette and menus: the
-                                // theme's selection colour at low alpha, so the
-                                // label keeps full contrast in every theme.
-                                color: chosen ? Tokens.withAlpha(Tokens.selectedBackground, Math.max(Tokens.selectedAlpha, 0.16))
-                                       : optMouse.containsMouse ? Tokens.withAlpha(Tokens.foreground, 0.08) : "transparent"
-                                border.color: chosen ? Tokens.accent : Tokens.withAlpha(Tokens.border, Tokens.borderAlpha)
-                                border.width: Tokens.borderWidth
-                                Text {
-                                    textFormat: Text.PlainText
-                                    id: optLabel
-                                    anchors.centerIn: parent
-                                    text: modelData[1]
-                                    color: chosen ? Tokens.foregroundBright : Tokens.foreground
-                                    font.bold: chosen
-                                    font.family: Tokens.fontFamily
-                                    font.pixelSize: Tokens.fontSmall
+            Column {
+                id: col
+                width: body.width
+                spacing: Tokens.spaceSm
+
+                Repeater {
+                    id: rowRepeater
+                    model: root.open ? root.rows : []
+                    delegate: Rectangle {
+                        id: rowItem
+                        required property var modelData
+                        required property int index
+                        function revealIfCurrent() {
+                            if (!root.open || root.current !== index) return
+                            // The bold choice and the restored note can both reflow.
+                            options.forceLayout()
+                            col.forceLayout()
+                            root.revealSelection()
+                        }
+                        width: col.width
+                        readonly property alias buttons: optionRepeater
+                        readonly property real availableWidth: width - Tokens.spaceSm * 2
+                        readonly property bool stacked: title.implicitWidth + Tokens.spaceSm
+                                                         + options.preferredWidth > availableWidth
+                        // A row marked `live` takes its note from the snapshot.
+                        readonly property string note: root.busyKey === modelData.key ? qsTr("Checking…")
+                            : modelData.live === "renderer"
+                              ? qsTr("Applies the next time Gust starts. Now: ")
+                                + (root.s.renderer_now === "software" ? qsTr("software") : qsTr("graphics card"))
+                            : modelData.live === "omarchy" ? (root.s.is_omarchy ? qsTr("You can switch back any time")
+                                                                                : qsTr("Needs Omarchy"))
+                            : modelData.note
+                        height: (noteText.visible ? noteText.y + noteText.height
+                                                  : options.y + options.height) + Tokens.spaceXs
+                        color: root.current === index
+                               ? Tokens.withAlpha(Tokens.selectedBackground, Math.max(Tokens.selectedAlpha, 0.14))
+                               : "transparent"
+                        Rectangle {
+                            visible: root.current === rowItem.index
+                            width: Math.max(2, Tokens.borderWidth * 2)
+                            height: parent.height
+                            color: Tokens.accent
+                        }
+
+                        Text {
+                            textFormat: Text.PlainText
+                            id: title
+                            x: Tokens.spaceSm
+                            y: rowItem.stacked ? Tokens.spaceXs : Math.round((Tokens.controlHeight - height) / 2)
+                            width: Math.min(implicitWidth, rowItem.availableWidth)
+                            wrapMode: Text.Wrap
+                            text: modelData.title
+                            color: Tokens.foreground
+                            font.family: Tokens.fontFamily
+                            font.pixelSize: Tokens.fontBody
+                        }
+                        Text {
+                            id: noteText
+                            textFormat: Text.PlainText
+                            x: Tokens.spaceSm
+                            y: rowItem.stacked ? options.y + options.height + Tokens.spaceXs
+                                               : Tokens.controlHeight - Tokens.spaceXs
+                            width: rowItem.availableWidth
+                            wrapMode: Text.Wrap
+                            objectName: "settingsNote-" + rowItem.modelData.key
+                            visible: rowItem.note !== ""
+                            text: rowItem.note
+                            color: Tokens.foregroundDim
+                            font.family: Tokens.fontFamily
+                            font.pixelSize: Tokens.fontCaption
+                        }
+                        Flow {
+                            id: options
+                            readonly property real preferredWidth: {
+                                let total = Math.max(0, optionRepeater.count - 1) * spacing
+                                for (let i = 0; i < optionRepeater.count; ++i) {
+                                    const button = optionRepeater.itemAt(i)
+                                    if (button) total += button.implicitWidth
                                 }
-                                MouseArea {
-                                    id: optMouse
-                                    anchors.fill: parent
-                                    hoverEnabled: true
-                                    cursorShape: Qt.PointingHandCursor
-                                    onClicked: { root.current = rowItem.index; root.choose(rowItem.index, modelData[0]) }
+                                return total
+                            }
+                            width: Math.min(preferredWidth, rowItem.availableWidth)
+                            x: rowItem.stacked ? Tokens.spaceSm : rowItem.width - Tokens.spaceSm - width
+                            y: rowItem.stacked ? title.y + title.height + Tokens.spaceXs
+                                               : Math.round((Tokens.controlHeight - height) / 2)
+                            spacing: Tokens.spaceXs
+                            Repeater {
+                                id: optionRepeater
+                                model: rowItem.modelData.options
+                                delegate: Rectangle {
+                                    required property var modelData
+                                    readonly property bool chosen: root.valueOf(rowItem.modelData.key) === modelData[0]
+                                    implicitWidth: optLabel.implicitWidth + Tokens.spaceLg * 2
+                                    width: Math.min(implicitWidth, rowItem.availableWidth)
+                                    height: rowItem.stacked ? optLabel.height + Tokens.spaceSm * 2
+                                                            : Tokens.controlHeight - Tokens.spaceSm
+                                    // Same treatment as the palette and menus: the
+                                    // theme's selection colour at low alpha, so the
+                                    // label keeps full contrast in every theme.
+                                    color: chosen ? Tokens.withAlpha(Tokens.selectedBackground, Math.max(Tokens.selectedAlpha, 0.16))
+                                           : optMouse.containsMouse ? Tokens.withAlpha(Tokens.foreground, 0.08) : "transparent"
+                                    border.color: chosen ? Tokens.accent : Tokens.withAlpha(Tokens.border, Tokens.borderAlpha)
+                                    border.width: Tokens.borderWidth
+                                    Text {
+                                        textFormat: Text.PlainText
+                                        id: optLabel
+                                        anchors.centerIn: parent
+                                        width: parent.width - Tokens.spaceLg * 2
+                                        wrapMode: Text.Wrap
+                                        horizontalAlignment: Text.AlignHCenter
+                                        text: modelData[1]
+                                        color: chosen ? Tokens.foregroundBright : Tokens.foreground
+                                        font.bold: chosen
+                                        font.family: Tokens.fontFamily
+                                        font.pixelSize: Tokens.fontSmall
+                                    }
+                                    MouseArea {
+                                        id: optMouse
+                                        anchors.fill: parent
+                                        hoverEnabled: true
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: { root.current = rowItem.index; root.choose(rowItem.index, modelData[0]) }
+                                    }
+                                    Accessible.role: Accessible.RadioButton
+                                    Accessible.checked: chosen
+                                    Accessible.name: rowItem.modelData.title + ": " + modelData[1]
                                 }
-                                Accessible.role: Accessible.RadioButton
-                                Accessible.checked: chosen
-                                Accessible.name: rowItem.modelData.title + ": " + modelData[1]
                             }
                         }
                     }
                 }
-            }
 
-            Item { width: 1; height: Tokens.spaceSm }
-            // Persistent: an error stays until a save succeeds.
-            Text {
-                objectName: "settingsStatus"
-                textFormat: Text.PlainText
-                width: col.width
-                wrapMode: Text.Wrap
-                horizontalAlignment: Text.AlignRight
-                text: root.statusText
-                color: root.failed ? Tokens.danger : Tokens.foregroundDim
-                font.family: Tokens.fontFamily
-                font.pixelSize: Tokens.fontCaption
-                MouseArea {
-                    anchors.fill: parent
-                    enabled: root.failed
-                    cursorShape: root.failed ? Qt.PointingHandCursor : Qt.ArrowCursor
-                    onClicked: root.retryRequested()
+                Item { width: 1; height: Tokens.spaceSm }
+                // Persistent: an error stays until a save succeeds.
+                Text {
+                    objectName: "settingsStatus"
+                    textFormat: Text.PlainText
+                    width: col.width
+                    wrapMode: Text.Wrap
+                    horizontalAlignment: Text.AlignRight
+                    text: root.statusText
+                    color: root.failed ? Tokens.danger : Tokens.foregroundDim
+                    font.family: Tokens.fontFamily
+                    font.pixelSize: Tokens.fontCaption
+                    MouseArea {
+                        anchors.fill: parent
+                        enabled: root.failed
+                        cursorShape: root.failed ? Qt.PointingHandCursor : Qt.ArrowCursor
+                        onClicked: root.retryRequested()
+                    }
+                    Accessible.role: root.failed ? Accessible.Button : Accessible.StaticText
+                    Accessible.name: root.failed ? root.statusText + qsTr(". Retry") : root.statusText
                 }
-                Accessible.role: root.failed ? Accessible.Button : Accessible.StaticText
-                Accessible.name: root.failed ? root.statusText + qsTr(". Retry") : root.statusText
-            }
-            Text {
-                textFormat: Text.PlainText
-                width: col.width
-                horizontalAlignment: Text.AlignRight
-                text: root.failed ? qsTr("↑↓ choose · ←→ change · R retry · Esc close")
-                                  : qsTr("↑↓ choose · ←→ change · Esc close")
-                color: Tokens.foregroundDim
-                font.family: Tokens.fontFamily
-                font.pixelSize: Tokens.fontCaption
+                Text {
+                    textFormat: Text.PlainText
+                    width: col.width
+                    horizontalAlignment: Text.AlignRight
+                    text: root.failed ? qsTr("↑↓ choose · ←→ change · R retry · Esc close")
+                                      : qsTr("↑↓ choose · ←→ change · Esc close")
+                    color: Tokens.foregroundDim
+                    font.family: Tokens.fontFamily
+                    font.pixelSize: Tokens.fontCaption
+                }
             }
         }
     }
