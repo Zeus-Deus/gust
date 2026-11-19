@@ -89,6 +89,7 @@ def main():
     confirm = text[text.index("        id: confirm\n"):]
     functions = [block(text, "function " + n + "(") for n in
                  ["busyModels", "runningJobModels", "closeTab", "placeWorkBlocker", "refuseBusyDisconnect", "askRun",
+                  "shareDialogClosed",
                   "revisionAtLeast", "prefsClose", "sessionChanged", "saveSession", "prefsLaunchUntouched", "startWithPrefs", "restoreSession"]]
     timers = [block(text, "Timer {\n        id: " + n + "\n") for n in ["closeAfterCancel", "closeTabAfterCancel", "prefsCloseDeadline", "sessionSaveTimer"]]
     fixture = (source / "ui/tests/tst_work_guard.qml.in").read_text()
