@@ -121,8 +121,9 @@ Rectangle {
                         anchors.fill: parent
                         onClicked: { root.rejected(); root.close() }
                     }
-                    Keys.onReturnPressed: { root.rejected(); root.close() }
-                    Keys.onSpacePressed: { root.rejected(); root.close() }
+                    Keys.onReturnPressed: (event) => { if (!event.isAutoRepeat) { root.rejected(); root.close() } }
+                    Keys.onEnterPressed: (event) => { if (!event.isAutoRepeat) { root.rejected(); root.close() } }
+                    Keys.onSpacePressed: (event) => { if (!event.isAutoRepeat) { root.rejected(); root.close() } }
                     Accessible.role: Accessible.Button
                     Accessible.name: "Cancel"
                 }
@@ -153,8 +154,9 @@ Rectangle {
                         anchors.fill: parent
                         onClicked: { root.accepted(); root.close() }
                     }
-                    Keys.onReturnPressed: { root.accepted(); root.close() }
-                    Keys.onSpacePressed: { root.accepted(); root.close() }
+                    Keys.onReturnPressed: (event) => { if (!event.isAutoRepeat) { root.accepted(); root.close() } }
+                    Keys.onEnterPressed: (event) => { if (!event.isAutoRepeat) { root.accepted(); root.close() } }
+                    Keys.onSpacePressed: (event) => { if (!event.isAutoRepeat) { root.accepted(); root.close() } }
                     Accessible.role: Accessible.Button
                     Accessible.name: root.confirmText
                 }

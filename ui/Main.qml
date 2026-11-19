@@ -47,10 +47,13 @@ Window {
                 }
                 win.sessionChanged()
                 win.noteSplitTabMoved(tabModel)
+                if (win.pendingShareOpenModel === tabModel && confirm.purpose === "share-open")
+                    confirm.close()
             }
             // Mounts and connections finish on a worker; every tab reports
             // here, so a result still lands if the user switched tabs.
             onPlace_done: (op, name, message) => win.placeDone(op, name, message, tabModel)
+            onShare_open_requested: (name) => win.askOpenShare(tabModel, name)
             onPaste_ready: (message, allowImage) => win.pasteFinished(tabModel, message, allowImage)
             onPermissions_done: (token, error, message, partial) => {
                 if (token !== 0) return
@@ -550,6 +553,29 @@ Window {
     // --- network shares (DESIGN §6.14) -----------------------------------
     property string shareAddress: ""
     property string shareUser: ""
+    property var pendingShareOpenModel: null
+
+    function askOpenShare(model, name) {
+        const canAsk = win.connectionOwner === model && connectPanel.open && !confirm.visible
+        win.finishPlaceFeedback("share", name, "", model)
+        if (!canAsk) {
+            model.share_finish(false)
+            return
+        }
+        win.pendingShareOpenModel = model
+        confirm.purpose = "share-open"
+        confirm.open(qsTr("Open Windows share?"),
+                     qsTr("%1 is mounted. The desktop shares SMB connections across apps, so Gust cannot verify which account is in use.").arg(name),
+                     qsTr("Open share"), false)
+        win.qaDump("share-open-question")
+    }
+
+    function finishShareOpen(open) {
+        const model = win.pendingShareOpenModel
+        win.pendingShareOpenModel = null
+        if (model) model.share_finish(open)
+        win.qaDump(open ? "share-open-confirmed" : "share-open-cancelled")
+    }
 
     /// Ask for the address first. A typo is caught here, before anybody
     /// types a secret.
@@ -1157,6 +1183,10 @@ Window {
         if (error !== "") win.finishPlaceFeedback("setup-install", key, error, model)
     }
     function forgetConnectionOwner(model) {
+        if (win.pendingShareOpenModel === model) {
+            win.pendingShareOpenModel = null
+            if (confirm.purpose === "share-open" && confirm.visible) confirm.close()
+        }
         if (win.pendingTailnet && win.pendingTailnet.model === model) win.pendingTailnet = null
         if (win.connectionOwner !== model) return
         const pending = connectPanel.operation
@@ -4380,8 +4410,13 @@ Window {
         // What this confirmation is FOR. Two different questions must never
         // share one handler by accident.
         property string purpose: "trash"
+        preferCancel: purpose === "share-open"
         onVisibleChanged: win.qaDump("confirm")
         onClosed: {
+            if (confirm.purpose === "share-open") {
+                confirm.purpose = "trash"
+                if (win.pendingShareOpenModel) win.finishShareOpen(false)
+            }
             // The keyboard returns to the panel the question was asked over;
             // focusList() leaves an open panel alone on purpose.
             if (connectPanel.open) connectPanel.refocus()
@@ -4392,6 +4427,10 @@ Window {
             if (win.prefsClosing) Qt.callLater(win.prefsClose, null)
         }
         onAccepted: {
+            if (confirm.purpose === "share-open") {
+                win.finishShareOpen(true)
+                return
+            }
             if (confirm.purpose === "run" || confirm.purpose === "allow-run") {
                 const model = win.pendingRunModel
                 const token = win.pendingRunToken
@@ -4495,6 +4534,10 @@ Window {
             win.qaDump("trashed")
         }
         onRejected: {
+            if (confirm.purpose === "share-open") {
+                win.finishShareOpen(false)
+                return
+            }
             if (confirm.purpose === "run" || confirm.purpose === "allow-run") {
                 if (win.pendingRunModel) win.pendingRunModel.run_discard(win.pendingRunToken)
                 win.pendingRunModel = null

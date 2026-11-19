@@ -159,6 +159,10 @@ pub mod qobject {
         #[qsignal]
         fn place_done(self: Pin<&mut DirModel>, op: QString, name: QString, message: QString);
 
+        /// GVfs mounted a shared SMB folder. The account in use is unknown.
+        #[qsignal]
+        fn share_open_requested(self: Pin<&mut DirModel>, name: QString);
+
         /// A worker finished file-clipboard admission for this exact model.
         #[qsignal]
         fn paste_ready(self: Pin<&mut DirModel>, message: QString, allow_image: bool);
@@ -464,6 +468,9 @@ pub mod qobject {
             domain: QString,
             password: QString,
         ) -> QString;
+        /// Consume the pending SMB decision for this tab.
+        #[qinvokable]
+        fn share_finish(self: Pin<&mut DirModel>, open: bool);
         /// Check an address before asking for a password, so a typo is
         /// caught without the user typing a secret first.
         #[qinvokable]
@@ -1246,6 +1253,8 @@ pub struct DirModelRust {
     finding: bool,
     find_needle: QString,
     place_busy: bool,
+    /// A mounted SMB folder and the navigation generation that requested it.
+    pending_share_open: Option<(u64, PathBuf)>,
     peek_hash: QString,
     /// What was selected when the current rubber band started.
     band_base: Option<std::sync::Arc<crate::projection::BandBase>>,
@@ -1349,6 +1358,8 @@ enum PlaceOutcome {
         path: std::path::PathBuf,
         status: String,
     },
+    /// Offer to open an SMB mount once the user accepts the shared account.
+    ConfirmShare(PathBuf),
     /// Report success with a status line.
     Done(String),
     /// Browse this folder, and tell the user something they must not miss
@@ -1594,6 +1605,7 @@ impl DirModelRust {
             finding: false,
             find_needle: QString::from(""),
             place_busy: false,
+            pending_share_open: None,
             peek_hash: QString::default(),
             band_base: None,
             band_active: false,
@@ -1928,6 +1940,15 @@ impl qobject::DirModel {
                                 model.as_mut().set_status(QString::from(&status));
                             }
                             model.as_mut().place_done(opq, nameq, QString::default());
+                        }
+                        PlaceOutcome::ConfirmShare(path) => {
+                            model.as_mut().set_status(QString::default());
+                            if model.as_ref().generation == gen {
+                                model.as_mut().rust_mut().pending_share_open = Some((gen, path));
+                                model.as_mut().share_open_requested(nameq);
+                            } else {
+                                model.as_mut().place_done(opq, nameq, QString::default());
+                            }
                         }
                         PlaceOutcome::Done(status) => {
                             model.as_mut().set_status(QString::from(&status));
@@ -3638,7 +3659,7 @@ impl qobject::DirModel {
         }
     }
 
-    /// Mount a share and browse it.
+    /// Mount a share. SMB browsing waits for a separate user decision.
     ///
     /// The password arrives here, goes straight into GIO's stdin, and is
     /// dropped. It is never stored, never logged, never put in argv, and
@@ -3651,7 +3672,7 @@ impl qobject::DirModel {
         domain: QString,
         password: QString,
     ) -> QString {
-        use gust_remote::shares::{mount, parse_address};
+        use gust_remote::shares::{mount, parse_address, ShareKind};
 
         let text = address.to_string();
         let mut share = match parse_address(&text, Self::share_kind_for(&text)) {
@@ -3685,6 +3706,7 @@ impl qobject::DirModel {
                     std::time::Duration::from_secs(25),
                     None,
                 ) {
+                    Ok(mp) if share.kind == ShareKind::Smb => PlaceOutcome::ConfirmShare(mp),
                     Ok(mp) => PlaceOutcome::Open {
                         path: mp,
                         status: format!("Connected to {label}"),
@@ -3694,6 +3716,15 @@ impl qobject::DirModel {
             },
         );
         QString::default()
+    }
+
+    fn share_finish(mut self: Pin<&mut Self>, open: bool) {
+        let pending = self.as_mut().rust_mut().pending_share_open.take();
+        if let Some((generation, path)) = pending {
+            if open && self.as_ref().generation == generation {
+                self.navigate_path(path);
+            }
+        }
     }
 
     // --- removable devices (DESIGN §6.13) --------------------------------

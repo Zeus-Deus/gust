@@ -13,7 +13,6 @@ Item {
         property var lostPlaces: []
         property var seenLostRoutes: []
         property var dirModel: ({places_json: "{}", location: "/local"})
-        property var confirm: ({visible: false})
         property var prompt: ({visible: false, claimingFocus: false, promptCalls: 0,
             openWith: function() { this.visible = true; this.promptCalls += 1 },
             close: function() { this.visible = false }})
@@ -39,6 +38,7 @@ Item {
         property var connectionOwner: null
         property string shareAddress: ""
         property string shareUser: ""
+        property var pendingShareOpenModel: null
         property var pendingTailnet: null
         property string pendingTailnetUser: ""
         property var hints: ({message: ""})
@@ -65,6 +65,7 @@ Item {
             function cloud_setup() { cloudSetupCalls += 1; return returnError }
             function share_check(address) { return "" }
             function share_mount(address, user, domain, password) { return remote_connect(address) }
+            function share_finish(open) { if (open) navigationCalls += 1 }
             function request_places() {}
         }
         function cloudSetupAction() { const a = "cloud-setup"; if (false) {} @CLOUD_BRANCH@ }
@@ -81,6 +82,14 @@ Item {
         function runningJobModels() { return [] }
         @PLACES_ARRIVED@
         ConnectPanel { id: connectPanel; places: win.placesInfo; @CONNECT_HANDLER@ @ACTION_HANDLER@ }
+        ConfirmDialog {
+            id: confirm
+            property string purpose: "trash"
+            preferCancel: purpose === "share-open"
+            onClosed: { @SHARE_CLOSED@ }
+            onAccepted: { @SHARE_ACCEPTED@ }
+            onRejected: { @SHARE_REJECTED@ }
+        }
     }
     ConfirmDialog { id: recovery; preferCancel: true }
     SignalSpy { id: accepted; target: recovery; signalName: "accepted" }
@@ -302,6 +311,52 @@ Item {
         compare(fakeModel.connectCalls, 1)
         compare(connectPanel.statusBody, fakeModel.returnError)
         compare(connectPanel.open, true)
+    }
+    function test_smb_mount_success_waits_for_an_explicit_open_data() {
+        return [{tag: "cancel", open: false}, {tag: "open-share", open: true}]
+    }
+    function test_smb_mount_success_waits_for_an_explicit_open(row) {
+        fakeModel.navigationCalls = 0
+        win.connectShare("//nas/shared", "entered-account", "")
+        compare(connectPanel.busy, true)
+        fakeModel.place_busy = false
+        // The mount succeeded, but the worker cannot vouch for its account.
+        win.askOpenShare(fakeModel, "nas/shared")
+        verify(confirm.visible)
+        compare(fakeModel.navigationCalls, 0)
+        verify(confirm.body.indexOf("cannot verify which account") >= 0)
+        verify(findChild(confirm, "cancelButton").activeFocus, "Cancel is the keyboard default")
+        if (row.open) {
+            const point = confirm.buttonCenters().confirm
+            mouseClick(confirm, point[0], point[1])
+        } else {
+            keyClick(Qt.Key_Return)
+        }
+        compare(confirm.visible, false)
+        compare(fakeModel.navigationCalls, row.open ? 1 : 0)
+        compare(win.pendingShareOpenModel, null)
+    }
+    function test_late_smb_mount_after_dismissing_connect_has_no_open_offer() {
+        fakeModel.navigationCalls = 0
+        win.connectShare("//nas/shared", "", "")
+        connectPanel.hide()
+        fakeModel.place_busy = false
+        win.askOpenShare(fakeModel, "nas/shared")
+        compare(connectPanel.busy, false)
+        compare(confirm.visible, false)
+        compare(fakeModel.navigationCalls, 0)
+        compare(win.pendingShareOpenModel, null)
+    }
+    function test_closing_the_smb_owner_dismisses_its_open_question() {
+        fakeModel.navigationCalls = 0
+        win.connectShare("//nas/shared", "", "")
+        fakeModel.place_busy = false
+        win.askOpenShare(fakeModel, "nas/shared")
+        verify(confirm.visible)
+        win.removeModel(0, fakeModel)
+        compare(confirm.visible, false)
+        compare(win.pendingShareOpenModel, null)
+        compare(fakeModel.navigationCalls, 0)
     }
     function test_closing_the_initiating_tab_releases_progress_without_claiming_cancellation() {
         connectPanel.show(); wait(0)

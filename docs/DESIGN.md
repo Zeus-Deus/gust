@@ -2167,8 +2167,15 @@ identifies the share but carries no login identity.
 After GIO accepts a new SMB mount, Gust checks directory readiness in a
 bounded helper using the remainder of the connection deadline. During a
 quick reconnect or a slow server response, the FUSE folder can take longer
-to become usable. NFS can reuse an existing mount because it has no login
-step.
+to become usable.
+
+GVfs can coalesce simultaneous requests from different desktop apps for
+the same SMB mount. Its success response establishes that the folder is
+mounted, while the login identity is unknown. Gust asks before opening the
+folder, with Cancel focused. Cancel leaves the desktop's shared mount
+available to other apps. If the originating tab moves to another location
+or closes, the pending decision is discarded. NFS opens directly because
+it has no account login step.
 
 ### NFS asks for nothing
 
