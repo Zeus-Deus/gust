@@ -366,6 +366,18 @@ Window {
     // A refusal or failure the user must read. Any new action clears it, so
     // a stale warning never lingers over unrelated state.
     property string alertText: ""
+    // Several launchers can fail before the user dismisses even one alert.
+    property list<string> pendingOpenFailures: []
+    function showNextOpenFailure() {
+        if (win.alertText === "" && win.pendingOpenFailures.length > 0)
+            win.alertText = win.pendingOpenFailures.shift()
+    }
+    // Let the action that cleared the strip finish setting its own feedback.
+    onAlertTextChanged: {
+        if (win.alertText === "" && win.pendingOpenFailures.length > 0)
+            Qt.callLater(win.showNextOpenFailure)
+    }
+
     /// Aliases of remote places connected right now. Refreshed after every
     /// connect/disconnect rather than polled, so the rail always reflects
     /// what actually happened.
@@ -628,7 +640,8 @@ Window {
             return
         }
         if (op === "open") {
-            win.alertText = message
+            win.pendingOpenFailures.push(message)
+            win.showNextOpenFailure()
             win.qaDump("open-failed")
             return
         }
@@ -3627,6 +3640,8 @@ Window {
             // stale behind a message some earlier keystroke left here.
             selection: win.selectionText
             alert: win.alertText !== "" ? win.alertText : win.prefsNotice !== "" ? win.prefsNotice : dirModel.notice
+            queuedOpenFailures: win.pendingOpenFailures.length
+            onNextOpenFailure: win.alertText = ""
             dialog: confirm.visible || connectionRecovery.visible
             onStatusChanged: win.qaDump("hint")
             onMessageChanged: win.qaDump("hint")

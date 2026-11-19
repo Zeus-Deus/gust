@@ -165,7 +165,10 @@ shot 48-mixed-no-opener
 cat > "$registry/bin/handlr" <<'STUB'
 #!/bin/sh
 printf '%s\0' "$@" > "${0%/*}/argv"
-case "$3" in *.patch) exit 1 ;; esac
+case "$3" in
+  *.patch) exit 1 ;;
+  *.PDF) /usr/bin/flock -s -w 20 "$0.lock" /usr/bin/true; exit 1 ;;
+esac
 STUB
 chmod 755 "$registry/bin/handlr"
 key Escape; typ "fix.patch"; key Return
@@ -178,14 +181,39 @@ wait_for "'fix.patch' in d['alertText']" "True" 20 >/dev/null
 expect_contains "handlr dispatch failure reaches the window" "d['alertText']" 'Could not open "fix.patch"'
 shot 48-handlr-launch-failure
 
-# A dangling link fails before spawn. The PDF can still be submitted.
+# A dangling link fails before spawn. Keep that refusal after the PDF fails.
 ln -s "$d48/missing-target" "$d48/unavailable.txt"
 wait_for "'unavailable.txt' in d['model']['visible']" "True" 20 >/dev/null
+# Release the PDF only after the earlier result is visible.
+exec {pdf_gate}>"$registry/bin/handlr.lock"
+flock -x "$pdf_gate"
 open_mixed_pair "unavailable.txt" "report.PDF"
+expect_contains "immediate refusal appears before the PDF exits" "d['hintShown']" 'unavailable.txt'
+flock -u "$pdf_gate"
+wait_for "'1 more' in d['hintShown']" "True" 20 || bad "the delayed PDF failure was not queued behind the refusal"
 expect_contains "partial dispatch counts submitted files" "d['alertText']" 'Sent 1 of 2 files'
 expect_contains "partial dispatch identifies the refused file" "d['hintShown']" 'unavailable.txt'
 expect_contains "partial dispatch explains the refusal" "d['hintShown']" 'the file no longer exists'
 shot 48-mixed-partial-dispatch
+key Home
+expect_contains "dismissing the refusal reveals the delayed failure" "d['hintShown']" 'Could not open "report.PDF"'
+shot 48-mixed-delayed-failure
+
+# Both openers start successfully, then exit unsuccessfully on their workers.
+flock -x "$pdf_gate"
+open_mixed_pair "fix.patch" "report.PDF"
+wait_for "'fix.patch' in d['alertText']" "True" 20 >/dev/null
+flock -u "$pdf_gate"
+exec {pdf_gate}>&-
+wait_for "'1 more' in d['hintShown']" "True" 20 >/dev/null
+expect_contains "first launcher failure survives the second" "d['hintShown']" 'Could not open "fix.patch"'
+expect_contains "the strip indicates another failure is waiting" "d['hintShown']" '1 more'
+shot 48-two-launch-failures-first
+key Home
+expect_contains "the second launcher failure is readable" "d['hintShown']" 'Could not open "report.PDF"'
+shot 48-two-launch-failures-second
+key End
+expect "both failures have been dismissed" "d['alertText']" ""
 
 unset QA_PATH_PREPEND
 stop_gust; start_gust "$FIXTURE"
