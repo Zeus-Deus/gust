@@ -3678,7 +3678,13 @@ impl qobject::DirModel {
             format!("Connecting to {label}…"),
             move || {
                 // Bounded: a server that never answers fails after the deadline.
-                match mount(&share, secret, &runtime, std::time::Duration::from_secs(25)) {
+                match mount(
+                    &share,
+                    secret,
+                    &runtime,
+                    std::time::Duration::from_secs(25),
+                    None,
+                ) {
                     Ok(mp) => PlaceOutcome::Open {
                         path: mp,
                         status: format!("Connected to {label}"),

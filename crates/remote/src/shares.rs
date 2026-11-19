@@ -11,9 +11,11 @@
 //! English. GIO reads user, domain and password from stdin in that fixed
 //! order, which is a protocol rather than a prompt.
 
+use std::ffi::{c_char, c_void, CStr, CString, OsStr, OsString};
 use std::io::Write;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::ffi::OsStringExt;
-use std::path::{Component, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -187,6 +189,53 @@ pub fn gvfs_available() -> bool {
         && std::path::Path::new("/usr/share/gvfs/mounts/smb.mount").exists()
 }
 
+pub const SMB_PATH_HELPER_ARG: &str = "--smb-local-path";
+
+#[link(name = "gio-2.0")]
+unsafe extern "C" {
+    fn g_file_new_for_uri(uri: *const c_char) -> *mut c_void;
+    fn g_file_get_path(file: *mut c_void) -> *mut c_char;
+}
+
+#[link(name = "gobject-2.0")]
+unsafe extern "C" {
+    fn g_object_unref(object: *mut c_void);
+}
+
+#[link(name = "glib-2.0")]
+unsafe extern "C" {
+    fn g_free(ptr: *mut c_void);
+}
+
+/// Headless Gust entry point. Return the mount tracker's path as OS bytes
+/// without querying the folder or formatting it for display.
+pub fn serve_smb_local_path(uri: &OsStr) -> i32 {
+    let bytes = uri.as_bytes();
+    if !bytes.starts_with(b"smb://") {
+        return 1;
+    }
+    let Ok(uri) = CString::new(bytes) else {
+        return 1;
+    };
+    // SAFETY: GIO takes a NUL-terminated URI, returns an owned GFile and
+    // either a new GLib-allocated path string or null. Release each once.
+    let path = unsafe {
+        let file = g_file_new_for_uri(uri.as_ptr());
+        if file.is_null() {
+            return 1;
+        }
+        let path = g_file_get_path(file);
+        g_object_unref(file);
+        if path.is_null() {
+            return 1;
+        }
+        let bytes = CStr::from_ptr(path).to_bytes().to_vec();
+        g_free(path.cast());
+        bytes
+    };
+    i32::from(std::io::stdout().lock().write_all(&path).is_err())
+}
+
 /// Mount a share, handing credentials to GIO on stdin.
 ///
 /// The password reaches the child's stdin pipe and nothing else: not argv,
@@ -199,17 +248,21 @@ pub fn mount(
     password: String,
     runtime_dir: &str,
     timeout: Duration,
+    smb_helper: Option<&Path>,
 ) -> Result<PathBuf, ShareError> {
     if !gvfs_available() {
         return Err(ShareError::NoGvfs);
     }
+    // The desktop uses its own executable before Qt starts. Fixture tests
+    // pass the Gust binary they built, since their executable is libtest.
+    let executable = smb_helper.unwrap_or_else(|| Path::new("/proc/self/exe"));
     mount_with_command(
         share,
         runtime_dir,
         mount_command(share, password.is_empty()),
         password,
         timeout,
-        smb_local_path,
+        |uri, budget| smb_local_path(executable, uri, budget),
     )
 }
 
@@ -231,18 +284,11 @@ fn mount_with_command(
             return path.is_dir().then(|| Ok(path.clone()));
         }
 
-        // Look up the share root even if the requested subfolder is missing
-        // or inaccessible. Its presence says nothing about the login used.
-        let (root_uri, nested) = match share.share.split_once('/') {
-            Some((root, _)) => (format!("smb://{}/{root}", share.server), true),
-            None => (smb_uri.clone(), false),
-        };
-        let lookup = Instant::now() + remaining().min(Duration::from_secs(1));
-        let path = resolve_smb(&root_uri, lookup.saturating_duration_since(Instant::now()))?;
-        let folder = nested
-            .then(|| resolve_smb(&smb_uri, lookup.saturating_duration_since(Instant::now())))
-            .flatten()
-            .unwrap_or(path);
+        // Offer the canonical share root. The mount tracker can map an SMB
+        // subfolder even when that subfolder has not been created.
+        let root = share.share.split('/').next().unwrap_or_default();
+        let root_uri = format!("smb://{}/{root}", share.server);
+        let folder = resolve_smb(&root_uri, remaining().min(Duration::from_secs(1)))?;
         Some(Err(ShareError::AlreadyMounted(folder)))
     };
     if let Some(existing) = existing_mount() {
@@ -269,7 +315,7 @@ fn mount_with_command(
         }
         std::thread::sleep(Duration::from_millis(25).min(time_left()));
     };
-    wait_for_smb_folder(path, time_left())
+    wait_for_smb_folder(path, remaining())
 }
 
 fn run_mount_command(
@@ -358,44 +404,26 @@ fn wait_for_smb_folder(path: PathBuf, timeout: Duration) -> Result<PathBuf, Shar
     )))
 }
 
-/// Ask GIO for the local path of exactly this URI. Request only the type
-/// so no remote-supplied display name or attribute enters the output.
-fn smb_local_path(uri: &str, timeout: Duration) -> Option<PathBuf> {
+fn smb_local_path(executable: &Path, uri: &str, timeout: Duration) -> Option<PathBuf> {
     let cancel = gust_core::lister::CancelToken::new();
     let ctx = crate::helper::CallContext {
         cancel: &cancel,
         timeout,
     };
-    let mut command = Command::new("gio");
-    command
-        .args(["info", "--attributes=standard::type", "--", uri])
-        .env("LC_ALL", "C.UTF-8")
-        .env_remove("LANGUAGE");
+    let mut command = Command::new(executable);
+    command.args([SMB_PATH_HELPER_ARG, uri]);
     let output = crate::helper::run(command, &[], &ctx).ok()?;
-    output
-        .status
-        .success()
-        .then(|| parse_smb_local_path(&output.stdout))
-        .flatten()
+    if !output.status.success() {
+        return None;
+    }
+    path_from_helper(output.stdout)
 }
 
-fn parse_smb_local_path(output: &[u8]) -> Option<PathBuf> {
-    let mut lines = output.split(|&byte| byte == b'\n');
-    if lines.next()? != b"type: directory" || !lines.next()?.starts_with(b"uri: smb://") {
+fn path_from_helper(bytes: Vec<u8>) -> Option<PathBuf> {
+    if bytes.contains(&0) {
         return None;
     }
-    let raw = lines.next()?.strip_prefix(b"local path: ")?;
-    // GIO flattens newlines for display. Refuse that ambiguous spelling
-    // rather than opening a different path with a literal arrow in its name.
-    let flattened_line_break = " ↵ ".as_bytes();
-    if raw.contains(&0)
-        || raw
-            .windows(flattened_line_break.len())
-            .any(|window| window == flattened_line_break)
-    {
-        return None;
-    }
-    let path = PathBuf::from(std::ffi::OsString::from_vec(raw.to_vec()));
+    let path = PathBuf::from(OsString::from_vec(bytes));
     (path.is_absolute() && !path.components().any(|part| part == Component::ParentDir))
         .then_some(path)
 }
@@ -535,37 +563,36 @@ mod tests {
     }
 
     #[test]
-    fn smb_mount_waits_for_the_fuse_directory() {
+    fn smb_mount_allows_slow_directory_readiness_within_the_deadline() {
         let runtime =
             std::env::temp_dir().join(format!("gust-smb-readiness-{}", std::process::id()));
         std::fs::create_dir(&runtime).unwrap();
         let path = runtime.join("share");
         let share = parse_address("//nas/public", ShareKind::Smb).unwrap();
-
-        let unready = mount_with_command(
-            &share,
-            runtime.to_str().unwrap(),
-            Command::new("true"),
-            String::new(),
-            Duration::from_millis(200),
-            {
-                let queries = std::cell::Cell::new(0);
-                let folder = path.clone();
-                move |_: &str, _: Duration| {
+        let connect = |timeout| {
+            let queries = std::cell::Cell::new(0);
+            mount_with_command(
+                &share,
+                runtime.to_str().unwrap(),
+                Command::new("true"),
+                String::new(),
+                timeout,
+                |_, _| {
                     let attempts = queries.get();
                     queries.set(attempts + 1);
-                    (attempts > 0).then(|| folder.clone())
-                }
-            },
-        );
+                    (attempts > 0).then(|| path.clone())
+                },
+            )
+        };
+        let unready = connect(Duration::from_millis(200));
         assert!(unready.unwrap_err().message().contains("still unavailable"));
 
         let fixture = path.clone();
         let publish = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(100));
+            std::thread::sleep(Duration::from_millis(1250));
             std::fs::create_dir(fixture).unwrap();
         });
-        let mounted = wait_for_smb_folder(path.clone(), Duration::from_secs(3));
+        let mounted = connect(Duration::from_secs(4));
         publish.join().unwrap();
         assert_eq!(mounted.unwrap(), path);
         std::fs::remove_dir_all(runtime).unwrap();
@@ -610,21 +637,22 @@ mod tests {
     }
 
     #[test]
-    fn gio_resolves_the_canonical_smb_path_without_losing_subfolders() {
-        let info = "type: directory\nuri: smb://nas/public/Release%20Notes\nlocal path: /run/user/1000/gvfs/smb-share:server=nas,share=public/Release Notes\nattributes:\n  standard::type: 2\n";
+    fn smb_path_helper_preserves_folder_name_bytes() {
+        let path = b"/run/user/1000/gvfs/smb-share:server=nas,share=public/Release\nNotes\xff";
         assert_eq!(
-            parse_smb_local_path(info.as_bytes()),
-            Some(PathBuf::from(
-                "/run/user/1000/gvfs/smb-share:server=nas,share=public/Release Notes"
-            ))
+            path_from_helper(path.to_vec())
+                .unwrap()
+                .as_os_str()
+                .as_bytes(),
+            path
         );
         for unusable in [
-            info.replace("local path: /", "local path: "),
-            info.replace("Release Notes", "Release ↵ Notes"),
-            info.replace("type: directory", "type: regular"),
-            info.replace("uri: smb://", "uri: file://"),
+            b"relative/path".as_slice(),
+            b"/run/x/../y",
+            b"/run/x\0y",
+            b"",
         ] {
-            assert_eq!(parse_smb_local_path(unusable.as_bytes()), None);
+            assert_eq!(path_from_helper(unusable.to_vec()), None);
         }
     }
 

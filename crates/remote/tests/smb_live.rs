@@ -4,14 +4,17 @@
 //! private passdb and a throwaway account, so no real credential exists to
 //! leak. Run with the fixture up:
 //!
+//!   cargo build -p gust-app
 //!   ./tests/smb-fixture.sh start
 //!   cargo test -p gust-remote --test smb_live -- --test-threads=1
 //!
+//! GUST_BIN can point to a different build of Gust for the path lookup.
 //! Set GUST_SMB_REQUIRED=1 and GUST_SMB_KEYRING_REQUIRED=1 to require the
 //! saved-login case. It needs dbus-run-session, gnome-keyring-daemon and
 //! secret-tool in addition to the Samba fixture.
 
 use gust_remote::shares::*;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 fn fixture_root() -> String {
@@ -20,6 +23,24 @@ fn fixture_root() -> String {
 
 fn runtime_dir() -> String {
     std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/run/user/1000".into())
+}
+
+fn smb_path_helper() -> PathBuf {
+    std::env::var_os("GUST_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/gust"))
+        .canonicalize()
+        .expect("build Gust with cargo build -p gust-app or set GUST_BIN")
+}
+
+fn mount(
+    share: &Share,
+    password: String,
+    runtime: &str,
+    timeout: Duration,
+) -> Result<PathBuf, ShareError> {
+    let helper = (share.kind == ShareKind::Smb).then(smb_path_helper);
+    gust_remote::shares::mount(share, password, runtime, timeout, helper.as_deref())
 }
 
 fn fixture_password() -> Option<String> {
@@ -197,7 +218,9 @@ fn guest_login_opens_a_mixed_case_smb_subfolder() {
             let actual = std::fs::read(path.join("guest.txt"));
             assert_eq!(
                 connect(&share),
-                Err(ShareError::AlreadyMounted(path.clone())),
+                Err(ShareError::AlreadyMounted(
+                    path.parent().unwrap().to_path_buf()
+                )),
             );
             let root = open("smb://localhost/guest");
             assert_eq!(
@@ -251,6 +274,7 @@ fn with_isolated_smb_session(test: &str, tag: &str, run: impl FnOnce()) {
             std::env::var_os("PATH").unwrap_or_else(|| "/usr/bin:/bin".into()),
         )
         .env("HOME", &home)
+        .env("GUST_BIN", smb_path_helper())
         .env("XDG_RUNTIME_DIR", &runtime)
         .env("LANG", "C.UTF-8")
         .env("USER", test_share().user.unwrap())
