@@ -2986,6 +2986,7 @@ Window {
             }
 
             Row {
+                id: leftTools
                 anchors.left: parent.left
                 anchors.leftMargin: Tokens.spaceLg
                 anchors.verticalCenter: parent.verticalCenter
@@ -3064,12 +3065,17 @@ Window {
                     onDragLanded: (m, e) => { hints.message = ""; win.transferStarted(m, e, "drop") }
                     model: dirModel
                     anchors.verticalCenter: parent.verticalCenter
+                    // Whatever the buttons on the right leave: a deep path
+                    // used to draw straight through them.
+                    width: Math.max(0, Math.min(implicitWidth,
+                        headerBar.width - rightTools.width - leftTools.x - x - Tokens.spaceLg * 3))
                     onPathChosen: (p) => { dirModel.navigate(p); win.focusList() }
                 }
             }
 
             // View switch: labelled, tooltipped, keyboard reachable.
             Row {
+                id: rightTools
                 anchors.right: parent.right
                 anchors.rightMargin: Tokens.spaceLg
                 anchors.verticalCenter: parent.verticalCenter
