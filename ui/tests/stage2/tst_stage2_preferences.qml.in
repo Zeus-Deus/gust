@@ -40,6 +40,46 @@ Item {
 @DIALOGS@
 @KEYS@
     }
+    SignalSpy { id: changed; target: settingsPanel; signalName: "changed" }
+    TestCase {
+        name: "SettingsViewport"
+        when: windowShown
+        function cleanup() {
+            settingsPanel.hide()
+            Tokens.tokens.fontBase = 12
+            Tokens.tokens.spacingScale = 1
+            Tokens.zoom = 1
+            Tokens.density = 1
+            top.width = 900
+            top.height = 700
+            changed.clear()
+        }
+        function test_density_reachable_data() {
+            return [{tag: "fallback", base: 12}, {tag: "large", base: 28}]
+        }
+        function test_density_reachable(data) {
+            top.width = 520
+            top.height = 320
+            Tokens.tokens.fontBase = data.base
+            Tokens.tokens.spacingScale = 2
+            Tokens.zoom = 1.6
+            Tokens.density = 1.25
+            win.prefsPublished()
+            settingsPanel.show()
+            waitForRendering(settingsPanel)
+            keyClick(Qt.Key_Down)
+            keyClick(Qt.Key_Down)
+            keyClick(Qt.Key_Up)
+            const compact = settingsPanel.visibleOptionPoints().compact
+            verify(compact !== undefined, "a complete Density button fits after scrolling back")
+            mouseClick(settingsPanel, compact[0], compact[1])
+            compare(changed.count, 1)
+            compare(changed.signalArguments[0][0], "density")
+            compare(changed.signalArguments[0][1], "compact")
+            mouseClick(settingsPanel.closeButton)
+            verify(!settingsPanel.open)
+        }
+    }
     TestCase {
         name: "Stage2IntegrationRefresh"
         when: windowShown

@@ -158,8 +158,10 @@ Item {
         id: panel
         anchors.centerIn: parent
         width: Math.min(parent.width - Tokens.spaceXl * 4, Math.round(Tokens.rowHeight * 26))
-        height: Math.min(root.height - Tokens.spaceSm * 2,
-                         header.height + col.implicitHeight + Tokens.spaceSm * 2 + Tokens.spaceXl)
+        readonly property real verticalInset: Math.min(Tokens.spaceSm, root.height / 16)
+        readonly property real bottomInset: Math.min(Tokens.spaceXl, root.height / 8)
+        height: Math.min(root.height - verticalInset * 2,
+                         header.height + col.implicitHeight + verticalInset * 2 + bottomInset)
         color: Tokens.backgroundDark
         border.width: Math.max(1, Tokens.borderWidth)
         border.color: Tokens.withAlpha(Tokens.border, Tokens.borderAlpha)
@@ -170,10 +172,11 @@ Item {
             anchors.top: parent.top
             anchors.left: parent.left
             anchors.right: parent.right
-            anchors.topMargin: Tokens.spaceSm
+            anchors.topMargin: panel.verticalInset
             anchors.leftMargin: Tokens.spaceXl
             anchors.rightMargin: Tokens.spaceSm
-            height: Math.max(heading.implicitHeight, close.height)
+            // Leave the scrolling options most of the window even at large type and spacing.
+            height: Math.min(Math.max(heading.implicitHeight, Tokens.controlHeight), root.height / 4)
 
             Text {
                 id: heading
@@ -189,6 +192,8 @@ Item {
                 objectName: "settingsClose"
                 anchors.right: parent.right
                 anchors.verticalCenter: parent.verticalCenter
+                width: height
+                height: header.height
                 icon: "close"
                 label: qsTr("Close")
                 keys: "Esc"
@@ -204,7 +209,8 @@ Item {
             anchors.left: parent.left
             anchors.right: parent.right
             anchors.margins: Tokens.spaceXl
-            anchors.topMargin: Tokens.spaceSm
+            anchors.topMargin: panel.verticalInset
+            anchors.bottomMargin: panel.bottomInset
             contentWidth: width
             contentHeight: col.implicitHeight
             flickableDirection: Flickable.VerticalFlick
