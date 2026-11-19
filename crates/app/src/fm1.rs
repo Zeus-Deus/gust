@@ -46,9 +46,17 @@ pub fn run() -> i32 {
         return 1;
     };
     // Do not replace another file manager that holds the name.
-    if conn.request_name(NAME, false, false, true).is_err() {
-        eprintln!("gust: {NAME} is already owned");
-        return 1;
+    use dbus::blocking::stdintf::org_freedesktop_dbus::RequestNameReply;
+    match conn.request_name(NAME, false, false, true) {
+        Ok(RequestNameReply::PrimaryOwner | RequestNameReply::AlreadyOwner) => {}
+        Ok(_) => {
+            eprintln!("gust: {NAME} is already owned");
+            return 1;
+        }
+        Err(error) => {
+            eprintln!("gust: could not acquire {NAME}: {error}");
+            return 1;
+        }
     }
     let mut cr = Crossroads::new();
     let iface = cr.register(NAME, |b| {
