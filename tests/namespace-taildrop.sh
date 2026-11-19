@@ -1,22 +1,59 @@
 #!/usr/bin/env bash
 # Usage: tests/namespace-taildrop.sh target/release/gust
-# Requires Bubblewrap, headscale, Tailscale, iproute2, curl, jq and Python.
+# Run as an unprivileged user with Bubblewrap, headscale, Tailscale, iproute2,
+# curl, jq and Python 3 installed. HEADSCALE_BIN may name a separate executable.
 set -euo pipefail
+if (( EUID == 0 )); then
+    echo "Run the Taildrop fixture as an unprivileged user." >&2
+    exit 1
+fi
 binary=$(realpath "${1:?pass the path to a built gust executable}")
 [[ -f $binary && -x $binary ]] || { echo "Gust executable unavailable" >&2; exit 1; }
-headscale_bin=$(command -v "${HEADSCALE_BIN:-headscale}") || { echo "missing headscale" >&2; exit 77; }
-for tool in bwrap tailscale tailscaled ip curl jq python3 timeout; do
+for tool in bwrap timeout; do
     command -v "$tool" >/dev/null || { echo "missing $tool" >&2; exit 77; }
 done
-# The two daemons share a private network. NET_ADMIN is confined to its user
-# namespace and only sets up the test link. No host sockets or devices enter.
-exec timeout 100 bwrap --unshare-all --uid 0 --gid 0 --cap-add CAP_NET_ADMIN \
-    --new-session --die-with-parent --ro-bind /usr /usr --symlink usr/bin /bin \
-    --symlink usr/lib /lib --symlink usr/lib /lib64 --proc /proc --dev /dev \
+
+# Use the installed system tools (including sbin), then look for separately
+# installed executables. Pass only the selected binaries from external paths.
+system_path=/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin
+tool_mounts=()
+for tool in headscale tailscale tailscaled ip curl jq python3; do
+    name=$tool
+    if [[ $tool == headscale ]]; then name=${HEADSCALE_BIN:-headscale}; fi
+    path=$(PATH="$system_path:$PATH" type -P -- "$name") || { echo "missing $name" >&2; exit 77; }
+    tool_mounts+=(--ro-bind "$path" "/fixture-bin/$tool")
+done
+
+# The ELF interpreter is an absolute path. Keep both merged-/usr symlinks
+# and separate library directories as installed on the host.
+system_mounts=(--ro-bind /usr /usr)
+for path in /bin /sbin /lib /lib64 /lib32 /libx32; do
+    if [[ -L $path ]]; then
+        system_mounts+=(--symlink "$(readlink "$path")" "$path")
+    elif [[ -d $path ]]; then
+        system_mounts+=(--ro-bind "$path" "$path")
+    fi
+done
+
+# NET_ADMIN only sets up the test link in a mandatory private user namespace.
+exec timeout 100 bwrap --unshare-user --unshare-all --uid 0 --gid 0 --cap-add CAP_NET_ADMIN \
+    --new-session --die-with-parent "${system_mounts[@]}" --proc /proc --dev /dev \
     --tmpfs /tmp --dir /run --symlink /run /var/run --dir /etc --dir /root \
-    --ro-bind "$headscale_bin" /headscale --ro-bind "$binary" /gust --clearenv --setenv PATH /usr/bin:/bin \
-    --setenv HOME /root --setenv USER root --setenv LANG C \
-    --setenv TS_NO_LOGS_NO_SUPPORT true bash -euo pipefail -s <<'GUEST'
+    --dir /fixture-bin "${tool_mounts[@]}" --ro-bind "$binary" /gust \
+    --clearenv --setenv PATH "/fixture-bin:$system_path" --setenv HOME /root --setenv USER root \
+    --setenv LANG C --setenv TS_NO_LOGS_NO_SUPPORT true bash -euo pipefail -s <<'GUEST'
+# An executable on the host can still lack its interpreter or libraries here.
+check_tool() {
+    "$@" >/dev/null || { echo "cannot run $1 inside the Taildrop sandbox" >&2; exit 77; }
+}
+check_tool headscale version
+check_tool tailscale version
+check_tool tailscaled --version
+check_tool ip -V
+check_tool curl --version
+check_tool jq --version
+check_tool python3 -c 'import json, subprocess, pathlib'
+
 umask 077
 echo 'root:x:0:0:root:/root:/bin/sh' > /etc/passwd
 echo 'root:x:0:' > /etc/group
@@ -56,7 +93,7 @@ unix_socket: /tmp/mesh/controller.sock
 taildrop:
   enabled: true
 CONFIG
-controller=(/headscale -c /tmp/mesh/config.yaml)
+controller=(headscale -c /tmp/mesh/config.yaml)
 "${controller[@]}" serve >/tmp/mesh/controller.log 2>&1 &
 for _ in {1..100}; do
     if curl -fsS http://10.88.0.1:8080/health >/dev/null 2>&1; then break; fi
