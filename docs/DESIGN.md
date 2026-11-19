@@ -1754,7 +1754,7 @@ Three places touch a path before any worker does, and all three are bounded:
 
 | Place | Why it must be bounded |
 |---|---|
-| `startup_location()` | Runs before the window exists. Unbounded, Gust never paints at all. |
+| `startup()` | Runs before the window exists. Unbounded, Gust never paints at all. |
 | `navigate()` | Runs on the UI thread. Unbounded, the whole window freezes. |
 | the listing worker | Unbounded, the folder never settles and the worker never returns. |
 
@@ -2427,7 +2427,15 @@ The handler list is read from the freedesktop database directly:
    desktop entries that registered for it — a machine-readable index with
    no prose in it.
 2. `mimeapps.list` carries the user's own additions and removals, which
-   take precedence over the system cache.
+   take precedence over the system cache. The default is the first installed,
+   not-removed id under `[Default Applications]` in the mime-apps spec's
+   lookup order: `<desktop>-mimeapps.list` then `mimeapps.list` in
+   `$XDG_CONFIG_HOME`, `$XDG_CONFIG_DIRS`, then the `applications`
+   directories. `[Added Associations]` never names a default. A removal
+   drops the application for that type, default or not, when the
+   association comes from the removing list's own directory or a lower one;
+   an association from a higher directory (a list's explicit addition, or a
+   desktop entry installed there) survives it.
 3. Each candidate's `.desktop` file supplies the name to show and the
    command to run.
 
@@ -2439,12 +2447,17 @@ is exactly what a person wants for an image.
 ### Launching
 
 The `Exec` line is parsed, not handed to a shell. Field codes are expanded
-per the freedesktop spec — `%f`/`%F` become the path, `%u`/`%U` its file URI,
-and `%i`/`%c`/`%k` are dropped — and every remaining word becomes one argv
-entry. A file called `; rm -rf ~` is one argument and nothing else.
+per the freedesktop spec — `%f`/`%F` become the path, `%u`/`%U` its
+percent-encoded file URI, `%%` a percent sign, and `%i`/`%c`/`%k` and the
+deprecated codes are dropped — and every remaining word becomes one argv
+entry; a double-quoted argument (with `\"`, `` \` ``, `\$`, `\\` escapes) is
+one word. A file called `; rm -rf ~` is one argument and nothing else, and
+paths stay raw OS bytes, so a name that is not UTF-8 still opens.
 
 `Terminal=true` entries are launched through a terminal, because an editor
-with no terminal simply vanishes.
+with no terminal simply vanishes. That holds for a multi-file launch too, and
+the terminal is the desktop's own (`xdg-terminal-exec`) before `$TERMINAL` or
+a guess at an installed one.
 
 ### What it will not do
 

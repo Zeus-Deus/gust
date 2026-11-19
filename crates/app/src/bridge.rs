@@ -277,6 +277,10 @@ pub mod qobject {
         /// Read once at start-up.
         #[qinvokable]
         fn interrupted_jobs(self: &DirModel) -> QString;
+        /// Why the launch argument could not be opened as given
+        /// ("Could not find …"), or "". Read once at start-up.
+        #[qinvokable]
+        fn startup_notice(self: &DirModel) -> QString;
         /// The user has seen the interrupted-operations notice.
         #[qinvokable]
         fn acknowledge_interrupted(self: &DirModel);
@@ -1221,6 +1225,9 @@ pub struct DirModelRust {
     /// After a rename or new folder, the cursor goes to this name once it
     /// appears in the listing.
     focus_name: Option<std::ffi::OsString>,
+    /// Why the window is not showing what the launch argument named, or
+    /// None. Decided once at startup and read once by the window.
+    startup_notice: Option<String>,
     focus_revision: u64,
     /// A change arrived during the hold; apply it when the hold ends.
     live_dirty: bool,
@@ -1413,12 +1420,15 @@ fn typed_navigation_path(typed: &str) -> PathBuf {
     path.components().collect()
 }
 
-/// The folder Gust should open, decided once at startup.
+/// Where Gust should open, decided once at startup.
 ///
 /// A file manager must honour `gust /some/path` — that is how a desktop
-/// "Open containing folder" action invokes it. Anything that is not an
-/// existing directory falls back to `$HOME` rather than opening nothing.
-pub fn startup_location() -> PathBuf {
+/// "Open containing folder" action invokes it — and `gust /some/file`, which
+/// is how a launcher hands it a file: the folder opens with the cursor on
+/// that file. An argument that cannot be honoured opens the nearest folder
+/// that exists (or `$HOME`) with one line saying so, rather than nothing.
+pub(crate) fn startup() -> crate::cli::Startup {
+    use crate::cli::Startup;
     let home = || {
         std::env::var_os("HOME")
             .map(PathBuf::from)
@@ -1429,13 +1439,15 @@ pub fn startup_location() -> PathBuf {
     // already checked it (main.rs, prepare_admin_session).
     if let Some(d) = std::env::var_os("GUST_ADMIN_FOLDER") {
         if admin_session() {
-            return PathBuf::from(d);
+            return Startup::folder(PathBuf::from(d));
         }
     }
 
-    // First non-flag argument wins. Flags are reserved for later options.
-    let Some(path) = crate::cli::startup_argument(std::env::args_os().skip(1)) else {
-        return home();
+    // First ordinary argument wins; options end at `--`.
+    let path = match crate::cli::startup_argument(std::env::args_os().skip(1)) {
+        None => return Startup::folder(home()),
+        Some(Err(arg)) => return crate::cli::unusable_startup(&arg, &home()),
+        Some(Ok(path)) => path,
     };
 
     // Resolve relative to the working directory the user launched from.
@@ -1458,22 +1470,42 @@ pub fn startup_location() -> PathBuf {
         {
             // Start at home rather than not starting. The place is reported
             // once there is a window to report it in.
-            return home();
+            return Startup::folder(home());
         }
     }
 
-    match std::fs::metadata(&abs) {
-        // Pointed at a file: open its folder, which is what the user means.
-        Ok(m) if m.is_file() => abs.parent().map(PathBuf::from).unwrap_or_else(home),
-        Ok(m) if m.is_dir() => abs,
-        _ => home(),
+    crate::cli::resolve_startup(&abs, &home())
+}
+
+impl DirModelRust {
+    /// The entry the cursor was asked to land on is a hidden one: show
+    /// hidden files in this window, or the list filters it out before the
+    /// cursor can find it (`gust ~/project/.env`, or another app's "Show in
+    /// folder" on a dotfile). This window only; the saved preference is not
+    /// touched.
+    fn reveal_focus(&mut self) {
+        if self
+            .focus_name
+            .as_deref()
+            .is_some_and(crate::cli::is_hidden_name)
+        {
+            self.show_hidden = true;
+        }
     }
 }
 
 impl Default for DirModelRust {
     fn default() -> Self {
-        let home = startup_location();
+        let start = startup();
+        let home = start.folder;
         let mut model = Self::fresh(home.clone());
+        // `gust /some/file`: the cursor goes on that file. A "Show in
+        // folder" request (GUST_SELECT) names its own and keeps priority.
+        if model.focus_name.is_none() {
+            model.focus_name = start.focus;
+        }
+        model.reveal_focus();
+        model.startup_notice = start.notice;
         // A window started by a tab detach picks up where the tab was:
         // history, selection, cursor, hidden files, view. Taken once (the
         // file is deleted), and only if it names this same folder.
@@ -1581,6 +1613,7 @@ impl DirModelRust {
             focus_name: std::env::var_os("GUST_SELECT")
                 .filter(|v| !v.is_empty())
                 .inspect(|_| std::env::remove_var("GUST_SELECT")),
+            startup_notice: None,
             live_dirty: false,
             live_busy: false,
 
@@ -2317,6 +2350,10 @@ impl qobject::DirModel {
         Some(gust_ops::journal::Journal::new(
             gust_ops::journal::Journal::default_path(),
         ))
+    }
+
+    fn startup_notice(&self) -> QString {
+        QString::from(self.startup_notice.as_deref().unwrap_or_default())
     }
 
     /// Operations a crash interrupted, as JSON for the start-up notice.
@@ -6446,24 +6483,14 @@ impl qobject::DirModel {
         let Some(path) = self.key.as_path() else {
             return list;
         };
-        // Each crumb is "path\tlabel". Inside a mounted place the bar starts
-        // at the place ("nas / Shared"), not at "/ run / user / 1000 / …".
-        let (start, first_label) = match place_of(path) {
-            Some((root, label)) => (root, label),
-            None => (PathBuf::from("/"), "/".to_string()),
-        };
-        let rest = path.strip_prefix(&start).unwrap_or(path);
-        let mut acc = start.clone();
-        list.append(QString::from(&format!(
-            "{}\t{first_label}",
-            start.to_string_lossy()
-        )));
-        for c in rest.components() {
-            acc.push(c);
-            let label = gust_core::location::escape_for_display(c.as_os_str());
+        // Each crumb is "path\tlabel". The bar starts at "Home" inside the
+        // home folder and at the place inside a mounted one ("nas / Shared"),
+        // not at "/ home / sam / …" or "/ run / user / 1000 / …".
+        let home = PathBuf::from(self.home_path.to_string());
+        for (folder, label) in gust_core::location::crumbs(path, &home, place_of(path)) {
             list.append(QString::from(&format!(
                 "{}\t{label}",
-                acc.to_string_lossy()
+                folder.to_string_lossy()
             )));
         }
         list
@@ -9148,9 +9175,7 @@ impl qobject::DirModel {
     fn session_json(&self) -> QString {
         if admin_session()
             || std::env::var_os("GUST_CHOOSER").is_some_and(|v| !v.is_empty())
-            || std::env::args_os()
-                .skip(1)
-                .any(|a| !a.to_string_lossy().starts_with('-'))
+            || crate::cli::names_a_place(std::env::args_os().skip(1))
         {
             return QString::default();
         }

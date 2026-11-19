@@ -291,30 +291,17 @@ pub fn open_terminal_here(dir: &Path) -> Result<String, OpenRefusal> {
 /// constant and its arguments are passed as separate argv entries: no shell is
 /// involved, so nothing here can be turned into command injection, and no
 /// secret ever passes through Gust.
-pub fn run_in_terminal(program: &str, args: &[&str]) -> Result<String, OpenRefusal> {
+pub fn run_in_terminal(program: &str, args: &[impl AsRef<OsStr>]) -> Result<String, OpenRefusal> {
     if which(program).is_none() {
         return Err(OpenRefusal::NoHandler);
     }
-    let mut candidates: Vec<String> = Vec::new();
-    if let Some(t) = std::env::var_os("TERMINAL") {
-        candidates.push(t.to_string_lossy().into_owned());
-    }
-    for t in ["alacritty", "kitty", "foot", "ghostty", "wezterm"] {
-        candidates.push(t.to_string());
-    }
-
-    for term in candidates {
-        if which(&term).is_none() {
-            continue;
-        }
+    let terminal = std::env::var_os("TERMINAL").map(|t| t.to_string_lossy().into_owned());
+    for (term, lead) in terminal_candidates(terminal.as_deref(), |p| which(p).is_some()) {
         let mut cmd = Command::new(&term);
-        // Every one of these takes "-e PROGRAM ARGS..." as separate argv
-        // entries. None of them needs a shell.
-        cmd.arg("-e").arg(program);
-        for a in args {
-            cmd.arg(a);
-        }
-        cmd.stdin(Stdio::null())
+        cmd.arg(lead)
+            .arg(program)
+            .args(args)
+            .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         if cmd.spawn().is_ok() {
@@ -322,6 +309,30 @@ pub fn run_in_terminal(program: &str, args: &[&str]) -> Result<String, OpenRefus
         }
     }
     Err(OpenRefusal::NoHandler)
+}
+
+/// The terminals to try for running a command, best first, each with the
+/// argument that introduces the command.
+///
+/// `xdg-terminal-exec` leads, as in [`terminal_command`]: it is where the
+/// desktop records the user's choice, so someone on Ghostty who also has
+/// Alacritty installed gets Ghostty. Then `$TERMINAL`, then the terminals an
+/// Omarchy install is likely to have. Every one of them takes the program
+/// and its arguments as separate argv entries after that lead; none of them
+/// needs a shell.
+pub fn terminal_candidates(
+    terminal_env: Option<&str>,
+    have: impl Fn(&str) -> bool,
+) -> Vec<(String, &'static str)> {
+    let mut candidates = vec![("xdg-terminal-exec".to_string(), "--")];
+    if let Some(t) = terminal_env.filter(|t| !t.is_empty()) {
+        candidates.push((t.to_string(), "-e"));
+    }
+    for t in ["alacritty", "kitty", "foot", "ghostty", "wezterm"] {
+        candidates.push((t.to_string(), "-e"));
+    }
+    candidates.retain(|(term, _)| have(term));
+    candidates
 }
 
 /// Reveal `path` by opening its parent folder — used by "show in folder".
@@ -342,6 +353,20 @@ pub fn is_single_argument(path: &OsStr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_command_runs_in_the_desktops_own_terminal_before_any_guess() {
+        let all = terminal_candidates(Some("footclient"), |_| true);
+        assert_eq!(all[0], ("xdg-terminal-exec".to_string(), "--"));
+        assert_eq!(all[1], ("footclient".to_string(), "-e"));
+        assert_eq!(all[2], ("alacritty".to_string(), "-e"));
+
+        // Only what is installed is offered, in the same order.
+        let some = terminal_candidates(None, |p| p == "ghostty" || p == "alacritty");
+        let names: Vec<&str> = some.iter().map(|(t, _)| t.as_str()).collect();
+        assert_eq!(names, vec!["alacritty", "ghostty"]);
+        assert!(terminal_candidates(None, |_| false).is_empty());
+    }
 
     #[test]
     fn the_desktops_own_terminal_is_used_first() {
@@ -365,7 +390,7 @@ mod tests {
         // slice of arguments, so there is no string for a shell to reparse.
         // This test fails to compile if that signature is ever loosened to
         // take one command line.
-        fn takes_argv(f: fn(&str, &[&str]) -> Result<String, OpenRefusal>) -> bool {
+        fn takes_argv<'a>(f: fn(&str, &[&'a str]) -> Result<String, OpenRefusal>) -> bool {
             let _ = f;
             true
         }

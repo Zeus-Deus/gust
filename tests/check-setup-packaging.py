@@ -106,6 +106,12 @@ class SetupPackagingTests(unittest.TestCase):
         self.assertRegex(source, r"(?m)^sha256sums=\('[0-9a-f]{64}'\)$")
         self.assertNotIn("<owner>", source)
 
+    def test_desktop_entry_asks_for_one_location_per_window(self):
+        # Gust opens one location per window. `%U` would hand it a list of
+        # which every entry after the first is silently dropped.
+        entry = (ROOT / "packaging/gust.desktop").read_text()
+        self.assertRegex(entry, r"(?m)^Exec=gust %u$")
+
     def test_qt_qualification_floor_is_declared_in_both_recipes(self):
         for manifest in MANIFESTS:
             dependencies = shell_array(manifest.read_text(), "depends")

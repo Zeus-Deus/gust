@@ -1571,6 +1571,32 @@ Window {
         hints.message = ""
         // A menu waiting for another tab's selection never opens over this one.
         if (win.menuIntent && win.menuIntent.model !== dirModel) win.menuIntent = null
+        win.syncFilterBar()
+    }
+
+    /// The filter bar shows the filter of the list on screen. Going to
+    /// another folder clears the model's filter and switching tab or pane
+    /// swaps the model; the bar used to keep the old text over a list that
+    /// was no longer filtered (or stay hidden over one that was).
+    function syncFilterBar() {
+        if (!dirModel || filterBar.searchActive) return
+        const text = dirModel.filter
+        if (text === filterInput.text && filterBar.filterActive === (text !== "" || filterInput.activeFocus))
+            return
+        filterBar.syncing = true
+        filterInput.text = text
+        filterBar.syncing = false
+        if (text !== "") {
+            filterBar.filterActive = true
+        } else if (filterBar.filterActive) {
+            const typing = filterInput.activeFocus
+            filterBar.filterActive = false
+            if (typing) win.focusList()
+        }
+    }
+    Connections {
+        target: dirModel
+        function onFilterChanged() { win.syncFilterBar() }
     }
 
     // Back/Forward availability. can_go_back() is a call, which QML never
@@ -2986,6 +3012,7 @@ Window {
             }
 
             Row {
+                id: leftTools
                 anchors.left: parent.left
                 anchors.leftMargin: Tokens.spaceLg
                 anchors.verticalCenter: parent.verticalCenter
@@ -3064,12 +3091,17 @@ Window {
                     onDragLanded: (m, e) => { hints.message = ""; win.transferStarted(m, e, "drop") }
                     model: dirModel
                     anchors.verticalCenter: parent.verticalCenter
+                    // Whatever the buttons on the right leave: a deep path
+                    // used to draw straight through them.
+                    width: Math.max(0, Math.min(implicitWidth,
+                        headerBar.width - rightTools.width - leftTools.x - x - Tokens.spaceLg * 3))
                     onPathChosen: (p) => { dirModel.navigate(p); win.focusList() }
                 }
             }
 
             // View switch: labelled, tooltipped, keyboard reachable.
             Row {
+                id: rightTools
                 anchors.right: parent.right
                 anchors.rightMargin: Tokens.spaceLg
                 anchors.verticalCenter: parent.verticalCenter
@@ -3465,6 +3497,8 @@ Window {
             // question. The filter narrows this folder; search walks this
             // folder and below, on a worker, ranked (DESIGN §6.3).
             property bool searchActive: false
+            // The field is being set FROM the model: not a keystroke to send back.
+            property bool syncing: false
             onFilterActiveChanged: win.qaDump("filterbar")
             onSearchActiveChanged: win.qaDump("searchbar")
 
@@ -3494,7 +3528,7 @@ Window {
                     selectByMouse: true
                     // While this field has focus it owns every key: h/j/k/l,
                     // / and : are text here, not commands.
-                    onTextChanged: dirModel.set_filter_text(text)
+                    onTextChanged: if (!filterBar.syncing) dirModel.set_filter_text(text)
                     Keys.onEscapePressed: {
                         text = ""
                         dirModel.set_filter_text("")
@@ -3504,6 +3538,7 @@ Window {
                         win.focusList()
                     }
                     Keys.onReturnPressed: win.focusList()
+                    Keys.onEnterPressed: win.focusList()
                     Accessible.role: Accessible.EditableText
                     Accessible.name: "Filter this folder"
                 }
@@ -3785,6 +3820,9 @@ Window {
             case Qt.Key_Backspace:
                 dirModel.navigate_up(); event.accepted = true; return
             case Qt.Key_Tab:
+                // Ctrl+Tab is the next tab, split or not: it used to be
+                // swallowed here and switch pane instead.
+                if (event.modifiers & Qt.ControlModifier) break
                 if (win.paneCount > 1) {
                     win.focusPane(win.activePane === 0 ? 1 : 0)
                     event.accepted = true; return
@@ -4992,6 +5030,9 @@ Window {
                             sortField: dirModel.sort_field, ascending: dirModel.sort_ascending }
         if (win.prefsReady) win.startWithPrefs(true)
         else dirModel.reload()
+        // `gust /no/such/file` opened somewhere else: say so, once.
+        const startupNotice = dirModel.startup_notice()
+        if (startupNotice !== "") win.alertText = startupNotice
         // After a crash, say what was interrupted — read once, here.
         try { interruptedNotice.items = JSON.parse(dirModel.interrupted_jobs()) } catch (e) {}
         // A local read of the kernel's own view: no daemon, no network.
