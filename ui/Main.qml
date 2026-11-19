@@ -5027,6 +5027,9 @@ Window {
                             sortField: dirModel.sort_field, ascending: dirModel.sort_ascending }
         if (win.prefsReady) win.startWithPrefs(true)
         else dirModel.reload()
+        // `gust /no/such/file` opened somewhere else: say so, once.
+        const startupNotice = dirModel.startup_notice()
+        if (startupNotice !== "") win.alertText = startupNotice
         // After a crash, say what was interrupted — read once, here.
         try { interruptedNotice.items = JSON.parse(dirModel.interrupted_jobs()) } catch (e) {}
         // A local read of the kernel's own view: no daemon, no network.
