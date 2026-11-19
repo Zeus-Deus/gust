@@ -123,9 +123,12 @@ def main():
     bindings_end = text.index("    function prefsNotified()")
     bindings = block(text, "function revisionAtLeast(") + "\n" + text[bindings_start:bindings_end]
     settings = text[text.index("        id: settingsPanel\n"):]
-    alerts = [line.strip() for line in text.splitlines() if line.strip().startswith("alert: win.alertText")]
+    alerts = [line.strip() for line in block(text, "HintStrip {").splitlines() if line.strip().startswith("alert: ")]
     if len(alerts) != 1:
         raise ValueError("Expected the production hint alert binding")
+    action_alert = next(line.strip() for line in text.splitlines()
+                        if line.strip().startswith("readonly property string actionAlert:"))
+    notice = replace_once(notice, "@ACTION_ALERT@", action_alert)
     notice = replace_once(notice, "@PREFS_BINDINGS@", bindings)
     notice = replace_once(notice, "@HINT_ALERT@", alerts[0][len("alert: "):])
     notice = replace_once(notice, "@SETTINGS_CHANGED@", body(settings, "onChanged: (key, value) =>"))

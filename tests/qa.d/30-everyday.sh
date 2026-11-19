@@ -213,13 +213,13 @@ else
   bad "no pointer injection: the sidebar bug checks did NOT run"
 fi
 
-say "30g · restore tabs on start (Settings → Tabs at start)"
+say "30g · restore tabs on start (Settings → When Gust opens)"
 rm -f "$FIXTURE/.local/state/gust/tabs.toml"
 stop_gust; start_gust "$FIXTURE"
 wait_for "d['model']['settled']" "True" 20 >/dev/null
 ctrl comma; wait_for "d['settingsOpen']" "True" 8 >/dev/null
 key Down; key Down; key Down; key Down; key Right; sleep 0.6
-expect "Tabs at start: Reopen last" "str(d['settings'].get('restore_tabs'))" "True"
+expect "When Gust opens: Last time's tabs" "str(d['settings'].get('restore_tabs'))" "True"
 shot 30g-settings
 key Escape; sleep 0.4
 ctrl t; sleep 0.8
@@ -242,7 +242,7 @@ shot 30g-restored-tabs
 ctrl w; sleep 0.6
 ctrl comma; wait_for "d['settingsOpen']" "True" 8 >/dev/null
 key Down; key Down; key Down; key Down; key Left; sleep 0.6
-expect "Tabs at start back to Fresh" "str(d['settings'].get('restore_tabs'))" "False"
+expect "When Gust opens: back to One new tab" "str(d['settings'].get('restore_tabs'))" "False"
 key Escape
 stop_gust; rm -f "$FIXTURE/.local/state/gust/tabs.toml"; start_gust "$FIXTURE"
 wait_for "d['model']['settled']" "True" 20 >/dev/null

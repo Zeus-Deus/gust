@@ -160,6 +160,10 @@ pub mod qobject {
         #[qsignal]
         fn place_done(self: Pin<&mut DirModel>, op: QString, name: QString, message: QString);
 
+        /// A requested application or terminal launch finished on a worker.
+        #[qsignal]
+        fn launch_done(self: Pin<&mut DirModel>, success: bool, message: QString);
+
         /// A worker finished file-clipboard admission for this exact model.
         #[qsignal]
         fn paste_ready(self: Pin<&mut DirModel>, message: QString, allow_image: bool);
@@ -278,6 +282,10 @@ pub mod qobject {
         /// Read once at start-up.
         #[qinvokable]
         fn interrupted_jobs(self: &DirModel) -> QString;
+        /// Why the launch argument could not be opened as given
+        /// ("Could not find …"), or "". Read once at start-up.
+        #[qinvokable]
+        fn startup_notice(self: &DirModel) -> QString;
         /// The user has seen the interrupted-operations notice.
         #[qinvokable]
         fn acknowledge_interrupted(self: &DirModel);
@@ -322,7 +330,7 @@ pub mod qobject {
         /// Launch `rclone config` in a terminal. Gust never asks for a cloud
         /// credential itself and never sees one.
         #[qinvokable]
-        fn cloud_setup(self: &DirModel) -> QString;
+        fn cloud_setup(self: Pin<&mut DirModel>);
         /// Install an allowlisted capability on a worker through polkit.
         /// No device is connected, trusted or browsed by installation.
         #[qinvokable]
@@ -1226,6 +1234,9 @@ pub struct DirModelRust {
     /// After a rename or new folder, the cursor goes to this name once it
     /// appears in the listing.
     focus_name: Option<std::ffi::OsString>,
+    /// Why the window is not showing what the launch argument named, or
+    /// None. Decided once at startup and read once by the window.
+    startup_notice: Option<String>,
     focus_revision: u64,
     /// A change arrived during the hold; apply it when the hold ends.
     live_dirty: bool,
@@ -1418,12 +1429,15 @@ fn typed_navigation_path(typed: &str) -> PathBuf {
     path.components().collect()
 }
 
-/// The folder Gust should open, decided once at startup.
+/// Where Gust should open, decided once at startup.
 ///
 /// A file manager must honour `gust /some/path` — that is how a desktop
-/// "Open containing folder" action invokes it. Anything that is not an
-/// existing directory falls back to `$HOME` rather than opening nothing.
-pub fn startup_location() -> PathBuf {
+/// "Open containing folder" action invokes it — and `gust /some/file`, which
+/// is how a launcher hands it a file: the folder opens with the cursor on
+/// that file. An argument that cannot be honoured opens the nearest folder
+/// that exists (or `$HOME`) with one line saying so, rather than nothing.
+pub(crate) fn startup() -> crate::cli::Startup {
+    use crate::cli::Startup;
     let home = || {
         std::env::var_os("HOME")
             .map(PathBuf::from)
@@ -1434,13 +1448,15 @@ pub fn startup_location() -> PathBuf {
     // already checked it (main.rs, prepare_admin_session).
     if let Some(d) = std::env::var_os("GUST_ADMIN_FOLDER") {
         if admin_session() {
-            return PathBuf::from(d);
+            return Startup::folder(PathBuf::from(d));
         }
     }
 
-    // First non-flag argument wins. Flags are reserved for later options.
-    let Some(path) = crate::cli::startup_argument(std::env::args_os().skip(1)) else {
-        return home();
+    // First ordinary argument wins; options end at `--`.
+    let path = match crate::cli::startup_argument(std::env::args_os().skip(1)) {
+        None => return Startup::folder(home()),
+        Some(Err(arg)) => return crate::cli::unusable_startup(&arg, &home()),
+        Some(Ok(path)) => path,
     };
 
     // Resolve relative to the working directory the user launched from.
@@ -1463,22 +1479,42 @@ pub fn startup_location() -> PathBuf {
         {
             // Start at home rather than not starting. The place is reported
             // once there is a window to report it in.
-            return home();
+            return Startup::folder(home());
         }
     }
 
-    match std::fs::metadata(&abs) {
-        // Pointed at a file: open its folder, which is what the user means.
-        Ok(m) if m.is_file() => abs.parent().map(PathBuf::from).unwrap_or_else(home),
-        Ok(m) if m.is_dir() => abs,
-        _ => home(),
+    crate::cli::resolve_startup(&abs, &home())
+}
+
+impl DirModelRust {
+    /// The entry the cursor was asked to land on is a hidden one: show
+    /// hidden files in this window, or the list filters it out before the
+    /// cursor can find it (`gust ~/project/.env`, or another app's "Show in
+    /// folder" on a dotfile). This window only; the saved preference is not
+    /// touched.
+    fn reveal_focus(&mut self) {
+        if self
+            .focus_name
+            .as_deref()
+            .is_some_and(crate::cli::is_hidden_name)
+        {
+            self.show_hidden = true;
+        }
     }
 }
 
 impl Default for DirModelRust {
     fn default() -> Self {
-        let home = startup_location();
+        let start = startup();
+        let home = start.folder;
         let mut model = Self::fresh(home.clone());
+        // `gust /some/file`: the cursor goes on that file. A "Show in
+        // folder" request (GUST_SELECT) names its own and keeps priority.
+        if model.focus_name.is_none() {
+            model.focus_name = start.focus;
+        }
+        model.reveal_focus();
+        model.startup_notice = start.notice;
         // A window started by a tab detach picks up where the tab was:
         // history, selection, cursor, hidden files, view. Taken once (the
         // file is deleted), and only if it names this same folder.
@@ -1587,6 +1623,7 @@ impl DirModelRust {
             focus_name: std::env::var_os("GUST_SELECT")
                 .filter(|v| !v.is_empty())
                 .inspect(|_| std::env::remove_var("GUST_SELECT")),
+            startup_notice: None,
             live_dirty: false,
             live_busy: false,
 
@@ -1868,6 +1905,44 @@ fn human_time(mtime: i64) -> String {
         }
     });
     gust_core::properties::relative_time(mtime, now, offset)
+}
+
+/// Open through the desktop. An opener can start and still fail to open the
+/// file; that answer arrives on a worker and reaches the window as
+/// `place_done("open", …)`, so nothing here waits for it.
+fn open_reporting(
+    thread: Option<cxx_qt::CxxQtThread<qobject::DirModel>>,
+    path: &Path,
+    mode: Option<u32>,
+) -> Result<String, gust_core::open::OpenRefusal> {
+    let name = path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    gust_core::open::open_with_desktop_reporting(path, mode, move |refusal| {
+        let Some(thread) = thread else {
+            return;
+        };
+        let reason = open_refusal_reason(refusal);
+        let message = format!(
+            "Could not open \"{name}\": {reason}. Right-click → Open with… to choose an app."
+        );
+        let _ = thread.queue(move |model| {
+            model.place_done(
+                QString::from("open"),
+                QString::from(&name),
+                QString::from(&message),
+            );
+        });
+    })
+}
+
+fn open_refusal_reason(refusal: gust_core::open::OpenRefusal) -> String {
+    match refusal {
+        gust_core::open::OpenRefusal::Failed(reason) => reason,
+        other => other.to_string(),
+    }
 }
 
 impl qobject::DirModel {
@@ -2325,6 +2400,10 @@ impl qobject::DirModel {
         ))
     }
 
+    fn startup_notice(&self) -> QString {
+        QString::from(self.startup_notice.as_deref().unwrap_or_default())
+    }
+
     /// Operations a crash interrupted, as JSON for the start-up notice.
     fn interrupted_jobs(&self) -> QString {
         let Some(j) = Self::production_journal() else {
@@ -2629,7 +2708,7 @@ impl qobject::DirModel {
         if gust_core::mime::needs_trusted_launch(&name, mode) {
             return QString::from("Programs are not started from here.");
         }
-        match gust_core::open::open_with_desktop(&p, mode) {
+        match open_reporting(self.qt_thread_handle(), &p, mode) {
             Ok(_) => QString::default(),
             Err(e) => QString::from(&e.to_string()),
         }
@@ -3197,6 +3276,9 @@ impl qobject::DirModel {
                 .collect(),
             show_hidden: self.show_hidden,
         };
+        // The new window decides its renderer and logging from the user's
+        // own environment, not from what this window chose for itself.
+        gust_core::childenv::for_gust_window(&mut cmd);
         if handoff.write(&handoff_path).is_ok() {
             cmd.env("GUST_HANDOFF", &handoff_path);
         }
@@ -3266,6 +3348,25 @@ impl qobject::DirModel {
 
     // --- opening several files (DESIGN §6.18) ----------------------------
 
+    fn launch_on_worker(
+        &self,
+        launch: impl FnOnce() -> Result<String, String> + Send + 'static,
+    ) -> Result<(), String> {
+        let thread = <Self as cxx_qt::Threading>::qt_thread(self);
+        std::thread::Builder::new()
+            .name("gust-launch".into())
+            .spawn(move || {
+                let result = launch();
+                let success = result.is_ok();
+                let message = result.unwrap_or_else(|error| error);
+                let _ = thread.queue(move |model| {
+                    model.launch_done(success, QString::from(message));
+                });
+            })
+            .map(|_| ())
+            .map_err(|e| format!("Could not start the launch worker: {e}"))
+    }
+
     /// Open the whole selection with its default handler.
     ///
     /// Returns "" when this is not a multi-file situation, so the caller
@@ -3325,35 +3426,53 @@ impl qobject::DirModel {
                 // Mixed kinds: open them one at a time with their own
                 // defaults, which is what the user would get by pressing
                 // Enter on each.
-                let mut opened = 0usize;
-                for p in &paths {
-                    let mode = std::fs::metadata(p).ok().map(|m| {
-                        use std::os::unix::fs::PermissionsExt;
-                        m.permissions().mode()
-                    });
-                    if gust_core::open::open_with_desktop(p, mode).is_ok() {
-                        opened += 1;
-                    }
-                }
-                let msg = format!("Opened {opened} files");
-                self.as_mut().set_status(QString::from(&msg));
-                return QString::from(format!("OK:{msg}"));
+                return self.open_mixed_selection(&paths);
             }
         }
 
         let handlers = gust_core::open::with::handlers_for(&mime);
-        let Some(handler) = handlers.first() else {
+        let Some(handler) = handlers.into_iter().next() else {
             return QString::default();
         };
-        let outcome = gust_core::open::with::launch_many(handler, &paths);
-        let msg = outcome.message();
-        match outcome {
-            gust_core::open::with::MultiOpen::Refused(_) => QString::from(msg),
-            _ => {
-                self.as_mut().set_status(QString::from(&msg));
-                QString::from(format!("OK:{msg}"))
+        match self.launch_on_worker(move || {
+            let outcome = gust_core::open::with::launch_many(&handler, &paths);
+            match outcome {
+                gust_core::open::with::MultiOpen::Refused(reason) => Err(reason),
+                _ => Ok(outcome.message()),
+            }
+        }) {
+            Ok(()) => QString::from("pending"),
+            Err(e) => QString::from(e),
+        }
+    }
+
+    fn open_mixed_selection(mut self: Pin<&mut Self>, paths: &[PathBuf]) -> QString {
+        use std::os::unix::fs::PermissionsExt;
+        let total = paths.len();
+        let mut refusals = Vec::new();
+        for path in paths {
+            let mode = std::fs::metadata(path).ok().map(|m| m.permissions().mode());
+            if let Err(error) = open_reporting(self.as_ref().qt_thread_handle(), path, mode) {
+                let name = path.file_name().unwrap_or_default().to_string_lossy();
+                refusals.push((name, open_refusal_reason(error)));
             }
         }
+
+        if let Some((_, first_reason)) = refusals.first() {
+            let sent = total - refusals.len();
+            if sent == 0 && refusals.iter().all(|(_, reason)| reason == first_reason) {
+                return QString::from(format!("Could not open {total} files: {first_reason}"));
+            }
+            let details = refusals
+                .into_iter()
+                .map(|(name, reason)| format!("{name}: {reason}"))
+                .collect::<Vec<_>>()
+                .join(" · ");
+            return QString::from(format!("Sent {sent} of {total} files. {details}"));
+        }
+        let msg = format!("Sent {total} files to the desktop opener");
+        self.as_mut().set_status(QString::from(&msg));
+        QString::from(format!("OK:{msg}"))
     }
 
     // --- open with (DESIGN §6.17) ----------------------------------------
@@ -3418,29 +3537,19 @@ impl qobject::DirModel {
         let Some(path) = self.path_of_row(row) else {
             return QString::from("That item is no longer there.");
         };
-        let Some(mime) = Self::mime_of(&path) else {
-            return QString::from("Unknown file type.");
-        };
         let wanted = id.to_string();
-
-        // The handler must be one the SYSTEM says can open this type. A
-        // desktop id arriving from anywhere else is not a licence to launch
-        // an arbitrary program.
-        let Some(handler) = gust_core::open::with::handlers_for(&mime)
-            .into_iter()
-            .find(|h| h.id == wanted)
-        else {
-            return QString::from("That application is no longer available.");
-        };
-
-        match gust_core::open::with::launch(&handler, &path) {
-            Ok(name) => {
-                // Reported, not silent: the window does not change, so
-                // without a line here nothing appears to have happened.
-                QString::from(format!("OK:Opened with {name}"))
-            }
-            Err(e) => QString::from(format!("{e}")),
-        }
+        let launch = self.launch_on_worker(move || {
+            let mime = Self::mime_of(&path).ok_or("Unknown file type.")?;
+            // Only a handler registered for this file type may be launched.
+            let handler = gust_core::open::with::handlers_for(&mime)
+                .into_iter()
+                .find(|h| h.id == wanted)
+                .ok_or("That application is no longer available.")?;
+            gust_core::open::with::launch(&handler, &path)
+                .map(|name| format!("Opened with {name}"))
+                .map_err(|e| e.to_string())
+        });
+        QString::from(launch.err().unwrap_or_default())
     }
 
     // --- archives (DESIGN §6.15) -----------------------------------------
@@ -6368,7 +6477,7 @@ impl qobject::DirModel {
                             })
                             .map_err(|error| error.to_string())
                     } else {
-                        gust_core::open::open_with_desktop(&path, mode)
+                        open_reporting(Some(thread.clone()), &path, mode)
                             .map(|_| ())
                             .map_err(|error| error.to_string())
                     };
@@ -6387,7 +6496,7 @@ impl qobject::DirModel {
         }
         // Non-media keeps its desktop handler; explicit Open with… also
         // remains available when a different media application is wanted.
-        match gust_core::open::open_with_desktop(path, mode) {
+        match open_reporting(self.as_ref().qt_thread_handle(), path, mode) {
             Ok(_opener) => QString::from("file"),
             Err(e) => QString::from(&format!("blocked:{e}")),
         }
@@ -6413,17 +6522,26 @@ impl qobject::DirModel {
     /// Launch rclone's own configuration tool. Every provider's setup
     /// differs and Drive's OAuth is not a template for Proton or Filen
     /// (plan §3), so Gust delegates rather than reimplementing any of it.
-    fn cloud_setup(&self) -> QString {
-        if !gust_remote::cloud::rclone_available() {
-            return QString::from(gust_remote::cloud::CloudError::NotInstalled.message());
-        }
-        let (bin, args) = gust_remote::cloud::config_command();
-        match gust_core::open::run_in_terminal(bin, &args) {
-            Ok(_) => QString::default(),
-            Err(_) => {
-                QString::from("No terminal found. Run rclone config yourself, then :cloud again.")
-            }
-        }
+    fn cloud_setup(self: Pin<&mut Self>) {
+        self.place_op(
+            "cloud-setup",
+            String::new(),
+            "Opening a terminal…".into(),
+            || {
+                if !gust_remote::cloud::rclone_available() {
+                    return PlaceOutcome::Failed(
+                        gust_remote::cloud::CloudError::NotInstalled.message(),
+                    );
+                }
+                let (bin, args) = gust_remote::cloud::config_command();
+                match gust_core::open::run_in_terminal(bin, &args) {
+                    Ok(_) => PlaceOutcome::Done("Opened a terminal for cloud setup".into()),
+                    Err(_) => PlaceOutcome::Failed(
+                        "No terminal found. Run rclone config yourself, then :cloud again.".into(),
+                    ),
+                }
+            },
+        );
     }
 
     /// Open a terminal in the current folder.
@@ -6437,10 +6555,13 @@ impl qobject::DirModel {
         let Some(dir) = self.key.as_path() else {
             return QString::from("this location is not a local folder");
         };
-        match gust_core::open::open_terminal_here(dir) {
-            Ok(term) => QString::from(&format!("Opened {term}")),
-            Err(e) => QString::from(&format!("{e}")),
-        }
+        let dir = dir.to_owned();
+        let launch = self.launch_on_worker(move || {
+            gust_core::open::open_terminal_here(&dir)
+                .map(|term| format!("Opened {term}"))
+                .map_err(|e| e.to_string())
+        });
+        QString::from(launch.err().unwrap_or_default())
     }
 
     fn breadcrumbs(&self) -> QStringList {
@@ -8558,7 +8679,8 @@ impl qobject::DirModel {
         let mut started = 0usize;
         for argv in &runs {
             let mut cmd = std::process::Command::new(&argv[0]);
-            cmd.args(&argv[1..])
+            gust_core::childenv::for_user_app(&mut cmd)
+                .args(&argv[1..])
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null());
@@ -8701,7 +8823,7 @@ impl qobject::DirModel {
         if gust_core::open::which("xdg-terminal-exec").is_none() {
             return QString::from("no terminal launcher (xdg-terminal-exec) is installed");
         }
-        match std::process::Command::new(&argv[0])
+        match gust_core::childenv::for_user_app(&mut std::process::Command::new(&argv[0]))
             .args(&argv[1..])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
@@ -9140,9 +9262,7 @@ impl qobject::DirModel {
     fn session_json(&self) -> QString {
         if admin_session()
             || std::env::var_os("GUST_CHOOSER").is_some_and(|v| !v.is_empty())
-            || std::env::args_os()
-                .skip(1)
-                .any(|a| !a.to_string_lossy().starts_with('-'))
+            || crate::cli::names_a_place(std::env::args_os().skip(1))
         {
             return QString::default();
         }
