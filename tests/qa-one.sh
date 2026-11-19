@@ -19,7 +19,10 @@ stop_gust
 if grep -qiE "TypeError|is not a function|ReferenceError|QML .*: error" "$LOG" 2>/dev/null; then
   bad "QML runtime errors in $LOG"; grep -iE "TypeError|is not a function|ReferenceError" "$LOG" | sort -u | head -5
 fi
-printf '%s\n' "${RESULTS[@]}" > "$OUTDIR/results.txt"
+if ! printf '%s\n' "${RESULTS[@]}" > "$OUTDIR/results.txt"; then
+  printf 'Could not save QA results to %s/results.txt\n' "$OUTDIR" >&2
+  exit 1
+fi
 printf '\n  passed: %d\n  failed: %d\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]] || exit 1
 finish_fixture

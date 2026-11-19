@@ -2727,7 +2727,10 @@ ok "QA used fixture home $FIXTURE and private auxiliary trees"
 stop_gust
 
 say "summary"
-printf '%s\n' "${RESULTS[@]}" > "$OUTDIR/results.txt"
+if ! printf '%s\n' "${RESULTS[@]}" > "$OUTDIR/results.txt"; then
+  printf 'Could not save QA results to %s/results.txt\n' "$OUTDIR" >&2
+  exit 1
+fi
 printf '\n  passed: %d\n  failed: %d\n  shots:  %s\n' "$PASS" "$FAIL" "$OUTDIR"
 [[ "$FAIL" -eq 0 ]] || exit 1
 finish_fixture

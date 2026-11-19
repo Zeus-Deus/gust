@@ -254,6 +254,37 @@ class FixtureContainmentTests(unittest.TestCase):
             self.assertIn(str(section), (root / "results.txt").read_text())
             self.assertFalse((root / "cleanup-called").exists())
 
+    def test_failed_results_write_preserves_passing_fixture(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runner = root / "qa-one.sh"
+            shutil.copy2(ROOT / "tests/qa-one.sh", runner)
+            section = root / "pass.sh"
+            section.write_text('PASS=1; RESULTS=("PASS section ran")\n')
+            (root / "qa-lib.sh").write_text("""
+                OUTDIR=$1
+                FIXTURE=$OUTDIR/home
+                LOG=$OUTDIR/gust.log
+                FAIL=0
+                start_gust() { mkdir "$FIXTURE"; }
+                stop_gust() { :; }
+                finish_fixture() { rmdir "$FIXTURE"; }
+            """)
+            for failure in ("open", "write"):
+                with self.subTest(failure=failure):
+                    out = root / failure
+                    out.mkdir()
+                    results = out / "results.txt"
+                    if failure == "open":
+                        results.mkdir()
+                    else:
+                        results.symlink_to("/dev/full")
+                    result = subprocess.run(["bash", str(runner), str(section), str(out)],
+                                            capture_output=True, text=True, timeout=5)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(str(results), result.stderr)
+                    self.assertTrue((out / "home").is_dir())
+
     def test_fresh_fixture_is_built_and_sibling_data_is_untouched(self):
         with tempfile.TemporaryDirectory(prefix="gust-fresh-fixture-") as temporary:
             parent = Path(temporary)
