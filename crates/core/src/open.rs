@@ -324,26 +324,32 @@ X-TerminalArgExec=-e
 ",
     )?;
 
-    let probe = Command::new(program)
-        .env_clear()
-        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
-        .env("HOME", root.path())
-        .env("XDG_DATA_HOME", root.path())
-        .env("XDG_DATA_DIRS", "/dev/null")
-        .env("XDG_CONFIG_DIRS", "/dev/null")
-        .env("XTE_CACHE_ENABLED", "false")
-        .arg("--print-id")
-        .stderr(Stdio::null())
-        .output()?;
-    if !probe.status.success() || probe.stdout.trim_ascii() != PROBE_ID.as_bytes() {
-        return Ok(false);
+    // v0.12 has only --test, which prints the command it would execute.
+    // Still older launchers can dispatch /bin/false for both options.
+    for (option, expected) in [
+        ("--print-id", PROBE_ID),
+        ("--test", "Command and arguments:\n  >/bin/false<"),
+    ] {
+        let probe = Command::new(program)
+            .env_clear()
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .env("HOME", root.path())
+            .env("XDG_DATA_HOME", root.path())
+            .env("XDG_DATA_DIRS", "/dev/null")
+            .env("XDG_CONFIG_DIRS", "/dev/null")
+            .env("XTE_CACHE_ENABLED", "false")
+            .arg(option)
+            .stderr(Stdio::null())
+            .output()?;
+        if probe.status.success() && probe.stdout.trim_ascii() == expected.as_bytes() {
+            let entry = crate::childenv::for_user_app(&mut Command::new(program))
+                .arg(option)
+                .stderr(Stdio::null())
+                .output()?;
+            return Ok(entry.status.success() && !entry.stdout.trim_ascii().is_empty());
+        }
     }
-
-    let entry = crate::childenv::for_user_app(&mut Command::new(program))
-        .arg("--print-id")
-        .stderr(Stdio::null())
-        .output()?;
-    Ok(entry.status.success() && !entry.stdout.trim_ascii().is_empty())
+    Ok(false)
 }
 
 fn terminal_in_dir(term: &str, dir: &Path) -> Command {

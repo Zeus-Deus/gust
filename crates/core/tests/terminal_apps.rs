@@ -228,40 +228,71 @@ fn unresolved_desktop_entry_uses_terminal_env_then_named_terminal() {
     assert!(!stage.was_called("xdg-terminal-exec"));
 }
 
-#[test]
-fn legacy_launcher_discarding_unknown_options_never_opens_a_probe_terminal() {
-    let stage = Stage::new(
-        "legacy",
-        &["xdg-terminal-exec", "selected-terminal", "foot", "rclone"],
-    );
-    // v0.12.4 discards --print-id, then execs the selected entry even if
-    // no arguments remain. Record that launch if it reaches our real entry.
+// A legacy launcher resolves its entry before parsing options. Unknown
+// options fall through to dispatch, including when no arguments remain.
+fn install_legacy_launcher(stage: &Stage, supports_test: bool) {
+    let test_mode = if supports_test {
+        r#"if [ "$1" = --test ]; then
+    printf 'Command and arguments:\n  >%s<\n' "$program"
+    exit 0
+fi"#
+    } else {
+        ""
+    };
     write_script(
         &stage.dir.join("xdg-terminal-exec"),
         &format!(
             r#"{SELECT_ENTRY}
-test_mode=false
-while [ "$#" -gt 0 ]; do
-    case "$1" in
-        --test) test_mode=true; shift ;;
-        --) shift; break ;;
-        -*) shift ;;
-        *) break ;;
-    esac
-done
 while IFS= read -r line; do
-    case "$line" in Exec=*)
-        program=${{line#Exec=}}
-        if "$test_mode"; then
-            printf 'Command and arguments:\n  >%s<\n' "$program"
-            exit 0
-        fi
-        exec "$program" "$@" ;;
-    esac
+    case "$line" in Exec=*) program=${{line#Exec=}}; break ;; esac
 done < "$entry"
-exit 1"#
+{test_mode}
+case "$1" in --|--test|--print-id) shift ;; esac
+exec "$program" "$@""#
         ),
     );
+}
+
+#[test]
+fn legacy_lookup_preserves_the_only_configured_terminal() {
+    let stage = Stage::new("legacy", &["xdg-terminal-exec", "rclone"]);
+    install_legacy_launcher(&stage, true);
+    write_script(
+        &stage.dir.join("selected-terminal"),
+        r#"printf '<%s>\n' "$@" >> "$0.launches"
+[ "$#" -gt 0 ] && exec "$@""#,
+    );
+    assert_eq!(
+        run_in_terminal("rclone", &["config"]).unwrap(),
+        "xdg-terminal-exec"
+    );
+    assert_eq!(stage.first_called(&["rclone"]).1, ["config"]);
+    assert_eq!(
+        std::fs::read_to_string(stage.dir.join("selected-terminal.launches")).unwrap(),
+        "<rclone>\n<config>\n",
+        "a probe or duplicate launch reached the configured terminal"
+    );
+}
+
+#[test]
+fn legacy_lookup_with_no_entry_falls_back() {
+    let stage = Stage::new("legacy-empty", &["xdg-terminal-exec", "foot"]);
+    install_legacy_launcher(&stage, true);
+    std::fs::remove_file(stage.dir.join("applications/fixture.desktop")).unwrap();
+    assert_eq!(open_terminal_here(&stage.dir).unwrap(), "foot");
+    assert_eq!(
+        stage.first_called(&["foot"]).1,
+        ["--working-directory", stage.dir.to_str().unwrap()]
+    );
+}
+
+#[test]
+fn launcher_without_a_lookup_mode_never_probes_the_configured_terminal() {
+    let stage = Stage::new(
+        "no-lookup",
+        &["xdg-terminal-exec", "selected-terminal", "foot", "rclone"],
+    );
+    install_legacy_launcher(&stage, false);
     assert_eq!(run_in_terminal("rclone", &["config"]).unwrap(), "foot");
     assert_eq!(stage.first_called(&["foot"]).1, ["-e", "rclone", "config"]);
     std::fs::remove_file(stage.dir.join("foot")).unwrap();
