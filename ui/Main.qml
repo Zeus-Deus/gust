@@ -2195,6 +2195,7 @@ Window {
         else if (a === "paste-into") {
             win.transferStarted(dirModel, dirModel.clip_paste_into(dirModel.cursor), "paste")
         }
+        else if (a === "sort-menu") win.openSortMenu()
         else if (a === "view-rows") win.setView("rows")
         else if (a === "split") win.splitPane()
         else if (a === "unsplit") win.closePane(win.activePane)
@@ -2283,7 +2284,9 @@ Window {
         }
         else if (a === "search") {
             win.openSearch()
+            return // Keep the keyboard in the search field.
         }
+        else if (a === "close-search") win.closeSearch(false)
         else if (a === "compress") {
             const cerr = dirModel.compress_selection(dirModel.cursor)
             if (cerr !== "") win.alertText = cerr
@@ -2529,7 +2532,8 @@ Window {
         const f = dirModel.sort_field
         const asc = dirModel.sort_ascending
         const mark = (on) => on ? "✓" : ""
-        const p = sortButton.mapToItem(null, 0, sortButton.height)
+        const anchor = actionTools.visible ? sortButton : moreButton
+        const p = anchor.mapToItem(null, 0, anchor.height)
         contextMenu.popup(p.x, p.y, [
             { label: qsTr("Name"), hint: mark(f === "name"), action: "sortto-name" },
             { label: qsTr("Kind"), hint: mark(f === "kind"), action: "sortto-kind" },
@@ -2573,7 +2577,18 @@ Window {
         win.alertText = ""
         const sep = { separator: true }
         const p = moreButton.mapToItem(null, 0, moreButton.height)
+        const overflow = actionTools.visible ? [] : [
+            filterBar.searchActive
+                ? { label: qsTr("Close search"), action: "close-search" }
+                : { label: qsTr("Search"), hint: "Ctrl+F", action: "search" },
+            { label: qsTr("Sort by %1").arg(sortButton.word), action: "sort-menu" },
+            ...viewSwitches.model.map(v => ({
+                label: v.nm, hint: win.viewMode === v.m ? "✓" : "", action: "view-" + v.m
+            })),
+            sep
+        ]
         contextMenu.popup(p.x, p.y, [
+            ...overflow,
             { label: qsTr("New folder"), hint: "Ctrl+N", action: "new-folder" },
             { label: qsTr("New file"), hint: "", action: "new-file" },
             { label: qsTr("Paste"), hint: "Ctrl+V", action: "paste", enabled: dirModel.can_paste() },
@@ -3053,6 +3068,7 @@ Window {
 
                 // Sidebar toggle — the visible restore control for the rail.
                 BarButton {
+                    id: sidebarButton
                     objectName: "sidebarToggle"
                     icon: "sidebar"
                     label: win.sidebarVisible ? qsTr("Hide sidebar") : qsTr("Show sidebar")
@@ -3060,6 +3076,7 @@ Window {
                 }
 
                 Repeater {
+                    id: navButtons
                     model: [
                         { act: "back",    nm: qsTr("Back") },
                         { act: "forward", nm: qsTr("Forward") },
@@ -3080,30 +3097,29 @@ Window {
                         }
                     }
                 }
-
-                Item { width: Tokens.spaceLg; height: 1 }
-
-                Breadcrumbs {
-                    id: crumbs
-                    onDragHover: (t) => { hints.message = t; win.qaDump("drag-hover") }
-                    onDragLanded: (m, e) => { hints.message = ""; win.transferStarted(m, e, "drop") }
-                    model: dirModel
-                    anchors.verticalCenter: parent.verticalCenter
-                    // Whatever the buttons on the right leave: a deep path
-                    // used to draw straight through them.
-                    width: Math.max(0, Math.min(implicitWidth,
-                        headerBar.width - rightTools.width - leftTools.x - x - Tokens.spaceLg * 3))
-                    onPathChosen: (p) => { dirModel.navigate(p); win.focusList() }
-                }
             }
 
-            // View switch: labelled, tooltipped, keyboard reachable.
+            Breadcrumbs {
+                id: crumbs
+                onDragHover: (t) => { hints.message = t; win.qaDump("drag-hover") }
+                onDragLanded: (m, e) => { hints.message = ""; win.transferStarted(m, e, "drop") }
+                model: dirModel
+                anchors.verticalCenter: parent.verticalCenter
+                x: leftTools.x + leftTools.width + Tokens.spaceLg + Tokens.spaceSm * 2
+                width: Math.max(0, Math.min(implicitWidth,
+                    (actionTools.visible ? actionTools.x : menuTools.x) - x - Tokens.spaceLg * 2))
+                onPathChosen: (p) => { dirModel.navigate(p); win.focusList() }
+            }
+
             Row {
-                id: rightTools
-                anchors.right: parent.right
-                anchors.rightMargin: Tokens.spaceLg
+                id: actionTools
+                anchors.right: menuTools.left
+                anchors.rightMargin: Tokens.spaceSm + Tokens.spaceXs * 2
                 anchors.verticalCenter: parent.verticalCenter
                 spacing: Tokens.spaceXs
+                // Measure the full row even while hidden, so resize, zoom and
+                // the current sort label can bring these actions back inline.
+                visible: x >= leftTools.x + leftTools.width + Tokens.spaceLg
 
                 // The everyday actions, one click away: they were reachable
                 // only by key or by right-clicking empty space, which a full
@@ -3121,6 +3137,7 @@ Window {
                     }
                 }
                 BarButton {
+                    id: newFolderButton
                     objectName: "newFolderButton"
                     icon: "new-folder"
                     label: qsTr("New folder")
@@ -3170,6 +3187,7 @@ Window {
                 Item { width: Tokens.spaceSm; height: 1 }
 
                 Repeater {
+                    id: viewSwitches
                     model: [
                         { m: "rows",    nm: qsTr("Rows view") },
                         { m: "grid",    nm: qsTr("Grid view") },
@@ -3183,8 +3201,14 @@ Window {
                         onClicked: win.setView(modelData.m)
                     }
                 }
+            }
 
-                Item { width: Tokens.spaceSm; height: 1 }
+            Row {
+                id: menuTools
+                anchors.right: parent.right
+                anchors.rightMargin: Tokens.spaceLg
+                anchors.verticalCenter: parent.verticalCenter
+                spacing: Tokens.spaceXs
 
                 // Everything else the window can do, in words.
                 BarButton {
@@ -3197,6 +3221,7 @@ Window {
 
                 // Settings: a visible control, never only a shortcut.
                 BarButton {
+                    id: settingsButton
                     objectName: "settingsButton"
                     icon: "settings"
                     label: win.prefsStatus === "unsaved" ? qsTr("Settings — not saved")
@@ -4910,7 +4935,11 @@ Window {
             })(),
             sortButtonPoint: win.qaPoint(sortButton),
             toolbarPoints: {
+                sidebar: win.qaPoint(sidebarButton),
+                back: win.qaPoint(navButtons.itemAt(0)), forward: win.qaPoint(navButtons.itemAt(1)),
+                up: win.qaPoint(navButtons.itemAt(2)), settings: win.qaPoint(settingsButton),
                 more: win.qaPoint(moreButton), search: win.qaPoint(searchButton),
+                newFolder: win.qaPoint(newFolderButton),
                 searchStart: win.qaPoint(searchButton, 0),
                 pathStart: win.qaPoint(crumbs, 0), pathEnd: win.qaPoint(crumbs, crumbs.width)
             },
