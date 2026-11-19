@@ -215,6 +215,45 @@ sys.exit(23 if os.environ.get('CASE') in ('failure', 'diagnostic', 'build-script
 
 
 class FixtureContainmentTests(unittest.TestCase):
+    def test_missing_section_fails_before_desktop_setup(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runner = root / "qa-one.sh"
+            shutil.copy2(ROOT / "tests/qa-one.sh", runner)
+            # Trap any attempt to enter the desktop harness on the test host.
+            (root / "qa-lib.sh").write_text('touch "$1/setup-started"\nexit 0\n')
+            for section in (root / "missing.sh", root):
+                with self.subTest(section=section):
+                    result = subprocess.run(["bash", str(runner), str(section), str(root)],
+                                            capture_output=True, text=True, timeout=5)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("readable QA section", result.stderr)
+                    self.assertFalse((root / "setup-started").exists())
+
+    def test_section_disappearing_after_setup_preserves_evidence(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runner = root / "qa-one.sh"
+            shutil.copy2(ROOT / "tests/qa-one.sh", runner)
+            section = root / "selected section.sh"
+            section.touch()
+            (root / "qa-lib.sh").write_text("""
+                OUTDIR=$1
+                FIXTURE=$OUTDIR/home
+                LOG=$OUTDIR/gust.log
+                PASS=0; FAIL=0; RESULTS=()
+                start_gust() { mv -- "$SECTION" "$SECTION.moved"; }
+                stop_gust() { :; }
+                bad() { FAIL=$((FAIL+1)); RESULTS+=("FAIL $1"); }
+                finish_fixture() { touch "$OUTDIR/cleanup-called"; }
+            """)
+            result = subprocess.run(["bash", str(runner), str(section), str(root)],
+                                    capture_output=True, timeout=5)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertTrue((root / "selected section.sh.moved").is_file())
+            self.assertIn(str(section), (root / "results.txt").read_text())
+            self.assertFalse((root / "cleanup-called").exists())
+
     def test_fresh_fixture_is_built_and_sibling_data_is_untouched(self):
         with tempfile.TemporaryDirectory(prefix="gust-fresh-fixture-") as temporary:
             parent = Path(temporary)

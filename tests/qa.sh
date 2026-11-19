@@ -2690,6 +2690,11 @@ rm -rf "$CLIPDIR"
 for section in "$HERE"/qa.d/*.sh; do
   # shellcheck source=/dev/null
   source "$section"
+  section_status=$?
+  if (( section_status != 0 )); then
+    bad "section $section returned status $section_status"
+    break
+  fi
 done
 
 say "13 · nothing executed, nothing crashed, no QML errors"
