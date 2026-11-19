@@ -2943,6 +2943,15 @@ was asked.
 
 The service expands MIME rules to globs through `shared-mime-info`'s `globs2`
 before it starts the window, so the window never reads files to filter rows.
+It matches the preferred filter by its full original name and rule list. If
+the retained entries have no exact match, the preferred filter gets its own
+slot within the same limits.
+
+The window writes and syncs a private sibling file, then renames it to the
+result path. Every record ends in NUL. A complete answer contains one or more
+absolute paths and, when filters were offered, one final valid filter index.
+Malformed answers return code 2 with no results. A committed answer survives
+a later window error. A normal exit without a result file returns code 1.
 
 ### The rules
 

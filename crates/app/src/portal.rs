@@ -344,23 +344,26 @@ impl Chooser {
                     status => status.ok().flatten(),
                 };
                 let directory = window.directory.take().expect("window owns its result");
-                let filters = std::mem::take(&mut window.filters);
+                let mut filters = std::mem::take(&mut window.filters);
                 let closed = self.call.is_none();
                 let worker = Worker::start("gust-chooser-result", move || {
                     if closed {
                         // Retire the private directory off the dispatcher without reading a cancelled answer.
                         return (2, Vec::new(), None);
                     }
-                    let (picked, index) = chooser::read_answer(&directory.path().join("result"));
-                    let code = if !picked.is_empty() {
-                        0
-                    } else if status.is_some_and(|s| s.success()) {
-                        1
-                    } else {
-                        2
-                    };
-                    let filter = index.and_then(|i| filters.into_iter().nth(i));
-                    (code, picked, filter)
+                    match chooser::try_read_answer(&directory.path().join("result")) {
+                        Ok((picked, None)) if filters.is_empty() => (0, picked, None),
+                        Ok((picked, Some(i))) if i < filters.len() => {
+                            (0, picked, Some(filters.swap_remove(i)))
+                        }
+                        Err(e)
+                            if e.kind() == std::io::ErrorKind::NotFound
+                                && status.is_some_and(|s| s.success()) =>
+                        {
+                            (1, Vec::new(), None)
+                        }
+                        _ => (2, Vec::new(), None),
+                    }
                 });
                 if closed {
                     // The child has been reaped. Its handle is available even during cleanup.
@@ -724,6 +727,85 @@ mod tests {
         assert_eq!(uris[0], "file:///dest/raw-%FF");
         assert_eq!(uris[1024], format!("file:///dest/{:0200}", 1023));
         assert!(!dirs.recv_timeout(TIMEOUT).unwrap().exists());
+        drop(daemon);
+        service.join().unwrap();
+    }
+
+    #[test]
+    fn accepting_the_default_returns_the_exact_preferred_rules() {
+        let (daemon, address) = private_bus();
+        let caller = Connection::new_address(&address).unwrap();
+        let service = service(&address, |prepared| {
+            let env: HashMap<_, _> = prepared.command.get_envs().collect();
+            let json = env[std::ffi::OsStr::new("GUST_CHOOSER_FILTERS")].unwrap();
+            let filters = chooser::Filters::from_json(json.to_str().unwrap());
+            assert_eq!(filters.items.len(), 2);
+            chooser::write_answer(
+                &prepared.directory.path().join("result"),
+                &[PathBuf::from("/picked")],
+                Some(filters.current),
+            )?;
+            Command::new("/usr/bin/true").spawn()
+        });
+        let raw = |kind, rule: &str| ("Images".to_owned(), vec![(kind, rule.to_owned())]);
+        let mime = raw(1, "*/*");
+        let glob = raw(0, "*");
+        for (offered, preferred) in [
+            (vec![raw(0, "*.png")], raw(0, "*.jpg")),
+            (vec![glob.clone(), mime.clone()], mime.clone()),
+            (vec![glob], mime),
+        ] {
+            let mut options = PropMap::new();
+            options.insert("filters".into(), Variant(Box::new(offered)));
+            options.insert(
+                "current_filter".into(),
+                Variant(Box::new(preferred.clone())),
+            );
+            let path = "/org/freedesktop/portal/desktop/request/test/default";
+            let reply = caller
+                .send_with_reply_and_block(call(path, "OpenFile", options), TIMEOUT)
+                .unwrap();
+            let mut it = reply.iter_init();
+            assert_eq!(it.read::<u32>().unwrap(), 0);
+            assert_eq!(
+                read_options(&mut it).unwrap().current_filter,
+                Some(preferred)
+            );
+        }
+        drop(daemon);
+        service.join().unwrap();
+    }
+
+    #[test]
+    fn malformed_answers_fail_without_returning_uris_or_filters() {
+        let (daemon, address) = private_bus();
+        let caller = Connection::new_address(&address).unwrap();
+        let cases = [
+            (b"/first\0/incomplete".as_slice(), "/usr/bin/false"),
+            (b"/first\0garbage\0", "/usr/bin/true"),
+            (b"/first\0filter:2\0", "/usr/bin/true"),
+            (b"/first\0", "/usr/bin/false"),
+        ]
+        .into_iter();
+        let cases = std::cell::RefCell::new(cases);
+        let count = cases.borrow().len();
+        let service = service(&address, move |prepared| {
+            let (bytes, exit) = cases.borrow_mut().next().unwrap();
+            fs::write(prepared.directory.path().join("result"), bytes)?;
+            Command::new(exit).spawn()
+        });
+        for _ in 0..count {
+            let mut options = PropMap::new();
+            let filter: RawFilter = ("All".into(), vec![(0, "*".into())]);
+            options.insert("filters".into(), Variant(Box::new(vec![filter])));
+            let path = "/org/freedesktop/portal/desktop/request/test/malformed";
+            let reply = caller
+                .send_with_reply_and_block(call(path, "OpenFile", options), TIMEOUT)
+                .unwrap();
+            let (code, results): (u32, PropMap) = reply.read2().unwrap();
+            assert_eq!(code, 2);
+            assert!(results.is_empty());
+        }
         drop(daemon);
         service.join().unwrap();
     }

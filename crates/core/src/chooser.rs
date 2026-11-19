@@ -8,6 +8,7 @@
 //! separated, so any name survives), or nothing if they cancelled.
 
 use std::ffi::{OsStr, OsString};
+use std::io::{self, Write};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 
@@ -325,28 +326,29 @@ fn expand_filter((name, rules): RawFilter, origin: usize, globs2: &str) -> Filte
 impl Filters {
     /// The app's list as globs only. `current` is the app's preferred filter;
     /// one that is not in the list is added, as GTK does. Names are labels and
-    /// may repeat, so the whole filter is compared first.
+    /// may repeat and different rules can expand to the same globs.
     pub fn expand(raw: Vec<RawFilter>, current: Option<RawFilter>, globs2: &str) -> Filters {
         let preferred = raw.len();
+        let matched = current.as_ref().and_then(|wanted| {
+            raw.iter()
+                .take(MAX_FILTERS)
+                .position(|entry| entry == wanted)
+        });
         let mut items: Vec<Filter> = raw
             .into_iter()
             .take(MAX_FILTERS)
             .enumerate()
             .map(|(i, f)| expand_filter(f, i, globs2))
             .collect();
-        let mut index = 0;
-        if let Some(wanted) = current.map(|f| expand_filter(f, preferred, globs2)) {
-            let same = |f: &Filter| f.name == wanted.name && f.globs == wanted.globs;
-            let found = items
-                .iter()
-                .position(same)
-                .or_else(|| items.iter().position(|f| f.name == wanted.name));
-            index = found.unwrap_or_else(|| {
+        let index = match (matched, current) {
+            (Some(index), _) => index,
+            (None, Some(wanted)) => {
                 items.truncate(MAX_FILTERS - 1);
-                items.push(wanted);
+                items.push(expand_filter(wanted, preferred, globs2));
                 items.len() - 1
-            });
-        }
+            }
+            (None, None) => 0,
+        };
         let mut filters = Filters {
             items,
             current: index,
@@ -468,24 +470,26 @@ pub fn check_targets(targets: &[PathBuf], wanted: impl Fn() -> bool) -> SaveChec
     }
 }
 
-fn write_private(out: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
-    let mut f = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(out)?;
-    f.write_all(bytes)?;
-    f.sync_all()
+fn write_private(out: &Path, bytes: &[u8]) -> io::Result<()> {
+    let parent = out.parent().ok_or(io::ErrorKind::InvalidInput)?;
+    let mut staged = tempfile::NamedTempFile::new_in(parent)?;
+    staged.write_all(bytes)?;
+    staged.as_file().sync_all()?;
+    staged.persist(out)?;
+    Ok(())
 }
 
 /// Write what was picked, and which file type was showing. Private (0600)
 /// because paths are personal.
 pub fn write_answer(out: &Path, picked: &[PathBuf], filter: Option<usize>) -> std::io::Result<()> {
+    if picked.is_empty() {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
     let mut bytes = Vec::new();
     for p in picked {
+        if !p.is_absolute() || p.as_os_str().as_bytes().contains(&0) {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
         bytes.extend_from_slice(p.as_os_str().as_bytes());
         bytes.push(0);
     }
@@ -499,19 +503,34 @@ pub fn write_result(out: &Path, picked: &[PathBuf]) -> std::io::Result<()> {
     write_answer(out, picked, None)
 }
 
-/// Read paths and the selected filter from the same answer, including byte names.
+/// Only a missing file denotes cancellation. Reject the whole answer if any
+/// path or its optional trailing filter is malformed.
+pub fn try_read_answer(out: &Path) -> io::Result<(Vec<PathBuf>, Option<usize>)> {
+    let invalid = io::ErrorKind::InvalidData;
+    let bytes = std::fs::read(out)?;
+    let records = bytes.strip_suffix(&[0]).ok_or(invalid)?;
+    let mut paths = Vec::new();
+    let mut filter = None;
+    for record in records.split(|&b| b == 0) {
+        if filter.is_some() {
+            return Err(invalid.into());
+        }
+        if record.starts_with(b"/") {
+            paths.push(PathBuf::from(OsStr::from_bytes(record)));
+        } else {
+            let digits = record.strip_prefix(b"filter:").ok_or(invalid)?;
+            if paths.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
+                return Err(invalid.into());
+            }
+            let index = std::str::from_utf8(digits).map_err(|_| invalid)?;
+            filter = Some(index.parse().map_err(|_| invalid)?);
+        }
+    }
+    Ok((paths, filter))
+}
+
 pub fn read_answer(out: &Path) -> (Vec<PathBuf>, Option<usize>) {
-    let bytes = std::fs::read(out).unwrap_or_default();
-    let mut fields = bytes.split(|b| *b == 0);
-    let paths = fields
-        .clone()
-        .filter(|s| s.starts_with(b"/"))
-        .map(|s| PathBuf::from(OsStr::from_bytes(s)))
-        .collect();
-    let filter = fields
-        .find_map(|s| s.strip_prefix(b"filter:"))
-        .and_then(|n| std::str::from_utf8(n).ok()?.parse().ok());
-    (paths, filter)
+    try_read_answer(out).unwrap_or_default()
 }
 
 pub fn parse_filter(out: &Path) -> Option<usize> {

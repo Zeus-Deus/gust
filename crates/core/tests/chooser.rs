@@ -77,12 +77,68 @@ fn no_result_file_means_cancelled() {
 }
 
 #[test]
-fn relative_or_empty_picks_are_dropped() {
-    let d = std::env::temp_dir().join(format!("gust-chooser-rel-{}", std::process::id()));
-    std::fs::create_dir_all(&d).unwrap();
-    let out = d.join("result");
-    std::fs::write(&out, b"relative\0\0/ok\0").unwrap();
-    assert_eq!(parse_result(&out), vec![PathBuf::from("/ok")]);
+fn a_malformed_record_refuses_the_entire_answer() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("result");
+    for bytes in [
+        b"".as_slice(),
+        b"/prefix",
+        b"/first\0/partial",
+        b"/first\0relative\0",
+        b"/first\0\0",
+        b"/first\0filter:1",
+        b"/first\0filter:\0",
+        b"/first\0filter:+1\0",
+        b"/first\0filter:18446744073709551616\0",
+        b"/first\0filter:1\0filter:1\0",
+        b"/first\0filter:1\0/after\0",
+        b"filter:1\0",
+    ] {
+        std::fs::write(&out, bytes).unwrap();
+        assert_eq!(
+            gust_core::chooser::read_answer(&out),
+            (vec![], None),
+            "{bytes:?}"
+        );
+    }
+}
+
+#[test]
+fn a_short_write_never_publishes_part_of_a_batch() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
+    const CHILD_OUT: &str = "GUST_TEST_LIMITED_ANSWER";
+    if let Some(out) = std::env::var_os(CHILD_OUT) {
+        let batch = vec![PathBuf::from("/picked"); 2048];
+        let error = write_result(out.as_ref(), &batch).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::FileTooLarge, "{error}");
+        return;
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("result");
+    // A real file-size limit allows a prefix, then fails the next write.
+    // Confine the limit and its signal disposition to the writer process.
+    let interrupt = || {
+        let child = Command::new("sh")
+            .args(["-c", r#"trap '' XFSZ && ulimit -f 1 && exec "$@""#, "sh"])
+            .arg(std::env::current_exe().unwrap())
+            .args(["--exact", "a_short_write_never_publishes_part_of_a_batch"])
+            .env(CHILD_OUT, &out)
+            .output()
+            .unwrap();
+        assert!(child.status.success(), "{child:?}");
+    };
+    interrupt();
+    assert!(!out.try_exists().unwrap());
+    let committed = vec![PathBuf::from("/earlier")];
+    write_answer(&out, &committed, Some(0)).unwrap();
+    interrupt();
+    assert_eq!(gust_core::chooser::read_answer(&out), (committed, Some(0)));
+    assert_eq!(
+        std::fs::metadata(&out).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
 }
 
 #[test]
@@ -288,6 +344,20 @@ fn the_preferred_filter_is_found_by_what_it_does_not_only_its_label() {
     let pdf = ("Files".to_string(), vec![(0, "*.pdf".to_string())]);
     let f = Filters::expand(vec![png, pdf.clone()], Some(pdf), "");
     assert_eq!(f.current, 1);
+}
+
+#[test]
+fn a_preference_past_the_filter_cap_keeps_its_raw_origin() {
+    let glob = ("Files".to_string(), vec![(0, "*".to_string())]);
+    let mime = ("Files".to_string(), vec![(1, "*/*".to_string())]);
+    let mut raw = vec![glob; 64];
+    raw.push(mime.clone());
+    let f = Filters::expand(raw, Some(mime), "");
+    assert_eq!(f.items.len(), 64);
+    assert_eq!(f.current, 63);
+    assert_eq!(f.items[0].origin, 0);
+    assert_eq!(f.items[f.current].origin, 65, "standalone preferred filter");
+    assert_eq!(f.items[0].globs, f.items[f.current].globs);
 }
 
 #[test]
