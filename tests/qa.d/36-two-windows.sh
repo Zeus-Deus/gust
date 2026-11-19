@@ -27,22 +27,14 @@ except Exception as e: print('ERR:'+str(e))" 2>/dev/null; }
 geo_of() { vm hyprctl clients -j | python3 -c "
 import json,sys
 for c in json.load(sys.stdin):
-    if c.get('class')=='gust' and c['title'].startswith('$1 '):
-        print(c['at'][0], c['at'][1], c['size'][0], c['size'][1]); break"; }
+    if c.get('class')=='gust' and c['title'].startswith(sys.argv[1] + ' '):
+        print(c['at'][0], c['at'][1], c['size'][0], c['size'][1]); break" "$(display_path "$1")"; }
 ptA() { state "' '.join(map(str, d['rowPoints']['$1']))"; }
 ptB() { stateb "' '.join(map(str, d['$1']['$2']))"; }
 
 start_b() {
-  cat > /tmp/gust-qa-run-b.sh <<EOF
-#!/usr/bin/env bash
-exec > "$OUTDIR/gust-b.log" 2>&1
-export HOME="$FIXTURE" XDG_DATA_HOME="$FIXTURE/.local/share" XDG_CACHE_HOME="$FIXTURE/.cache"
-export XDG_CONFIG_HOME="$FIXTURE/.config" XDG_STATE_HOME="$FIXTURE/.local/state"
-export GUST_OMARCHY_STATE="$REAL_STATE" GUST_QA_STATE="$SB"
-exec "$BIN" "$XB"
-EOF
-  chmod +x /tmp/gust-qa-run-b.sh; rm -f "$SB"
-  vm /tmp/gust-qa-run-b.sh 9>&- &
+  rm -f "$SB"
+  launch_gust "$SB" "$XB" > "$OUTDIR/gust-b.log" 2>&1 9>&- &
   for _ in $(seq 1 40); do [[ -f "$SB" ]] && break; sleep 0.3; done
   sleep 2
 }

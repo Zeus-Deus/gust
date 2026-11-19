@@ -21,7 +21,7 @@ wait_for "d['model']['settled']" "True" 15 >/dev/null
 typ "Invoices"; sleep 1.2
 ctrl c
 goto "$MRG/dst"
-wait_for "d['model']['location']" "$MRG/dst" 10 >/dev/null
+wait_location "$MRG/dst" 10 >/dev/null
 ctrl v
 wait_for "d['conflictOpen']" "True" 15 >/dev/null
 expect "pasting a folder onto its twin asks first" "d['conflictOpen']" "True"
@@ -52,11 +52,11 @@ sleep 2
 # The same journey with the mouse: click Merge.
 if [[ "$MOUSE_OK" -eq 1 ]]; then
   goto "$MRG/src"
-  wait_for "d['model']['location']" "$MRG/src" 10 >/dev/null
+  wait_location "$MRG/src" 10 >/dev/null
   typ "Invoices"; sleep 1.2
   ctrl x
   goto "$MRG/dst"
-  wait_for "d['model']['location']" "$MRG/dst" 10 >/dev/null
+  wait_location "$MRG/dst" 10 >/dev/null
   ctrl v
   wait_for "d['conflictOpen']" "True" 15 >/dev/null
   read -r WX WY WW WH <<<"$(win_geo)"

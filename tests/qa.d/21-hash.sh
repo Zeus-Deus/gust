@@ -4,7 +4,7 @@
 
 say "21a · h in Quick Look shows the file's SHA-256"
 printf 'gust hash check\n' > "$FIXTURE/hashme.txt"
-want="$(sha256sum "$FIXTURE/hashme.txt" | cut -d' ' -f1)"
+want="$(sha256sum < "$FIXTURE/hashme.txt" | cut -d' ' -f1)"
 stop_gust; start_gust "$FIXTURE"
 wait_for "d['model']['settled']" "True" 20 >/dev/null
 typ "hashm"; sleep 1.2
@@ -15,7 +15,7 @@ expect "no hash until asked" "d['quickLookHash']" ""
 typ "h"
 wait_for "d['quickLookHash']" "$want" 10 >/dev/null
 expect "the digest matches sha256sum" "d['quickLookHash']" "$want"
-expect "h did not leave the folder" "d['model']['location']" "$FIXTURE"
+expect_location "h did not leave the folder" "$FIXTURE"
 shot 21a-hash
 key Escape; sleep 0.5
 expect "Escape closes Quick Look" "d['quickLookOpen']" "False"

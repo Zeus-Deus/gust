@@ -106,14 +106,14 @@ state() {
   python3 -c "
 import json,sys
 try:
-    d=json.load(open('$STATE'))
+    d=json.load(open(sys.argv[1]))
 except Exception as e:
     print('NO_STATE'); sys.exit(0)
 try:
     print($1)
 except Exception as e:
     print('ERR:'+str(e))
-"
+" "$STATE" "${@:2}"
 }
 
 # expect <label> <expr> <expected>
@@ -138,34 +138,26 @@ expect_contains() {
   fi
 }
 
+# A section can add stand-in device settings to the app's environment.
+qa_launch_env=()
+
+# Pass paths as individual arguments through vmsession, including the isolated
+# HOME and every XDG base. A fixture name can contain quotes and newlines.
+launch_gust() {
+  local snapshot="$1"
+  shift
+  vm env HOME="$FIXTURE" XDG_DATA_HOME="$FIXTURE/.local/share" \
+    XDG_CACHE_HOME="$FIXTURE/.cache" XDG_CONFIG_HOME="$FIXTURE/.config" \
+    XDG_STATE_HOME="$FIXTURE/.local/state" GUST_OMARCHY_STATE="$REAL_STATE" \
+    GUST_QA_STATE="$snapshot" PATH="${QA_PATH_PREPEND:+$QA_PATH_PREPEND:}$PATH" \
+    "${qa_launch_env[@]}" "$BIN" "$@"
+}
+
 start_gust() {
-  local start_args=""
-  if [[ "$#" -gt 0 ]]; then printf -v start_args '%q ' "$@"; fi
   pkill -x gust 2>/dev/null || true
   sleep 0.4
   rm -f "$STATE"
-  cat > /tmp/gust-qa-run.sh <<EOF
-#!/usr/bin/env bash
-exec > "$LOG" 2>&1
-export HOME="$FIXTURE"
-export XDG_DATA_HOME="$FIXTURE/.local/share"
-export XDG_CACHE_HOME="$FIXTURE/.cache"
-# Every XDG base, or a test Gust reads (and could write) the real user's
-# settings, bookmarks and journal through the inherited session values.
-export XDG_CONFIG_HOME="$FIXTURE/.config"
-export XDG_STATE_HOME="$FIXTURE/.local/state"
-export GUST_OMARCHY_STATE="$REAL_STATE"
-export GUST_QA_STATE="$STATE"
-# A section may put stand-ins for desktop programs first on PATH (28-run
-# replaces the terminal launcher so no window takes the keyboard).
-${QA_PATH_PREPEND:+export PATH="$QA_PATH_PREPEND:\$PATH"}
-# ...and stand-ins for what the system reports (37-phones points sysfs, the
-# udev database and the GVfs backend list at a fake tree).
-${QA_ENV:+export $QA_ENV}
-exec "$BIN" $start_args
-EOF
-  chmod +x /tmp/gust-qa-run.sh
-  vm /tmp/gust-qa-run.sh 9>&- &
+  launch_gust "$STATE" "$@" > "$LOG" 2>&1 9>&- &
   for _ in $(seq 1 30); do
     [[ -f "$STATE" ]] && break
     sleep 0.4
@@ -221,16 +213,43 @@ palette_run() {
   sleep 0.9
 }
 
-# Navigate through the palette. A home-relative or escaped path can have a
-# different model location from the text typed into the palette.
+# Match LocationKey::display_path (crates/core/src/location.rs). Only the
+# projection escapes controls and bidi marks. File operations keep the bytes.
+display_path() {
+  python3 - "$1" <<'PYTHON'
+import os, sys
+path = os.fsencode(sys.argv[1]).decode("utf-8", "replace")
+for c in path:
+    n = ord(c)
+    if (n < 0x20 or 0x7f <= n <= 0x9f or n in (0x061c, 0x200e, 0x200f)
+            or 0x202a <= n <= 0x202e or 0x2066 <= n <= 0x2069):
+        sys.stdout.write(f"<U+{n:04X}>")
+    else:
+        sys.stdout.write(c)
+PYTHON
+}
+
+expect_location() { expect "$1" "d['model']['location']" "$(display_path "$2")"; }
+wait_location() { wait_for "d['model']['location']" "$(display_path "$1")" "${2:-20}"; }
+
+# Ctrl+L accepts ~ and ~/child even when HOME itself cannot be typed into a
+# single-line field. Sibling paths sharing a prefix must stay absolute.
 goto() {
-  local target="$1" display="${2:-$1}"
+  local path="$1" input="$1"
+  case "$path" in
+    "$FIXTURE")   input='~' ;;
+    "$FIXTURE"/*) input="~/${path#"$FIXTURE"/}" ;;
+  esac
   for _ in 1 2 3; do
-    palette_run "$target"
-    if wait_for "d['model']['location']" "$display" 10; then
+    ctrl l
+    wait_for "d['paletteOpen']" "True" 8 || continue
+    typ "$input"
+    key Return
+    if wait_location "$path" "${2:-10}"; then
       return 0
     fi
   done
+  bad "could not navigate to $(display_path "$path") (got $(state "d['model']['location']"))" >&2
   return 1
 }
 
