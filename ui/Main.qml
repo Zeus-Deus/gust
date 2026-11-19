@@ -3510,6 +3510,7 @@ Window {
                         win.focusList()
                     }
                     Keys.onReturnPressed: win.focusList()
+                    Keys.onEnterPressed: win.focusList()
                     Accessible.role: Accessible.EditableText
                     Accessible.name: "Filter this folder"
                 }
@@ -3788,6 +3789,9 @@ Window {
             case Qt.Key_Backspace:
                 dirModel.navigate_up(); event.accepted = true; return
             case Qt.Key_Tab:
+                // Ctrl+Tab is the next tab, split or not: it used to be
+                // swallowed here and switch pane instead.
+                if (event.modifiers & Qt.ControlModifier) break
                 if (win.paneCount > 1) {
                     win.focusPane(win.activePane === 0 ? 1 : 0)
                     event.accepted = true; return
