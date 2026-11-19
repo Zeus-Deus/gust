@@ -1754,11 +1754,7 @@ expect "the last tab cannot be closed" "d['tabCount']" "1"
 
 say "12p · two panes: independent, and F5/F6 really move files"
 stop_gust
-PANEDIR="${FIXTURE}-panes"
-rm -rf "$PANEDIR"
-mkdir -p "$PANEDIR/paneL" "$PANEDIR/paneR"
-printf 'one\n'   > "$PANEDIR/paneL/p1.txt"
-printf 'two\n'   > "$PANEDIR/paneL/p2.txt"
+prepare_pane_fixture || exit 1
 start_gust
 wait_for "d['model']['settled']" "True" 20 >/dev/null
 goto "$PANEDIR/paneL"
@@ -1961,8 +1957,6 @@ wait_for "d['model']['settled']" "True" 20 >/dev/null
 
 say "12q · Quick Look shows what a file is, without running it"
 stop_gust
-QLDIR="${FIXTURE}-peek"
-rm -rf "$QLDIR"
 mkdir -p "$QLDIR/sub"
 for i in $(seq 1 120); do echo "line $i of the notes file"; done > "$QLDIR/notes.txt"
 printf 'before\033[31mRED\033[0m bell\007 after\n' > "$QLDIR/nasty.txt"
@@ -2156,11 +2150,8 @@ stop_gust
 # separate tmpfs on every Linux system; if it is not usable, the case still
 # runs and reports that it tested the Trash path instead.
 if [[ -d /dev/shm && -w /dev/shm ]]; then
-  DELDIR="/dev/shm/gust-qa-perm-$$"
-else
-  DELDIR="${FIXTURE}-perm"
+  DELDIR="$(mktemp -d /dev/shm/gust-qa-perm.XXXXXXXX)" || exit 1
 fi
-rm -rf "$DELDIR"
 mkdir -p "$DELDIR/keepdir"
 for n in one two three four; do printf '%s\n' "$n" > "$DELDIR/del-$n.txt"; done
 printf 'untouched\n' > "$DELDIR/keep-me.txt"
@@ -2253,7 +2244,6 @@ fi
 
 shot "12d-permanent"
 rm -rf "$DELDIR"
-DELDIR=""
 
 say "12v · devices are discovered without mounting anything"
 # The dangerous mistakes here are offering the system disk as ejectable and
@@ -2299,8 +2289,6 @@ fi
 
 say "12a · archives: compress, extract, and refuse what is unsafe"
 stop_gust
-ARCDIR="${FIXTURE}-arch"
-rm -rf "$ARCDIR"
 mkdir -p "$ARCDIR/src/sub"
 printf 'keep me\n'   > "$ARCDIR/src/good.txt"
 printf 'also fine\n' > "$ARCDIR/src/sub/nested.txt"
@@ -2394,8 +2382,6 @@ rm -rf "$ARCDIR"
 
 say "12b · bulk rename shows the plan before it touches anything"
 stop_gust
-BULKDIR="${FIXTURE}-bulk"
-rm -rf "$BULKDIR"
 mkdir -p "$BULKDIR"
 for n in one two three; do printf '%s\n' "$n" > "$BULKDIR/$n.txt"; done
 printf 'bystander\n' > "$BULKDIR/keep.md"
@@ -2503,8 +2489,6 @@ rm -rf "$BULKDIR"
 
 say "12o · open with: the system's handlers, and nothing else"
 stop_gust
-OWDIR="${FIXTURE}-openwith"
-rm -rf "$OWDIR"
 mkdir -p "$OWDIR"
 printf 'some text\n' > "$OWDIR/notes.txt"
 printf 'not really a png\n' > "$OWDIR/picture.png"
@@ -2565,8 +2549,6 @@ rm -rf "$OWDIR"
 
 say "12m · opening several files opens ONE application, not five"
 stop_gust
-MODIR="${FIXTURE}-multiopen"
-rm -rf "$MODIR"
 mkdir -p "$MODIR"
 for n in 1 2 3; do printf 'text %s\n' "$n" > "$MODIR/doc-$n.txt"; done
 
@@ -2644,8 +2626,6 @@ rm -rf "$MODIR"
 
 say "12c2 · the clipboard other applications can see"
 stop_gust
-CLIPDIR="${FIXTURE}-clip"
-rm -rf "$CLIPDIR"
 mkdir -p "$CLIPDIR/dest"
 printf 'shared\n' > "$CLIPDIR/shared.txt"
 printf 'from elsewhere\n' > "$CLIPDIR/elsewhere.txt"
@@ -2731,13 +2711,13 @@ else
   real_trash_count=0
 fi
 echo "  (real trash entries: $real_trash_count — Gust ran with XDG_DATA_HOME=$FIXTURE/.local/share)"
-for d in "$FIXTURE" "${FIXTURE}-panes" "${FIXTURE}-peek" "${FIXTURE}-perm" "${FIXTURE}-arch" "${FIXTURE}-bulk" "${FIXTURE}-openwith" "${FIXTURE}-multiopen" "${FIXTURE}-clip"; do
+for d in "$FIXTURE" "$PANEDIR" "$QLDIR" "$DELDIR" "$ARCDIR" "$BULKDIR" "$OWDIR" "$MODIR" "$CLIPDIR"; do
   case "$d" in
     /home/*|/root/*)
       bad "a QA tree was inside a real home: $d" ;;
   esac
 done
-ok "QA ran entirely against $FIXTURE and its eight fixture trees"
+ok "QA used fixture home $FIXTURE and private auxiliary trees"
 
 stop_gust
 

@@ -1,16 +1,27 @@
 # shellcheck shell=bash
 # Shared by the legacy desktop QA runners.
 prepare_fixture() {
-  FIXTURE="${GUST_FIXTURE:-}"
-  qa_run_dir=""
-  if [[ -z "$FIXTURE" ]]; then
-    qa_run_dir="$(mktemp -d /tmp/gust-fixture.XXXXXXXX)" || return 1
-    # Full-suite sections also create sibling trees such as "${FIXTURE}-panes".
-    FIXTURE="$qa_run_dir/home"
-    echo "gust qa: using $FIXTURE"
-    qa_run_dir_id="$(stat -c '%d:%i' -- "$qa_run_dir")" || return 1
-  fi
+  qa_run_dir="$(mktemp -d /tmp/gust-fixture.XXXXXXXX)" || return 1
+  qa_run_dir_id="$(stat -c '%d:%i' -- "$qa_run_dir")" || return 1
+  FIXTURE="${GUST_FIXTURE:-$qa_run_dir/home}"
+  echo "gust qa: using $FIXTURE (private workspace $qa_run_dir)"
+  # Auxiliary cases write and remove whole trees, even with an explicit fixture home.
+  PANEDIR="$qa_run_dir/panes"
+  QLDIR="$qa_run_dir/peek"
+  DELDIR="$qa_run_dir/perm"
+  ARCDIR="$qa_run_dir/arch"
+  BULKDIR="$qa_run_dir/bulk"
+  OWDIR="$qa_run_dir/openwith"
+  MODIR="$qa_run_dir/multiopen"
+  CLIPDIR="$qa_run_dir/clip"
   "$HERE/make-fixture.sh" "$FIXTURE" >/dev/null
+}
+
+# Initial on-disk state for the full runner's two-pane transfer journey.
+prepare_pane_fixture() {
+  mkdir -p "$PANEDIR/paneL" "$PANEDIR/paneR" || return 1
+  printf 'one\n' > "$PANEDIR/paneL/p1.txt" || return 1
+  printf 'two\n' > "$PANEDIR/paneL/p2.txt"
 }
 
 # Both runners call this only after their final success check.

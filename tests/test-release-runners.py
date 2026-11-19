@@ -228,6 +228,45 @@ class FixtureContainmentTests(unittest.TestCase):
             self.assertEqual(sibling.read_text(), "outside fixture")
             self.assertEqual(destination.stat().st_mode & 0o777, 0o700)
 
+    def test_runner_auxiliary_trees_preserve_explicit_fixture_siblings(self):
+        with tempfile.TemporaryDirectory(prefix="gust-qa-siblings-", dir="/tmp") as temporary:
+            parent = Path(temporary)
+            home = parent / "explicit home"
+            home.mkdir()
+            siblings = ["panes", "peek", "perm", "arch", "bulk", "openwith", "multiopen", "clip"]
+            for name in siblings:
+                sibling = parent / f"{home.name}-{name}"
+                sibling.mkdir()
+                (sibling / "sentinel").write_text(name)
+
+            subprocess.run(["bash", "-euc", """
+                HERE=$1
+                GUST_FIXTURE=$2
+                unset GUST_KEEP_FIXTURE
+                source "$HERE/qa-fixture.sh"
+                prepare_fixture
+                test "$FIXTURE" = "$GUST_FIXTURE"
+                for tree in "$PANEDIR" "$QLDIR" "$DELDIR" "$ARCDIR" "$BULKDIR" "$OWDIR" "$MODIR" "$CLIPDIR"; do
+                    test "$(dirname -- "$tree")" = "$qa_run_dir"
+                    mkdir -- "$tree"
+                    rmdir -- "$tree"
+                done
+                prepare_pane_fixture
+                test "$(cat "$PANEDIR/paneL/p1.txt")" = one
+                test "$(cat "$PANEDIR/paneL/p2.txt")" = two
+                finish_fixture
+                # If cleanup namespaces are unavailable, remove only the
+                # files and empty directories that this test just created.
+                if [[ -d $qa_run_dir ]]; then
+                    rm -- "$PANEDIR/paneL/p1.txt" "$PANEDIR/paneL/p2.txt"
+                    rmdir -- "$PANEDIR/paneL" "$PANEDIR/paneR" "$PANEDIR" "$qa_run_dir"
+                fi
+            """, "qa-fixture-test", str(ROOT / "tests"), str(home)], check=True, timeout=20)
+
+            self.assertTrue((home / "Projects/omarchy/README.md").is_file())
+            for name in siblings:
+                self.assertEqual((parent / f"{home.name}-{name}" / "sentinel").read_text(), name)
+
     def test_existing_files_and_symlink_targets_survive_fixture_builder(self):
         with tempfile.TemporaryDirectory(prefix="gust-containment-") as temporary:
             root = Path(temporary)

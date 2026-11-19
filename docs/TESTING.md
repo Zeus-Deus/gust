@@ -209,13 +209,19 @@ some global process termination. Do not use them on a shared/human desktop or
 as the native release gate. Their old evidence does not qualify a new artifact.
 No native/theme or benchmark acceptance is run automatically on public hosted CI.
 
-The two legacy desktop QA runners create a fresh directory under `/tmp` for each
-run. A passing run removes its generated fixture after checking for mounts in a
-private mount namespace. Set `GUST_KEEP_FIXTURE=1` to keep it. Failed and
-interrupted runs leave the fixture path in the run log for inspection. An
-explicit `GUST_FIXTURE` must be a new or empty directory under `/tmp` and
-stays in place after the run. Screenshots and results are written to the
-separate output directory.
+The two legacy desktop QA runners allocate a private workspace under `/tmp`
+for each run. By default it holds the fixture home and auxiliary test trees.
+Set `GUST_FIXTURE` to use a new or empty directory under `/tmp` as the fixture
+home. The runner leaves that directory in place and allocates the auxiliary
+trees in its own workspace. The cross-filesystem deletion test uses a fresh
+directory on `/dev/shm` when available.
+
+Cleanup after a passing run is best-effort. It requires private user and mount
+namespaces, verifies the workspace identity, and checks for mounts before
+removal. If cleanup cannot proceed safely, the runner logs the retained path.
+Failed and interrupted runs retain their workspace. Set `GUST_KEEP_FIXTURE=1`
+to retain it after success as well. Screenshots and results go to the separate
+output directory.
 
 ### Focused remote listing state journey
 
