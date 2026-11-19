@@ -13,6 +13,7 @@ Item {
     z: 60
 
     property bool open: false
+    readonly property alias closeButton: close
     // Parsed DirModel.settings_json(), bound by the window (never assigned
     // here, so every published snapshot arrives).
     property var s: ({})
@@ -73,6 +74,7 @@ Item {
     function show() {
         root.current = 0
         root.open = true
+        body.contentY = 0
         keys.forceActiveFocus()
         // A click that opened the panel is still being delivered; take the
         // keyboard again once it has finished, or Escape goes to the list.
@@ -99,6 +101,14 @@ Item {
         else if (r.key === "omarchy_keys") root.keysRequested(value === "true")
         else if (r.key === "file_dialogs") root.dialogsRequested(value === "true")
         else root.changed(r.key, value)
+    }
+    // Keep the keyboard selection inside the scrolling body.
+    onCurrentChanged: {
+        const row = rowRepeater.itemAt(current)
+        if (!row) return
+        if (row.y < body.contentY) body.contentY = row.y
+        else if (row.y + row.height > body.contentY + body.height)
+            body.contentY = row.y + row.height - body.height
     }
     function step(dir) {
         const r = root.rows[root.current]
@@ -131,163 +141,187 @@ Item {
         id: panel
         anchors.centerIn: parent
         width: Math.min(parent.width - Tokens.spaceXl * 4, Math.round(Tokens.rowHeight * 26))
-        height: col.implicitHeight + Tokens.spaceXl * 2
+        height: Math.min(root.height - Tokens.spaceSm * 2,
+                         header.height + col.implicitHeight + Tokens.spaceSm * 2 + Tokens.spaceXl)
         color: Tokens.backgroundDark
         border.width: Math.max(1, Tokens.borderWidth)
         border.color: Tokens.withAlpha(Tokens.border, Tokens.borderAlpha)
         MouseArea { anchors.fill: parent }   // clicks inside do not close
 
-        // A visible way out: Escape and a click outside were the only ones.
-        BarButton {
-            objectName: "settingsClose"
+        Item {
+            id: header
             anchors.top: parent.top
-            anchors.right: parent.right
-            anchors.margins: Tokens.spaceSm
-            z: 1
-            icon: "close"
-            label: qsTr("Close")
-            keys: "Esc"
-            onClicked: root.hide()
-        }
-
-        Column {
-            id: col
             anchors.left: parent.left
             anchors.right: parent.right
-            anchors.top: parent.top
-            anchors.margins: Tokens.spaceXl
-            spacing: Tokens.spaceSm
+            anchors.topMargin: Tokens.spaceSm
+            anchors.leftMargin: Tokens.spaceXl
+            anchors.rightMargin: Tokens.spaceSm
+            height: Math.max(heading.implicitHeight, close.height)
 
             Text {
+                id: heading
+                anchors.verticalCenter: parent.verticalCenter
                 textFormat: Text.PlainText
                 text: qsTr("Settings")
                 color: Tokens.foregroundBright
                 font.family: Tokens.fontFamily
                 font.pixelSize: Tokens.fontSubtitle
             }
-            Item { width: 1; height: Tokens.spaceSm }
+            BarButton {
+                id: close
+                objectName: "settingsClose"
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                icon: "close"
+                label: qsTr("Close")
+                keys: "Esc"
+                onClicked: root.hide()
+            }
+        }
 
-            Repeater {
-                model: root.open ? root.rows : []
-                delegate: Rectangle {
-                    id: rowItem
-                    required property var modelData
-                    required property int index
-                    width: col.width
-                    // A row marked `live` takes its note from the snapshot.
-                    readonly property string note: root.busyKey === modelData.key ? qsTr("Checking…")
-                        : modelData.live === "renderer"
-                          ? qsTr("Next start. Now: ") + (root.s.renderer_now === "software" ? qsTr("software") : qsTr("GPU"))
-                        : modelData.live === "omarchy" ? (root.s.is_omarchy ? qsTr("Reversible") : qsTr("Needs Omarchy"))
-                        : modelData.note
-                    height: Tokens.controlHeight + (rowItem.note !== "" ? Tokens.fontCaption + Tokens.spaceXs : 0)
-                    color: root.current === index
-                           ? Tokens.withAlpha(Tokens.selectedBackground, Math.max(Tokens.selectedAlpha, 0.14))
-                           : "transparent"
-                    Rectangle {
-                        visible: root.current === rowItem.index
-                        width: Math.max(2, Tokens.borderWidth * 2)
-                        height: parent.height
-                        color: Tokens.accent
-                    }
+        Flickable {
+            id: body
+            objectName: "settingsBody"
+            anchors.top: header.bottom
+            anchors.bottom: parent.bottom
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.margins: Tokens.spaceXl
+            anchors.topMargin: Tokens.spaceSm
+            contentWidth: width
+            contentHeight: col.implicitHeight
+            flickableDirection: Flickable.VerticalFlick
+            boundsBehavior: Flickable.StopAtBounds
+            clip: true
 
-                    Text {
-                        textFormat: Text.PlainText
-                        id: title
-                        x: Tokens.spaceSm
-                        y: Math.round((Tokens.controlHeight - height) / 2)
-                        width: Math.round(Tokens.rowHeight * 5)
-                        text: modelData.title
-                        color: Tokens.foreground
-                        font.family: Tokens.fontFamily
-                        font.pixelSize: Tokens.fontBody
-                    }
-                    Text {
-                        textFormat: Text.PlainText
-                        x: Tokens.spaceSm
-                        y: Tokens.controlHeight - Tokens.spaceXs
-                        objectName: "settingsNote-" + rowItem.modelData.key
-                        visible: rowItem.note !== ""
-                        text: rowItem.note
-                        color: Tokens.foregroundDim
-                        font.family: Tokens.fontFamily
-                        font.pixelSize: Tokens.fontCaption
-                    }
-                    Row {
-                        anchors.right: parent.right
-                        anchors.rightMargin: Tokens.spaceSm
-                        y: Math.round((Tokens.controlHeight - height) / 2)
-                        spacing: Tokens.spaceXs
-                        Repeater {
-                            model: rowItem.modelData.options
-                            delegate: Rectangle {
-                                required property var modelData
-                                readonly property bool chosen: root.valueOf(rowItem.modelData.key) === modelData[0]
-                                width: optLabel.implicitWidth + Tokens.spaceLg * 2
-                                height: Tokens.controlHeight - Tokens.spaceSm
-                                // Same treatment as the palette and menus: the
-                                // theme's selection colour at low alpha, so the
-                                // label keeps full contrast in every theme.
-                                color: chosen ? Tokens.withAlpha(Tokens.selectedBackground, Math.max(Tokens.selectedAlpha, 0.16))
-                                       : optMouse.containsMouse ? Tokens.withAlpha(Tokens.foreground, 0.08) : "transparent"
-                                border.color: chosen ? Tokens.accent : Tokens.withAlpha(Tokens.border, Tokens.borderAlpha)
-                                border.width: Tokens.borderWidth
-                                Text {
-                                    textFormat: Text.PlainText
-                                    id: optLabel
-                                    anchors.centerIn: parent
-                                    text: modelData[1]
-                                    color: chosen ? Tokens.foregroundBright : Tokens.foreground
-                                    font.bold: chosen
-                                    font.family: Tokens.fontFamily
-                                    font.pixelSize: Tokens.fontSmall
+            Column {
+                id: col
+                width: body.width
+                spacing: Tokens.spaceSm
+
+                Repeater {
+                    id: rowRepeater
+                    model: root.open ? root.rows : []
+                    delegate: Rectangle {
+                        id: rowItem
+                        required property var modelData
+                        required property int index
+                        width: col.width
+                        // A row marked `live` takes its note from the snapshot.
+                        readonly property string note: root.busyKey === modelData.key ? qsTr("Checking…")
+                            : modelData.live === "renderer"
+                              ? qsTr("Next start. Now: ") + (root.s.renderer_now === "software" ? qsTr("software") : qsTr("GPU"))
+                            : modelData.live === "omarchy" ? (root.s.is_omarchy ? qsTr("Reversible") : qsTr("Needs Omarchy"))
+                            : modelData.note
+                        height: Tokens.controlHeight + (rowItem.note !== "" ? Tokens.fontCaption + Tokens.spaceXs : 0)
+                        color: root.current === index
+                               ? Tokens.withAlpha(Tokens.selectedBackground, Math.max(Tokens.selectedAlpha, 0.14))
+                               : "transparent"
+                        Rectangle {
+                            visible: root.current === rowItem.index
+                            width: Math.max(2, Tokens.borderWidth * 2)
+                            height: parent.height
+                            color: Tokens.accent
+                        }
+
+                        Text {
+                            textFormat: Text.PlainText
+                            id: title
+                            x: Tokens.spaceSm
+                            y: Math.round((Tokens.controlHeight - height) / 2)
+                            width: Math.round(Tokens.rowHeight * 5)
+                            text: modelData.title
+                            color: Tokens.foreground
+                            font.family: Tokens.fontFamily
+                            font.pixelSize: Tokens.fontBody
+                        }
+                        Text {
+                            textFormat: Text.PlainText
+                            x: Tokens.spaceSm
+                            y: Tokens.controlHeight - Tokens.spaceXs
+                            objectName: "settingsNote-" + rowItem.modelData.key
+                            visible: rowItem.note !== ""
+                            text: rowItem.note
+                            color: Tokens.foregroundDim
+                            font.family: Tokens.fontFamily
+                            font.pixelSize: Tokens.fontCaption
+                        }
+                        Row {
+                            anchors.right: parent.right
+                            anchors.rightMargin: Tokens.spaceSm
+                            y: Math.round((Tokens.controlHeight - height) / 2)
+                            spacing: Tokens.spaceXs
+                            Repeater {
+                                model: rowItem.modelData.options
+                                delegate: Rectangle {
+                                    required property var modelData
+                                    readonly property bool chosen: root.valueOf(rowItem.modelData.key) === modelData[0]
+                                    width: optLabel.implicitWidth + Tokens.spaceLg * 2
+                                    height: Tokens.controlHeight - Tokens.spaceSm
+                                    // Same treatment as the palette and menus: the
+                                    // theme's selection colour at low alpha, so the
+                                    // label keeps full contrast in every theme.
+                                    color: chosen ? Tokens.withAlpha(Tokens.selectedBackground, Math.max(Tokens.selectedAlpha, 0.16))
+                                           : optMouse.containsMouse ? Tokens.withAlpha(Tokens.foreground, 0.08) : "transparent"
+                                    border.color: chosen ? Tokens.accent : Tokens.withAlpha(Tokens.border, Tokens.borderAlpha)
+                                    border.width: Tokens.borderWidth
+                                    Text {
+                                        textFormat: Text.PlainText
+                                        id: optLabel
+                                        anchors.centerIn: parent
+                                        text: modelData[1]
+                                        color: chosen ? Tokens.foregroundBright : Tokens.foreground
+                                        font.bold: chosen
+                                        font.family: Tokens.fontFamily
+                                        font.pixelSize: Tokens.fontSmall
+                                    }
+                                    MouseArea {
+                                        id: optMouse
+                                        anchors.fill: parent
+                                        hoverEnabled: true
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: { root.current = rowItem.index; root.choose(rowItem.index, modelData[0]) }
+                                    }
+                                    Accessible.role: Accessible.RadioButton
+                                    Accessible.checked: chosen
+                                    Accessible.name: rowItem.modelData.title + ": " + modelData[1]
                                 }
-                                MouseArea {
-                                    id: optMouse
-                                    anchors.fill: parent
-                                    hoverEnabled: true
-                                    cursorShape: Qt.PointingHandCursor
-                                    onClicked: { root.current = rowItem.index; root.choose(rowItem.index, modelData[0]) }
-                                }
-                                Accessible.role: Accessible.RadioButton
-                                Accessible.checked: chosen
-                                Accessible.name: rowItem.modelData.title + ": " + modelData[1]
                             }
                         }
                     }
                 }
-            }
 
-            Item { width: 1; height: Tokens.spaceSm }
-            // Persistent: an error stays until a save succeeds.
-            Text {
-                objectName: "settingsStatus"
-                textFormat: Text.PlainText
-                width: col.width
-                wrapMode: Text.Wrap
-                horizontalAlignment: Text.AlignRight
-                text: root.statusText
-                color: root.failed ? Tokens.danger : Tokens.foregroundDim
-                font.family: Tokens.fontFamily
-                font.pixelSize: Tokens.fontCaption
-                MouseArea {
-                    anchors.fill: parent
-                    enabled: root.failed
-                    cursorShape: root.failed ? Qt.PointingHandCursor : Qt.ArrowCursor
-                    onClicked: root.retryRequested()
+                Item { width: 1; height: Tokens.spaceSm }
+                // Persistent: an error stays until a save succeeds.
+                Text {
+                    objectName: "settingsStatus"
+                    textFormat: Text.PlainText
+                    width: col.width
+                    wrapMode: Text.Wrap
+                    horizontalAlignment: Text.AlignRight
+                    text: root.statusText
+                    color: root.failed ? Tokens.danger : Tokens.foregroundDim
+                    font.family: Tokens.fontFamily
+                    font.pixelSize: Tokens.fontCaption
+                    MouseArea {
+                        anchors.fill: parent
+                        enabled: root.failed
+                        cursorShape: root.failed ? Qt.PointingHandCursor : Qt.ArrowCursor
+                        onClicked: root.retryRequested()
+                    }
+                    Accessible.role: root.failed ? Accessible.Button : Accessible.StaticText
+                    Accessible.name: root.failed ? root.statusText + qsTr(". Retry") : root.statusText
                 }
-                Accessible.role: root.failed ? Accessible.Button : Accessible.StaticText
-                Accessible.name: root.failed ? root.statusText + qsTr(". Retry") : root.statusText
-            }
-            Text {
-                textFormat: Text.PlainText
-                width: col.width
-                horizontalAlignment: Text.AlignRight
-                text: root.failed ? qsTr("↑↓ choose · ←→ change · R retry · Esc close")
-                                  : qsTr("↑↓ choose · ←→ change · Esc close")
-                color: Tokens.foregroundDim
-                font.family: Tokens.fontFamily
-                font.pixelSize: Tokens.fontCaption
+                Text {
+                    textFormat: Text.PlainText
+                    width: col.width
+                    horizontalAlignment: Text.AlignRight
+                    text: root.failed ? qsTr("↑↓ choose · ←→ change · R retry · Esc close")
+                                      : qsTr("↑↓ choose · ←→ change · Esc close")
+                    color: Tokens.foregroundDim
+                    font.family: Tokens.fontFamily
+                    font.pixelSize: Tokens.fontCaption
+                }
             }
         }
     }

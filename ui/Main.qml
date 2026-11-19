@@ -3109,6 +3109,7 @@ Window {
                 // only by key or by right-clicking empty space, which a full
                 // list does not have.
                 BarButton {
+                    id: searchButton
                     objectName: "searchButton"
                     icon: "search"
                     label: qsTr("Search")
@@ -4609,6 +4610,11 @@ Window {
         win.qaWrite(win.qaTakePending())
     }
 
+    function qaPoint(item, x = item.width / 2) {
+        const p = item.mapToItem(null, x, item.height / 2)
+        return [Math.round(p.x), Math.round(p.y)]
+    }
+
     function qaWrite(pending) {
         const tag = pending.tag
         const payload = {
@@ -4806,6 +4812,7 @@ Window {
             chooserMode: chooserBar.mode,
             chooserError: chooserBar.error,
             settingsOpen: settingsPanel.open,
+            settingsPoints: settingsPanel.open ? { close: win.qaPoint(settingsPanel.closeButton) } : {},
             trashOpen: trashPanel.open,
             recentOpen: recentPanel.open,
             deleteTotal: dirModel.delete_total,
@@ -4901,10 +4908,12 @@ Window {
                 const it = win.activePaneItem()
                 return it && it.iconInfo ? it.iconInfo() : []
             })(),
-            sortButtonPoint: (function () {
-                const p = sortButton.mapToItem(null, sortButton.width / 2, sortButton.height / 2)
-                return [Math.round(p.x), Math.round(p.y)]
-            })(),
+            sortButtonPoint: win.qaPoint(sortButton),
+            toolbarPoints: {
+                more: win.qaPoint(moreButton), search: win.qaPoint(searchButton),
+                searchStart: win.qaPoint(searchButton, 0),
+                pathStart: win.qaPoint(crumbs, 0), pathEnd: win.qaPoint(crumbs, crumbs.width)
+            },
             sortButtonText: sortText.text,
             model: JSON.parse(dirModel.state_json())
         }

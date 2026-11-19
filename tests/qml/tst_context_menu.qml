@@ -66,6 +66,24 @@ TestCase {
         compare(chosen.signalArguments[0][0], "trash")
     }
 
+    function test_wheeling_past_the_end_keeps_the_last_action_clickable() {
+        menu.popup(10, 150, entries(19))
+        keyClick(Qt.Key_End)
+        waitForRendering(menu)
+        const last = menu.itemPoints()["Move to Trash"]
+        verify(last[1] > 0 && last[1] < test.height, "last row at " + last)
+        mouseWheel(test, last[0], last[1], 0, -120)
+        verify(menu.open, "a wheel tick inside the frame must not dismiss it")
+        tryCompare(scroller(), "moving", false)
+        mouseClick(test, last[0], last[1])
+        compare(chosen.count, 1)
+        compare(chosen.signalArguments[0][0], "trash")
+
+        menu.popup(10, 150, entries(19))
+        mouseWheel(test, test.width - 1, test.height / 2, 0, -120)
+        verify(!menu.open, "a wheel tick outside still dismisses the menu")
+    }
+
     function test_travelling_back_up_shows_the_first_entry_again() {
         menu.popup(10, 10, entries(19))
         keyClick(Qt.Key_End)

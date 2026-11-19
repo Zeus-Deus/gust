@@ -185,7 +185,12 @@ Item {
 
         // Clicks inside the frame but between rows must not fall through
         // to the dismiss area.
-        MouseArea { anchors.fill: parent; acceptedButtons: Qt.AllButtons }
+        MouseArea {
+            anchors.fill: parent
+            acceptedButtons: Qt.AllButtons
+            // At a scroll limit the Flickable passes on further wheel ticks.
+            onWheel: (wheel) => { wheel.accepted = true }
+        }
 
         Flickable {
             id: scroller
