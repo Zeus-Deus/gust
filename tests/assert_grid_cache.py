@@ -3,6 +3,7 @@
 import hashlib
 import json
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -27,18 +28,22 @@ def completed_grid(state, display_location, names):
 
 
 def check_png(path, source_name):
-    from PIL import Image
-
     if not path.is_file() or path.stat().st_size > 8 * 1024 * 1024:
         sys.exit(f"missing or oversized thumbnail: {path}")
-    with Image.open(path, formats=["PNG"]) as image:
-        if max(image.size) > 128:
-            sys.exit(f"oversized normal thumbnail: {path} ({image.size})")
-        image.load()
-        if source_name == "wide.png" and image.width <= image.height:
-            sys.exit(f"expected a landscape thumbnail for {source_name}: {path} ({image.size})")
-        if source_name == "tall.jpg" and image.height <= image.width:
-            sys.exit(f"expected a portrait thumbnail for {source_name}: {path} ({image.size})")
+    # Decode the pixels with the PNG reader, keeping fixture paths out of ImageMagick syntax.
+    with path.open("rb") as png:
+        result = subprocess.run(
+            ["magick", "-regard-warnings", "-limit", "width", "128", "-limit", "height", "128",
+             "+ping", "png:-", "-format", "%w %h", "info:"],
+            stdin=png, stdout=subprocess.PIPE, text=True,
+        )
+    if result.returncode:
+        sys.exit(f"invalid or oversized normal PNG thumbnail: {path}")
+    width, height = map(int, result.stdout.split())
+    if source_name == "wide.png" and width <= height:
+        sys.exit(f"expected a landscape thumbnail for {source_name}: {path} ({width}x{height})")
+    if source_name == "tall.jpg" and height <= width:
+        sys.exit(f"expected a portrait thumbnail for {source_name}: {path} ({width}x{height})")
 
 
 def main():
