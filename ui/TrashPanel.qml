@@ -56,6 +56,19 @@ Item {
         border.color: Tokens.withAlpha(Tokens.border, Tokens.borderAlpha)
         MouseArea { anchors.fill: parent }
 
+        // A visible way out: Escape and a click outside were the only ones.
+        BarButton {
+            objectName: "trashClose"
+            anchors.top: parent.top
+            anchors.right: parent.right
+            anchors.margins: Tokens.spaceSm
+            z: 1
+            icon: "close"
+            label: qsTr("Close")
+            keys: "Esc"
+            onClicked: root.hide()
+        }
+
         Column {
             id: head
             anchors.left: parent.left

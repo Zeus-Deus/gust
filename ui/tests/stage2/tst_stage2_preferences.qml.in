@@ -13,7 +13,12 @@ Item {
         property string response: ""
         property int requests: 0
         property int refreshes: 0
-        function settings_json() { return JSON.stringify({ ready: true, revision: "1", saved_revision: "1", integration_refresh: ack }) }
+        property string renderer: "auto"
+        property bool isDefault: false
+        function settings_json() {
+            return JSON.stringify({ ready: true, revision: "1", saved_revision: "1", integration_refresh: ack,
+                                    is_default: isDefault, renderer: renderer, renderer_now: "gpu" })
+        }
         function preferences_refresh() { refreshes++; return next }
         function set_default_file_manager(on) { requests++; return response }
         function set_file_dialogs(on) { requests++; return response }
@@ -36,9 +41,137 @@ Item {
         s: win.prefs
         status: win.prefsStatus
         error: win.prefsError
+        onChanged: (key, value) => {
+            if (key === "renderer") dirModel.renderer = value
+        }
 @DEFAULT@
 @DIALOGS@
 @KEYS@
+    }
+    SignalSpy { id: changed; target: settingsPanel; signalName: "changed" }
+    TestCase {
+        name: "SettingsViewport"
+        when: windowShown
+        function cleanup() {
+            settingsPanel.hide()
+            dirModel.renderer = "auto"
+            Tokens.tokens.fontBase = 12
+            Tokens.tokens.spacingScale = 1
+            Tokens.zoom = 1
+            Tokens.density = 1
+            top.width = 900
+            top.height = 700
+            changed.clear()
+        }
+        function test_density_reachable_data() {
+            return [{tag: "fallback", base: 12}, {tag: "large", base: 28}]
+        }
+        function showNarrowSettings(base) {
+            top.width = 520
+            top.height = 320
+            Tokens.tokens.fontBase = base
+            Tokens.tokens.spacingScale = 2
+            Tokens.zoom = 1.6
+            Tokens.density = 1.25
+            win.prefsPublished()
+            settingsPanel.show()
+            waitForRendering(settingsPanel)
+        }
+        function test_density_reachable(data) {
+            showNarrowSettings(data.base)
+            keyClick(Qt.Key_Down)
+            keyClick(Qt.Key_Down)
+            keyClick(Qt.Key_Up)
+            const compact = settingsPanel.visibleOptionPoints().compact
+            verify(compact !== undefined, "a complete Density button fits after scrolling back")
+            mouseClick(settingsPanel, compact[0], compact[1])
+            compare(changed.count, 1)
+            compare(changed.signalArguments[0][0], "density")
+            compare(changed.signalArguments[0][1], "compact")
+            mouseClick(settingsPanel.closeButton)
+            verify(!settingsPanel.open)
+        }
+        function test_graphics_keyboard_selection_and_note() {
+            showNarrowSettings(28)
+            const graphics = settingsPanel.rows.findIndex(row => row.key === "renderer")
+            verify(graphics > 0)
+            for (let i = 0; i < graphics; ++i) keyClick(Qt.Key_Down)
+            function verifyChoice(value) {
+                compare(settingsPanel.valueOf("renderer"), value)
+                tryVerify(() => value in settingsPanel.visibleOptionPoints(), 1000,
+                          "the complete " + value + " button is visible")
+            }
+            verifyChoice("auto")
+            keyClick(Qt.Key_Right)
+            verifyChoice("software")
+            keyClick(Qt.Key_Right)
+            verifyChoice("gpu")
+            keyClick(Qt.Key_Down)
+            keyClick(Qt.Key_Up)
+            verifyChoice("gpu")
+
+            const body = findChild(settingsPanel, "settingsBody")
+            const note = findChild(settingsPanel, "settingsNote-renderer")
+            const noteBottom = () => note.mapToItem(body, 0, note.height).y
+            verify(note.lineCount > 1 && noteBottom() > body.height)
+            while (noteBottom() > body.height) {
+                const before = body.contentY
+                mouseWheel(body, body.width / 2, body.height / 2, 0, -120)
+                tryVerify(() => body.contentY > before && !body.moving)
+            }
+            verify(noteBottom() > 0, "the end of the wrapped note scrolls into view")
+            keyClick(Qt.Key_Left)
+            verifyChoice("software")
+            keyClick(Qt.Key_Left)
+            verifyChoice("auto")
+        }
+        function waitForDeferredCallbacks() {
+            let ran = false
+            Qt.callLater(() => { ran = true })
+            tryVerify(() => ran)
+        }
+        function test_delayed_default_ack_data() {
+            return [{tag: "same row"}, {tag: "other row"}, {tag: "closed"}]
+        }
+        function test_delayed_default_ack(data) {
+            dirModel.ack = "1"
+            dirModel.next = "2"
+            dirModel.isDefault = true
+            showNarrowSettings(28)
+            const row = settingsPanel.rows.findIndex(r => r.key === "default")
+            for (let i = 0; i < row; ++i) keyClick(Qt.Key_Down)
+            keyClick(Qt.Key_Right)
+            compare(settingsPanel.busyKey, "default")
+
+            // Deliver the worker's answer only after the keypress reveal has run.
+            waitForDeferredCallbacks()
+            verify("true" in settingsPanel.visibleOptionPoints())
+            verify(!("false" in settingsPanel.visibleOptionPoints()))
+
+            if (data.tag === "closed") {
+                keyClick(Qt.Key_Escape)
+                verify(!settingsPanel.open)
+                tryCompare(settingsPanel, "scrollY", 0)
+            }
+            dirModel.isDefault = false
+            dirModel.ack = dirModel.next
+            win.prefsPublished()
+            compare(settingsPanel.busyKey, "")
+            compare(settingsPanel.valueOf("default"), "false")
+            if (data.tag === "same row") {
+                tryVerify(() => "false" in settingsPanel.visibleOptionPoints(), 1000,
+                          "Previous app is fully visible after acknowledgement")
+                return
+            }
+            // Leave before any deferred reveal. A manual scroll on the new
+            // row must survive the previous row's acknowledgement.
+            if (data.tag === "other row") {
+                settingsPanel.moveRow(-1)
+                findChild(settingsPanel, "settingsBody").contentY = 0
+            }
+            waitForDeferredCallbacks()
+            compare(settingsPanel.scrollY, 0)
+        }
     }
     TestCase {
         name: "Stage2IntegrationRefresh"

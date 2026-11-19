@@ -2,7 +2,7 @@
 # AFC and non-Unix mounts can mark every file +x. Opening content must reach
 # the desktop handler, while Run must not offer to execute that content.
 say "48 · phone-style executable permissions do not turn content into programs"
-d48="$FIXTURE/content-open"
+d48="$qa_run_dir/content-open"
 mkdir -p "$d48/.bin"
 for name in IMG_0001.JPG photo.HEIF clip.MOV memo.M4A report.PDF notes.txt; do
   printf 'content fixture\n' > "$d48/$name"
