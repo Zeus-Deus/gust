@@ -44,56 +44,44 @@ fn run_default(mode: &str) -> i32 {
         eprintln!("gust: cannot find your config directory (is HOME set?)");
         return 1;
     };
-    let current = MimeApps::parse(&std::fs::read_to_string(&mime_path).unwrap_or_default());
+    let desktops = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
 
     match mode {
         "on" => {
-            // Claiming twice must not record gust.desktop as the "previous"
-            // value, which would make rollback restore Gust over itself.
-            if state.exists() && current.get("inode/directory").as_deref() == Some(GUST_DESKTOP) {
-                println!("gust is already the default file manager");
-                claim_show_in_folder();
-                return 0;
+            let done = match claim(&mime_path, &state, &desktops) {
+                Ok(done) => done,
+                Err(e) => {
+                    eprintln!("gust: cannot update {}: {e}", mime_path.display());
+                    return 1;
+                }
+            };
+            for line in done.lines() {
+                println!("{line}");
             }
-            let (next, prev) = plan_claim(&current);
-            if let Err(e) = write_atomic(&state, &prev.to_text()) {
-                eprintln!("gust: cannot record the previous default: {e}");
-                return 1;
-            }
-            if let Err(e) = write_atomic(&mime_path, &next.to_text()) {
-                eprintln!("gust: cannot update {}: {e}", mime_path.display());
-                return 1;
-            }
-            let was = prev
-                .entries
-                .get("inode/directory")
-                .and_then(|v| v.clone())
-                .unwrap_or_else(|| "nothing".into());
-            println!("gust is now the default file manager (was: {was})");
             claim_show_in_folder();
-            println!("run `gust --default off` to put it back");
+            if !done.already {
+                println!("run `gust --default off` to put it back");
+            }
             0
         }
         "off" => {
-            let Ok(text) = std::fs::read_to_string(&state) else {
-                println!("gust was not set as the default; nothing to undo");
-                return 0;
+            let done = match release(&mime_path, &state) {
+                Ok(Some(done)) => done,
+                Ok(None) => {
+                    println!("gust was not set as the default; nothing to undo");
+                    return 0;
+                }
+                Err(e) => {
+                    eprintln!("gust: cannot update {}: {e}", mime_path.display());
+                    return 1;
+                }
             };
-            let prev = PreviousDefaults::from_text(&text);
-            let (next, skipped) = plan_release(&current, &prev);
-            if let Err(e) = write_atomic(&mime_path, &next.to_text()) {
-                eprintln!("gust: cannot update {}: {e}", mime_path.display());
-                return 1;
-            }
-            let _ = std::fs::remove_file(&state);
-            for s in &skipped {
-                // A later choice by something else is reported, not undone.
-                println!("left alone: {s}");
-            }
             if let Some(dir) = gust_core::filemanager1::user_service_dir() {
                 let _ = gust_core::filemanager1::release_service(&dir);
             }
-            println!("the previous default file manager has been restored");
+            for line in done.lines() {
+                println!("{line}");
+            }
             0
         }
         other => {
@@ -329,8 +317,10 @@ fn main() {
     // Folder arguments are OS bytes, not necessarily Unicode. Checking a
     // CLI flag must not panic before byte-preserving folder admission.
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
-    if let Some(pos) = args.iter().position(|a| a == "--default") {
-        let mode = match args.get(pos + 1) {
+    // After `--` everything is a path, even one spelled like an option.
+    let flags = cli::flags(&args);
+    if let Some(pos) = flags.iter().position(|a| a == "--default") {
+        let mode = match flags.get(pos + 1) {
             None => "on",
             Some(value) => match value.to_str() {
                 Some(mode) => mode,
@@ -343,8 +333,8 @@ fn main() {
         std::process::exit(run_default(mode));
     }
     // Other apps' Open/Save dialogs through Gust (opt-in, reversible).
-    if let Some(pos) = args.iter().position(|a| a == "--file-dialogs") {
-        let mode = match args.get(pos + 1) {
+    if let Some(pos) = flags.iter().position(|a| a == "--file-dialogs") {
+        let mode = match flags.get(pos + 1) {
             None => "on",
             Some(value) => match value.to_str() {
                 Some(mode) => mode,
@@ -357,8 +347,8 @@ fn main() {
         std::process::exit(run_file_dialogs(mode));
     }
     // Omarchy: make Super+Shift+F open Gust (opt-in, reversible).
-    if let Some(pos) = args.iter().position(|a| a == "--bind-keys") {
-        let mode = match args.get(pos + 1) {
+    if let Some(pos) = flags.iter().position(|a| a == "--bind-keys") {
+        let mode = match flags.get(pos + 1) {
             None => "on",
             Some(value) => match value.to_str() {
                 Some(mode) => mode,
@@ -395,8 +385,9 @@ fn main() {
     if args.first().map(OsString::as_os_str) == Some(OsStr::new("--clip-serve")) {
         std::process::exit(gust_core::clipboard::serve_from_stdin());
     }
-    if args.iter().any(|a| a == "--help" || a == "-h") {
-        println!("gust [PATH]              open a folder");
+    if flags.iter().any(|a| a == "--help" || a == "-h") {
+        println!("gust [PATH]              open a folder, or a file in its folder");
+        println!("gust -- PATH             the same, for a path that starts with a dash");
         println!("gust --default [on|off]  set or restore the default file manager");
         println!("gust --bind-keys [on|off] make Super+Shift+F open gust (Omarchy)");
         println!("gust --file-dialogs [on|off] answer other apps' Open/Save dialogs");
@@ -407,18 +398,21 @@ fn main() {
     // Qt suppresses qDebug/qWarning output when stderr is not a terminal,
     // which hides QML errors from any automated run. Gust always wants them:
     // a silent QML failure is how a broken build looks healthy. Set only if
-    // the user has not expressed their own preference.
+    // the user has not expressed their own preference, and through
+    // `set_for_gust` so the applications Gust opens do not inherit it.
     if std::env::var_os("QT_FORCE_STDERR_LOGGING").is_none() {
-        std::env::set_var("QT_FORCE_STDERR_LOGGING", "1");
+        gust_core::childenv::set_for_gust("QT_FORCE_STDERR_LOGGING", "1");
     }
     if std::env::var_os("QT_ASSUME_STDERR_HAS_CONSOLE").is_none() {
-        std::env::set_var("QT_ASSUME_STDERR_HAS_CONSOLE", "1");
+        gust_core::childenv::set_for_gust("QT_ASSUME_STDERR_HAS_CONSOLE", "1");
     }
 
     // No GPU (a VM, a server, a machine whose driver is missing): Qt would
     // emulate OpenGL on the CPU through llvmpipe, which measured 2.5x the
     // memory and 1.5x the first-window time of Qt's own raster renderer.
-    // Decided from sysfs before Qt starts; only THIS process is affected,
+    // Decided from sysfs before Qt starts; only THIS process is affected
+    // (`set_for_gust`: an application opened from Gust gets the user's own
+    // value back, so it is not forced into software rendering too),
     // and a user's own QT_QUICK_BACKEND / GUST_RENDERER always wins (plan §9:
     // nothing global, nothing about the compositor).
     // The Settings choice applies unless the user already chose in the
@@ -446,7 +440,7 @@ fn main() {
         }
     };
     if software {
-        std::env::set_var("QT_QUICK_BACKEND", "software");
+        gust_core::childenv::set_for_gust("QT_QUICK_BACKEND", "software");
     }
     let mut app = QGuiApplication::new();
     let mut engine = QQmlApplicationEngine::new();

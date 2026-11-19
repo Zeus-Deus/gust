@@ -122,6 +122,7 @@ Rectangle {
                         onClicked: { root.rejected(); root.close() }
                     }
                     Keys.onReturnPressed: { root.rejected(); root.close() }
+                    Keys.onEnterPressed: { root.rejected(); root.close() }
                     Keys.onSpacePressed: { root.rejected(); root.close() }
                     Accessible.role: Accessible.Button
                     Accessible.name: "Cancel"
@@ -154,6 +155,7 @@ Rectangle {
                         onClicked: { root.accepted(); root.close() }
                     }
                     Keys.onReturnPressed: { root.accepted(); root.close() }
+                    Keys.onEnterPressed: { root.accepted(); root.close() }
                     Keys.onSpacePressed: { root.accepted(); root.close() }
                     Accessible.role: Accessible.Button
                     Accessible.name: root.confirmText

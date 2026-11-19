@@ -51,6 +51,11 @@ Window {
             // Mounts and connections finish on a worker; every tab reports
             // here, so a result still lands if the user switched tabs.
             onPlace_done: (op, name, message) => win.placeDone(op, name, message, tabModel)
+            onLaunch_done: (success, message) => {
+                if (success) hints.message = message
+                else win.queueOpenFailure(message)
+                win.qaDump("launch-done")
+            }
             onPaste_ready: (message, allowImage) => win.pasteFinished(tabModel, message, allowImage)
             onPermissions_done: (token, error, message, partial) => {
                 if (token !== 0) return
@@ -366,6 +371,30 @@ Window {
     // A refusal or failure the user must read. Any new action clears it, so
     // a stale warning never lingers over unrelated state.
     property string alertText: ""
+    // Workers may update alertText while the user is reading an open failure.
+    property string currentOpenFailure: ""
+    readonly property string actionAlert: win.currentOpenFailure || win.alertText
+    property list<string> pendingOpenFailures: []
+    function queueOpenFailure(message) {
+        win.pendingOpenFailures.push(message)
+        win.showNextOpenFailure()
+    }
+    function showNextOpenFailure() {
+        if (win.actionAlert === "" && win.pendingOpenFailures.length > 0)
+            win.currentOpenFailure = win.pendingOpenFailures.shift()
+    }
+    function dismissAlert() {
+        if (win.currentOpenFailure !== "")
+            win.currentOpenFailure = ""
+        else
+            win.alertText = ""
+    }
+    // Let the action that cleared the strip finish setting its own feedback.
+    onActionAlertChanged: {
+        if (win.actionAlert === "" && win.pendingOpenFailures.length > 0)
+            Qt.callLater(win.showNextOpenFailure)
+    }
+
     /// Aliases of remote places connected right now. Refreshed after every
     /// connect/disconnect rather than polled, so the rail always reflects
     /// what actually happened.
@@ -625,6 +654,11 @@ Window {
             if (message !== "") win.alertText = message
             else { win.alertText = ""; hints.message = name }
             win.qaDump("paste-image" + (message === "" ? "" : "-failed"))
+            return
+        }
+        if (op === "open") {
+            win.queueOpenFailure(message)
+            win.qaDump("open-failed")
             return
         }
         if (!message.startsWith("ASKKEY:") && !message.startsWith("ASK:"))
@@ -1131,6 +1165,13 @@ Window {
         if (!win.connectionOwner || (owner && owner !== win.connectionOwner)) return
         if (connectPanel.completeFeedback(op, name, message)) {
             win.connectionOwner = null
+            if (op === "cloud-setup") {
+                connectPanel.feedbackTitle = message !== "" ? qsTr("Cloud storage setup needs attention") : qsTr("Continue setup in your terminal")
+                if (message === "") {
+                    connectPanel.feedbackBody = qsTr("Finish rclone config in the terminal, then check again.")
+                    hints.message = connectPanel.feedbackBody
+                }
+            }
             if (op === "setup-install") {
                 connectPanel.feedbackTitle = message === "" ? qsTr("Connection support is installed") : qsTr("Setup did not finish")
                 if (message === "") connectPanel.feedbackBody = name === "apple"
@@ -1571,6 +1612,32 @@ Window {
         hints.message = ""
         // A menu waiting for another tab's selection never opens over this one.
         if (win.menuIntent && win.menuIntent.model !== dirModel) win.menuIntent = null
+        win.syncFilterBar()
+    }
+
+    /// The filter bar shows the filter of the list on screen. Going to
+    /// another folder clears the model's filter and switching tab or pane
+    /// swaps the model; the bar used to keep the old text over a list that
+    /// was no longer filtered (or stay hidden over one that was).
+    function syncFilterBar() {
+        if (!dirModel || filterBar.searchActive) return
+        const text = dirModel.filter
+        if (text === filterInput.text && filterBar.filterActive === (text !== "" || filterInput.activeFocus))
+            return
+        filterBar.syncing = true
+        filterInput.text = text
+        filterBar.syncing = false
+        if (text !== "") {
+            filterBar.filterActive = true
+        } else if (filterBar.filterActive) {
+            const typing = filterInput.activeFocus
+            filterBar.filterActive = false
+            if (typing) win.focusList()
+        }
+    }
+    Connections {
+        target: dirModel
+        function onFilterChanged() { win.syncFilterBar() }
     }
 
     // Back/Forward availability. can_go_back() is a call, which QML never
@@ -1946,13 +2013,14 @@ Window {
         if (win.selectionSettling()) return
         if (dirModel.sel_count() > 1) {
             const many = dirModel.activate_selection()
+            if (many === "pending") return
             if (many.startsWith("OK:")) {
                 hints.message = many.substring(3)
                 win.qaDump("activate-many")
                 return
             }
             if (many !== "") {
-                win.alertText = many
+                win.queueOpenFailure(many)
                 win.qaDump("activate-refused")
                 return
             }
@@ -1964,7 +2032,7 @@ Window {
         if (r.startsWith("blocked:"))
             hints.message = r.substring(8)
         else if (r === "file")
-            hints.message = qsTr("Opened ") + dirModel.entry_name(row)
+            hints.message = ""
         win.qaDump("activate")
     }
 
@@ -2264,10 +2332,7 @@ Window {
         else if (a === "noop") { /* nothing to do */ }
         else if (a.startsWith("openwith:")) {
             const msg = dirModel.open_with_id(dirModel.cursor, a.substring(9))
-            // "OK:" marks success: the window does not change, so
-            // without a line here nothing appears to have happened.
-            if (msg.startsWith("OK:")) hints.message = msg.substring(3)
-            else if (msg !== "") win.alertText = msg
+            if (msg !== "") win.alertText = msg
             win.qaDump("open-with")
         }
         else if (a === "bulk") {
@@ -2341,14 +2406,8 @@ Window {
             if (connectPanel.busy) { connectPanel.showFeedback("", "", false); return }
             if (!win.requireSupport("cloud")) return
             connectPanel.supportKey = "cloud"
-            // rclone's own config tool, in a terminal. Gust never asks
-            // for a cloud password and never sees one.
-            const serr = dirModel.cloud_setup()
-            if (serr !== "") win.alertText = serr
-            const instruction = qsTr("Finish rclone config in the terminal, then check again.")
-            connectPanel.showFeedback(serr !== "" ? qsTr("Cloud storage setup needs attention") : qsTr("Continue setup in your terminal"),
-                serr || instruction, serr !== "")
-            if (serr === "") hints.message = instruction
+            if (!win.beginPlaceFeedback("cloud-setup", "", qsTr("Opening a terminal…"))) return
+            win.connectionOwner.cloud_setup()
             win.qaDump("cloud-setup")
         }
         else if (a.startsWith("remote-on:")) {
@@ -2986,6 +3045,7 @@ Window {
             }
 
             Row {
+                id: leftTools
                 anchors.left: parent.left
                 anchors.leftMargin: Tokens.spaceLg
                 anchors.verticalCenter: parent.verticalCenter
@@ -3064,12 +3124,17 @@ Window {
                     onDragLanded: (m, e) => { hints.message = ""; win.transferStarted(m, e, "drop") }
                     model: dirModel
                     anchors.verticalCenter: parent.verticalCenter
+                    // Whatever the buttons on the right leave: a deep path
+                    // used to draw straight through them.
+                    width: Math.max(0, Math.min(implicitWidth,
+                        headerBar.width - rightTools.width - leftTools.x - x - Tokens.spaceLg * 3))
                     onPathChosen: (p) => { dirModel.navigate(p); win.focusList() }
                 }
             }
 
             // View switch: labelled, tooltipped, keyboard reachable.
             Row {
+                id: rightTools
                 anchors.right: parent.right
                 anchors.rightMargin: Tokens.spaceLg
                 anchors.verticalCenter: parent.verticalCenter
@@ -3465,6 +3530,8 @@ Window {
             // question. The filter narrows this folder; search walks this
             // folder and below, on a worker, ranked (DESIGN §6.3).
             property bool searchActive: false
+            // The field is being set FROM the model: not a keystroke to send back.
+            property bool syncing: false
             onFilterActiveChanged: win.qaDump("filterbar")
             onSearchActiveChanged: win.qaDump("searchbar")
 
@@ -3494,7 +3561,7 @@ Window {
                     selectByMouse: true
                     // While this field has focus it owns every key: h/j/k/l,
                     // / and : are text here, not commands.
-                    onTextChanged: dirModel.set_filter_text(text)
+                    onTextChanged: if (!filterBar.syncing) dirModel.set_filter_text(text)
                     Keys.onEscapePressed: {
                         text = ""
                         dirModel.set_filter_text("")
@@ -3504,6 +3571,7 @@ Window {
                         win.focusList()
                     }
                     Keys.onReturnPressed: win.focusList()
+                    Keys.onEnterPressed: win.focusList()
                     Accessible.role: Accessible.EditableText
                     Accessible.name: "Filter this folder"
                 }
@@ -3621,7 +3689,10 @@ Window {
             // Bound, not assigned: a selection is live state and must not go
             // stale behind a message some earlier keystroke left here.
             selection: win.selectionText
-            alert: win.alertText !== "" ? win.alertText : win.prefsNotice !== "" ? win.prefsNotice : dirModel.notice
+            alert: win.actionAlert || win.prefsNotice || dirModel.notice
+            showingOpenFailure: win.currentOpenFailure !== ""
+            queuedOpenFailures: win.pendingOpenFailures.length
+            onDismissAlert: { win.dismissAlert(); win.qaDump("hint") }
             dialog: confirm.visible || connectionRecovery.visible
             onStatusChanged: win.qaDump("hint")
             onMessageChanged: win.qaDump("hint")
@@ -3647,8 +3718,8 @@ Window {
         Keys.onPressed: (event) => {
             // A warning is about the action that produced it. The next
             // keystroke moves on, so it must not linger over unrelated state.
-            if (win.alertText !== "" && event.key !== Qt.Key_Z)
-                win.alertText = ""
+            if (event.key !== Qt.Key_Z)
+                win.dismissAlert()
 
             // h in Quick Look computes the file's SHA-256 (on a worker;
             // Escape or closing stops it). Checked before the key table so
@@ -3782,6 +3853,9 @@ Window {
             case Qt.Key_Backspace:
                 dirModel.navigate_up(); event.accepted = true; return
             case Qt.Key_Tab:
+                // Ctrl+Tab is the next tab, split or not: it used to be
+                // swallowed here and switch pane instead.
+                if (event.modifiers & Qt.ControlModifier) break
                 if (win.paneCount > 1) {
                     win.focusPane(win.activePane === 0 ? 1 : 0)
                     event.accepted = true; return
@@ -4124,7 +4198,7 @@ Window {
         onOpenRequested: (path) => {
             const err = dirModel.open_path(path)
             recentPanel.error = err
-            if (err === "") { hints.message = qsTr("Opened ") + path; recentPanel.hide() }
+            if (err === "") { hints.message = ""; recentPanel.hide() }
             win.qaDump("recent-open")
         }
         onRevealRequested: (path) => { recentPanel.hide(); dirModel.reveal(path); win.qaDump("recent-reveal") }
@@ -4989,6 +5063,9 @@ Window {
                             sortField: dirModel.sort_field, ascending: dirModel.sort_ascending }
         if (win.prefsReady) win.startWithPrefs(true)
         else dirModel.reload()
+        // `gust /no/such/file` opened somewhere else: say so, once.
+        const startupNotice = dirModel.startup_notice()
+        if (startupNotice !== "") win.alertText = startupNotice
         // After a crash, say what was interrupted — read once, here.
         try { interruptedNotice.items = JSON.parse(dirModel.interrupted_jobs()) } catch (e) {}
         // A local read of the kernel's own view: no daemon, no network.

@@ -7,16 +7,16 @@ say "26a · a custom action runs on the selection, argv only"
 d26="$FIXTURE/actions"
 rm -rf "$d26"; mkdir -p "$d26" "$FIXTURE/.config/gust/actions"
 out="$d26/ran.txt"
-cat > "$FIXTURE/.config/gust/actions/stamp.toml" <<TOML
+cat > "$FIXTURE/.config/gust/actions/stamp.toml" <<'TOML'
 name = "Stamp it"
-command = ["sh", "-c", "printf '%s\\\\n' \"\$1\" >> $out", "gust-action", "{file}"]
+command = ["sh", "-c", "printf '%s\\n' \"$1\" >> \"$HOME/actions/ran.txt\"", "gust-action", "{file}"]
 for = "files"
 extensions = ["txt"]
 TOML
 chmod 644 "$FIXTURE/.config/gust/actions/stamp.toml"
-cat > "$FIXTURE/.config/gust/actions/evil.toml" <<TOML
+cat > "$FIXTURE/.config/gust/actions/evil.toml" <<'TOML'
 name = "Planted"
-command = ["touch", "$d26/PLANTED"]
+command = ["sh", "-c", "touch \"$HOME/actions/PLANTED\""]
 TOML
 chmod 666 "$FIXTURE/.config/gust/actions/evil.toml"
 hostile='a $(touch PWNED); b.txt'

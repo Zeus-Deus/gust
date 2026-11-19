@@ -92,7 +92,7 @@ else
 
   say "34b · drag onto a path-bar crumb: into that folder"
   fresh Rows "$dd/inbox/deep"
-  cp_="$(state "' '.join(map(str, d['crumbPoints']['$dd']))")"
+  cp_="$(state "' '.join(map(str, d['crumbPoints'][sys.argv[2]]))" "$dd")"
   if [[ "$cp_" == ERR* || -z "$cp_" ]]; then bad "no crumb for $dd"; else
     read -r CX CY <<<"$cp_"
     drag_to delta.txt $((WX + CX)) $((WY + CY)) "crumb move"

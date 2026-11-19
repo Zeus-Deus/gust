@@ -101,12 +101,12 @@ TestCase {
         // Rows do not depend on the snapshot, so they are never rebuilt.
         compare(panel.rows.length, 9)
         const omarchy = findChild(panel, "settingsNote-omarchy_keys")
-        compare(omarchy.text, "Reversible")
+        compare(omarchy.text, "You can switch back any time")
         test.snap = Object.assign({}, test.snap, { is_omarchy: false })
         compare(omarchy.text, "Needs Omarchy")
         compare(findChild(panel, "settingsNote-omarchy_keys"), omarchy, "the same row, updated in place")
         test.snap = Object.assign({}, test.snap, { renderer_now: "software" })
-        compare(note("renderer"), "Next start. Now: software")
+        compare(note("renderer"), "Applies the next time Gust starts. Now: software")
     }
 
     function test_an_integration_change_is_not_requested_twice() {
