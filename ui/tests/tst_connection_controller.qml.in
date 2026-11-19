@@ -90,7 +90,13 @@ Item {
         function qaDump(tag) {}
         function runningJobModels() { return [] }
         @PLACES_ARRIVED@
-        ConnectPanel { id: connectPanel; places: win.placesInfo; @CONNECT_HANDLER@ @ACTION_HANDLER@ }
+        ConnectPanel {
+            id: connectPanel
+            places: win.placesInfo
+            @CONNECT_HANDLER@
+            @ACTION_HANDLER@
+            @CONNECT_CLOSED@
+        }
         ConfirmDialog {
             id: confirm
             property string purpose: "trash"
@@ -357,6 +363,27 @@ Item {
         fakeModel.mountedSharePending = false
         keyClick(Qt.Key_Return)
         tryCompare(connectPanel, "busy", false)
+        verify(!confirm.visible)
+        compare(fakeModel.navigationCalls, 0)
+    }
+    function test_dismissing_connect_discards_a_queued_smb_offer() {
+        fakeModel.navigationCalls = 0
+        win.connectShare("//nas/shared", "", "")
+        confirm.purpose = "close"
+        confirm.open("A transfer is still running", "Wait for the transfer?", "Stop and close", true)
+        completeSmbMount()
+        compare(confirm.purpose, "close")
+        verify(win.pendingShareOpen !== null)
+        verify(fakeModel.mountedSharePending)
+
+        connectPanel.hide()
+        compare(win.pendingShareOpen, null)
+        compare(fakeModel.mountedSharePending, false)
+        compare(connectPanel.busy, false)
+        verify(confirm.visible)
+
+        confirm.close()
+        wait(0)
         verify(!confirm.visible)
         compare(fakeModel.navigationCalls, 0)
     }
