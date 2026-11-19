@@ -93,12 +93,34 @@ pub fn path_to_uri(path: &Path) -> String {
 ///
 /// Returns None for anything that is not a local file: an `http://` URI is
 /// not something to paste into a folder.
+/// RFC 8089: `localhost` and this machine's own name both mean "here".
+fn local_authority(authority: &str, hostname: &str) -> bool {
+    authority.eq_ignore_ascii_case("localhost")
+        || (!hostname.is_empty() && authority.eq_ignore_ascii_case(hostname))
+}
+
 pub fn uri_to_path(uri: &str) -> Option<PathBuf> {
     let rest = uri.trim().strip_prefix("file://")?;
-    // An authority component (file://host/path) is not local.
-    // A leading slash means the path is absolute and local; anything else
-    // (file://host/path) has an authority component and is not.
-    let rest = format!("/{}", rest.strip_prefix('/')?);
+    // A leading slash means the path is absolute and local. Anything before
+    // the first slash is an authority (file://host/path), which is local
+    // only when it names this computer.
+    let rest = match rest.find('/')? {
+        0 => rest,
+        slash => {
+            let authority = &rest[..slash];
+            // The kernel's own answer, read only for a URI that names a host
+            // other than `localhost`.
+            let hostname = if authority.eq_ignore_ascii_case("localhost") {
+                String::new()
+            } else {
+                std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap_or_default()
+            };
+            if !local_authority(authority, hostname.trim()) {
+                return None;
+            }
+            &rest[slash..]
+        }
+    };
     let mut out = Vec::with_capacity(rest.len());
     let bytes = rest.as_bytes();
     let mut i = 0;
@@ -731,6 +753,25 @@ mod tests {
         // file:// with an authority is not local either.
         assert!(uri_to_path("file://otherhost/tmp/a").is_none());
         assert!(uri_to_path("file:///tmp/a").is_some());
+    }
+
+    #[test]
+    fn this_computer_named_as_the_authority_is_local() {
+        // RFC 8089: `localhost` and the machine's own name mean "here".
+        let want = Some(PathBuf::from("/tmp/a b"));
+        assert_eq!(uri_to_path("file://localhost/tmp/a%20b"), want);
+        assert_eq!(uri_to_path("file://LOCALHOST/tmp/a%20b"), want);
+        let host = std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap();
+        assert_eq!(
+            uri_to_path(&format!("file://{}/tmp/a%20b", host.trim())),
+            want
+        );
+        // A bare authority names no file, and an empty name matches nothing.
+        assert!(uri_to_path("file://localhost").is_none());
+        assert!(local_authority("localhost", ""));
+        assert!(local_authority("ThisHost", "thishost"));
+        assert!(!local_authority("", ""));
+        assert!(!local_authority("otherhost", "thishost"));
     }
 
     #[test]

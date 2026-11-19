@@ -38,6 +38,8 @@ TestCase {
     Item {
         id: win
         property string alertText: ""
+        property string currentOpenFailure: ""
+        @ACTION_ALERT@
         // Session stand-ins: saveSession's own semantics are tst_work_guard's.
         property bool sessionDirty: false
         property int sessionSaves: 0

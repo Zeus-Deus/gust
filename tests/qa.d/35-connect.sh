@@ -37,11 +37,11 @@ Host box
     HostName studio.tail.gust.test
     User media
     IdentityFile $KEY
-    UserKnownHostsFile $FIXTURE/.ssh/box_known_hosts
+    UserKnownHostsFile $qa_run_dir/box_known_hosts
 EOF
 chmod 600 "$FIXTURE/.ssh/config"
 # A computer the user already trusts: its key is on record beforehand.
-ssh-keyscan -T 5 studio.tail.gust.test 2>/dev/null > "$FIXTURE/.ssh/box_known_hosts"
+ssh-keyscan -T 5 studio.tail.gust.test 2>/dev/null > "$qa_run_dir/box_known_hosts"
 
 CL="/var/tmp/gust-qa-cloud"; rm -rf "$CL"; mkdir -p "$CL/backend/albums"
 echo "stored in the cloud" > "$CL/backend/cloud-hello.txt"
@@ -99,8 +99,8 @@ wait_for "d['promptOpen']" "True" 10 >/dev/null
 ctrl a; typ media; key Return
 wait_for "d['confirmOpen']" "True" 30 >/dev/null
 wclick left "$(state "' '.join(map(str, d['confirmButtons']['confirm']))")"
-wait_for "d['model']['location']" "$NAS" 60 >/dev/null
-expect "connecting browsed nas"                      "d['model']['location']" "$NAS"
+wait_location "$NAS" 60 >/dev/null
+expect_location "connecting browsed nas" "$NAS"
 mounted "$NAS" && ok "a real filesystem is mounted" || bad "nothing mounted at $NAS"
 grep -q "nas.tail.gust.test" "$FIXTURE/.ssh/known_hosts" && ok "the trusted key was recorded" || bad "no key recorded"
 expect "the sidebar lists nas as connected"          "d['connectedPlaces']" "['nas']"
@@ -143,7 +143,7 @@ for _ in $(seq 1 40); do mounted "$NAS" || break; sleep 0.3; done
 mounted "$NAS" && bad "still mounted after Disconnect" || ok "Disconnect unmounted nas"
 wait_for "d['connectedPlaces']" "[]" 20 >/dev/null
 expect "the sidebar no longer lists it"              "d['connectedPlaces']" "[]"
-expect_contains "Gust left the folder it was showing" "d['model']['location']" "$FIXTURE"
+expect_contains "Gust left the folder it was showing" "d['model']['location']" "$(display_path "$FIXTURE")"
 
 say "35f · a computer from the SSH config, from the panel"
 wclick left "$(pt_of placePoints connect)"
@@ -156,8 +156,8 @@ if [[ "$(state "len(next(c['routes'] for c in d['places']['computers'] if any(r[
   expect "one computer offers both connection routes" "len([r for r in d['connectRows'] if r['type']=='place'])" "2"
   wclick left "$(pt_of connectPoints ssh:box)"
 fi
-wait_for "d['model']['location']" "$BOX" 60 >/dev/null
-expect "Connect opened box"                          "d['model']['location']" "$BOX"
+wait_location "$BOX" 60 >/dev/null
+expect_location "Connect opened box" "$BOX"
 [[ "$(cat "$BOX/Shared/hello.txt" 2>/dev/null)" == "hello from studio" ]] \
   && ok "box is studio, over the tailnet, with the config's key" || bad "box shows the wrong machine"
 wclick left "$(pt_of placePoints connect)"
@@ -173,8 +173,8 @@ say "35g · cloud storage through rclone"
 wclick left "$(pt_of placePoints connect)"
 wait_for "d['connectOpen']" "True" 10 >/dev/null
 wclick left "$(pt_of connectPoints cloud:gustcloud)"
-wait_for "d['model']['location']" "$CLOUD" 60 >/dev/null
-expect "Connect opened the cloud remote"             "d['model']['location']" "$CLOUD"
+wait_location "$CLOUD" 60 >/dev/null
+expect_location "Connect opened the cloud remote" "$CLOUD"
 wait_for "d['model']['settled']" "True" 20 >/dev/null
 expect "its files are listed"                        "sorted(d['rowPoints'].keys())" "['albums', 'cloud-hello.txt']"
 read -r WX WY WW WH <<<"$(win_geo)"
@@ -192,7 +192,7 @@ mounted "$CLOUD" && bad "the cloud is still mounted" || ok "Disconnect unmounted
 key Escape; sleep 0.5
 
 say "35h · Tailscale stopped: the panel says so instead of an empty list"
-stub="$FIXTURE/.tsbin"; mkdir -p "$stub"
+stub="$qa_run_dir/tsbin"; mkdir -p "$stub"
 printf '#!/bin/sh\necho %s\n' "'{\"BackendState\":\"Stopped\"}'" > "$stub/tailscale"; chmod 755 "$stub/tailscale"
 export QA_PATH_PREPEND="$stub"
 stop_gust; start_gust "$FIXTURE"

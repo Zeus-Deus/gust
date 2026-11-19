@@ -716,7 +716,17 @@ the rollback is the part that must be right.
   after Gust claimed it, `--default off` leaves that newer choice alone
   rather than stamping an old value over it (§8: "uninstall/rollback
   preserves later edits").
-- Written atomically, and never as root.
+- **Gust is never its own predecessor.** A key that already names Gust
+  (set by `xdg-mime` or the desktop's chooser) is not claimed and not
+  recorded, so `--default off` leaves it as found and says the default was
+  not changed instead of announcing a restore.
+- Written atomically, and never as root. A `mimeapps.list` that is a
+  symbolic link (dotfile managers) is written through to its target, which
+  keeps its mode; a new file is owner-only.
+- `~/.config/<desktop>-mimeapps.list` for `$XDG_CURRENT_DESKTOP` is read
+  before `mimeapps.list`. It is never edited; when it sends folders
+  elsewhere, `--default on` names the file and says folders will still open
+  with that app.
 - The state file lives beside Gust's own config, not in the user's XDG
   defaults, so removing Gust cannot corrupt unrelated associations.
 
@@ -1754,7 +1764,7 @@ Three places touch a path before any worker does, and all three are bounded:
 
 | Place | Why it must be bounded |
 |---|---|
-| `startup_location()` | Runs before the window exists. Unbounded, Gust never paints at all. |
+| `startup()` | Runs before the window exists. Unbounded, Gust never paints at all. |
 | `navigate()` | Runs on the UI thread. Unbounded, the whole window freezes. |
 | the listing worker | Unbounded, the folder never settles and the worker never returns. |
 
@@ -2427,7 +2437,15 @@ The handler list is read from the freedesktop database directly:
    desktop entries that registered for it — a machine-readable index with
    no prose in it.
 2. `mimeapps.list` carries the user's own additions and removals, which
-   take precedence over the system cache.
+   take precedence over the system cache. The default is the first installed,
+   not-removed id under `[Default Applications]` in the mime-apps spec's
+   lookup order: `<desktop>-mimeapps.list` then `mimeapps.list` in
+   `$XDG_CONFIG_HOME`, `$XDG_CONFIG_DIRS`, then the `applications`
+   directories. `[Added Associations]` never names a default. A removal
+   drops the application for that type, default or not, when the
+   association comes from the removing list's own directory or a lower one;
+   an association from a higher directory (a list's explicit addition, or a
+   desktop entry installed there) survives it.
 3. Each candidate's `.desktop` file supplies the name to show and the
    command to run.
 
@@ -2439,12 +2457,24 @@ is exactly what a person wants for an image.
 ### Launching
 
 The `Exec` line is parsed, not handed to a shell. Field codes are expanded
-per the freedesktop spec — `%f`/`%F` become the path, `%u`/`%U` its file URI,
-and `%i`/`%c`/`%k` are dropped — and every remaining word becomes one argv
-entry. A file called `; rm -rf ~` is one argument and nothing else.
+per the freedesktop spec — `%f`/`%F` become the path, `%u`/`%U` its
+percent-encoded file URI, `%%` a percent sign, and `%i`/`%c`/`%k` and the
+deprecated codes are dropped — and every remaining word becomes one argv
+entry; a double-quoted argument (with `\"`, `` \` ``, `\$`, `\\` escapes) is
+one word. A file called `; rm -rf ~` is one argument and nothing else, and
+paths stay raw OS bytes, so a name that is not UTF-8 still opens.
 
 `Terminal=true` entries are launched through a terminal, because an editor
-with no terminal simply vanishes.
+with no terminal simply vanishes. That holds for a multi-file launch too, and
+the terminal is the desktop's own (`xdg-terminal-exec`) before `$TERMINAL` or
+a guess at an installed one. For terminal apps, cloud setup and opening a
+terminal in a folder, a worker first checks `--print-id`, then the older
+`--test` mode, against a private registry whose only entry runs `/bin/false`.
+Older launchers can dispatch that entry when they ignore an option. Gust
+uses the first mode that prints the expected entry ID or command to look
+up the user's configured terminal. If neither mode is supported or the
+configured lookup fails, Gust tries the next candidate. Once a terminal starts,
+Gust reaps it without retrying the command.
 
 ### What it will not do
 
@@ -2462,6 +2492,14 @@ Select five photographs, press Enter, and the right outcome is **one image
 viewer showing five images** — you can move between them. Five separate
 viewers, each holding one photograph, is five windows to close and no way to
 flip through them.
+
+Starting a desktop opener only submits the request. The file list and Recent
+leave success unannounced. If the opener reports a launch failure, the window
+names the file, gives the reported reason and points to Open with…. An empty
+Open with menu cannot establish why the desktop failed to open the file.
+For selected documents of different types, Gust submits each file separately.
+If a submission fails, the warning gives the reason and accounts for how many
+requests reached an opener. A later launch failure still names its file.
 
 ### One launch, many arguments
 
@@ -2510,6 +2548,17 @@ bindings apply to this player process only. Non-media, explicit Open with…,
 and multi-selection retain their desktop handlers. If mpv is absent, the
 activated file opens with its desktop handler. Launch errors return to the
 owning model; no system file associations are changed.
+
+Every program started for the user — an application, an opener, the media
+player, a terminal, a custom action, Run — is built through
+`gust_core::childenv::for_user_app(&mut Command)`. Gust sets variables for
+its own window before Qt starts (`QT_QUICK_BACKEND=software`,
+`QT_FORCE_STDERR_LOGGING`, `QT_ASSUME_STDERR_HAS_CONSOLE`) only through
+`childenv::set_for_gust`, which records the user's value; `for_user_app`
+restores that value or removes the variable, and drops the window-only
+instructions (`GUST_SELECT`, `GUST_HANDOFF`, `GUST_READY_FILE`,
+`GUST_CHOOSER*`, `GUST_ADMIN*`). Nothing else is touched, and Gust's own
+helpers and re-execs do not use it.
 
 ## 6.19 The clipboard other applications can see
 

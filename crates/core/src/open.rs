@@ -12,7 +12,8 @@ use std::path::{Path, PathBuf};
 pub mod media;
 #[path = "openwith.rs"]
 pub mod with;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
 
 /// Why an open was refused, in words a person can act on.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,7 +61,7 @@ pub fn is_runnable(path: &Path, mode: Option<u32>) -> bool {
 /// is that the path is one argument and no shell is involved.
 pub fn command_for(opener: &str, path: &Path) -> Command {
     let mut cmd = Command::new(opener);
-    if opener == "gio" {
+    if matches!(opener, "gio" | "handlr") {
         cmd.arg("open");
     }
     // `--` so a filename beginning with '-' is never read as a flag.
@@ -72,12 +73,84 @@ pub fn command_for(opener: &str, path: &Path) -> Command {
     cmd
 }
 
+/// How soon after its start an opener's failure still means "the open did
+/// not happen". `xdg-open` can stay alive for as long as the application it
+/// started, so a later failure says something about that application, not
+/// about the open.
+const OPEN_FAILED_WINDOW: Duration = Duration::from_secs(5);
+
+/// What `on_refusal` is told when the opener itself reports failure.
+pub const OPENER_REPORTED_FAILURE: &str = "the desktop launcher reported a failure";
+
+/// gio and handlr exit after dispatch. xdg-open can stay alive with
+/// the application, so only its early failures describe the open request.
+fn refusal_from_exit(opener: &str, code: Option<i32>, elapsed: Duration) -> Option<OpenRefusal> {
+    let reason = match (opener, code) {
+        ("xdg-open", Some(3)) if elapsed <= OPEN_FAILED_WINDOW => {
+            "a required desktop tool is missing"
+        }
+        ("xdg-open", Some(4)) if elapsed <= OPEN_FAILED_WINDOW => OPENER_REPORTED_FAILURE,
+        ("gio", Some(2)) => OPENER_REPORTED_FAILURE,
+        ("handlr", Some(code)) if code != 0 => OPENER_REPORTED_FAILURE,
+        _ => return None,
+    };
+    Some(OpenRefusal::Failed(reason.into()))
+}
+
+/// Wait for a detached child on a worker thread, so the caller never blocks
+/// and the child never lingers as a zombie. `done` runs there with the exit
+/// code (`None` if a signal ended it) and how long the child lived.
+fn wait_detached(mut child: Child, done: impl FnOnce(Option<i32>, Duration) + Send + 'static) {
+    let started = Instant::now();
+    let _ = std::thread::Builder::new()
+        .name("gust-reap".into())
+        .spawn(move || {
+            if let Ok(status) = child.wait() {
+                done(status.code(), started.elapsed());
+            }
+        });
+}
+
+/// Reap a detached child in the background. Closing Gust still leaves the
+/// application running; only its exit status is collected.
+pub(crate) fn reap(child: Child) {
+    wait_detached(child, |_, _| {});
+}
+
+/// Reap an opener, and tell `on_refusal` if its exit says the open did not
+/// happen.
+fn watch_opener(
+    opener: &'static str,
+    child: Child,
+    on_refusal: impl FnOnce(OpenRefusal) + Send + 'static,
+) {
+    wait_detached(child, move |code, elapsed| {
+        if let Some(refusal) = refusal_from_exit(opener, code, elapsed) {
+            on_refusal(refusal);
+        }
+    });
+}
+
 /// Ask the desktop to open `path`.
 ///
 /// Returns the opener that accepted the request. The child is fully detached
 /// from Gust's stdio so a chatty handler cannot spam the terminal, and Gust
-/// does not wait for it.
+/// does not wait for it. An opener that starts and then finds no application
+/// is not reported here; [`open_with_desktop_reporting`] does that.
 pub fn open_with_desktop(path: &Path, mode: Option<u32>) -> Result<String, OpenRefusal> {
+    open_with_desktop_reporting(path, mode, |_| {})
+}
+
+/// [`open_with_desktop`], plus the answer that only arrives afterwards: an
+/// opener can start and still fail to open the file. `on_refusal` is then
+/// called once, on a worker thread, after this has returned `Ok`, with a
+/// [`OpenRefusal::Failed`]: the opener does not say whether an application
+/// was missing or merely failed to start.
+pub fn open_with_desktop_reporting(
+    path: &Path,
+    mode: Option<u32>,
+    on_refusal: impl FnOnce(OpenRefusal) + Send + 'static,
+) -> Result<String, OpenRefusal> {
     if is_runnable(path, mode) {
         return Err(OpenRefusal::NeedsDeliberateRun);
     }
@@ -91,17 +164,21 @@ pub fn open_with_desktop(path: &Path, mode: Option<u32>) -> Result<String, OpenR
             continue;
         }
         let mut cmd = command_for(opener, path);
-        cmd.stdin(Stdio::null())
+        crate::childenv::for_user_app(&mut cmd)
+            .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         match cmd.spawn() {
-            Ok(_child) => return Ok(opener.to_string()),
+            Ok(child) => {
+                watch_opener(opener, child, on_refusal);
+                return Ok(opener.to_string());
+            }
             Err(e) => last_err = Some(e.to_string()),
         }
     }
     match last_err {
         Some(e) => Err(OpenRefusal::Failed(e)),
-        None => Err(OpenRefusal::NoHandler),
+        None => Err(OpenRefusal::Failed("no desktop opener was found".into())),
     }
 }
 
@@ -124,16 +201,6 @@ pub fn which(program: &str) -> Option<PathBuf> {
     })
 }
 
-/// Open a terminal in `dir`, for the "Open terminal here" action.
-///
-/// Honours `$TERMINAL` first, then the terminals an Omarchy install is
-/// likely to have. Never falls back to a shell string.
-/// The command that opens the user's own terminal in `dir`.
-///
-/// Omarchy (and any desktop following the xdg-terminal-exec spec) records
-/// the chosen terminal there — its Super+Return uses it — so it comes
-/// first. `--dir` is a separate argument: the path is never parsed by a
-/// shell.
 /// The argv that runs an executable file deliberately (the "Run…" action,
 /// always behind a confirmation). It runs in the user's default terminal,
 /// held open so its output can be read, with its own folder as the working
@@ -230,98 +297,150 @@ pub fn program_state(path: &Path, mode: u32, is_regular: bool) -> ProgramState {
     ProgramState::NotAProgram
 }
 
-pub fn terminal_command(dir: &Path, have: impl Fn(&str) -> bool) -> Option<Command> {
-    if have("xdg-terminal-exec") {
-        let mut c = Command::new("xdg-terminal-exec");
-        c.arg(format!("--dir={}", dir.display()));
-        return Some(c);
+const XDG_TERMINAL: &str = "xdg-terminal-exec";
+
+/// Older launchers discard unknown options and exec the selected terminal.
+/// Probe a registry containing only /bin/false before consulting the real one.
+fn desktop_terminal_resolves(program: &str) -> std::io::Result<bool> {
+    use std::fs::{self, Permissions};
+    use std::os::unix::fs::PermissionsExt;
+
+    const PROBE_ID: &str = "gust-terminal-probe.desktop";
+    // XDG search lists split on ':', even in XDG_DATA_HOME. Keep this path
+    // independent of TMPDIR so it always names exactly one private registry.
+    let root = tempfile::Builder::new()
+        .permissions(Permissions::from_mode(0o700))
+        .tempdir_in("/tmp")?;
+    let apps = root.path().join("applications");
+    fs::create_dir(&apps)?;
+    fs::write(
+        apps.join(PROBE_ID),
+        "[Desktop Entry]
+Type=Application
+Name=Probe
+Exec=/bin/false
+Categories=TerminalEmulator;
+X-TerminalArgExec=-e
+",
+    )?;
+
+    // v0.12 has only --test, which prints the command it would execute.
+    // Still older launchers can dispatch /bin/false for both options.
+    for (option, expected) in [
+        ("--print-id", PROBE_ID),
+        ("--test", "Command and arguments:\n  >/bin/false<"),
+    ] {
+        let probe = Command::new(program)
+            .env_clear()
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .env("HOME", root.path())
+            .env("XDG_DATA_HOME", root.path())
+            .env("XDG_DATA_DIRS", "/dev/null")
+            .env("XDG_CONFIG_DIRS", "/dev/null")
+            .env("XTE_CACHE_ENABLED", "false")
+            .arg(option)
+            .stderr(Stdio::null())
+            .output()?;
+        if probe.status.success() && probe.stdout.trim_ascii() == expected.as_bytes() {
+            let entry = crate::childenv::for_user_app(&mut Command::new(program))
+                .arg(option)
+                .stderr(Stdio::null())
+                .output()?;
+            return Ok(entry.status.success() && !entry.stdout.trim_ascii().is_empty());
+        }
     }
-    None
+    Ok(false)
 }
 
+fn terminal_in_dir(term: &str, dir: &Path) -> Command {
+    let mut cmd = Command::new(term);
+    let flag = match Path::new(term).file_name().and_then(OsStr::to_str) {
+        Some(XDG_TERMINAL) => "--dir=",
+        Some("kitty" | "ghostty") => "--working-directory=",
+        _ => {
+            cmd.arg("--working-directory").arg(dir);
+            return cmd;
+        }
+    };
+    let mut arg = OsString::from(flag);
+    arg.push(dir);
+    cmd.arg(arg);
+    cmd
+}
+
+/// Build the desktop launcher's command for opening a folder.
+pub fn terminal_command(dir: &Path, have: impl Fn(&str) -> bool) -> Option<Command> {
+    have(XDG_TERMINAL).then(|| terminal_in_dir(XDG_TERMINAL, dir))
+}
+
+/// Open a terminal in a folder. Resolve and spawn on a worker.
 pub fn open_terminal_here(dir: &Path) -> Result<String, OpenRefusal> {
     if !dir.is_dir() {
         return Err(OpenRefusal::Failed("not a folder".into()));
     }
-    if let Some(mut cmd) = terminal_command(dir, |p| which(p).is_some()) {
-        cmd.stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        if cmd.spawn().is_ok() {
-            return Ok("xdg-terminal-exec".into());
-        }
-    }
-    let mut candidates: Vec<String> = Vec::new();
-    if let Some(t) = std::env::var_os("TERMINAL") {
-        candidates.push(t.to_string_lossy().into_owned());
-    }
-    for t in ["alacritty", "kitty", "foot", "ghostty", "wezterm"] {
-        candidates.push(t.to_string());
-    }
+    start_terminal(|term, _| terminal_in_dir(term, dir))
+}
 
-    for term in candidates {
-        if which(&term).is_none() {
+/// Run a desktop application's Exec argv or the cloud configuration tool
+/// inside the user's terminal. Resolve and spawn on a worker.
+pub fn run_in_terminal(program: &str, args: &[impl AsRef<OsStr>]) -> Result<String, OpenRefusal> {
+    if which(program).is_none() {
+        return Err(OpenRefusal::NoHandler);
+    }
+    start_terminal(|term, lead| {
+        let mut cmd = Command::new(term);
+        cmd.arg(lead).arg(program).args(args);
+        cmd
+    })
+}
+
+fn start_terminal(command: impl Fn(&str, &str) -> Command) -> Result<String, OpenRefusal> {
+    let terminal = std::env::var("TERMINAL").ok();
+    for (term, lead) in terminal_candidates(terminal.as_deref(), |p| which(p).is_some()) {
+        if lead == "--" && !desktop_terminal_resolves(&term).unwrap_or(false) {
             continue;
         }
-        let mut cmd = Command::new(&term);
-        // Every one of these accepts a working directory flag; none of them
-        // needs a shell to receive it.
-        match term.as_str() {
-            "kitty" | "ghostty" => {
-                cmd.arg(format!("--working-directory={}", dir.display()));
-            }
-            _ => {
-                cmd.arg("--working-directory").arg(dir);
-            }
-        }
-        cmd.stdin(Stdio::null())
+        let mut cmd = command(&term, lead);
+        if let Ok(child) = crate::childenv::for_user_app(&mut cmd)
+            .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        if cmd.spawn().is_ok() {
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            reap(child);
             return Ok(term);
         }
     }
     Err(OpenRefusal::NoHandler)
 }
 
-/// Run a fixed, known command in a terminal.
+/// The terminals to try for running a command, best first, each with the
+/// argument that introduces the command.
 ///
-/// Used only for `rclone config`, whose whole job is to ask the user for
-/// credentials that Gust must never see or touch. The command is a compiled-in
-/// constant and its arguments are passed as separate argv entries: no shell is
-/// involved, so nothing here can be turned into command injection, and no
-/// secret ever passes through Gust.
-pub fn run_in_terminal(program: &str, args: &[&str]) -> Result<String, OpenRefusal> {
-    if which(program).is_none() {
-        return Err(OpenRefusal::NoHandler);
-    }
-    let mut candidates: Vec<String> = Vec::new();
-    if let Some(t) = std::env::var_os("TERMINAL") {
-        candidates.push(t.to_string_lossy().into_owned());
+/// `xdg-terminal-exec` leads, as in [`terminal_command`]: it is where the
+/// desktop records the user's choice, so someone on Ghostty who also has
+/// Alacritty installed gets Ghostty. Then `$TERMINAL`, then the terminals an
+/// Omarchy install is likely to have. Every one of them takes the program
+/// and its arguments as separate argv entries after that lead; none of them
+/// needs a shell.
+pub fn terminal_candidates(
+    terminal_env: Option<&str>,
+    have: impl Fn(&str) -> bool,
+) -> Vec<(String, &'static str)> {
+    let mut candidates = vec![(XDG_TERMINAL.to_string(), "--")];
+    if let Some(t) = terminal_env.filter(|t| !t.is_empty() && *t != XDG_TERMINAL) {
+        let lead = if Path::new(t).file_name() == Some(OsStr::new(XDG_TERMINAL)) {
+            "--"
+        } else {
+            "-e"
+        };
+        candidates.push((t.to_string(), lead));
     }
     for t in ["alacritty", "kitty", "foot", "ghostty", "wezterm"] {
-        candidates.push(t.to_string());
+        candidates.push((t.to_string(), "-e"));
     }
-
-    for term in candidates {
-        if which(&term).is_none() {
-            continue;
-        }
-        let mut cmd = Command::new(&term);
-        // Every one of these takes "-e PROGRAM ARGS..." as separate argv
-        // entries. None of them needs a shell.
-        cmd.arg("-e").arg(program);
-        for a in args {
-            cmd.arg(a);
-        }
-        cmd.stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        if cmd.spawn().is_ok() {
-            return Ok(term);
-        }
-    }
-    Err(OpenRefusal::NoHandler)
+    candidates.retain(|(term, _)| have(term));
+    candidates
 }
 
 /// Reveal `path` by opening its parent folder — used by "show in folder".
@@ -342,6 +461,20 @@ pub fn is_single_argument(path: &OsStr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_command_runs_in_the_desktops_own_terminal_before_any_guess() {
+        let all = terminal_candidates(Some("footclient"), |_| true);
+        assert_eq!(all[0], ("xdg-terminal-exec".to_string(), "--"));
+        assert_eq!(all[1], ("footclient".to_string(), "-e"));
+        assert_eq!(all[2], ("alacritty".to_string(), "-e"));
+
+        // Only what is installed is offered, in the same order.
+        let some = terminal_candidates(None, |p| p == "ghostty" || p == "alacritty");
+        let names: Vec<&str> = some.iter().map(|(t, _)| t.as_str()).collect();
+        assert_eq!(names, vec!["alacritty", "ghostty"]);
+        assert!(terminal_candidates(None, |_| false).is_empty());
+    }
 
     #[test]
     fn the_desktops_own_terminal_is_used_first() {
@@ -365,7 +498,7 @@ mod tests {
         // slice of arguments, so there is no string for a shell to reparse.
         // This test fails to compile if that signature is ever loosened to
         // take one command line.
-        fn takes_argv(f: fn(&str, &[&str]) -> Result<String, OpenRefusal>) -> bool {
+        fn takes_argv<'a>(f: fn(&str, &[&'a str]) -> Result<String, OpenRefusal>) -> bool {
             let _ = f;
             true
         }
@@ -458,13 +591,118 @@ mod tests {
     }
 
     #[test]
-    fn gio_gets_its_subcommand_and_a_terminator() {
-        let p = Path::new("/tmp/-leading-dash.txt");
-        let cmd = command_for("gio", p);
-        let args: Vec<_> = cmd.get_args().collect();
-        assert_eq!(args[0], "open");
-        assert_eq!(args[1], "--", "a leading dash must not become a flag");
-        assert_eq!(args[2], p.as_os_str());
+    fn gio_and_handlr_get_the_open_subcommand_and_one_path() {
+        let path = Path::new("-two words.txt");
+        for opener in ["gio", "handlr"] {
+            let cmd = command_for(opener, path);
+            assert_eq!(cmd.get_program(), opener);
+            assert_eq!(
+                cmd.get_args().collect::<Vec<_>>(),
+                [OsStr::new("open"), OsStr::new("--"), path.as_os_str()]
+            );
+        }
+    }
+
+    /// A fake opener: a script in a temp dir, run by `sh` so the test never
+    /// executes a file it has just written (no ETXTBSY) and never starts a
+    /// real application.
+    fn fake_opener(tag: &str, body: &str) -> (PathBuf, Child) {
+        let d = std::env::temp_dir().join(format!("gust-opener-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let script = d.join("xdg-open");
+        std::fs::write(&script, format!("#!/bin/sh\n{body}\n")).unwrap();
+        let child = Command::new("sh")
+            .arg(&script)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        (d, child)
+    }
+
+    #[test]
+    fn an_opener_that_reports_failure_is_a_failure_not_a_missing_app() {
+        for (code, reason) in [
+            (3, "a required desktop tool is missing"),
+            (4, OPENER_REPORTED_FAILURE),
+        ] {
+            let (d, child) = fake_opener(&format!("none-{code}"), &format!("exit {code}"));
+            let (tx, rx) = std::sync::mpsc::channel();
+            watch_opener("xdg-open", child, move |refusal| {
+                let _ = tx.send(refusal);
+            });
+            assert_eq!(
+                rx.recv_timeout(Duration::from_secs(10)).ok(),
+                Some(OpenRefusal::Failed(reason.into())),
+                "xdg-open exit {code}"
+            );
+            std::fs::remove_dir_all(&d).ok();
+        }
+    }
+
+    #[test]
+    fn an_opener_that_succeeds_reports_nothing() {
+        let (d, child) = fake_opener("fine", "exit 0");
+        let (tx, rx) = std::sync::mpsc::channel::<OpenRefusal>();
+        watch_opener("xdg-open", child, move |refusal| {
+            let _ = tx.send(refusal);
+        });
+        // The sender is dropped unused once the opener has been reaped.
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(10)),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
+        );
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn only_a_prompt_xdg_open_failure_is_reported() {
+        let soon = Duration::from_millis(200);
+        for code in [Some(0), Some(1), Some(2), None] {
+            assert_eq!(refusal_from_exit("xdg-open", code, soon), None, "{code:?}");
+        }
+        // xdg-open may live as long as the application: a failure an hour in
+        // is that application ending badly, not a failed open.
+        assert_eq!(
+            refusal_from_exit("xdg-open", Some(4), Duration::from_secs(3600)),
+            None
+        );
+    }
+
+    #[test]
+    fn gio_reports_a_dispatch_failure_even_if_the_desktop_took_time_to_reply() {
+        assert_eq!(
+            refusal_from_exit("gio", Some(2), Duration::from_secs(60)),
+            Some(OpenRefusal::Failed(OPENER_REPORTED_FAILURE.into())),
+        );
+        for code in [Some(0), Some(1), Some(4), None] {
+            assert_eq!(refusal_from_exit("gio", code, Duration::ZERO), None);
+        }
+    }
+
+    #[test]
+    fn handlr_reports_unsuccessful_dispatch() {
+        let elapsed = Duration::from_secs(60);
+        assert_eq!(refusal_from_exit("handlr", Some(0), elapsed), None);
+        assert_eq!(
+            refusal_from_exit("handlr", Some(1), elapsed),
+            Some(OpenRefusal::Failed(OPENER_REPORTED_FAILURE.into())),
+        );
+    }
+
+    #[test]
+    fn a_detached_child_is_reaped_not_left_defunct() {
+        let (d, child) = fake_opener("reap", "exit 0");
+        let proc_entry = PathBuf::from(format!("/proc/{}", child.id()));
+        reap(child);
+        // A zombie keeps its /proc entry until its parent waits for it.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while proc_entry.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!proc_entry.exists(), "the child was never waited for");
+        std::fs::remove_dir_all(&d).ok();
     }
 
     #[test]

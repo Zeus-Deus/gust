@@ -215,18 +215,332 @@ sys.exit(23 if os.environ.get('CASE') in ('failure', 'diagnostic', 'build-script
 
 
 class FixtureContainmentTests(unittest.TestCase):
-    def test_fresh_fixture_is_built_and_sibling_data_is_untouched(self):
+    def test_missing_section_fails_before_desktop_setup(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runner = root / "qa-one.sh"
+            shutil.copy2(ROOT / "tests/qa-one.sh", runner)
+            # Trap any attempt to enter the desktop harness on the test host.
+            (root / "qa-lib.sh").write_text('touch "$1/setup-started"\nexit 0\n')
+            for section in (root / "missing.sh", root):
+                with self.subTest(section=section):
+                    result = subprocess.run(["bash", str(runner), str(section), str(root)],
+                                            capture_output=True, text=True, timeout=5)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("readable QA section", result.stderr)
+                    self.assertFalse((root / "setup-started").exists())
+
+    def test_section_ending_in_newline_sources_the_selected_sibling(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runner = root / "qa-one.sh"
+            shutil.copy2(ROOT / "tests/qa-one.sh", runner)
+            (root / "qa-lib.sh").write_text("""
+                OUTDIR=$1; FIXTURE=$1; LOG=$1/gust.log
+                PASS=0; FAIL=0; RESULTS=()
+                start_gust() { cd /; }
+                stop_gust() { :; }
+                finish_fixture() { :; }
+            """)
+            sections = (("section", "plain"), ("section\n", "newline"))
+            for name, marker in sections:
+                (root / name).write_text(f'RESULTS=("{marker}")\n')
+            for name, marker in sections:
+                with self.subTest(name=name):
+                    subprocess.run(["bash", runner, name, root], cwd=root, capture_output=True,
+                                   check=True, timeout=5)
+                    self.assertEqual((root / "results.txt").read_text(), marker + "\n")
+
+    def test_fixture_setup_failure_retains_workspace_before_desktop_or_cleanup(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            root = Path(temporary)
+            for name in ("qa.sh", "qa-one.sh", "make-fixture.sh", "fixture-root.py"):
+                shutil.copy2(ROOT / "tests" / name, root)
+            # Give the production runners a private lock, sentinel and scratch directory.
+            for name in ("qa-lib.sh", "qa-fixture.sh"):
+                script = (ROOT / "tests" / name).read_text()
+                (root / name).write_text(script.replace("/tmp/gust-", f"{root}/gust-"))
+
+            calls = root / "calls"
+            for name in ("vmsession", "sudo", "pkill", "gust", "unshare"):
+                double = root / name
+                double.write_text('#!/bin/sh\necho "${0##*/} $*" >> "$CALLS"\nexit 1\n')
+                double.chmod(0o700)
+            section = root / "section.sh"
+            section.write_text('echo "section ran" >> "$CALLS"\n')
+            env = {"PATH": f"{root}:{os.defpath}", "HOME": temporary, "CALLS": str(calls),
+                   "GUST_BIN": str(root / "gust"), "GUST_FIXTURE": temporary}
+            sentinel = root / "gust-fixture-EXECUTED"
+            for failure in ("fixture refused", ".cache"):
+                if failure == ".cache":
+                    # The builder succeeds. The real mkdir cannot create .cache over a file.
+                    del env["GUST_FIXTURE"]
+                    (root / "make-fixture.sh").write_text(
+                        '#!/bin/sh\nmkdir -p "$1/Projects" && echo evidence > "$1/.cache"\n')
+                for command in ([root / "qa.sh"], [root / "qa-one.sh", section]):
+                    with self.subTest(runner=command[0].name, failure=failure):
+                        calls.write_text("")
+                        sentinel.write_text("retain")
+                        before = set(root.glob("gust-fixture.*"))
+                        result = subprocess.run([*command, root / "out"], env=env,
+                                                capture_output=True, text=True, timeout=20)
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertIn(failure, result.stderr)
+                        self.assertNotIn("fixture built", result.stdout)
+                        self.assertEqual(calls.read_text(), "")
+                        self.assertEqual(sentinel.read_text(), "retain")
+                        workspace, = set(root.glob("gust-fixture.*")) - before
+                        self.assertTrue(workspace.is_dir())
+                        if failure == ".cache":
+                            self.assertEqual((workspace / "home/.cache").read_text(), "evidence\n")
+
+    def test_section_disappearing_after_setup_preserves_evidence(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runner = root / "qa-one.sh"
+            shutil.copy2(ROOT / "tests/qa-one.sh", runner)
+            section = root / "selected section.sh"
+            section.touch()
+            (root / "qa-lib.sh").write_text("""
+                OUTDIR=$1
+                FIXTURE=$OUTDIR/home
+                LOG=$OUTDIR/gust.log
+                PASS=0; FAIL=0; RESULTS=()
+                start_gust() { mv -- "$SECTION" "$SECTION.moved"; }
+                stop_gust() { :; }
+                bad() { FAIL=$((FAIL+1)); RESULTS+=("FAIL $1"); }
+                finish_fixture() { touch "$OUTDIR/cleanup-called"; }
+            """)
+            result = subprocess.run(["bash", str(runner), str(section), str(root)],
+                                    capture_output=True, timeout=5)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertTrue((root / "selected section.sh.moved").is_file())
+            self.assertIn(str(section), (root / "results.txt").read_text())
+            self.assertFalse((root / "cleanup-called").exists())
+
+    def test_failed_results_write_preserves_passing_fixture(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runner = root / "qa-one.sh"
+            shutil.copy2(ROOT / "tests/qa-one.sh", runner)
+            section = root / "pass.sh"
+            section.write_text('PASS=1; RESULTS=("PASS section ran")\n')
+            (root / "qa-lib.sh").write_text("""
+                OUTDIR=$1
+                FIXTURE=$OUTDIR/home
+                LOG=$OUTDIR/gust.log
+                FAIL=0
+                start_gust() { mkdir "$FIXTURE"; }
+                stop_gust() { :; }
+                finish_fixture() { rmdir "$FIXTURE"; }
+            """)
+            for failure in ("open", "write"):
+                with self.subTest(failure=failure):
+                    out = root / failure
+                    out.mkdir()
+                    results = out / "results.txt"
+                    if failure == "open":
+                        results.mkdir()
+                    else:
+                        results.symlink_to("/dev/full")
+                    result = subprocess.run(["bash", str(runner), str(section), str(out)],
+                                            capture_output=True, text=True, timeout=5)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(str(results), result.stderr)
+                    self.assertTrue((out / "home").is_dir())
+
+    def test_fixture_ending_in_newline_is_distinct_from_its_sibling(self):
         with tempfile.TemporaryDirectory(prefix="gust-fresh-fixture-") as temporary:
             parent = Path(temporary)
-            sibling = parent / "keep"
+            sibling = parent / "fixture"
             sibling.write_text("outside fixture")
-            destination = parent / "fixture"
+            destination = parent / "fixture\n"
             result = subprocess.run([str(ROOT / "tests/make-fixture.sh"), str(destination)],
                                     capture_output=True, timeout=20)
             self.assertEqual(result.returncode, 0)
             self.assertEqual(len(list((destination / "big").iterdir())), 5000)
             self.assertEqual(sibling.read_text(), "outside fixture")
             self.assertEqual(destination.stat().st_mode & 0o777, 0o700)
+
+    def test_runner_returns_builder_failure_before_normalizing(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            root = Path(temporary)
+            builder = root / "make-fixture.sh"
+            builder.write_text('#!/bin/sh\nprintf "%s" "$1" > "$HERE/received"\nexit 23\n')
+            builder.chmod(0o700)
+            spelling = f"{root}/../{root.name}/"
+            result = subprocess.run(["bash", "-uc", """
+                source "$1"
+                export HERE=$2
+                GUST_FIXTURE=$3
+                prepare_fixture
+                status=$?
+                rmdir -- "$qa_run_dir" || exit 1
+                exit "$status"
+            """, "qa-fixture-test", str(ROOT / "tests/qa-fixture.sh"), temporary, spelling],
+                                    capture_output=True, timeout=5)
+            self.assertEqual(result.returncode, 23)
+            self.assertEqual((root / "received").read_text(), spelling)
+
+    @staticmethod
+    def load_copy_crash():
+        spec = importlib.util.spec_from_file_location("qa_copy_crash", ROOT / "tests/qa-copy-crash.py")
+        crash = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(crash)
+        return crash
+
+    def test_killed_transfer_checks_every_published_payload(self):
+        crash = self.load_copy_crash()
+        with tempfile.TemporaryDirectory() as temporary:
+            dest = Path(temporary)
+            expected = dict(crash.originals())
+            names = [name for name in expected if name != crash.IN_FLIGHT][:60]
+            for name in names:
+                (dest / name).write_bytes(expected[name])
+            crash.verify_published(dest, names)
+
+            # Corrupt a completed copy beyond the former 50-file sample.
+            last = dest / names[-1]
+            data = last.read_bytes()
+            for damaged in (b"", data[:-1], data + b"!", b"!" + data[1:]):
+                with self.subTest(damaged=damaged):
+                    last.write_bytes(damaged)
+                    with self.assertRaisesRegex(ValueError, "published bytes differ"):
+                        crash.verify_published(dest, names)
+            for invalid in ([], list(expected)):
+                with self.assertRaisesRegex(ValueError, "expected an interrupted subset"):
+                    crash.verify_published(dest, invalid)
+
+    def test_recovery_requires_exact_names_payloads_and_successful_scan(self):
+        crash = self.load_copy_crash()
+        expected = dict(crash.originals())
+        first, second, spare = list(expected)[:3]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            dest = root / "dest"
+            dest.mkdir()
+            (root / "published.json").write_text(json.dumps([first, second]))
+            for name in (first, second):
+                (dest / name).write_bytes(expected[name])
+
+            (dest / first).unlink()
+            with self.assertRaisesRegex(ValueError, f"missing .*{first}"):
+                crash.verify_recovered(root)
+            # A valid, byte-exact replacement restores the count but not the names.
+            (dest / spare).write_bytes(expected[spare])
+            with self.assertRaisesRegex(ValueError, f"unexpected .*{spare}"):
+                crash.verify_recovered(root)
+            (dest / spare).unlink()
+
+            (dest / first).write_bytes(b"!" * len(expected[first]))
+            with self.assertRaisesRegex(ValueError, "published bytes differ"):
+                crash.verify_recovered(root)
+            (dest / first).write_bytes(expected[first])
+            for extra in (crash.IN_FLIGHT, ".gust-staging-survivor"):
+                with self.subTest(extra=extra):
+                    (dest / extra).touch()
+                    with self.assertRaisesRegex(ValueError, f"unexpected .*{extra}"):
+                        crash.verify_recovered(root)
+                    (dest / extra).unlink()
+
+            dest.rename(root / "unavailable")
+            with self.assertRaises(FileNotFoundError):
+                crash.verify_recovered(root)
+
+    def test_crash_requires_the_owned_signal_staged_prefix_and_no_early_publication(self):
+        crash = self.load_copy_crash()
+        # Real child, signal, file-size limit and inotify events. Only the
+        # copier is a double. A normal exit with the shell's signal status
+        # must be distinguishable from actual signal death.
+        writer = """
+import os, signal, sys, time
+from pathlib import Path
+root, name, mode = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+signal.signal(signal.SIGXFSZ, signal.SIG_DFL)
+while not (root / "armed").exists():
+    time.sleep(0.01)
+(root / "pid").write_text(str(os.getpid()))
+if mode == "stalled":
+    time.sleep(30)
+stage = root / "dest" / f".gust-staging-{os.getpid()}-0"
+final = root / "dest" / name
+data = (root / "src" / name).read_bytes()
+completed = "k-00001.dat"
+(root / "dest" / completed).write_bytes((root / "src" / completed).read_bytes())
+if mode == "transient":
+    final.touch()
+    final.unlink()
+if mode == "published":
+    stage = final
+if mode == "unrelated":
+    stage = root / "unrelated"
+if mode == "corrupt":
+    data = b"!" + data[1:]
+if mode == "changed-source":
+    (root / "src/k-00001.dat").write_bytes(b"!" * len(b"k-00001.dat\\n"))
+if mode == "normal-exit":
+    stage.write_bytes(data[:int(sys.argv[4])])
+    sys.exit(128 + signal.SIGXFSZ)
+stage.write_bytes(data)
+"""
+        for mode, failure in (("correct", None), ("transient", "final name"),
+                              ("published", "final name"), ("corrupt", "prefix"),
+                              ("unrelated", "one staging file"), ("normal-exit", "SIGXFSZ"),
+                              ("changed-source", "original payload changed"), ("stalled", "timed out")):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                crash.prepare(root)
+                (root / "ready-to-paste").touch()
+                command = [sys.executable, "-c", writer, tmp, crash.IN_FLIGHT, mode, str(crash.LIMIT)]
+                if failure is None:
+                    crash.observe(root, command, timeout=5)
+                    self.assertEqual(json.loads((root / "published.json").read_text()), ["k-00001.dat"])
+                    next((root / "dest").glob(".gust-staging-*")).unlink()
+                    crash.verify_recovered(root)
+                else:
+                    error = subprocess.TimeoutExpired if mode == "stalled" else ValueError
+                    with self.assertRaisesRegex(error, failure):
+                        crash.observe(root, command, timeout=1 if mode == "stalled" else 5)
+                self.assertFalse(Path("/proc", (root / "pid").read_text()).exists())
+
+    def test_runner_normalizes_trailing_slash_and_preserves_fixture_siblings(self):
+        with tempfile.TemporaryDirectory(prefix="gust-qa-siblings-", dir="/tmp") as temporary:
+            parent = Path(temporary)
+            home = parent / "explicit home"
+            home.mkdir()
+            siblings = ["panes", "peek", "perm", "arch", "bulk", "openwith", "multiopen", "clip"]
+            for name in siblings:
+                sibling = parent / f"{home.name}-{name}"
+                sibling.mkdir()
+                (sibling / "sentinel").write_text(name)
+
+            subprocess.run(["bash", "-euc", """
+                HERE=$1
+                GUST_FIXTURE="$2/"
+                unset GUST_KEEP_FIXTURE
+                source "$HERE/qa-fixture.sh"
+                prepare_fixture
+                test "$FIXTURE" = "$2"
+                for tree in "$PANEDIR" "$QLDIR" "$DELDIR" "$ARCDIR" "$BULKDIR" "$OWDIR" "$MODIR" "$CLIPDIR"; do
+                    test "$(dirname -- "$tree")" = "$qa_run_dir"
+                    mkdir -- "$tree"
+                    rmdir -- "$tree"
+                done
+                prepare_pane_fixture
+                test "$(cat "$PANEDIR/paneL/p1.txt")" = one
+                test "$(cat "$PANEDIR/paneL/p2.txt")" = two
+                finish_fixture
+                # If cleanup namespaces are unavailable, remove only the
+                # files and empty directories that this test just created.
+                if [[ -d $qa_run_dir ]]; then
+                    rm -- "$PANEDIR/paneL/p1.txt" "$PANEDIR/paneL/p2.txt"
+                    rmdir -- "$PANEDIR/paneL" "$PANEDIR/paneR" "$PANEDIR" "$qa_run_dir"
+                fi
+            """, "qa-fixture-test", str(ROOT / "tests"), str(home)], check=True, timeout=20)
+
+            self.assertTrue((home / "Projects/omarchy/README.md").is_file())
+            for name in siblings:
+                self.assertEqual((parent / f"{home.name}-{name}" / "sentinel").read_text(), name)
 
     def test_existing_files_and_symlink_targets_survive_fixture_builder(self):
         with tempfile.TemporaryDirectory(prefix="gust-containment-") as temporary:
@@ -241,6 +555,44 @@ class FixtureContainmentTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertEqual(sentinel.read_text(), "preserve this data")
             self.assertFalse((root / "Projects").exists())
+
+    def test_fixture_cleanup_preserves_mounts_and_checks_directory_identity(self):
+        namespace = ["unshare", "--user", "--map-root-user", "--mount", "--propagation", "private"]
+        cleanup_namespace = ["unshare", "--user", "--map-current-user", "--mount", "--propagation", "private"]
+        if (not shutil.which("unshare")
+                or subprocess.run([*namespace, *cleanup_namespace, "true"], capture_output=True).returncode):
+            self.skipTest("private user and mount namespaces unavailable")
+        with tempfile.TemporaryDirectory(prefix="gust-fixture-cleanup-") as temporary:
+            parent = Path(temporary)
+            run = parent / "run"
+            mountpoint = run / "nested mount"
+            mountpoint.mkdir(parents=True)
+            peer = parent / "peer"
+            peer.mkdir()
+            (peer / "sentinel").write_text("outside")
+            (run / "local").write_text("inside")
+            subprocess.run([*namespace, "bash", "-euc", """
+                source "$1"
+                unset GUST_KEEP_FIXTURE
+                qa_run_dir="$2/run"
+                qa_run_dir_id=$(stat -c '%d:%i' -- "$qa_run_dir")
+                mount --bind "$2/peer" "$qa_run_dir/nested mount"
+                finish_fixture
+                test -f "$qa_run_dir/local"
+                test -f "$2/peer/sentinel"
+                umount "$qa_run_dir/nested mount"
+
+                mv "$qa_run_dir" "$2/original"
+                mkdir "$qa_run_dir"
+                finish_fixture
+                test -d "$qa_run_dir"
+                rmdir "$qa_run_dir"
+                mv "$2/original" "$qa_run_dir"
+                finish_fixture
+                test ! -e "$qa_run_dir"
+            """, "fixture-cleanup", str(ROOT / "tests/qa-fixture.sh"), temporary],
+                           check=True, timeout=20)
+            self.assertEqual((peer / "sentinel").read_text(), "outside")
 
     def test_root_and_home_are_rejected_before_mutation(self):
         for destination in ("/", str(Path.home()), str(ROOT), "/tmp"):
