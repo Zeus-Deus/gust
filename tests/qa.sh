@@ -291,44 +291,78 @@ cp "$OPEN/trap.sh" "$OPEN/noexec.sh"; chmod 644 "$OPEN/noexec.sh"
 echo "plain text" > "$OPEN/document.txt"
 rm -f /tmp/gust-fixture-EXECUTED
 
-require_goto "$OPEN"
+# Record the actual opener arguments. A desktop handler can otherwise take
+# focus and receive the rest of the suite's input, including undo shortcuts.
+opener_fail() {
+  bad "$1"
+  save_results
+  exit 1
+}
+opener_expect() {
+  local label="$1" expr="$2" want="$3"
+  wait_for "$expr" "$want" || opener_fail "$label: expected '$want', got '$(state "$expr")'"
+  ok "$label"
+}
+active_gust_address() {
+  vm hyprctl activewindow -j | python3 -c '
+import json, sys
+window = json.load(sys.stdin)
+print(window.get("address", "") if window.get("class") == "gust" else "")
+'
+}
+opener_key() {
+  local active
+  active="$(active_gust_address)" || opener_fail "could not check keyboard focus before $1"
+  [[ "$active" == "$opener_window" ]] || opener_fail "opener window lost keyboard focus before $1"
+  key "$1"
+}
 
-key Home              # document.txt sorts first
-key Return
-sleep 1.5
-if [[ "$(state "d['hintStatus']")" == *"Opened"* ]]; then
-  ok "a document is handed to the desktop opener  ($(state "d['hintStatus']"))"
-else
-  bad "document did not open (hint='$(state "d['hintStatus']")')"
-fi
+opener_bin="$OPEN/.opener"
+mkdir "$opener_bin" || opener_fail "could not create the opener directory"
+cat > "$opener_bin/xdg-open" <<'OPENER' || opener_fail "could not write the opener recorder"
+#!/bin/sh
+printf '%s\0' "$@" >> "$0.args"
+OPENER
+chmod +x "$opener_bin/xdg-open" || opener_fail "could not make the opener executable"
+# Exercise the interpreter and the actual fixture filesystem before pressing Enter.
+"$opener_bin/xdg-open" probe || opener_fail "could not run the opener recorder"
+rm "$opener_bin/xdg-open.args" || opener_fail "could not reset the opener receipt"
+QA_PATH_PREPEND="$opener_bin" start_gust "$OPEN" || opener_fail "could not start Gust in the opener fixture"
+wait_location "$OPEN" || opener_fail "Gust did not open the opener fixture"
+wait_for "d['model']['settled']" "True" || opener_fail "the opener fixture did not settle"
+opener_window="$(active_gust_address)" || opener_fail "could not identify the active opener window"
+[[ -n "$opener_window" ]] || opener_fail "the opener window did not have keyboard focus"
+opener_key Home
+opener_expect "the document is focused" "d['model']['cursor_name']" "document.txt"
+opener_key Return
+for _ in {1..50}; do
+  [[ -s "$opener_bin/xdg-open.args" ]] && break
+  sleep 0.1
+done
+cmp -s "$opener_bin/xdg-open.args" <(printf '%s\0' "$OPEN/document.txt") \
+  && ok "the desktop opener received the exact document path" \
+  || opener_fail "the desktop opener did not receive exactly the document path"
 
-key Down              # noexec.sh — a script WITHOUT the executable bit
-key Return
-sleep 1.2
-if [[ "$(state "d['hintStatus']")" == *"Run"* || "$(state "d['hintStatus']")" == *"executable"* ]]; then
-  ok "a script without +x still needs a deliberate Run"
-else
-  bad "a non-executable script was not refused (hint='$(state "d['hintStatus']")')"
-fi
-
-key Down              # trap.sh — executable
-key Return
-sleep 1.2
-if [[ "$(state "d['hintStatus']")" == *"Run"* || "$(state "d['hintStatus']")" == *"executable"* ]]; then
-  ok "an executable is refused by plain activation"
-else
-  bad "an executable was not refused (hint='$(state "d['hintStatus']")')"
-fi
-
+for script in noexec.sh trap.sh; do
+  opener_key Down
+  opener_expect "cursor on $script" "d['model']['cursor_name']" "$script"
+  opener_key Return
+  opener_expect "a confirmation is visible for $script" "d['confirmOpen']" "True"
+  if [[ "$script" == noexec.sh ]]; then
+    opener_expect "an unpermitted script asks first" "d['confirmTitle']" "Allow noexec.sh to run?"
+  else
+    opener_expect "an executable script asks first" "d['confirmTitle']" "Run trap.sh?"
+  fi
+  opener_key Escape
+  opener_expect "the prompt was dismissed" "d['confirmOpen']" "False"
+done
 [[ ! -f /tmp/gust-fixture-EXECUTED ]] \
-  && ok "SECURITY: no file was executed by opening it" \
-  || bad "SECURITY FAILURE: activation executed a file"
-
-# Opening a document really launches the system's handler. Close what this
-# case started, or instances pile up across runs — 47 were alive before this
-# was added, and they made a later assertion blame the wrong thing.
-pkill -f "nvim $OPEN" 2>/dev/null || true
-sleep 0.3
+  && ok "opening either script executed nothing" \
+  || bad "opening a script executed it"
+cmp -s "$opener_bin/xdg-open.args" <(printf '%s\0' "$OPEN/document.txt") \
+  && ok "only the document reached the opener" \
+  || opener_fail "the opener received an unexpected file"
+start_gust "$FIXTURE" || opener_fail "could not restart Gust after the opener checks"
 
 say "10h · Multi-select acts on exactly what is selected"
 SEL="$FIXTURE/multi"
