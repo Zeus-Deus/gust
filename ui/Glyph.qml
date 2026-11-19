@@ -14,7 +14,13 @@ Text {
         sidebar: 0xF06FD, back: 0xF0141, forward: 0xF0142, up: 0xF005D,
         search: 0xF0349, "new-folder": 0xF0B9D, more: 0xF01D8,
         rows: 0xF0279, grid: 0xF11D9, columns: 0xF1487, settings: 0xF08BB,
-        close: 0xF0156
+        close: 0xF0156,
+        // Sidebar rows. These have no plain fallback: without the icon
+        // font a row is just its name, as it was before.
+        home: 0xF06A1, documents: 0xF09EE, downloads: 0xF01DA,
+        pictures: 0xF0976, videos: 0xF0BDC, music: 0xF0387,
+        recent: 0xF0150, trash: 0xF0A7A, bookmark: 0xF0256,
+        drive: 0xF129F, phone: 0xF011C, computer: 0xF0379, cloud: 0xF0163
     })
     readonly property var plain: ({
         sidebar: "☰", back: "‹", forward: "›", up: "↑",
