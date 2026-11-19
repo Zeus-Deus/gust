@@ -124,3 +124,59 @@ pub fn same_config(a: &str, b: &str) -> bool {
     }
     norm(a) == norm(b)
 }
+
+pub const RULE_BEGIN: &str =
+    "-- >>> gust: Open/Save dialogs float (remove with: gust --file-dialogs off)";
+pub const RULE_END: &str = "-- <<< gust";
+
+/// Omarchy's own treatment for dialogs: floating, centred, its dialog size.
+fn rule_block() -> String {
+    format!(
+        "{RULE_BEGIN}\no.window(\"gust-chooser\", {{ tag = \"+floating-window\" }})\n{RULE_END}\n"
+    )
+}
+
+pub fn has_rule(text: &str) -> bool {
+    text.lines().any(|l| l == RULE_BEGIN)
+}
+
+pub fn add_rule(text: &str) -> String {
+    if has_rule(text) {
+        return text.to_string();
+    }
+    let mut out = text.to_string();
+    if !out.is_empty() && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(&rule_block());
+    out
+}
+
+/// Remove exactly the marked block; every other line is left as it is. A
+/// block that lost its end marker is left alone: nothing says where it stops,
+/// and what follows may be the user's. Check `has_rule` afterwards.
+pub fn remove_rule(text: &str) -> String {
+    let lines: Vec<&str> = text.split_inclusive('\n').collect();
+    let bare = |line: &str| line.trim_end_matches('\n') == RULE_BEGIN;
+    let Some(begin) = lines.iter().position(|l| bare(l)) else {
+        return text.to_string();
+    };
+    let Some(len) = lines[begin..]
+        .iter()
+        .position(|l| l.trim_end_matches('\n') == RULE_END)
+    else {
+        return text.to_string();
+    };
+    let mut out = lines[..begin].concat();
+    out.push_str(&lines[begin + len + 1..].concat());
+    out
+}
+
+/// `~/.config/hypr/windows.lua`, following XDG_CONFIG_HOME.
+pub fn windows_path() -> Option<PathBuf> {
+    let cfg = std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
+    Some(cfg.join("hypr/windows.lua"))
+}

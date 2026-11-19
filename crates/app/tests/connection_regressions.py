@@ -91,11 +91,7 @@ QtObject {
         branch = block(block(dialog, "on" + handler + ":"),
                        'if (confirm.purpose === "share-open")')
         controller = controller.replace("@SHARE_" + handler.upper() + "@", branch)
-    controller = controller.replace("@CONNECT_HANDLER@", block(main_source, "onConnectRequested:"))
-    connect_panel = main_source[main_source.index("    ConnectPanel {"):]
-    controller = controller.replace("@CONNECT_CLOSED@", block(connect_panel, "onClosed:"))
-    controller = controller.replace("@ACTION_HANDLER@", block(main_source, "onActionRequested: (a) => { connectPanel" ) if "onActionRequested: (a) => { connectPanel" in main_source
-                                    else block(main_source[main_source.index("    ConnectPanel {"):], "onActionRequested:"))
+    controller = controller.replace("@CONNECT_PANEL@", block(main_source, "ConnectPanel {\n        id: connectPanel"))
     controller = controller.replace("@CLOUD_BRANCH@", block(main_source, 'else if (a === "cloud-setup")'))
     removed = block(main_source, "onObjectRemoved:")
     controller = controller.replace("@OBJECT_REMOVED@", removed[removed.index("{") + 1:-1])

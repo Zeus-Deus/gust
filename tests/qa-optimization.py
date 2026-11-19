@@ -126,7 +126,7 @@ def main():
         parser.error("output must be a fresh private directory under /tmp or /var/tmp")
     if any(p.is_symlink() for p in (out, *out.parents)) or out.exists():
         parser.error("output must be fresh and have no symlink ancestors")
-    pointer_needed = args.projection or args.pointer_smoke
+    pointer_needed = args.projection or args.pointer_smoke or args.chooser_sort
     required_tools = ("labwc", "dbus-daemon", "wlr-randr", "wtype", "grim")
     if pointer_needed:
         required_tools += ("wayland-scanner", "cc", "pkg-config")
@@ -360,24 +360,22 @@ def main():
               "initial Name listing leaves metadata missing and forces Size reload")
         sorts_path = home / ".config/gust/sorts.toml"
         remembered = sorts_path.read_bytes() if sorts_path.exists() else None
-        # Only Return while the palette is observably open, with the exact
-        # known action first. Never Return on the chooser's file list.
-        for _ in range(8):
-            run(["wtype", ":"])
-            time.sleep(.2)
-            if state().get("paletteOpen"):
-                break
-        wait(lambda: state().get("paletteOpen"), "chooser command palette opened")
-        run(["wtype", "Sort by size"])
-        wait(lambda: state().get("paletteOpen") and state().get("paletteText") == "Sort by size"
-             and state().get("paletteResults", [])[:1] == ["Sort by size"], "exact Sort by size action offered first")
+        # Choosers hide the command palette. Exercise their actual toolbar
+        # menu, retaining the same transient-sort and metadata-reload checks.
+        pointer(state()["sortButtonPoint"])
+        wait(lambda: state().get("menuOpen") and "Size" in state().get("menuPoints", {}),
+             "chooser sort menu opened")
         observe("size-action-offered")
-        shot("chooser-sort-palette")
+        shot("chooser-sort-menu")
+        key("Home")
+        key("Down")
+        key("Down")
+        wait(lambda: state().get("menuCurrent") == "Size", "exact Size menu action highlighted")
         key("Return")
         wait(lambda: settled_after("size-metadata-reload", initial["generation"]), "Size metadata reload settles in a newer generation", 45)
         sorted_model = observe("size-settled")
         assert_size_order(sorted_model, "Size metadata reload")
-        check(not state().get("paletteOpen") and app.poll() is None, "sort action leaves chooser open")
+        check(not state().get("menuOpen") and app.poll() is None, "sort action leaves chooser open")
         shot("chooser-sort-size")
         # Size must remain the reload input even though chooser policy never
         # admitted it to shared remembered preferences.

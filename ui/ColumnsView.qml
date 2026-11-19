@@ -31,6 +31,9 @@ FocusScope {
         }
         return out
     }
+    /// A plain click selects the row as well as moving the cursor. A folder
+    /// dialog answers with the selection, so there a click has to be a choice.
+    property bool clickSelects: false
     /// Where to click each folder or file shown in the parent and preview
     /// columns, keyed by its raw path token, in window coordinates, with the
     /// revision of the response that drew them (qa). Only delegates that
@@ -387,7 +390,8 @@ FocusScope {
                                     root.contextRequested(index, g.x, g.y)
                                     return
                                 }
-                                root.model.focus_row(index)
+                                if (root.clickSelects) root.model.sel_only(index)
+                                else root.model.focus_row(index)
                                 root.selectionTouched()
                             }
                             onDoubleClicked: root.activated(index)
