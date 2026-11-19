@@ -420,12 +420,16 @@ pub fn run() -> i32 {
         eprintln!("gust: could not watch chooser owners: {error}");
         return 1;
     }
-    if !matches!(
-        conn.request_name(NAME, false, false, true),
-        Ok(RequestNameReply::PrimaryOwner)
-    ) {
-        eprintln!("gust: could not own {NAME}");
-        return 1;
+    match conn.request_name(NAME, false, false, true) {
+        Ok(RequestNameReply::PrimaryOwner | RequestNameReply::AlreadyOwner) => {}
+        Ok(_) => {
+            eprintln!("gust: {NAME} is already owned");
+            return 1;
+        }
+        Err(error) => {
+            eprintln!("gust: could not acquire {NAME}: {error}");
+            return 1;
+        }
     }
     i32::from(serve(conn.channel(), &start_chooser).is_err())
 }
