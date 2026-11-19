@@ -155,8 +155,11 @@ def main():
         check(not state()['places']['computers'], 'iPhone and iPad are not advertised as SSH computers')
         palette('connect'); wait(lambda: state().get('connectOpen'), 'Connect opened')
         rows = state().get('connectRows', [])
-        check(all(r.get('detail') == 'Phone or tablet · send and get files' for r in rows if r.get('kind') == 'mobile'),
-              'Connect describes phones and tablets without guessing the model')
+        mobile = [r for r in rows if r.get('kind') == 'mobile']
+        check([r.get('label') for r in mobile] == ['iphone-15', 'ipad']
+              and any(r.get('type') == 'head' and r.get('text') == 'Phones and tablets' for r in rows)
+              and all(r.get('detail') == 'Send and get files' for r in mobile),
+              'Connect lists both phones and tablets with their sharing action')
         shot('01-apple-devices')
         wait(lambda: state().get('connectSelection') == 'mobile:iphone-15', 'Connect selects the first device')
         check(state().get('connectSelection') == 'mobile:iphone-15', 'Connect opens with a device ready for Enter')
