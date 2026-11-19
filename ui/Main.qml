@@ -4237,6 +4237,7 @@ Window {
 
     SettingsPanel {
         id: settingsPanel
+        onCurrentChanged: win.qaDump("settings-row")
         // Bound, never assigned: every published snapshot reaches the panel.
         s: win.prefs
         status: win.prefsStatus
@@ -4854,6 +4855,8 @@ Window {
             chooserError: chooserBar.error,
             settingsOpen: settingsPanel.open,
             settingsPoints: settingsPanel.open ? { close: win.qaPoint(settingsPanel.closeButton) } : {},
+            settingsOptionPoints: settingsPanel.open ? settingsPanel.visibleOptionPoints() : {},
+            settingsScrollY: settingsPanel.scrollY,
             trashOpen: trashPanel.open,
             recentOpen: recentPanel.open,
             deleteTotal: dirModel.delete_total,

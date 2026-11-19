@@ -1,7 +1,7 @@
 import QtQuick
 import com.gust.app
 
-// Settings — five choices, each one row, each a set of clickable options.
+// Settings — one row of clickable options per preference.
 // Everything shown here is honoured: nothing is listed that Gust ignores.
 // A choice shows as soon as it is accepted; the preferences worker saves it
 // to ~/.config/gust/settings.toml, and the status line says "Saved" only
@@ -14,6 +14,7 @@ Item {
 
     property bool open: false
     readonly property alias closeButton: close
+    readonly property alias scrollY: body.contentY
     // Parsed DirModel.settings_json(), bound by the window (never assigned
     // here, so every published snapshot arrives).
     property var s: ({})
@@ -81,6 +82,22 @@ Item {
         Qt.callLater(() => keys.forceActiveFocus())
     }
     function hide() { root.open = false; root.closed() }
+    // The desktop probe clicks only options wholly inside the clipped viewport.
+    function visibleOptionPoints() {
+        const points = {}
+        const row = rowRepeater.itemAt(current)
+        if (!row) return points
+        for (let i = 0; i < row.buttons.count; ++i) {
+            const button = row.buttons.itemAt(i)
+            if (!button) continue
+            const p = button.mapToItem(body, 0, 0)
+            if (p.x < 0 || p.x + button.width > body.width ||
+                p.y < 0 || p.y + button.height > body.height) continue
+            const center = button.mapToItem(null, button.width / 2, button.height / 2)
+            points[button.modelData[0]] = [Math.round(center.x), Math.round(center.y)]
+        }
+        return points
+    }
     /// Take the keyboard back after something shown over the panel (a
     /// confirmation) goes, on the row the user was on.
     function refocus() { if (root.open) keys.forceActiveFocus() }
@@ -207,13 +224,18 @@ Item {
                         required property var modelData
                         required property int index
                         width: col.width
+                        readonly property alias buttons: optionRepeater
+                        readonly property real availableWidth: width - Tokens.spaceSm * 2
+                        readonly property bool stacked: title.implicitWidth + Tokens.spaceSm
+                                                         + options.preferredWidth > availableWidth
                         // A row marked `live` takes its note from the snapshot.
                         readonly property string note: root.busyKey === modelData.key ? qsTr("Checking…")
                             : modelData.live === "renderer"
                               ? qsTr("Next start. Now: ") + (root.s.renderer_now === "software" ? qsTr("software") : qsTr("GPU"))
                             : modelData.live === "omarchy" ? (root.s.is_omarchy ? qsTr("Reversible") : qsTr("Needs Omarchy"))
                             : modelData.note
-                        height: Tokens.controlHeight + (rowItem.note !== "" ? Tokens.fontCaption + Tokens.spaceXs : 0)
+                        height: (noteText.visible ? noteText.y + noteText.height
+                                                  : options.y + options.height) + Tokens.spaceXs
                         color: root.current === index
                                ? Tokens.withAlpha(Tokens.selectedBackground, Math.max(Tokens.selectedAlpha, 0.14))
                                : "transparent"
@@ -228,17 +250,22 @@ Item {
                             textFormat: Text.PlainText
                             id: title
                             x: Tokens.spaceSm
-                            y: Math.round((Tokens.controlHeight - height) / 2)
-                            width: Math.round(Tokens.rowHeight * 5)
+                            y: rowItem.stacked ? Tokens.spaceXs : Math.round((Tokens.controlHeight - height) / 2)
+                            width: Math.min(implicitWidth, rowItem.availableWidth)
+                            wrapMode: Text.Wrap
                             text: modelData.title
                             color: Tokens.foreground
                             font.family: Tokens.fontFamily
                             font.pixelSize: Tokens.fontBody
                         }
                         Text {
+                            id: noteText
                             textFormat: Text.PlainText
                             x: Tokens.spaceSm
-                            y: Tokens.controlHeight - Tokens.spaceXs
+                            y: rowItem.stacked ? options.y + options.height + Tokens.spaceXs
+                                               : Tokens.controlHeight - Tokens.spaceXs
+                            width: rowItem.availableWidth
+                            wrapMode: Text.Wrap
                             objectName: "settingsNote-" + rowItem.modelData.key
                             visible: rowItem.note !== ""
                             text: rowItem.note
@@ -246,18 +273,31 @@ Item {
                             font.family: Tokens.fontFamily
                             font.pixelSize: Tokens.fontCaption
                         }
-                        Row {
-                            anchors.right: parent.right
-                            anchors.rightMargin: Tokens.spaceSm
-                            y: Math.round((Tokens.controlHeight - height) / 2)
+                        Flow {
+                            id: options
+                            readonly property real preferredWidth: {
+                                let total = Math.max(0, optionRepeater.count - 1) * spacing
+                                for (let i = 0; i < optionRepeater.count; ++i) {
+                                    const button = optionRepeater.itemAt(i)
+                                    if (button) total += button.implicitWidth
+                                }
+                                return total
+                            }
+                            width: Math.min(preferredWidth, rowItem.availableWidth)
+                            x: rowItem.stacked ? Tokens.spaceSm : rowItem.width - Tokens.spaceSm - width
+                            y: rowItem.stacked ? title.y + title.height + Tokens.spaceXs
+                                               : Math.round((Tokens.controlHeight - height) / 2)
                             spacing: Tokens.spaceXs
                             Repeater {
+                                id: optionRepeater
                                 model: rowItem.modelData.options
                                 delegate: Rectangle {
                                     required property var modelData
                                     readonly property bool chosen: root.valueOf(rowItem.modelData.key) === modelData[0]
-                                    width: optLabel.implicitWidth + Tokens.spaceLg * 2
-                                    height: Tokens.controlHeight - Tokens.spaceSm
+                                    implicitWidth: optLabel.implicitWidth + Tokens.spaceLg * 2
+                                    width: Math.min(implicitWidth, rowItem.availableWidth)
+                                    height: rowItem.stacked ? optLabel.height + Tokens.spaceSm * 2
+                                                            : Tokens.controlHeight - Tokens.spaceSm
                                     // Same treatment as the palette and menus: the
                                     // theme's selection colour at low alpha, so the
                                     // label keeps full contrast in every theme.
@@ -269,6 +309,9 @@ Item {
                                         textFormat: Text.PlainText
                                         id: optLabel
                                         anchors.centerIn: parent
+                                        width: parent.width - Tokens.spaceLg * 2
+                                        wrapMode: Text.Wrap
+                                        horizontalAlignment: Text.AlignHCenter
                                         text: modelData[1]
                                         color: chosen ? Tokens.foregroundBright : Tokens.foreground
                                         font.bold: chosen

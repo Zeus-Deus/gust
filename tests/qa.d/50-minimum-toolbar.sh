@@ -28,6 +28,27 @@ toolbar_menu_click() {
   toolbar_click toolbarPoints more && toolbar_click menuPoints "$1"
 }
 
+roomy_settings_options() {
+  local preset
+  key Down
+  key Right
+  expect "Roomy density takes effect" "d['settings']['density']" "roomy"
+  key Down
+  expect "navigating lower settings scrolls the body" "d['settingsScrollY'] > 0" "True"
+  key Up
+  key Up
+  expect "scrolling back reveals all four complete Keys buttons" \
+    "sorted(d['settingsOptionPoints'])" "['mac', 'standard', 'vim', 'windows']"
+  shot "50-settings-keys-roomy"
+  for preset in vim mac windows standard; do
+    toolbar_click settingsOptionPoints "$preset" || return 1
+    expect "the $preset button selects its Keys preset" "d['keyPreset']" "$preset"
+  done
+  key Down
+  key Left
+  expect "normal density is restored" "d['settings']['density']" "normal"
+}
+
 compact_toolbar_navigation() {
   local folder="$1"
   expect "Up ends before More begins" \
@@ -96,6 +117,7 @@ minimum_toolbar() {
     expect "text zoom" "d['zoom']" "$zoom"
     expect "theme spacing scale" "d['spacingScale']" "$spacing"
     shot "50-settings-$zoom$shot_suffix"
+    if [[ "$spacing" == 2 ]]; then roomy_settings_options || return 1; fi
     toolbar_click settingsPoints close || return 1
     expect "Close dismisses Settings" "d['settingsOpen']" "False"
     shot "50-breadcrumbs-$zoom$shot_suffix"
