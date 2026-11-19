@@ -638,6 +638,24 @@ pub fn launch_many(handler: &Handler, paths: &[PathBuf]) -> MultiOpen {
         ));
     }
 
+    // A terminal program started bare has nothing to draw on: it would
+    // "open" and show nothing.
+    if handler.terminal && takes_many(&handler.exec) {
+        let argv = exec_argv_many(&handler.exec, paths);
+        let Some((program, args)) = argv.split_first() else {
+            return MultiOpen::Refused("empty command".into());
+        };
+        // The program is Exec text, so this conversion loses nothing.
+        let program = Path::new(program).to_string_lossy();
+        return match super::run_in_terminal(&program, args) {
+            Ok(_) => MultiOpen::Together {
+                app: handler.name.clone(),
+                count: paths.len(),
+            },
+            Err(_) => MultiOpen::Refused(format!("{} could not be started", handler.name)),
+        };
+    }
+
     if takes_many(&handler.exec) {
         let argv = exec_argv_many(&handler.exec, paths);
         if argv.is_empty() {
