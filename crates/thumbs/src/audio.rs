@@ -153,10 +153,8 @@ pub fn decoder_argv(path: &Path, scratch: &Path, start: f64) -> Vec<String> {
     // and memory, not the preview helpers' 20-second wall clock.
     spec.cpu_seconds = 3600;
     spec.wall_timeout_seconds = 12 * 3600;
-    // ffmpeg's decoder threads reserve address space for their stacks; under
-    // the helpers' 512 MiB cap about 1 run in 10 failed to start one (EINVAL
-    // / EAGAIN from pthread_create) on an 8-core VM. 1 GiB: 0 in 48. This
-    // caps address space, not memory actually used.
+    // Keep the established address-space limit and bound FFmpeg's thread
+    // pools so playback does not reserve more stacks on a many-core host.
     spec.address_space_bytes = 1024 * 1024 * 1024;
     let start = format!("{:.3}", start.max(0.0));
     spec.bwrap_argv(
@@ -166,6 +164,10 @@ pub fn decoder_argv(path: &Path, scratch: &Path, start: f64) -> Vec<String> {
             "-hide_banner",
             "-loglevel",
             "error",
+            "-filter_threads",
+            "1",
+            "-threads",
+            "1",
             "-ss",
             &start,
             "-i",
@@ -178,6 +180,8 @@ pub fn decoder_argv(path: &Path, scratch: &Path, start: f64) -> Vec<String> {
             "s16le",
             "-acodec",
             "pcm_s16le",
+            "-threads",
+            "1",
             "-ac",
             "2",
             "-ar",
@@ -653,6 +657,10 @@ mod tests {
         let i = a.iter().position(|x| x == "-ss").unwrap();
         assert_eq!(a[i + 1], "12.500");
         assert!(a.iter().any(|x| x == "/in/input"));
+        let input = a.iter().position(|x| x == "-i").unwrap();
+        assert!(a[..input].windows(2).any(|args| args == ["-threads", "1"]));
+        assert!(a[input..].windows(2).any(|args| args == ["-threads", "1"]));
+        assert!(a.windows(2).any(|args| args == ["-filter_threads", "1"]));
         assert!(a.iter().any(|x| x == "--cpu=3600"));
         assert!(a.iter().any(|x| x == "--as=1073741824"));
         assert_eq!(a.last().unwrap(), "pipe:1");
