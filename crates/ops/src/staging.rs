@@ -16,11 +16,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 fn encode_path(path: &Path) -> String {
-    path.as_os_str()
-        .as_encoded_bytes()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    gust_core::hash::hex(path.as_os_str().as_encoded_bytes())
 }
 
 fn decode_path(hex: &str) -> Option<PathBuf> {

@@ -15,6 +15,7 @@ Rectangle {
     opacity: enabled ? 1 : 0.5
     activeFocusOnTab: true
     Keys.onReturnPressed: if (enabled) root.clicked()
+    Keys.onEnterPressed: if (enabled) root.clicked()
     Keys.onSpacePressed: if (enabled) root.clicked()
     Keys.onTabPressed: root.focusStep(1)
     Keys.onBacktabPressed: root.focusStep(-1)

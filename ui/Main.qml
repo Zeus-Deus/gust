@@ -3047,6 +3047,7 @@ Window {
             }
 
             Row {
+                id: leftTools
                 anchors.left: parent.left
                 anchors.leftMargin: Tokens.spaceLg
                 anchors.verticalCenter: parent.verticalCenter
@@ -3125,12 +3126,17 @@ Window {
                     onDragLanded: (m, e) => { hints.message = ""; win.transferStarted(m, e, "drop") }
                     model: dirModel
                     anchors.verticalCenter: parent.verticalCenter
+                    // Whatever the buttons on the right leave: a deep path
+                    // used to draw straight through them.
+                    width: Math.max(0, Math.min(implicitWidth,
+                        headerBar.width - rightTools.width - leftTools.x - x - Tokens.spaceLg * 3))
                     onPathChosen: (p) => { dirModel.navigate(p); win.focusList() }
                 }
             }
 
             // View switch: labelled, tooltipped, keyboard reachable.
             Row {
+                id: rightTools
                 anchors.right: parent.right
                 anchors.rightMargin: Tokens.spaceLg
                 anchors.verticalCenter: parent.verticalCenter
@@ -3565,6 +3571,7 @@ Window {
                         win.focusList()
                     }
                     Keys.onReturnPressed: win.focusList()
+                    Keys.onEnterPressed: win.focusList()
                     Accessible.role: Accessible.EditableText
                     Accessible.name: "Filter this folder"
                 }
@@ -3843,6 +3850,9 @@ Window {
             case Qt.Key_Backspace:
                 dirModel.navigate_up(); event.accepted = true; return
             case Qt.Key_Tab:
+                // Ctrl+Tab is the next tab, split or not: it used to be
+                // swallowed here and switch pane instead.
+                if (event.modifiers & Qt.ControlModifier) break
                 if (win.paneCount > 1) {
                     win.focusPane(win.activePane === 0 ? 1 : 0)
                     event.accepted = true; return

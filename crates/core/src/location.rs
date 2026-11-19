@@ -301,6 +301,35 @@ pub fn place_root(path: &Path) -> Option<(PathBuf, String)> {
     None
 }
 
+/// The path bar's crumbs for `path`, each a folder and the label shown for
+/// it, outermost first.
+///
+/// A person thinks "Home / Documents", not "/ home / sam / Documents": inside
+/// the home folder the bar starts at a crumb called "Home". Inside a mounted
+/// `place` (its root and name) it starts at the place. Anywhere else it
+/// starts at "/". The folders above the first crumb are still one Up away.
+/// Pure: it reads no file.
+pub fn crumbs(
+    path: &Path,
+    home: &Path,
+    place: Option<(PathBuf, String)>,
+) -> Vec<(PathBuf, String)> {
+    let home_set = home.is_absolute() && home != Path::new("/");
+    let (start, first) = match place {
+        Some((root, label)) if path.starts_with(&root) => (root, label),
+        _ if home_set && path.starts_with(home) => (home.to_path_buf(), "Home".to_string()),
+        _ => (PathBuf::from("/"), "/".to_string()),
+    };
+    let rest = path.strip_prefix(&start).unwrap_or(path).to_path_buf();
+    let mut acc = start.clone();
+    let mut out = vec![(start, first)];
+    for c in rest.components() {
+        acc.push(c);
+        out.push((acc.clone(), escape_for_display(c.as_os_str())));
+    }
+    out
+}
+
 /// A GVfs mount directory's name as a person would say it:
 /// `smb-share:server=nas,share=photos` → "photos on nas".
 fn gvfs_label(dir: &str) -> String {

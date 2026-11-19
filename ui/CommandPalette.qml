@@ -411,6 +411,7 @@ Rectangle {
                         }
                     }
                     Keys.onReturnPressed: root.accept()
+                    Keys.onEnterPressed: root.accept()
                     Keys.onDownPressed: list.currentIndex = Math.min(list.currentIndex + 1, results.count - 1)
                     Keys.onUpPressed: list.currentIndex = Math.max(list.currentIndex - 1, 0)
 

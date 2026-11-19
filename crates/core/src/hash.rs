@@ -129,7 +129,13 @@ impl Sha256 {
 }
 
 pub fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &byte in bytes {
+        out.push(char::from(DIGITS[(byte >> 4) as usize]));
+        out.push(char::from(DIGITS[(byte & 0xf) as usize]));
+    }
+    out
 }
 
 /// SHA-256 of a regular file, as lowercase hex. `Ok(None)` when cancelled.
