@@ -48,9 +48,9 @@ sleep 1
 key Escape; typ "orphan.nohandler"
 expect "cursor on orphan.nohandler" "d['model']['cursor_name']" "orphan.nohandler"
 key Return
-wait_for "'orphan.nohandler' in d['alertText']" "True" 20 >/dev/null
+wait_for "'orphan.nohandler' in d['hintAlert']" "True" 20 >/dev/null
 # An opener failure names the file and offers a way to choose an app.
-expect_contains "a file the desktop could not open says so" "d['alertText']" 'open "orphan.nohandler"'
+expect_contains "a file the desktop could not open says so" "d['hintAlert']" 'open "orphan.nohandler"'
 shot 48-no-application
 key Escape
 
@@ -101,9 +101,9 @@ stop_gust; QA_ENV="$open_env" start_gust "$d48"
 key Escape; typ "fix.patch"
 expect "cursor on fix.patch" "d['model']['cursor_name']" "fix.patch"
 key Return
-wait_for "'fix.patch' in d['alertText']" "True" 20 >/dev/null
-expect_contains "failed associated app names the patch" "d['alertText']" 'Could not open "fix.patch"'
-expect_contains "failed open offers an alternative" "d['alertText']" 'Open with'
+wait_for "'fix.patch' in d['hintAlert']" "True" 20 >/dev/null
+expect_contains "failed associated app names the patch" "d['hintAlert']" 'Could not open "fix.patch"'
+expect_contains "failed open offers an alternative" "d['hintAlert']" 'Open with'
 shot 48-associated-launch-failure
 key Escape
 
@@ -111,12 +111,12 @@ key Escape
 palette_run "Recent files"
 expect "Recent opened" "d['recentOpen']" "True"
 key Return
-wait_for "'fix.patch' in d['alertText'] and not d['recentOpen']" "True" 20 >/dev/null
-expect_contains "Recent reports the failed open" "d['alertText']" 'Could not open "fix.patch"'
+wait_for "'fix.patch' in d['hintAlert'] and not d['recentOpen']" "True" 20 >/dev/null
+expect_contains "Recent reports the failed open" "d['hintAlert']" 'Could not open "fix.patch"'
 expect "Recent never announces success on spawn" "d['hintStatus'].startswith('Opened ')" "False"
 shot 48-recent-launch-failure
 key Home
-expect "the warning was dismissed" "d['alertText']" ""
+expect "the warning was dismissed" "d['hintAlert']" ""
 expect "dismissal leaves no success hint" "d['hintStatus'].startswith('Opened ')" "False"
 shot 48-recent-dismissed
 
@@ -129,7 +129,7 @@ open_mixed_pair() {
   key Return
 }
 open_mixed_pair "fix.patch" "report.PDF"
-wait_for "'fix.patch' in d['alertText']" "True" 20 >/dev/null
+wait_for "'fix.patch' in d['hintAlert']" "True" 20 >/dev/null
 expect_contains "mixed selection names the failed file" "d['hintShown']" 'Could not open "fix.patch"'
 expect_contains "mixed selection counts submitted requests" "d['hintStatus']" 'Sent 2 files to the desktop opener'
 
@@ -139,8 +139,8 @@ printf -v gio_path 'PATH=%q' "$registry/bin"
 stop_gust; QA_ENV="$open_env$gio_path" start_gust "$d48"
 key Escape; typ "fix.patch"
 key Return
-wait_for "'fix.patch' in d['alertText']" "True" 20 >/dev/null
-expect_contains "gio fallback reports launch failure" "d['alertText']" 'Could not open "fix.patch"'
+wait_for "'fix.patch' in d['hintAlert']" "True" 20 >/dev/null
+expect_contains "gio fallback reports launch failure" "d['hintAlert']" 'Could not open "fix.patch"'
 shot 48-gio-launch-failure
 
 # With the last opener gone, even dispatch fails. Keep that specific reason.
@@ -157,7 +157,7 @@ PATH=/usr/bin exec xdg-mime "$@"
 STUB
 chmod 755 "$registry/bin/xdg-mime"
 open_mixed_pair "fix.patch" "report.PDF"
-expect_contains "both files refused before dispatch" "d['alertText']" '2 files'
+expect_contains "both files refused before dispatch" "d['hintAlert']" '2 files'
 expect_contains "mixed selection reports the missing opener" "d['hintShown']" 'no desktop opener was found'
 shot 48-mixed-no-opener
 
@@ -177,8 +177,8 @@ if cmp -s "$registry/bin/argv" <(printf '%s\0' open -- "$d48/fix.patch"); then
 else
   bad "handlr received incorrect arguments"
 fi
-wait_for "'fix.patch' in d['alertText']" "True" 20 >/dev/null
-expect_contains "handlr dispatch failure reaches the window" "d['alertText']" 'Could not open "fix.patch"'
+wait_for "'fix.patch' in d['hintAlert']" "True" 20 >/dev/null
+expect_contains "handlr dispatch failure reaches the window" "d['hintAlert']" 'Could not open "fix.patch"'
 shot 48-handlr-launch-failure
 
 # A dangling link fails before spawn. Keep that refusal after the PDF fails.
@@ -191,7 +191,7 @@ open_mixed_pair "unavailable.txt" "report.PDF"
 expect_contains "immediate refusal appears before the PDF exits" "d['hintShown']" 'unavailable.txt'
 flock -u "$pdf_gate"
 wait_for "'1 more' in d['hintShown']" "True" 20 || bad "the delayed PDF failure was not queued behind the refusal"
-expect_contains "partial dispatch counts submitted files" "d['alertText']" 'Sent 1 of 2 files'
+expect_contains "partial dispatch counts submitted files" "d['hintAlert']" 'Sent 1 of 2 files'
 expect_contains "partial dispatch identifies the refused file" "d['hintShown']" 'unavailable.txt'
 expect_contains "partial dispatch explains the refusal" "d['hintShown']" 'the file no longer exists'
 shot 48-mixed-partial-dispatch
@@ -202,9 +202,8 @@ shot 48-mixed-delayed-failure
 # Both openers start successfully, then exit unsuccessfully on their workers.
 flock -x "$pdf_gate"
 open_mixed_pair "fix.patch" "report.PDF"
-wait_for "'fix.patch' in d['alertText']" "True" 20 >/dev/null
+wait_for "'fix.patch' in d['hintAlert']" "True" 20 >/dev/null
 flock -u "$pdf_gate"
-exec {pdf_gate}>&-
 wait_for "'1 more' in d['hintShown']" "True" 20 >/dev/null
 expect_contains "first launcher failure survives the second" "d['hintShown']" 'Could not open "fix.patch"'
 expect_contains "the strip indicates another failure is waiting" "d['hintShown']" '1 more'
@@ -213,7 +212,54 @@ key Home
 expect_contains "the second launcher failure is readable" "d['hintShown']" 'Could not open "report.PDF"'
 shot 48-two-launch-failures-second
 key End
-expect "both failures have been dismissed" "d['alertText']" ""
+expect "both failures have been dismissed" "d['hintAlert']" ""
+
+# Hold an image paste on its worker until both launcher errors have arrived.
+# The clipboard helper releases either image bytes or a read error.
+cat > "$registry/bin/wl-paste" <<'STUB'
+#!/bin/sh
+case "$1" in
+  --list-types) echo image/png ;;
+  --no-newline)
+    [ "$3" = image/png ] || exit 1
+    /usr/bin/flock -s -w 45 "$0.lock" /usr/bin/true || exit 1
+    [ -r "$0.png" ] && exec /usr/bin/cat "$0.png" ;;
+esac
+STUB
+chmod 755 "$registry/bin/wl-paste"
+exec {paste_gate}>"$registry/bin/wl-paste.lock"
+for paste_result in failure success; do
+  if [[ "$paste_result" == success ]]; then
+    cp "$OUTDIR/48-two-launch-failures-first.png" "$registry/bin/wl-paste.png"
+  fi
+  flock -x "$paste_gate"
+  palette_run "Paste image as file"
+  flock -x "$pdf_gate"
+  open_mixed_pair "fix.patch" "report.PDF"
+  wait_for "'fix.patch' in d['hintShown']" "True" 20 || bad "first open failure did not arrive"
+  flock -u "$pdf_gate"
+  wait_for "'1 more' in d['hintShown']" "True" 20 || bad "second open failure did not arrive"
+  flock -u "$paste_gate"
+  if [[ "$paste_result" == success ]]; then
+    wait_for "'Saved Pasted image' in d['hintStatus']" "True" 20 || bad "background paste did not save the image"
+  else
+    wait_for "'clipboard image could not be read' in d['alertText']" "True" 20 || bad "background paste error did not arrive"
+  fi
+  expect_contains "first failure survives paste $paste_result" "d['hintShown']" 'Could not open "fix.patch"'
+  expect_contains "second failure still waits after paste $paste_result" "d['hintShown']" '1 more'
+  shot "48-paste-$paste_result-first"
+  key Home
+  if [[ "$paste_result" == failure ]]; then
+    expect_contains "the ordinary paste error remains readable" "d['hintShown']" 'clipboard image could not be read'
+    key Down
+  fi
+  expect_contains "the second open failure is readable after paste $paste_result" "d['hintShown']" 'Could not open "report.PDF"'
+  shot "48-paste-$paste_result-second"
+  key End
+  expect "all alerts dismissed after paste $paste_result" "d['hintAlert']" ""
+done
+exec {paste_gate}>&-
+exec {pdf_gate}>&-
 
 unset QA_PATH_PREPEND
 stop_gust; start_gust "$FIXTURE"

@@ -366,15 +366,27 @@ Window {
     // A refusal or failure the user must read. Any new action clears it, so
     // a stale warning never lingers over unrelated state.
     property string alertText: ""
-    // Several launchers can fail before the user dismisses even one alert.
+    // Workers may update alertText while the user is reading an open failure.
+    property string currentOpenFailure: ""
+    readonly property string actionAlert: win.currentOpenFailure || win.alertText
     property list<string> pendingOpenFailures: []
+    function queueOpenFailure(message) {
+        win.pendingOpenFailures.push(message)
+        win.showNextOpenFailure()
+    }
     function showNextOpenFailure() {
-        if (win.alertText === "" && win.pendingOpenFailures.length > 0)
-            win.alertText = win.pendingOpenFailures.shift()
+        if (win.actionAlert === "" && win.pendingOpenFailures.length > 0)
+            win.currentOpenFailure = win.pendingOpenFailures.shift()
+    }
+    function dismissAlert() {
+        if (win.currentOpenFailure !== "")
+            win.currentOpenFailure = ""
+        else
+            win.alertText = ""
     }
     // Let the action that cleared the strip finish setting its own feedback.
-    onAlertTextChanged: {
-        if (win.alertText === "" && win.pendingOpenFailures.length > 0)
+    onActionAlertChanged: {
+        if (win.actionAlert === "" && win.pendingOpenFailures.length > 0)
             Qt.callLater(win.showNextOpenFailure)
     }
 
@@ -640,8 +652,7 @@ Window {
             return
         }
         if (op === "open") {
-            win.pendingOpenFailures.push(message)
-            win.showNextOpenFailure()
+            win.queueOpenFailure(message)
             win.qaDump("open-failed")
             return
         }
@@ -1970,7 +1981,7 @@ Window {
                 return
             }
             if (many !== "") {
-                win.alertText = many
+                win.queueOpenFailure(many)
                 win.qaDump("activate-refused")
                 return
             }
@@ -3639,9 +3650,9 @@ Window {
             // Bound, not assigned: a selection is live state and must not go
             // stale behind a message some earlier keystroke left here.
             selection: win.selectionText
-            alert: win.alertText !== "" ? win.alertText : win.prefsNotice !== "" ? win.prefsNotice : dirModel.notice
+            alert: win.actionAlert || win.prefsNotice || dirModel.notice
             queuedOpenFailures: win.pendingOpenFailures.length
-            onNextOpenFailure: win.alertText = ""
+            onNextOpenFailure: win.dismissAlert()
             dialog: confirm.visible || connectionRecovery.visible
             onStatusChanged: win.qaDump("hint")
             onMessageChanged: win.qaDump("hint")
@@ -3667,8 +3678,8 @@ Window {
         Keys.onPressed: (event) => {
             // A warning is about the action that produced it. The next
             // keystroke moves on, so it must not linger over unrelated state.
-            if (win.alertText !== "" && event.key !== Qt.Key_Z)
-                win.alertText = ""
+            if (event.key !== Qt.Key_Z)
+                win.dismissAlert()
 
             // h in Quick Look computes the file's SHA-256 (on a worker;
             // Escape or closing stops it). Checked before the key table so
