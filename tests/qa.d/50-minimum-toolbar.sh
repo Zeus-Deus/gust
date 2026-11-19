@@ -119,6 +119,7 @@ compact_toolbar_actions() {
 
 second_tab_toolbar() {
   local index point x y
+  local -a names=(Aloe Fern Moss Iris Reed Pine Sage Rose)
   key Down
   key Right
   expect "Roomy density takes effect" "d['settings']['density']" "roomy"
@@ -145,15 +146,38 @@ second_tab_toolbar() {
   toolbar_click settingsPoints close || return 1
   expect "Close returns to the second tab" "(d['settingsOpen'], d['activeTab'])" "(False, 1)"
 
-  for index in {2..7}; do ctrl t; done
+  for index in "${!names[@]}"; do
+    mkdir -p "$FIXTURE/${names[index]}" || return 1
+    case "$index" in
+      0|1) toolbar_click tabCenters "$index" || return 1 ;;
+      *) ctrl t ;;
+    esac
+    goto "$FIXTURE/${names[index]}" || return 1
+  done
   expect "the eighth tab opens in view" \
     "d['activeTab'] == 7 and 0 < d['tabCenters'][7][0] < d['windowWidth']" "True"
+  toolbar_menu_click Search || return 1
+  expect "Search leaves distinct neighboring labels readable at the end of the strip" \
+    "d['searchBarActive'] and d['visibleTabLabels'][-2:] == ['Sage', 'Rose'] and d['tabCenters'][0][0] < 0" "True"
+  shot "50-crowded-tabs-search"
+  toolbar_click tabCenters 7 || return 1
+  for index in "${!names[@]}"; do
+    ctrl Tab
+    expect "cycling to ${names[index]} reveals its complete label with Search open" \
+      "d['searchBarActive'] and d['activeTab'] == $index and '${names[index]}' in d['visibleTabLabels']" "True"
+  done
   ctrl Tab
   expect "cycling back reveals the first tab" \
     "d['activeTab'] == 0 and 0 < d['tabCenters'][0][0] < d['windowWidth']" "True"
   point="$(toolbar_point tabCenters 0)" || return 1
   read -r x y <<<"$point"
-  mouse wheel "$x" "$y" -12 || return 1
+  # A wheel gesture's pixel distance depends on the device. Scroll until
+  # the last caption is fully visible before clicking it.
+  for _ in {1..8}; do
+    mouse wheel "$x" "$y" -12 || return 1
+    [[ "$(state "'Rose' in d['visibleTabLabels']")" == True ]] && break
+  done
+  expect "scrolling reveals the last folder name" "'Rose' in d['visibleTabLabels']" "True"
   toolbar_click tabCenters 7 || return 1
   expect "scrolling the tab strip makes the eighth tab clickable" "d['activeTab']" "7"
   toolbar_click tabCenters 6 middle || return 1

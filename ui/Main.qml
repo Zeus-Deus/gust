@@ -539,6 +539,20 @@ Window {
         return out
     }
 
+    /// Complete captions inside the clipped strip, for the desktop QA harness.
+    function visibleTabLabels() {
+        const labels = []
+        for (let i = 0; i < tabRepeater.count; i++) {
+            const tab = tabRepeater.itemAt(i)
+            if (!tab || !tab.visible) continue
+            const caption = tab.caption
+            const left = caption.mapToItem(tabViewport, 0, 0).x
+            if (!caption.truncated && left >= 0 && left + caption.width <= tabViewport.width)
+                labels.push(caption.text)
+        }
+        return labels
+    }
+
     function refreshDevices() {
         try {
             win.deviceList = JSON.parse(dirModel.devices_json())
@@ -2968,10 +2982,16 @@ Window {
                 flickableDirection: Flickable.HorizontalFlick
                 boundsBehavior: Flickable.StopAtBounds
 
-                // Fit the active pane's tabs into the strip. Once a tab would
-                // be narrower than the strip is tall, scroll to keep it usable.
+                // Leave room for letters on both sides of a middle ellipsis,
+                // even when Search reduces the strip height. Scroll the rest.
+                TextMetrics {
+                    id: tabCaptionMetrics
+                    font.family: Tokens.fontFamily
+                    font.pixelSize: Tokens.fontCaption
+                    text: "MM…M"
+                }
                 readonly property int tabCount: Math.max(1, win.activePaneTabCount)
-                readonly property real tabBudget: Math.max(height,
+                readonly property real tabBudget: Math.max(Math.ceil(tabCaptionMetrics.advanceWidth) + Tokens.spaceLg,
                     (width - (tabCount - 1) * tabRow.spacing) / tabCount)
 
                 function scrollTo(x) {
@@ -3025,6 +3045,7 @@ Window {
                             required property int index
                             required property string label
                             readonly property bool current: index === win.activeTab
+                            readonly property alias caption: tabText
 
                             implicitWidth: Math.min(Math.round(Tokens.rowHeight * 7),
                                                     Math.max(Math.round(Tokens.rowHeight * 3),
@@ -3048,8 +3069,7 @@ Window {
                                 text: parent.label
                                 color: parent.current ? Tokens.foreground
                                                       : Tokens.foregroundDim
-                                font.family: Tokens.fontFamily
-                                font.pixelSize: Tokens.fontCaption
+                                font: tabCaptionMetrics.font
                             }
 
                             MouseArea {
@@ -5008,6 +5028,7 @@ Window {
             windowHeight: win.height,
             places: win.placesInfo,
             tabCenters: win.tabCenters(),
+            visibleTabLabels: win.visibleTabLabels(),
             confirmTitle: confirm.title,
             confirmBody: confirm.body,
             confirmButtons: confirm.visible ? confirm.buttonCenters() : null,
