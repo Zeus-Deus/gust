@@ -68,7 +68,7 @@ say "fixture"
 # Honour explicit roots only when the fixture builder admits them.
 source "$HERE/qa-fixture.sh"
 prepare_fixture || exit 1
-mkdir -p "$FIXTURE/.local/share" "$FIXTURE/.cache"
+mkdir -p "$FIXTURE/.local/share" "$FIXTURE/.cache" || exit 1
 rm -f /tmp/gust-fixture-EXECUTED
 [[ -d "$FIXTURE/Projects" ]] && ok "fixture built at $FIXTURE" || bad "fixture missing"
 
@@ -141,7 +141,7 @@ expect_contains() {
   fi
 }
 
-# A section can add stand-in device settings to the app's environment.
+# Extra env(1) arguments for a section's device settings or supervised launch.
 qa_launch_env=()
 
 # Pass paths as individual arguments through vmsession, including the isolated
@@ -165,6 +165,7 @@ start_gust() {
   sleep 0.4
   rm -f "$STATE"
   launch_gust "$STATE" "$@" > "$LOG" 2>&1 9>&- &
+  qa_gust_job=$!
   for _ in $(seq 1 30); do
     [[ -f "$STATE" ]] && break
     sleep 0.4

@@ -230,7 +230,7 @@ class FixtureContainmentTests(unittest.TestCase):
                     self.assertIn("readable QA section", result.stderr)
                     self.assertFalse((root / "setup-started").exists())
 
-    def test_rejected_fixture_never_drives_the_desktop_or_terminates_gust(self):
+    def test_fixture_setup_failure_retains_workspace_before_desktop_or_cleanup(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
             root = Path(temporary)
             for name in ("qa.sh", "qa-one.sh", "make-fixture.sh", "fixture-root.py"):
@@ -241,7 +241,7 @@ class FixtureContainmentTests(unittest.TestCase):
                 (root / name).write_text(script.replace("/tmp/gust-", f"{root}/gust-"))
 
             calls = root / "calls"
-            for name in ("vmsession", "sudo", "pkill", "gust"):
+            for name in ("vmsession", "sudo", "pkill", "gust", "unshare"):
                 double = root / name
                 double.write_text('#!/bin/sh\necho "${0##*/} $*" >> "$CALLS"\nexit 1\n')
                 double.chmod(0o700)
@@ -249,14 +249,29 @@ class FixtureContainmentTests(unittest.TestCase):
             section.write_text('echo "section ran" >> "$CALLS"\n')
             env = {"PATH": f"{root}:{os.defpath}", "HOME": temporary, "CALLS": str(calls),
                    "GUST_BIN": str(root / "gust"), "GUST_FIXTURE": temporary}
-            for command in ([root / "qa.sh"], [root / "qa-one.sh", section]):
-                with self.subTest(runner=command[0].name):
-                    calls.write_text("")
-                    result = subprocess.run([*command, root / "out"], env=env,
-                                            capture_output=True, text=True, timeout=10)
-                    self.assertNotEqual(result.returncode, 0)
-                    self.assertIn("fixture refused", result.stderr)
-                    self.assertEqual(calls.read_text(), "")
+            sentinel = root / "gust-fixture-EXECUTED"
+            for failure in ("fixture refused", ".cache"):
+                if failure == ".cache":
+                    # The builder succeeds. The real mkdir cannot create .cache over a file.
+                    del env["GUST_FIXTURE"]
+                    (root / "make-fixture.sh").write_text(
+                        '#!/bin/sh\nmkdir -p "$1/Projects" && echo evidence > "$1/.cache"\n')
+                for command in ([root / "qa.sh"], [root / "qa-one.sh", section]):
+                    with self.subTest(runner=command[0].name, failure=failure):
+                        calls.write_text("")
+                        sentinel.write_text("retain")
+                        before = set(root.glob("gust-fixture.*"))
+                        result = subprocess.run([*command, root / "out"], env=env,
+                                                capture_output=True, text=True, timeout=20)
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertIn(failure, result.stderr)
+                        self.assertNotIn("fixture built", result.stdout)
+                        self.assertEqual(calls.read_text(), "")
+                        self.assertEqual(sentinel.read_text(), "retain")
+                        workspace, = set(root.glob("gust-fixture.*")) - before
+                        self.assertTrue(workspace.is_dir())
+                        if failure == ".cache":
+                            self.assertEqual((workspace / "home/.cache").read_text(), "evidence\n")
 
     def test_section_disappearing_after_setup_preserves_evidence(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -362,21 +377,86 @@ class FixtureContainmentTests(unittest.TestCase):
             # outside the original 50-file sample. Keep the directory order stable.
             published = [p for p in destination.iterdir() if not p.name.startswith(".gust-staging-")][-1]
             original = source / published.name
+
+            def check_copies():
+                return subprocess.run(["bash", "-euc", """
+                    source "$1"
+                    ok() { echo PASS; }
+                    bad() { echo FAIL; }
+                    expect_published_copies "$2" "$3"
+                """, "transfer-test", str(ROOT / "tests/qa-fixture.sh"), source, destination],
+                                      check=True, capture_output=True, text=True, timeout=5)
+
             for src, dest, expected in ((b"complete", b"complete", "PASS"),
-                                        (b"complete", b"cut", "FAIL"), (b"", b"extra", "FAIL")):
+                                        (b"complete", b"cut", "FAIL"), (b"", b"extra", "FAIL"),
+                                        (b"complete", b"tampered", "FAIL")):
                 with self.subTest(source=src, published=dest):
                     original.write_bytes(src)
                     published.write_bytes(dest)
-                    result = subprocess.run(["bash", "-euc", """
-                        source "$1"
-                        ok() { echo PASS; }
-                        bad() { echo FAIL; }
-                        expect_published_copies "$2" "$3"
-                    """, "transfer-test", str(ROOT / "tests/qa-fixture.sh"), source, destination],
-                                            check=True, capture_output=True, text=True, timeout=5)
-                    self.assertEqual(result.stdout.strip(), expected)
-                    if expected == "FAIL":
+                    result = check_copies()
+                    self.assertEqual(result.stdout.splitlines()[-1], expected)
+                    if expected == "FAIL" and len(src) != len(dest):
                         self.assertIn(f"published {len(dest)} bytes, expected {len(src)}", result.stderr)
+
+            published.write_bytes(original.read_bytes())
+            (destination / "unpublished").touch()
+            self.assertIn("expected an interrupted subset", check_copies().stderr)
+            for entry in destination.iterdir():
+                entry.unlink()
+            self.assertIn("expected an interrupted subset", check_copies().stderr)
+
+    def test_crash_requires_the_owned_signal_staged_prefix_and_no_early_publication(self):
+        spec = importlib.util.spec_from_file_location("qa_copy_crash", ROOT / "tests/qa-copy-crash.py")
+        crash = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(crash)
+        # Real child, signal, file-size limit and inotify events. Only the
+        # copier is a double. A normal exit with the shell's signal status
+        # must be distinguishable from actual signal death.
+        writer = """
+import os, signal, sys, time
+from pathlib import Path
+root, name, mode = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+signal.signal(signal.SIGXFSZ, signal.SIG_DFL)
+while not (root / "armed").exists():
+    time.sleep(0.01)
+(root / "pid").write_text(str(os.getpid()))
+if mode == "stalled":
+    time.sleep(30)
+stage = root / "dest" / f".gust-staging-{os.getpid()}-0"
+final = root / "dest" / name
+data = (root / "src" / name).read_bytes()
+if mode == "transient":
+    final.touch()
+    final.unlink()
+if mode == "published":
+    stage = final
+if mode == "unrelated":
+    stage = root / "unrelated"
+if mode == "corrupt":
+    data = b"!" + data[1:]
+if mode == "changed-source":
+    (root / "src/k-00001.dat").write_bytes(b"!" * len(b"k-00001.dat\\n"))
+if mode == "normal-exit":
+    stage.write_bytes(data[:int(sys.argv[4])])
+    sys.exit(128 + signal.SIGXFSZ)
+stage.write_bytes(data)
+"""
+        for mode, failure in (("correct", None), ("transient", "final name"),
+                              ("published", "final name"), ("corrupt", "prefix"),
+                              ("unrelated", "one staging file"), ("normal-exit", "SIGXFSZ"),
+                              ("changed-source", "original payload changed"), ("stalled", "timed out")):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                crash.prepare(root)
+                (root / "ready-to-paste").touch()
+                command = [sys.executable, "-c", writer, tmp, crash.IN_FLIGHT, mode, str(crash.LIMIT)]
+                if failure is None:
+                    crash.observe(root, command, timeout=5)
+                else:
+                    error = subprocess.TimeoutExpired if mode == "stalled" else ValueError
+                    with self.assertRaisesRegex(error, failure):
+                        crash.observe(root, command, timeout=1 if mode == "stalled" else 5)
+                self.assertFalse(Path("/proc", (root / "pid").read_text()).exists())
 
     def test_runner_normalizes_trailing_slash_and_preserves_fixture_siblings(self):
         with tempfile.TemporaryDirectory(prefix="gust-qa-siblings-", dir="/tmp") as temporary:

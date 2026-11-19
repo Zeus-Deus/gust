@@ -658,67 +658,51 @@ say "10n · A killed transfer leaves no partial file and no debris"
 # Keep the URI list below Gust's 512 KiB clipboard read limit, independent
 # of the caller's fixture path length.
 KL="$qa_run_dir/killtest"
-kill_file_count=2000
-mkdir -p "$KL/src" "$KL/dest" || exit 1
-(cd -- "$KL/src" && seq -f 'k-%05g.dat' 1 "$kill_file_count" | xargs -n 2000 touch) || exit 1
-
-require_goto "$KL/src"
-wait_for "d['model']['count']" "$kill_file_count" 60 >/dev/null
+kill_file_count="$(python3 "$HERE/qa-copy-crash.py" prepare "$KL")" || exit 1
+# Only this Gust child has a file-size limit. Small files publish normally
+# before the oversized file reaches the limit and the kernel kills the writer.
+# The limit must not hit a journal accumulated by earlier QA sections.
+qa_launch_env=("XDG_STATE_HOME=$KL/state" python3 "$HERE/qa-copy-crash.py" observe "$KL")
+start_gust "$KL/src" || exit 1
+qa_launch_env=("XDG_STATE_HOME=$KL/state")
+wait_for "d['model']['count']" "$kill_file_count" 60 || { bad "kill-test sources did not load"; exit 1; }
 vm wtype -M ctrl -k a -m ctrl >/dev/null 2>&1; sleep 2.0
 vm wtype -M ctrl -k c -m ctrl >/dev/null 2>&1
-wait_for "d['clip']" "Copy $kill_file_count items" || bad "could not copy all $kill_file_count files to the clipboard"
+wait_for "d['clip']" "Copy $kill_file_count items" || { bad "could not copy all $kill_file_count files to the clipboard"; exit 1; }
 require_goto "$KL/dest"
-
-vm wtype -M ctrl -k v -m ctrl >/dev/null 2>&1
-# Wait for actual publication. A refused or delayed paste can leave an empty
-# destination that trivially satisfies every per-file integrity check.
+touch "$KL/ready-to-paste" || exit 1
 for _ in {1..100}; do
-  [[ -n "$(find "$KL/dest" -maxdepth 1 -name 'k-*.dat' -type f -printf x -quit)" ]] && break
+  [[ -e "$KL/armed" ]] && break
   sleep 0.05
 done
-WAS_RUNNING="$(state "d['jobRunning']")"
-pkill -9 -x gust
-sleep 1.5
-
-DEBRIS="$(count_entries "$KL/dest" -maxdepth 1 -name '.gust-staging-*')"
-PUBLISHED="$(count_entries "$KL/dest" -maxdepth 1 -type f -name 'k-*.dat')"
-SRC_LEFT="$(count_entries "$KL/src" -maxdepth 1 -type f)"
-if (( PUBLISHED > 0 && PUBLISHED < kill_file_count )); then
-  ok "the kill interrupted the copy after $PUBLISHED of $kill_file_count files were published"
-else
-  bad "did not interrupt a publishing copy ($PUBLISHED of $kill_file_count files published)"
+[[ -e "$KL/armed" ]] || { bad "could not arm the interrupted copy"; exit 1; }
+vm wtype -M ctrl -k v -m ctrl >/dev/null 2>&1 || exit 1
+# The supervisor reaps its own child, checks the signal and staged bytes,
+# and times out if the paste never attempts the oversized write.
+if ! wait "$qa_gust_job"; then
+  bad "could not verify the interrupted write (see $LOG)"
+  save_results
+  exit 1
 fi
-# A SIGKILLed process cannot clean up after itself: at most the ONE file
-# it was writing survives, and it is named .gust-staging-<pid>-… so it is
-# identifiable. The guarantee is that it never looks like a real file and
-# that the next listing sweeps it. Asserting 0 here passes only when the
-# kill happens to land between files.
-[[ "$DEBRIS" -le 1 ]] \
-  && ok "a SIGKILL left at most the one in-flight staging file  (job was running: $WAS_RUNNING)" \
-  || bad "$DEBRIS staging file(s) survived a kill, expected at most 1"
-[[ "$SRC_LEFT" -eq "$kill_file_count" ]] \
-  && ok "a killed COPY never touched the source" \
-  || bad "source damaged by a killed copy ($SRC_LEFT of $kill_file_count)"
+ok "the kernel killed the owned writer with one verified partial stage and no in-flight final name"
+cp -- "$LOG" "$OUTDIR/10n-interruption.log" || exit 1
 
+ok "all $kill_file_count source files kept their original payloads"
 expect_published_copies "$KL/src" "$KL/dest"
 
-# The promise is not that a kill leaves nothing, but that browsing the
-# folder afterwards cleans it up. Restart and list the destination.
-if [[ "$DEBRIS" -gt 0 ]]; then
-  start_gust
-  goto "$KL/dest" >/dev/null
-  wait_for "d['model']['settled']" "True" 40 >/dev/null
-  sleep 1
-  AFTER_SWEEP="$(count_entries "$KL/dest" -maxdepth 1 -name '.gust-staging-*')"
-  [[ "$AFTER_SWEEP" -eq 0 ]] \
-    && ok "listing the folder swept the dead process's staging file" \
-    || bad "$AFTER_SWEEP staging file(s) survived a listing"
-else
-  ok "the kill landed between files: no debris to sweep"
-fi
+# Listing the destination must sweep the dead writer's identifiable stage.
+start_gust || exit 1
+require_goto "$KL/dest"
+wait_for "d['model']['settled']" "True" 40 || { bad "crashed folder did not settle"; exit 1; }
+sleep 1
+AFTER_SWEEP="$(count_entries "$KL/dest" -maxdepth 1 -name '.gust-staging-*')"
+[[ "$AFTER_SWEEP" -eq 0 ]] \
+  && ok "listing the folder swept the dead process's staging file" \
+  || bad "$AFTER_SWEEP staging file(s) survived a listing"
 
-# Restart Gust: it must come back cleanly over the folder a crash touched.
-start_gust
+# Resume the suite with its usual state and revisit the crashed folder.
+qa_launch_env=()
+start_gust || exit 1
 wait_for "d['model']['settled']" "True" 60 >/dev/null
 require_goto "$KL/dest" 40
 [[ "$(state "d['model']['settled']")" == "True" ]] \

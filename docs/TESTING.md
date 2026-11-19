@@ -223,6 +223,13 @@ Failed and interrupted runs retain their workspace. Set `GUST_KEEP_FIXTURE=1`
 to retain it after success as well. Screenshots and results go to the separate
 output directory.
 
+In section 10n, a supervised Gust instance pastes 2,000 nonempty files.
+An 8 MiB Linux file-size limit interrupts a write to the ninth file. The
+runner records the child's fatal signal and staged byte count in
+`10n-interruption.log`, checks for premature publication via inotify,
+compares every published file with its source, and reopens the folder to
+verify that Gust sweeps the staging file.
+
 ### Focused remote listing state journey
 
 ```sh
