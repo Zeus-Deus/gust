@@ -753,14 +753,15 @@ echo "ordinary" > "$SW/keeper.txt"
 # Ownership comes from the claim store, never from the filename (the m41
 # data-loss fix): a crashed copy leaves a claim naming its file, its dev/ino
 # and a pid that is gone. Plant exactly that. Gust runs with HOME=$FIXTURE
-# and no XDG_STATE_HOME, so its claim store is here.
+# and XDG_STATE_HOME under that fixture, so its claim store is here.
 CLAIMS="$FIXTURE/.local/state/gust/staging-claims"
 mkdir -p "$CLAIMS"; chmod 700 "$CLAIMS"
 BOOT="$(cat /proc/sys/kernel/random/boot_id)"
 plant_claim() {  # <file> <pid>
-  local f="$1" pid="$2"
-  printf 'path=%s\nboot=%s\npid=%s\ndev=%s\nino=%s\n' \
-    "$f" "$BOOT" "$pid" "$(stat -c %d "$f")" "$(stat -c %i "$f")" \
+  local f="$1" pid="$2" path_hex
+  path_hex="$(printf '%s' "$f" | od -An -v -tx1 | tr -d ' \n')"
+  printf 'version=2\npath_hex=%s\nboot=%s\npid=%s\ndev=%s\nino=%s\nsince=%s\nnet=0\nwritten=0\n' \
+    "$path_hex" "$BOOT" "$pid" "$(stat -c %d "$f")" "$(stat -c %i "$f")" "$(stat -c %Y "$f")" \
     > "$CLAIMS/$pid-$(printf '%s' "$f" | sha1sum | cut -c1-16).claim"
 }
 printf 'partial' > "$SW/.gust-staging-999999-dead.pdf"
@@ -824,14 +825,16 @@ LEFT="$(count_entries "$RO/dest" -maxdepth 1 -name '.gust-staging-*')"
 [[ "$(cat "$RO/src/wanted.txt")" == "payload" ]] \
   && ok "the source survived a failed copy" || bad "source damaged by a failed copy"
 
-say "10q · Thumbnails: only safe kinds, produced in a sandbox, UI stays live"
+say "10q · Grid navigation and per-file thumbnail results"
 TH="$FIXTURE/pictures"
 rm -rf "$TH"; mkdir -p "$TH"
-if command -v magick >/dev/null 2>&1; then
+images=()
+if command -v magick >/dev/null 2>&1 && command -v bwrap >/dev/null 2>&1; then
+  images=(wide.png tall.jpg)
   magick -size 800x600 gradient:navy-orange "$TH/wide.png" 2>/dev/null
   magick -size 600x800 gradient:green-yellow "$TH/tall.jpg" 2>/dev/null
 else
-  ok "(magick absent — thumbnail rendering skipped, refusals still checked)"
+  echo "magick or bwrap unavailable — checking thumbnail refusals only"
 fi
 # Things that must NEVER be handed to an image helper.
 echo "just text" > "$TH/notes.txt"
@@ -849,48 +852,17 @@ key Return
 wait_for "d['view']" "grid" 20 >/dev/null
 expect "grid view is active" "d['view']" "grid"
 
-# Give the sandboxed helper time to work.
-for _ in $(seq 1 15); do
-  C="$(count_entries "$FIXTURE/.cache/thumbnails" -name '*.png' 2>/dev/null)"
-  [[ "$C" -ge 2 ]] && break
-  sleep 1
-done
+key End
+expect "End selects the last Grid item" "d['model']['cursor'] == d['model']['count'] - 1 and d['model']['count'] > 1" "True"
 
-if command -v magick >/dev/null 2>&1 && command -v bwrap >/dev/null 2>&1; then
-  MADE="$(count_entries "$FIXTURE/.cache/thumbnails" -name '*.png' 2>/dev/null)"
-  [[ "$MADE" -ge 2 ]] \
-    && ok "the sandboxed helper produced $MADE thumbnail(s)" \
-    || bad "no thumbnail was produced (found $MADE)"
-
-  # Every produced thumbnail must be a real, bounded PNG.
-  BADPNG=0
-  while IFS= read -r -d '' f; do
-    head -c 8 "$f" | grep -q $'\x89PNG' || BADPNG=$((BADPNG+1))
-    SZ="$(stat -c %s "$f")"
-    [[ "$SZ" -gt 8388608 ]] && BADPNG=$((BADPNG+1))
-  done < <(find "$FIXTURE/.cache/thumbnails" -name '*.png' -print0 2>/dev/null)
-  [[ "$BADPNG" -eq 0 ]] \
-    && ok "every cached thumbnail is a real, size-bounded PNG" \
-    || bad "$BADPNG cached thumbnail(s) failed validation"
-
-  # The count must not exceed the number of REAL images: a corrupt png, an
-  # svg, a text file and an executable must never produce one.
-  [[ "$MADE" -le 2 ]] \
-    && ok "refused: corrupt.png, logo.svg, notes.txt and program got no thumbnail" \
-    || bad "something unsafe was thumbnailed ($MADE > 2 real images)"
+if python3 "$HERE/assert_grid_cache.py" "$STATE" "$TH" "$(display_path "$TH")" "$FIXTURE/.cache/thumbnails" "${images[@]}"; then
+  ok "completed Grid pass displayed the expected images and left both caches clear for refused files"
+else
+  bad "thumbnail results did not match the picture fixtures"
 fi
 
-# The window must stay usable while thumbnails render.
-key End
-sleep 0.5
-CUR="$(state "d['model']['cursor']")"
-[[ "$CUR" != "0" && "$CUR" != "None" ]] \
-  && ok "the list still responds while thumbnails render (cursor=$CUR)" \
-  || bad "the UI stalled during thumbnailing (cursor=$CUR)"
-
-# Leaving the folder must abandon the pass.
 require_goto "$FIXTURE"
-ok "navigating away from a thumbnailing folder is clean"
+ok "the location bar returned from Pictures to the fixture"
 
 say "10r · An explicit view choice is remembered per location"
 VW="$FIXTURE/viewmem"

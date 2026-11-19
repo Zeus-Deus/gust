@@ -5654,6 +5654,11 @@ Window {
         function onShow_hiddenChanged() { win.qaDump("hidden") }
     }
 
+    Connections {
+        target: win.qaStatePath === "" ? null : dirModel
+        function onThumbnail_pass_finished() { win.qaDump("thumbnail-pass-finished") }
+    }
+
     // A theme switch repaints everything by itself; record it for QA.
     Connections {
         target: Tokens.tokens
