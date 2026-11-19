@@ -48,6 +48,7 @@ impl Playlist {
 
     fn command(&self, player: &Path) -> Command {
         let mut command = Command::new(player);
+        crate::childenv::for_user_app(&mut command);
         command.args([
             "--no-terminal",
             "--force-window=yes",

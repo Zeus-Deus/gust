@@ -247,6 +247,7 @@ Rectangle {
                             onClicked: modelData.id === "cancel" ? root.cancel() : root.pick(modelData.id)
                         }
                         Keys.onReturnPressed: modelData.id === "cancel" ? root.cancel() : root.pick(modelData.id)
+                        Keys.onEnterPressed: modelData.id === "cancel" ? root.cancel() : root.pick(modelData.id)
                         Keys.onSpacePressed: modelData.id === "cancel" ? root.cancel() : root.pick(modelData.id)
                         Accessible.role: Accessible.Button
                         Accessible.name: modelData.label

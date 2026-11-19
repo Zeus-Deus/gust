@@ -52,7 +52,7 @@ fi
 typ "gamma"; sleep 1.2
 ctrl c
 goto "$TG/into"
-wait_for "d['model']['location']" "$TG/into" 10 >/dev/null
+wait_location "$TG/into" 10 >/dev/null
 ctrl v
 wait_for "d['jobState']" "Confirmed" 20 >/dev/null
 [[ "$(xt "$TG/into/gamma.txt")" == "Blue" ]] && ok "the copy keeps its tag" || bad "copy tag: '$(xt "$TG/into/gamma.txt")'"

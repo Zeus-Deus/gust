@@ -10,7 +10,8 @@
 #    the test "taps Trust", says no when told to, and mounts a folder.
 # Gust's code from detection to eject is the real code.
 
-T="$FIXTURE/phones"; rm -rf "$T"
+# gio info reports the simulated mount path on a single line.
+T="$qa_run_dir/phones"; rm -rf "$T"
 SYS="$T/sys"; UDEV="$T/udev"; MNTS="$T/gvfs-mounts"; USB="$T/usb"; BIN37="$T/bin"; M="$T/mnt"
 mkdir -p "$SYS" "$UDEV" "$MNTS" "$USB/001" "$BIN37" "$M"
 touch "$MNTS/afc.mount" "$MNTS/mtp.mount"
@@ -109,7 +110,7 @@ for c in json.load(sys.stdin):
     if c.get('class')=='gust': print(c['title']); break"; }
 
 export QA_PATH_PREPEND="$BIN37"
-export QA_ENV="GUST_SYSFS_USB=$SYS GUST_UDEV_DATA=$UDEV GUST_GVFS_MOUNTS=$MNTS GUST_USB_WATCH=$USB"
+qa_launch_env=("GUST_SYSFS_USB=$SYS" "GUST_UDEV_DATA=$UDEV" "GUST_GVFS_MOUNTS=$MNTS" "GUST_USB_WATCH=$USB")
 stop_gust; start_gust "$FIXTURE"
 wait_for "d['model']['settled']" "True" 20 >/dev/null
 
@@ -132,7 +133,7 @@ else
   touch "$T/trusted"   # the person taps Trust on the phone
   if wait_dev "Alex's iPhone|Open" 10; then ok "after Trust the row says it is open"; else bad "after Trust the row says: $(devs)"; fi
   wait_for "d['model']['settled']" "True" 10 >/dev/null
-  expect "the window shows the iPhone's photos folder" "d['model']['location']" "$M/afc:host=$UDID"
+  expect_location "the window shows the iPhone's photos folder" "$M/afc:host=$UDID"
   expect_contains "DCIM is listed" "' '.join(d['model']['visible'])" "DCIM"
   t="$(title)"; [[ "$t" == "Alex's iPhone — Gust" ]] && ok "the title names the phone, not its serial ($t)" || bad "the title is '$t'"
   goto "$M/afc:host=$UDID/DCIM/100APPLE"; wait_for "d['model']['settled']" "True" 10 >/dev/null
@@ -153,13 +154,13 @@ else
   shot 37d-iphone-menu
   wclick left "$(pt_wait menuPoints "Open app files")"
   sleep 2.0; wait_for "d['model']['settled']" "True" 10 >/dev/null
-  expect "the app files are shown" "d['model']['location']" "$M/afc:host=$UDID,port=3"
+  expect_location "the app files are shown" "$M/afc:host=$UDID,port=3"
   expect_contains "app files leave the device in a settled Open state" "' ;; '.join(d['devices'])" "Open · right-click to eject"
   t="$(title)"; [[ "$t" == "Alex's iPhone · app files — Gust" ]] && ok "titled: $t" || bad "the title is '$t'"
   wclick right "$(pt_wait placePoints "device:$IPHONE")"
   wclick left "$(pt_wait menuPoints "Open photos and files")"
-  wait_for "d['model']['location']" "$M/afc:host=$UDID" 10 >/dev/null
-  expect "Photos menu returns to media, not the last app folder" "d['model']['location']" "$M/afc:host=$UDID"
+  wait_location "$M/afc:host=$UDID" 10 >/dev/null
+  expect_location "Photos menu returns to media, not the last app folder" "$M/afc:host=$UDID"
 
   say "37e · Eject leaves the phone and says it is safe to unplug"
   goto "$M/afc:host=$UDID/DCIM"; wait_for "d['model']['settled']" "True" 10 >/dev/null
@@ -213,7 +214,8 @@ if [[ "$MOUSE_OK" -eq 1 ]]; then
 fi
 shot 37h-needs-package
 
-unset QA_PATH_PREPEND QA_ENV
+unset QA_PATH_PREPEND
+qa_launch_env=()
 stop_gust
 rm -rf "$T"
 start_gust "$FIXTURE"

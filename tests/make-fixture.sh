@@ -6,9 +6,10 @@ set -euo pipefail
 
 ROOT="${1:-/tmp/gust-fixture}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT="$(python3 "$HERE/fixture-root.py" "$ROOT")"
-
-cd "$ROOT"
+# Capturing the validator's stdout would strip trailing newlines from the name.
+python3 "$HERE/fixture-root.py" "$ROOT" >/dev/null
+cd -- "$ROOT"
+ROOT=$PWD
 
 # --- an ordinary-looking project folder -----------------------------------
 mkdir -p Projects/omarchy/{bin,config,themes}

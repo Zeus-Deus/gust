@@ -445,6 +445,7 @@ Item {
                             color: Tokens.accent
                             activeFocusOnTab: true
                             Keys.onReturnPressed: root.installSupport()
+                            Keys.onEnterPressed: root.installSupport()
                             Keys.onSpacePressed: root.installSupport()
                             Text {
                                 id: installLabel
