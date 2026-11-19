@@ -2,6 +2,7 @@
 """Interrupt the desktop copy with a kernel file-size limit on this Gust child."""
 
 import ctypes
+import json
 import os
 from pathlib import Path
 import resource
@@ -37,6 +38,30 @@ def prepare(root):
 def matches(path, data):
     info = path.lstat()
     return stat.S_ISREG(info.st_mode) and info.st_size == len(data) and path.read_bytes() == data
+
+
+def verify_published(destination, names):
+    expected = dict(originals())
+    if not 0 < len(names) < len(expected):
+        raise ValueError(f"expected an interrupted subset, found {len(names)} of {len(expected)} files")
+    for name in names:
+        if name == IN_FLIGHT or name not in expected:
+            raise ValueError(f"unexpected published name: {name!r}")
+        if not matches(destination / name, expected[name]):
+            raise ValueError(f"published bytes differ from original: {name!r}")
+
+
+def verify_recovered(root):
+    expected = set(json.loads((root / "published.json").read_text()))
+    destination = root / "dest"
+    # Include every entry. A leftover stage or a newly published final is extra,
+    # and iterdir raises if the recovery directory could not be scanned.
+    actual = {entry.name for entry in destination.iterdir()}
+    if actual != expected:
+        raise ValueError(f"recovered names differ: missing {sorted(expected - actual)!r}, "
+                         f"unexpected {sorted(actual - expected)!r}")
+    verify_published(destination, expected)
+    print(f"Verified {len(expected)} completed copies after recovery")
 
 
 # Retain create/rename events through process death. A premature final that the
@@ -106,7 +131,8 @@ def observe(root, command, timeout=90):
     finally:
         os.close(fd)
 
-    stages = list(destination.glob(".gust-staging-*"))
+    entries = list(destination.iterdir())
+    stages = [p for p in entries if p.name.startswith(".gust-staging-")]
     if len(stages) != 1 or not stages[0].name.startswith(f".gust-staging-{child.pid}-"):
         raise ValueError(f"expected one staging file owned by Gust {child.pid}")
     stage = stages[0]
@@ -120,6 +146,10 @@ def observe(root, command, timeout=90):
     for name, payload in originals():
         if not matches(source / name, payload):
             raise ValueError(f"original payload changed: {name}")
+    published = sorted(p.name for p in entries if p != stage)
+    verify_published(destination, published)
+    (root / "published.json").write_text(json.dumps(published) + "\n")
+    print(f"Recorded {len(published)} completed copies before restart", flush=True)
     print(f"Gust {child.pid} died from SIGXFSZ with {LIMIT}/{len(PAYLOAD)} bytes of "
           f"{IN_FLIGHT} staged and no publication of its final name", flush=True)
 
@@ -131,5 +161,7 @@ if __name__ == "__main__":
         print(FILE_COUNT)
     elif mode == "observe" and argv:
         observe(Path(directory), argv)
+    elif mode == "verify-recovered" and not argv:
+        verify_recovered(Path(directory))
     else:
-        sys.exit("expected prepare DIRECTORY or observe DIRECTORY COMMAND...")
+        sys.exit("expected prepare DIRECTORY, observe DIRECTORY COMMAND... or verify-recovered DIRECTORY")

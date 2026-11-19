@@ -230,6 +230,27 @@ class FixtureContainmentTests(unittest.TestCase):
                     self.assertIn("readable QA section", result.stderr)
                     self.assertFalse((root / "setup-started").exists())
 
+    def test_section_ending_in_newline_sources_the_selected_sibling(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runner = root / "qa-one.sh"
+            shutil.copy2(ROOT / "tests/qa-one.sh", runner)
+            (root / "qa-lib.sh").write_text("""
+                OUTDIR=$1; FIXTURE=$1; LOG=$1/gust.log
+                PASS=0; FAIL=0; RESULTS=()
+                start_gust() { cd /; }
+                stop_gust() { :; }
+                finish_fixture() { :; }
+            """)
+            sections = (("section", "plain"), ("section\n", "newline"))
+            for name, marker in sections:
+                (root / name).write_text(f'RESULTS=("{marker}")\n')
+            for name, marker in sections:
+                with self.subTest(name=name):
+                    subprocess.run(["bash", runner, name, root], cwd=root, capture_output=True,
+                                   check=True, timeout=5)
+                    self.assertEqual((root / "results.txt").read_text(), marker + "\n")
+
     def test_fixture_setup_failure_retains_workspace_before_desktop_or_cleanup(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
             root = Path(temporary)
@@ -361,54 +382,73 @@ class FixtureContainmentTests(unittest.TestCase):
             self.assertEqual(result.returncode, 23)
             self.assertEqual((root / "received").read_text(), spelling)
 
-    def test_killed_transfer_checks_every_published_file_against_its_source(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            source, destination = root / "src", root / "dest"
-            source.mkdir()
-            destination.mkdir()
-            (source / "unpublished").touch()
-            (destination / ".gust-staging-inflight").write_bytes(b"partial")
-            for index in range(60):
-                name = f"copy {index}\nwith a newline"
-                (source / name).touch()
-                (destination / name).touch()
-            # Corrupt the last published entry in directory traversal order,
-            # outside the original 50-file sample. Keep the directory order stable.
-            published = [p for p in destination.iterdir() if not p.name.startswith(".gust-staging-")][-1]
-            original = source / published.name
-
-            def check_copies():
-                return subprocess.run(["bash", "-euc", """
-                    source "$1"
-                    ok() { echo PASS; }
-                    bad() { echo FAIL; }
-                    expect_published_copies "$2" "$3"
-                """, "transfer-test", str(ROOT / "tests/qa-fixture.sh"), source, destination],
-                                      check=True, capture_output=True, text=True, timeout=5)
-
-            for src, dest, expected in ((b"complete", b"complete", "PASS"),
-                                        (b"complete", b"cut", "FAIL"), (b"", b"extra", "FAIL"),
-                                        (b"complete", b"tampered", "FAIL")):
-                with self.subTest(source=src, published=dest):
-                    original.write_bytes(src)
-                    published.write_bytes(dest)
-                    result = check_copies()
-                    self.assertEqual(result.stdout.splitlines()[-1], expected)
-                    if expected == "FAIL" and len(src) != len(dest):
-                        self.assertIn(f"published {len(dest)} bytes, expected {len(src)}", result.stderr)
-
-            published.write_bytes(original.read_bytes())
-            (destination / "unpublished").touch()
-            self.assertIn("expected an interrupted subset", check_copies().stderr)
-            for entry in destination.iterdir():
-                entry.unlink()
-            self.assertIn("expected an interrupted subset", check_copies().stderr)
-
-    def test_crash_requires_the_owned_signal_staged_prefix_and_no_early_publication(self):
+    @staticmethod
+    def load_copy_crash():
         spec = importlib.util.spec_from_file_location("qa_copy_crash", ROOT / "tests/qa-copy-crash.py")
         crash = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(crash)
+        return crash
+
+    def test_killed_transfer_checks_every_published_payload(self):
+        crash = self.load_copy_crash()
+        with tempfile.TemporaryDirectory() as temporary:
+            dest = Path(temporary)
+            expected = dict(crash.originals())
+            names = [name for name in expected if name != crash.IN_FLIGHT][:60]
+            for name in names:
+                (dest / name).write_bytes(expected[name])
+            crash.verify_published(dest, names)
+
+            # Corrupt a completed copy beyond the former 50-file sample.
+            last = dest / names[-1]
+            data = last.read_bytes()
+            for damaged in (b"", data[:-1], data + b"!", b"!" + data[1:]):
+                with self.subTest(damaged=damaged):
+                    last.write_bytes(damaged)
+                    with self.assertRaisesRegex(ValueError, "published bytes differ"):
+                        crash.verify_published(dest, names)
+            for invalid in ([], list(expected)):
+                with self.assertRaisesRegex(ValueError, "expected an interrupted subset"):
+                    crash.verify_published(dest, invalid)
+
+    def test_recovery_requires_exact_names_payloads_and_successful_scan(self):
+        crash = self.load_copy_crash()
+        expected = dict(crash.originals())
+        first, second, spare = list(expected)[:3]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            dest = root / "dest"
+            dest.mkdir()
+            (root / "published.json").write_text(json.dumps([first, second]))
+            for name in (first, second):
+                (dest / name).write_bytes(expected[name])
+
+            (dest / first).unlink()
+            with self.assertRaisesRegex(ValueError, f"missing .*{first}"):
+                crash.verify_recovered(root)
+            # A valid, byte-exact replacement restores the count but not the names.
+            (dest / spare).write_bytes(expected[spare])
+            with self.assertRaisesRegex(ValueError, f"unexpected .*{spare}"):
+                crash.verify_recovered(root)
+            (dest / spare).unlink()
+
+            (dest / first).write_bytes(b"!" * len(expected[first]))
+            with self.assertRaisesRegex(ValueError, "published bytes differ"):
+                crash.verify_recovered(root)
+            (dest / first).write_bytes(expected[first])
+            for extra in (crash.IN_FLIGHT, ".gust-staging-survivor"):
+                with self.subTest(extra=extra):
+                    (dest / extra).touch()
+                    with self.assertRaisesRegex(ValueError, f"unexpected .*{extra}"):
+                        crash.verify_recovered(root)
+                    (dest / extra).unlink()
+
+            dest.rename(root / "unavailable")
+            with self.assertRaises(FileNotFoundError):
+                crash.verify_recovered(root)
+
+    def test_crash_requires_the_owned_signal_staged_prefix_and_no_early_publication(self):
+        crash = self.load_copy_crash()
         # Real child, signal, file-size limit and inotify events. Only the
         # copier is a double. A normal exit with the shell's signal status
         # must be distinguishable from actual signal death.
@@ -425,6 +465,8 @@ if mode == "stalled":
 stage = root / "dest" / f".gust-staging-{os.getpid()}-0"
 final = root / "dest" / name
 data = (root / "src" / name).read_bytes()
+completed = "k-00001.dat"
+(root / "dest" / completed).write_bytes((root / "src" / completed).read_bytes())
 if mode == "transient":
     final.touch()
     final.unlink()
@@ -452,6 +494,9 @@ stage.write_bytes(data)
                 command = [sys.executable, "-c", writer, tmp, crash.IN_FLIGHT, mode, str(crash.LIMIT)]
                 if failure is None:
                     crash.observe(root, command, timeout=5)
+                    self.assertEqual(json.loads((root / "published.json").read_text()), ["k-00001.dat"])
+                    next((root / "dest").glob(".gust-staging-*")).unlink()
+                    crash.verify_recovered(root)
                 else:
                     error = subprocess.TimeoutExpired if mode == "stalled" else ValueError
                     with self.assertRaisesRegex(error, failure):

@@ -27,44 +27,6 @@ prepare_pane_fixture() {
   printf 'two\n' > "$PANEDIR/paneL/p2.txt"
 }
 
-# The interrupted copy must publish some complete files before the crash.
-# The supervisor separately checks the in-flight file and staging debris.
-expect_published_copies() {
-  if python3 - "$1" "$2" <<'PYTHON'
-from filecmp import cmp
-from pathlib import Path
-from stat import S_ISREG
-import sys
-
-source, destination = map(Path, sys.argv[1:])
-count = 0
-for published in destination.iterdir():
-    if published.name.startswith(".gust-staging-"):
-        continue
-    original = source / published.name
-    try:
-        source_stat, copy_stat = original.lstat(), published.lstat()
-    except OSError as error:
-        sys.exit(str(error))
-    if not (S_ISREG(source_stat.st_mode) and S_ISREG(copy_stat.st_mode)):
-        sys.exit(f"expected regular files for {published.name!r}")
-    if copy_stat.st_size != source_stat.st_size:
-        sys.exit(f"{published.name!r}: published {copy_stat.st_size} bytes, expected {source_stat.st_size}")
-    if not cmp(original, published, shallow=False):
-        sys.exit(f"{published.name!r}: published bytes differ from source")
-    count += 1
-total = sum(1 for _ in source.iterdir())
-if not 0 < count < total:
-    sys.exit(f"expected an interrupted subset, found {count} of {total} files")
-print(f"  Verified {count} of {total} files published before the crash")
-PYTHON
-  then
-    ok "all published files match their sources byte for byte after the kill"
-  else
-    bad "a published file could not be verified against its source after the kill"
-  fi
-}
-
 # Both runners call this only after their final success check.
 finish_fixture() {
   [[ -n "$qa_run_dir" ]] || return 0

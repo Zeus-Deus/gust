@@ -688,17 +688,20 @@ ok "the kernel killed the owned writer with one verified partial stage and no in
 cp -- "$LOG" "$OUTDIR/10n-interruption.log" || exit 1
 
 ok "all $kill_file_count source files kept their original payloads"
-expect_published_copies "$KL/src" "$KL/dest"
+cp -- "$KL/published.json" "$OUTDIR/10n-published.json" || exit 1
+ok "recorded every completed copy after verifying its original bytes"
 
 # Listing the destination must sweep the dead writer's identifiable stage.
 start_gust || exit 1
 require_goto "$KL/dest"
 wait_for "d['model']['settled']" "True" 40 || { bad "crashed folder did not settle"; exit 1; }
 sleep 1
-AFTER_SWEEP="$(count_entries "$KL/dest" -maxdepth 1 -name '.gust-staging-*')"
-[[ "$AFTER_SWEEP" -eq 0 ]] \
-  && ok "listing the folder swept the dead process's staging file" \
-  || bad "$AFTER_SWEEP staging file(s) survived a listing"
+if ! python3 "$HERE/qa-copy-crash.py" verify-recovered "$KL"; then
+  bad "recovery did not preserve the verified set of completed copies"
+  save_results
+  exit 1
+fi
+ok "recovery preserved every completed copy byte for byte, swept the stage and left the interrupted final absent"
 
 # Resume the suite with its usual state and revisit the crashed folder.
 qa_launch_env=()

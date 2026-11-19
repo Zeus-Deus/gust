@@ -6,7 +6,7 @@ if [[ ! -f "${1:-}" || ! -r "${1:-}" ]]; then
   printf 'Expected a readable QA section file, got %q\n' "${1:-}" >&2
   exit 1
 fi
-SECTION="$(realpath -e -- "$1")" || exit 1
+IFS= read -r -d '' SECTION < <(realpath -ez -- "$1") || exit 1
 shift
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/qa-lib.sh"
 start_gust "$FIXTURE" || { echo "no window"; exit 1; }
