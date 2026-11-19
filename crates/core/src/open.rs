@@ -299,15 +299,51 @@ pub fn program_state(path: &Path, mode: u32, is_regular: bool) -> ProgramState {
 
 const XDG_TERMINAL: &str = "xdg-terminal-exec";
 
-/// The launcher's print mode (since 0.13.0) exits before exec. A terminal
-/// may return its target's exit status, so only this lookup can be retried.
-fn desktop_terminal_resolves(program: &str) -> bool {
-    crate::childenv::for_user_app(&mut Command::new(program))
+/// Older launchers discard unknown options and exec the selected terminal.
+/// Probe a registry containing only /bin/false before consulting the real one.
+fn desktop_terminal_resolves(program: &str) -> std::io::Result<bool> {
+    use std::fs::{self, Permissions};
+    use std::os::unix::fs::PermissionsExt;
+
+    const PROBE_ID: &str = "gust-terminal-probe.desktop";
+    // XDG search lists split on ':', even in XDG_DATA_HOME. Keep this path
+    // independent of TMPDIR so it always names exactly one private registry.
+    let root = tempfile::Builder::new()
+        .permissions(Permissions::from_mode(0o700))
+        .tempdir_in("/tmp")?;
+    let apps = root.path().join("applications");
+    fs::create_dir(&apps)?;
+    fs::write(
+        apps.join(PROBE_ID),
+        "[Desktop Entry]
+Type=Application
+Name=Probe
+Exec=/bin/false
+Categories=TerminalEmulator;
+X-TerminalArgExec=-e
+",
+    )?;
+
+    let probe = Command::new(program)
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("HOME", root.path())
+        .env("XDG_DATA_HOME", root.path())
+        .env("XDG_DATA_DIRS", "/dev/null")
+        .env("XDG_CONFIG_DIRS", "/dev/null")
+        .env("XTE_CACHE_ENABLED", "false")
         .arg("--print-id")
-        .stdin(Stdio::null())
         .stderr(Stdio::null())
-        .output()
-        .is_ok_and(|o| o.status.success() && !o.stdout.trim_ascii().is_empty())
+        .output()?;
+    if !probe.status.success() || probe.stdout.trim_ascii() != PROBE_ID.as_bytes() {
+        return Ok(false);
+    }
+
+    let entry = crate::childenv::for_user_app(&mut Command::new(program))
+        .arg("--print-id")
+        .stderr(Stdio::null())
+        .output()?;
+    Ok(entry.status.success() && !entry.stdout.trim_ascii().is_empty())
 }
 
 fn terminal_in_dir(term: &str, dir: &Path) -> Command {
@@ -355,7 +391,7 @@ pub fn run_in_terminal(program: &str, args: &[impl AsRef<OsStr>]) -> Result<Stri
 fn start_terminal(command: impl Fn(&str, &str) -> Command) -> Result<String, OpenRefusal> {
     let terminal = std::env::var("TERMINAL").ok();
     for (term, lead) in terminal_candidates(terminal.as_deref(), |p| which(p).is_some()) {
-        if lead == "--" && !desktop_terminal_resolves(&term) {
+        if lead == "--" && !desktop_terminal_resolves(&term).unwrap_or(false) {
             continue;
         }
         let mut cmd = command(&term, lead);

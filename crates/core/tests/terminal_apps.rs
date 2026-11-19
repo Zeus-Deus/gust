@@ -14,15 +14,30 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-/// PATH and TERMINAL are process-wide; one test at a time may own them.
+/// The launcher environment is process-wide; one test at a time may own them.
 static ENV: Mutex<()> = Mutex::new(());
 
 const DONE: &str = "gust-test-end-of-argv";
+
+// Each test registry has at most one entry. Match the reference launcher's
+// missing-entry refusal before it inspects any command-line options.
+const SELECT_ENTRY: &str = r#"
+for entry in "$XDG_DATA_HOME"/applications/*.desktop; do
+    [ -f "$entry" ] || exit 1
+    break
+done"#;
+const PRINT_ID: &str = r#"
+if [ "$1" = --print-id ]; then
+    [ "$#" -eq 1 ] || exit 1
+    echo "${entry##*/}"
+    exit 0
+fi"#;
 
 /// A directory of stand-in programs, each of which records its own argv, one
 /// argument per line, in `<name>.called`.
 struct Stage {
     dir: PathBuf,
+    old_data_home: Option<std::ffi::OsString>,
     old_path: Option<std::ffi::OsString>,
     old_terminal: Option<std::ffi::OsString>,
     _env: std::sync::MutexGuard<'static, ()>,
@@ -34,16 +49,17 @@ impl Stage {
         let dir = std::env::temp_dir().join(format!("gust-term-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir(dir.join("applications")).unwrap();
+        std::fs::write(
+            dir.join("applications/fixture.desktop"),
+            format!("Exec={}/selected-terminal\n", dir.display()),
+        )
+        .unwrap();
         for name in programs {
             let probe = if *name == "xdg-terminal-exec" {
-                r#"[ ! -f "${0%/*}/unresolved" ] || exit 1
-if [ "$1" = --print-id ]; then
-    [ "$#" -eq 1 ] || exit 1
-    echo fixture.desktop
-    exit 0
-fi"#
+                format!("{SELECT_ENTRY}\n{PRINT_ID}")
             } else {
-                ""
+                String::new()
             };
             write_script(
                 &dir.join(name),
@@ -51,11 +67,13 @@ fi"#
             );
         }
         let stage = Stage {
+            old_data_home: std::env::var_os("XDG_DATA_HOME"),
             old_path: std::env::var_os("PATH"),
             old_terminal: std::env::var_os("TERMINAL"),
             dir,
             _env: env,
         };
+        std::env::set_var("XDG_DATA_HOME", &stage.dir);
         std::env::set_var("PATH", &stage.dir);
         std::env::remove_var("TERMINAL");
         stage
@@ -94,6 +112,10 @@ fn write_script(path: &Path, body: &str) {
 
 impl Drop for Stage {
     fn drop(&mut self) {
+        match self.old_data_home.take() {
+            Some(p) => std::env::set_var("XDG_DATA_HOME", p),
+            None => std::env::remove_var("XDG_DATA_HOME"),
+        }
         match self.old_path.take() {
             Some(p) => std::env::set_var("PATH", p),
             None => std::env::remove_var("PATH"),
@@ -147,7 +169,7 @@ fn several_files_for_a_terminal_app_open_inside_a_terminal() {
 #[test]
 fn a_terminal_app_with_no_terminal_to_run_in_is_refused_not_faked() {
     let stage = Stage::new("none", &["xdg-terminal-exec", "nvim"]);
-    std::fs::write(stage.dir.join("unresolved"), "").unwrap();
+    std::fs::remove_file(stage.dir.join("applications/fixture.desktop")).unwrap();
     assert_eq!(open_terminal_here(&stage.dir), Err(OpenRefusal::NoHandler));
     assert_eq!(
         run_in_terminal("nvim", &["one"]),
@@ -193,7 +215,7 @@ fn unresolved_desktop_entry_uses_terminal_env_then_named_terminal() {
         "unresolved",
         &["xdg-terminal-exec", "my-term", "alacritty", "nvim"],
     );
-    std::fs::write(stage.dir.join("unresolved"), "").unwrap();
+    std::fs::remove_file(stage.dir.join("applications/fixture.desktop")).unwrap();
     std::env::set_var("TERMINAL", "my-term");
     assert_eq!(open_terminal_here(&stage.dir).unwrap(), "my-term");
     let (_, args) = stage.first_called(&["my-term"]);
@@ -207,22 +229,60 @@ fn unresolved_desktop_entry_uses_terminal_env_then_named_terminal() {
 }
 
 #[test]
+fn legacy_launcher_discarding_unknown_options_never_opens_a_probe_terminal() {
+    let stage = Stage::new(
+        "legacy",
+        &["xdg-terminal-exec", "selected-terminal", "foot", "rclone"],
+    );
+    // v0.12.4 discards --print-id, then execs the selected entry even if
+    // no arguments remain. Record that launch if it reaches our real entry.
+    write_script(
+        &stage.dir.join("xdg-terminal-exec"),
+        &format!(
+            r#"{SELECT_ENTRY}
+test_mode=false
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --test) test_mode=true; shift ;;
+        --) shift; break ;;
+        -*) shift ;;
+        *) break ;;
+    esac
+done
+while IFS= read -r line; do
+    case "$line" in Exec=*)
+        program=${{line#Exec=}}
+        if "$test_mode"; then
+            printf 'Command and arguments:\n  >%s<\n' "$program"
+            exit 0
+        fi
+        exec "$program" "$@" ;;
+    esac
+done < "$entry"
+exit 1"#
+        ),
+    );
+    assert_eq!(run_in_terminal("rclone", &["config"]).unwrap(), "foot");
+    assert_eq!(stage.first_called(&["foot"]).1, ["-e", "rclone", "config"]);
+    std::fs::remove_file(stage.dir.join("foot")).unwrap();
+    assert_eq!(open_terminal_here(&stage.dir), Err(OpenRefusal::NoHandler));
+    assert!(!stage.was_called("selected-terminal"));
+}
+
+#[test]
 fn a_failing_target_runs_once_with_its_original_file_arguments() {
     let stage = Stage::new("dispatch", &["xdg-terminal-exec", "foot", "nvim"]);
     // The launcher execs the target. Its eventual nonzero status is therefore
     // indistinguishable from a desktop-entry lookup failure after dispatch.
     write_script(
         &stage.dir.join("xdg-terminal-exec"),
-        r#"
-if [ "$1" = --print-id ]; then
-    [ "$#" -eq 1 ] || exit 1
-    echo fixture.desktop
-    exit 0
-fi
+        &format!(
+            r#"{SELECT_ENTRY}
+{PRINT_ID}
 [ "$1" = -- ] || exit 2
 shift
-exec "$@"
-"#,
+exec "$@""#
+        ),
     );
     write_script(
         &stage.dir.join("nvim"),
