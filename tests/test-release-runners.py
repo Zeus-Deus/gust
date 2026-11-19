@@ -285,12 +285,12 @@ class FixtureContainmentTests(unittest.TestCase):
                     self.assertIn(str(results), result.stderr)
                     self.assertTrue((out / "home").is_dir())
 
-    def test_fresh_fixture_is_built_and_sibling_data_is_untouched(self):
+    def test_fixture_ending_in_newline_is_distinct_from_its_sibling(self):
         with tempfile.TemporaryDirectory(prefix="gust-fresh-fixture-") as temporary:
             parent = Path(temporary)
-            sibling = parent / "keep"
+            sibling = parent / "fixture"
             sibling.write_text("outside fixture")
-            destination = parent / "fixture"
+            destination = parent / "fixture\n"
             result = subprocess.run([str(ROOT / "tests/make-fixture.sh"), str(destination)],
                                     capture_output=True, timeout=20)
             self.assertEqual(result.returncode, 0)
@@ -298,7 +298,27 @@ class FixtureContainmentTests(unittest.TestCase):
             self.assertEqual(sibling.read_text(), "outside fixture")
             self.assertEqual(destination.stat().st_mode & 0o777, 0o700)
 
-    def test_runner_auxiliary_trees_preserve_explicit_fixture_siblings(self):
+    def test_runner_returns_builder_failure_before_normalizing(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            root = Path(temporary)
+            builder = root / "make-fixture.sh"
+            builder.write_text('#!/bin/sh\nprintf "%s" "$1" > "$HERE/received"\nexit 23\n')
+            builder.chmod(0o700)
+            spelling = f"{root}/../{root.name}/"
+            result = subprocess.run(["bash", "-uc", """
+                source "$1"
+                export HERE=$2
+                GUST_FIXTURE=$3
+                prepare_fixture
+                status=$?
+                rmdir -- "$qa_run_dir" || exit 1
+                exit "$status"
+            """, "qa-fixture-test", str(ROOT / "tests/qa-fixture.sh"), temporary, spelling],
+                                    capture_output=True, timeout=5)
+            self.assertEqual(result.returncode, 23)
+            self.assertEqual((root / "received").read_text(), spelling)
+
+    def test_runner_normalizes_trailing_slash_and_preserves_fixture_siblings(self):
         with tempfile.TemporaryDirectory(prefix="gust-qa-siblings-", dir="/tmp") as temporary:
             parent = Path(temporary)
             home = parent / "explicit home"
@@ -311,11 +331,11 @@ class FixtureContainmentTests(unittest.TestCase):
 
             subprocess.run(["bash", "-euc", """
                 HERE=$1
-                GUST_FIXTURE=$2
+                GUST_FIXTURE="$2/"
                 unset GUST_KEEP_FIXTURE
                 source "$HERE/qa-fixture.sh"
                 prepare_fixture
-                test "$FIXTURE" = "$GUST_FIXTURE"
+                test "$FIXTURE" = "$2"
                 for tree in "$PANEDIR" "$QLDIR" "$DELDIR" "$ARCDIR" "$BULKDIR" "$OWDIR" "$MODIR" "$CLIPDIR"; do
                     test "$(dirname -- "$tree")" = "$qa_run_dir"
                     mkdir -- "$tree"

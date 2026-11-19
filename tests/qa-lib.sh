@@ -221,13 +221,13 @@ palette_run() {
   sleep 0.9
 }
 
-# Navigate to an absolute path through the palette (a typed path is
-# recognised as a path, not an action).
+# Navigate through the palette. A home-relative or escaped path can have a
+# different model location from the text typed into the palette.
 goto() {
-  local target="$1"
+  local target="$1" display="${2:-$1}"
   for _ in 1 2 3; do
     palette_run "$target"
-    if wait_for "d['model']['location']" "$target" 10; then
+    if wait_for "d['model']['location']" "$display" 10; then
       return 0
     fi
   done

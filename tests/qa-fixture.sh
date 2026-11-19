@@ -14,7 +14,10 @@ prepare_fixture() {
   OWDIR="$qa_run_dir/openwith"
   MODIR="$qa_run_dir/multiopen"
   CLIPDIR="$qa_run_dir/clip"
-  "$HERE/make-fixture.sh" "$FIXTURE" >/dev/null
+  "$HERE/make-fixture.sh" "$FIXTURE" >/dev/null || return $?
+  # Admit the original spelling first. Match Gust's lexical path spelling,
+  # keeping even a final newline in the admitted directory name.
+  IFS= read -r -d '' FIXTURE < <(realpath -esz -- "$FIXTURE")
 }
 
 # Initial on-disk state for the full runner's two-pane transfer journey.
