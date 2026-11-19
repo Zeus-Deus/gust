@@ -230,6 +230,34 @@ class FixtureContainmentTests(unittest.TestCase):
                     self.assertIn("readable QA section", result.stderr)
                     self.assertFalse((root / "setup-started").exists())
 
+    def test_rejected_fixture_never_drives_the_desktop_or_terminates_gust(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            root = Path(temporary)
+            for name in ("qa.sh", "qa-one.sh", "make-fixture.sh", "fixture-root.py"):
+                shutil.copy2(ROOT / "tests" / name, root)
+            # Give the production runners a private lock, sentinel and scratch directory.
+            for name in ("qa-lib.sh", "qa-fixture.sh"):
+                script = (ROOT / "tests" / name).read_text()
+                (root / name).write_text(script.replace("/tmp/gust-", f"{root}/gust-"))
+
+            calls = root / "calls"
+            for name in ("vmsession", "sudo", "pkill", "gust"):
+                double = root / name
+                double.write_text('#!/bin/sh\necho "${0##*/} $*" >> "$CALLS"\nexit 1\n')
+                double.chmod(0o700)
+            section = root / "section.sh"
+            section.write_text('echo "section ran" >> "$CALLS"\n')
+            env = {"PATH": f"{root}:{os.defpath}", "HOME": temporary, "CALLS": str(calls),
+                   "GUST_BIN": str(root / "gust"), "GUST_FIXTURE": temporary}
+            for command in ([root / "qa.sh"], [root / "qa-one.sh", section]):
+                with self.subTest(runner=command[0].name):
+                    calls.write_text("")
+                    result = subprocess.run([*command, root / "out"], env=env,
+                                            capture_output=True, text=True, timeout=10)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("fixture refused", result.stderr)
+                    self.assertEqual(calls.read_text(), "")
+
     def test_section_disappearing_after_setup_preserves_evidence(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -317,6 +345,38 @@ class FixtureContainmentTests(unittest.TestCase):
                                     capture_output=True, timeout=5)
             self.assertEqual(result.returncode, 23)
             self.assertEqual((root / "received").read_text(), spelling)
+
+    def test_killed_transfer_checks_every_published_file_against_its_source(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source, destination = root / "src", root / "dest"
+            source.mkdir()
+            destination.mkdir()
+            (source / "unpublished").touch()
+            (destination / ".gust-staging-inflight").write_bytes(b"partial")
+            for index in range(60):
+                name = f"copy {index}\nwith a newline"
+                (source / name).touch()
+                (destination / name).touch()
+            # Corrupt the last published entry in directory traversal order,
+            # outside the original 50-file sample. Keep the directory order stable.
+            published = [p for p in destination.iterdir() if not p.name.startswith(".gust-staging-")][-1]
+            original = source / published.name
+            for src, dest, expected in ((b"complete", b"complete", "PASS"),
+                                        (b"complete", b"cut", "FAIL"), (b"", b"extra", "FAIL")):
+                with self.subTest(source=src, published=dest):
+                    original.write_bytes(src)
+                    published.write_bytes(dest)
+                    result = subprocess.run(["bash", "-euc", """
+                        source "$1"
+                        ok() { echo PASS; }
+                        bad() { echo FAIL; }
+                        expect_published_copies "$2" "$3"
+                    """, "transfer-test", str(ROOT / "tests/qa-fixture.sh"), source, destination],
+                                            check=True, capture_output=True, text=True, timeout=5)
+                    self.assertEqual(result.stdout.strip(), expected)
+                    if expected == "FAIL":
+                        self.assertIn(f"published {len(dest)} bytes, expected {len(src)}", result.stderr)
 
     def test_runner_normalizes_trailing_slash_and_preserves_fixture_siblings(self):
         with tempfile.TemporaryDirectory(prefix="gust-qa-siblings-", dir="/tmp") as temporary:

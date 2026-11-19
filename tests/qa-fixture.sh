@@ -27,6 +27,35 @@ prepare_pane_fixture() {
   printf 'two\n' > "$PANEDIR/paneL/p2.txt"
 }
 
+# The interrupted copy may publish any subset, but each final name must
+# identify a complete copy. Staging debris has its own assertion.
+expect_published_copies() {
+  if python3 - "$1" "$2" <<'PYTHON'
+from pathlib import Path
+from stat import S_ISREG
+import sys
+
+source, destination = map(Path, sys.argv[1:])
+for published in destination.iterdir():
+    if published.name.startswith(".gust-staging-"):
+        continue
+    original = source / published.name
+    try:
+        source_stat, copy_stat = original.lstat(), published.lstat()
+    except OSError as error:
+        sys.exit(str(error))
+    if not (S_ISREG(source_stat.st_mode) and S_ISREG(copy_stat.st_mode)):
+        sys.exit(f"expected regular files for {published.name!r}")
+    if copy_stat.st_size != source_stat.st_size:
+        sys.exit(f"{published.name!r}: published {copy_stat.st_size} bytes, expected {source_stat.st_size}")
+PYTHON
+  then
+    ok "all published files match their source sizes after the kill"
+  else
+    bad "a published file could not be verified against its source after the kill"
+  fi
+}
+
 # Both runners call this only after their final success check.
 finish_fixture() {
   [[ -n "$qa_run_dir" ]] || return 0

@@ -47,12 +47,6 @@ echo "$$" >&9
 STATE="$OUTDIR/qa-state.json"
 rm -f "$STATE"
 
-# A run that dies must not leave the app it started behind.
-cleanup() { pkill -x gust 2>/dev/null || true; }
-trap cleanup EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
-
 if [[ ! -x "$BIN" ]]; then
   echo "gust qa: no binary at $BIN" >&2
   echo "gust qa: build it first, or set GUST_BIN." >&2
@@ -68,6 +62,15 @@ PASS=0; FAIL=0; RESULTS=()
 say()  { printf '\n\033[1m== %s\033[0m\n' "$*"; }
 ok()   { PASS=$((PASS+1)); RESULTS+=("PASS $*"); printf '  \033[32mPASS\033[0m %s\n' "$*"; }
 bad()  { FAIL=$((FAIL+1)); RESULTS+=("FAIL $*"); printf '  \033[31mFAIL\033[0m %s\n' "$*"; }
+
+say "fixture"
+# A completed or interrupted run may still contain evidence or mounts.
+# Honour explicit roots only when the fixture builder admits them.
+source "$HERE/qa-fixture.sh"
+prepare_fixture || exit 1
+mkdir -p "$FIXTURE/.local/share" "$FIXTURE/.cache"
+rm -f /tmp/gust-fixture-EXECUTED
+[[ -d "$FIXTURE/Projects" ]] && ok "fixture built at $FIXTURE" || bad "fixture missing"
 
 vm()   { "$HERE/vmsession" "$@" 9>&-; }
 
@@ -154,6 +157,10 @@ launch_gust() {
 }
 
 start_gust() {
+  # Cleanup becomes necessary only when the runner starts managing Gust.
+  trap 'pkill -x gust 2>/dev/null || true' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
   pkill -x gust 2>/dev/null || true
   sleep 0.4
   rm -f "$STATE"
@@ -302,12 +309,3 @@ if [[ "${FOREIGN:-0}" -gt 0 ]]; then
 else
   ok "no other windows are competing for input"
 fi
-
-say "fixture"
-# A completed or interrupted run may still contain evidence or mounts.
-# Honour explicit roots only when the fixture builder admits them.
-source "$HERE/qa-fixture.sh"
-prepare_fixture || exit 1
-mkdir -p "$FIXTURE/.local/share" "$FIXTURE/.cache"
-rm -f /tmp/gust-fixture-EXECUTED
-[[ -d "$FIXTURE/Projects" ]] && ok "fixture built at $FIXTURE" || bad "fixture missing"

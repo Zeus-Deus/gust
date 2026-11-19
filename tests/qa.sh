@@ -655,25 +655,39 @@ sleep 1.0
   || bad "the window did not settle after a cancel"
 
 say "10n · A killed transfer leaves no partial file and no debris"
-KL="$FIXTURE/killtest"
-rm -rf "$KL"; mkdir -p "$KL/src" "$KL/dest"
-# Enough files that the copy is still running when the process is killed.
-(cd -- "$KL/src" && seq -f 'k-%05g.dat' 1 20000 | xargs -n 2000 touch)
+# Keep the URI list below Gust's 512 KiB clipboard read limit, independent
+# of the caller's fixture path length.
+KL="$qa_run_dir/killtest"
+kill_file_count=2000
+mkdir -p "$KL/src" "$KL/dest" || exit 1
+(cd -- "$KL/src" && seq -f 'k-%05g.dat' 1 "$kill_file_count" | xargs -n 2000 touch) || exit 1
 
 require_goto "$KL/src"
-wait_for "d['model']['count']" "20000" 60 >/dev/null
+wait_for "d['model']['count']" "$kill_file_count" 60 >/dev/null
 vm wtype -M ctrl -k a -m ctrl >/dev/null 2>&1; sleep 2.0
-vm wtype -M ctrl -k c -m ctrl >/dev/null 2>&1; sleep 1.0
+vm wtype -M ctrl -k c -m ctrl >/dev/null 2>&1
+wait_for "d['clip']" "Copy $kill_file_count items" || bad "could not copy all $kill_file_count files to the clipboard"
 require_goto "$KL/dest"
 
 vm wtype -M ctrl -k v -m ctrl >/dev/null 2>&1
-sleep 0.4
+# Wait for actual publication. A refused or delayed paste can leave an empty
+# destination that trivially satisfies every per-file integrity check.
+for _ in {1..100}; do
+  [[ -n "$(find "$KL/dest" -maxdepth 1 -name 'k-*.dat' -type f -printf x -quit)" ]] && break
+  sleep 0.05
+done
 WAS_RUNNING="$(state "d['jobRunning']")"
 pkill -9 -x gust
 sleep 1.5
 
 DEBRIS="$(count_entries "$KL/dest" -maxdepth 1 -name '.gust-staging-*')"
+PUBLISHED="$(count_entries "$KL/dest" -maxdepth 1 -type f -name 'k-*.dat')"
 SRC_LEFT="$(count_entries "$KL/src" -maxdepth 1 -type f)"
+if (( PUBLISHED > 0 && PUBLISHED < kill_file_count )); then
+  ok "the kill interrupted the copy after $PUBLISHED of $kill_file_count files were published"
+else
+  bad "did not interrupt a publishing copy ($PUBLISHED of $kill_file_count files published)"
+fi
 # A SIGKILLed process cannot clean up after itself: at most the ONE file
 # it was writing survives, and it is named .gust-staging-<pid>-… so it is
 # identifiable. The guarantee is that it never looks like a real file and
@@ -682,9 +696,11 @@ SRC_LEFT="$(count_entries "$KL/src" -maxdepth 1 -type f)"
 [[ "$DEBRIS" -le 1 ]] \
   && ok "a SIGKILL left at most the one in-flight staging file  (job was running: $WAS_RUNNING)" \
   || bad "$DEBRIS staging file(s) survived a kill, expected at most 1"
-[[ "$SRC_LEFT" -eq 20000 ]] \
+[[ "$SRC_LEFT" -eq "$kill_file_count" ]] \
   && ok "a killed COPY never touched the source" \
-  || bad "source damaged by a killed copy ($SRC_LEFT of 20000)"
+  || bad "source damaged by a killed copy ($SRC_LEFT of $kill_file_count)"
+
+expect_published_copies "$KL/src" "$KL/dest"
 
 # The promise is not that a kill leaves nothing, but that browsing the
 # folder afterwards cleans it up. Restart and list the destination.
@@ -700,13 +716,6 @@ if [[ "$DEBRIS" -gt 0 ]]; then
 else
   ok "the kill landed between files: no debris to sweep"
 fi
-
-# Every file in the destination must be complete — never a partial.
-PARTIAL=0
-while IFS= read -r -d '' f; do
-  [[ -s "$f" ]] && PARTIAL=$((PARTIAL+1))
-done < <(find "$KL/dest" -maxdepth 1 -type f -print0 | head -z -n50)
-ok "no partially-written file was published (staged then renamed atomically)"
 
 # Restart Gust: it must come back cleanly over the folder a crash touched.
 start_gust
