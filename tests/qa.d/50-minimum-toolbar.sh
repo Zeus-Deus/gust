@@ -87,9 +87,29 @@ compact_toolbar_actions() {
   done
 }
 
+second_tab_toolbar() {
+  key Down
+  key Right
+  expect "Roomy density takes effect" "d['settings']['density']" "roomy"
+  toolbar_click settingsPoints close || return 1
+  ctrl t
+  expect "second tab is active" "(d['tabCount'], d['activeTab'])" "(2, 1)"
+  shot "50-second-tab-roomy"
+
+  toolbar_click toolbarPoints more || return 1
+  expect "More opens with two tabs" "d['menuOpen']" "True"
+  toolbar_click menuPoints Search || return 1
+  expect "the overflow Search action takes its click" "d['searchBarActive']" "True"
+  key Escape
+  toolbar_click toolbarPoints settings || return 1
+  expect "Settings opens with two tabs" "d['settingsOpen']" "True"
+  toolbar_click settingsPoints close || return 1
+  expect "Close returns to the second tab" "(d['settingsOpen'], d['activeTab'])" "(False, 1)"
+}
+
 minimum_toolbar() {
-  local spacing="$1" test_home
-  shift
+  local spacing="$1" base="$2" test_home
+  shift 2
   test_home="$(mktemp -d "$FIXTURE/toolbar-XXXXXXXX")" || return 1
   # Keep font metrics and preferences deterministic across desktop themes.
   local FIXTURE="$test_home" REAL_STATE="$test_home/theme"
@@ -100,7 +120,7 @@ minimum_toolbar() {
     shot_suffix="-spacing-$spacing"
     mkdir -p "$REAL_STATE/current/theme"
     echo 'mode = "dark"' > "$REAL_STATE/current/theme/colors.toml"
-    printf '[spacing]\nscale = 2.0\n' > "$REAL_STATE/current/theme/shell.toml"
+    printf '[font]\nbase-size = %s\n[spacing]\nscale = 2.0\n' "$base" > "$REAL_STATE/current/theme/shell.toml"
   fi
   for zoom in "$@"; do
     start_gust "$folder/q" || return 1
@@ -116,6 +136,10 @@ minimum_toolbar() {
     expect "minimum client size" "(d['windowWidth'], d['windowHeight'])" "(520, 320)"
     expect "text zoom" "d['zoom']" "$zoom"
     expect "theme spacing scale" "d['spacingScale']" "$spacing"
+    if [[ "$base" == 28 ]]; then
+      second_tab_toolbar || return 1
+      continue
+    fi
     shot "50-settings-$zoom$shot_suffix"
     if [[ "$spacing" == 2 ]]; then roomy_settings_options || return 1; fi
     toolbar_click settingsPoints close || return 1
@@ -191,8 +215,9 @@ minimum_toolbar() {
 
 say "50 · minimum-size toolbar and panels at default and increased text"
 if [[ "$MOUSE_OK" == 1 ]]; then
-  minimum_toolbar 1 1 1.1 1.6 || bad "minimum-size toolbar journey did not finish"
-  minimum_toolbar 2 1.6 || bad "doubled-spacing toolbar journey did not finish"
+  minimum_toolbar 1 12 1 1.1 1.6 || bad "minimum-size toolbar journey did not finish"
+  minimum_toolbar 2 12 1.6 || bad "doubled-spacing toolbar journey did not finish"
+  minimum_toolbar 2 28 1.6 || bad "large-font second-tab toolbar journey did not finish"
 else
   bad "minimum-size toolbar journey needs pointer injection"
 fi

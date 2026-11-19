@@ -2900,13 +2900,20 @@ Window {
     }
 
     Column {
+        id: windowLayout
         anchors.fill: parent
+
+        // Share the available height between the toolbar (1.5 rows), footer
+        // and file area (one each), plus the rows that are currently open.
+        readonly property real rowCount: 3.5 + (win.activePaneTabCount > 1 ? 1 : 0)
+            + (win.adminMode ? 1 : 0) + (filterBar.filterActive || filterBar.searchActive ? 1 : 0)
+        readonly property int controlHeight: Math.min(Tokens.controlHeight, Math.floor(height / rowCount))
 
         // The administrator window says so, on every screen of it.
         Rectangle {
             id: adminBanner
             width: parent.width
-            height: win.adminMode ? Tokens.controlHeight : 0
+            height: win.adminMode ? windowLayout.controlHeight : 0
             visible: win.adminMode
             color: Tokens.withAlpha(Tokens.danger, 0.16)
             Rectangle {
@@ -2939,7 +2946,7 @@ Window {
             // `height: visible ? X : 0` makes height depend on a sibling
             // binding's evaluation order: visible flipped true while height
             // stayed 0, so the strip was shown and occupied no space at all.
-            height: win.activePaneTabCount > 1 ? Tokens.controlHeight : 0
+            height: win.activePaneTabCount > 1 ? windowLayout.controlHeight : 0
             color: Tokens.barBackground
             visible: win.activePaneTabCount > 1
 
@@ -2977,7 +2984,7 @@ Window {
                                                          tabText.implicitWidth
                                                          + Tokens.spaceLg * 2))
                         width: implicitWidth
-                        height: Math.round(Tokens.controlHeight * 0.8)
+                        height: Math.round(tabStrip.height * 0.8)
                         radius: Tokens.radius
                         color: current ? Tokens.withAlpha(Tokens.foreground, 0.12)
                                        : "transparent"
@@ -3049,12 +3056,12 @@ Window {
         Rectangle {
             id: headerBar
             width: parent.width
-            height: Math.round(Tokens.controlHeight * 1.5)
+            height: Math.round(windowLayout.controlHeight * 1.5)
             color: Tokens.barBackground
 
             // Keep the themed button sizes until the two persistent rows
             // would touch. Then shrink their horizontal padding and gaps
-            // together, leaving the glyphs and vertical hit areas unchanged.
+            // together, independently of their height.
             readonly property real preferredToolsWidth:
                 (1 + navButtons.count + menuTools.children.length) * Tokens.controlHeight
                 + navButtons.count * Tokens.spaceSm + (menuTools.children.length - 1) * Tokens.spaceXs
@@ -3080,6 +3087,7 @@ Window {
                 // Sidebar toggle — the visible restore control for the rail.
                 BarButton {
                     id: sidebarButton
+                    height: windowLayout.controlHeight
                     width: headerBar.toolWidth
                     objectName: "sidebarToggle"
                     icon: "sidebar"
@@ -3095,6 +3103,7 @@ Window {
                         { act: "up",      nm: qsTr("Up one folder") }
                     ]
                     delegate: BarButton {
+                        height: windowLayout.controlHeight
                         objectName: "nav-" + modelData.act
                         width: headerBar.toolWidth
                         icon: modelData.act
@@ -3114,6 +3123,7 @@ Window {
 
             Breadcrumbs {
                 id: crumbs
+                height: windowLayout.controlHeight
                 onDragHover: (t) => { hints.message = t; win.qaDump("drag-hover") }
                 onDragLanded: (m, e) => { hints.message = ""; win.transferStarted(m, e, "drop") }
                 model: dirModel
@@ -3139,6 +3149,7 @@ Window {
                 // list does not have.
                 BarButton {
                     id: searchButton
+                    height: windowLayout.controlHeight
                     objectName: "searchButton"
                     icon: "search"
                     label: qsTr("Search")
@@ -3151,6 +3162,7 @@ Window {
                 }
                 BarButton {
                     id: newFolderButton
+                    height: windowLayout.controlHeight
                     objectName: "newFolderButton"
                     icon: "new-folder"
                     label: qsTr("New folder")
@@ -3167,7 +3179,7 @@ Window {
                     id: sortButton
                     objectName: "sortButton"
                     width: sortText.implicitWidth + Tokens.spaceLg * 2
-                    height: Tokens.controlHeight
+                    height: windowLayout.controlHeight
                     color: sortHover.hovered ? Tokens.withAlpha(Tokens.foreground, 0.1) : "transparent"
                     radius: Tokens.radius
                     readonly property string word: {
@@ -3207,6 +3219,7 @@ Window {
                         { m: "columns", nm: qsTr("Columns view") }
                     ]
                     delegate: BarButton {
+                        height: windowLayout.controlHeight
                         objectName: "viewswitch-" + modelData.m
                         icon: modelData.m
                         label: modelData.nm
@@ -3226,6 +3239,7 @@ Window {
                 // Everything else the window can do, in words.
                 BarButton {
                     id: moreButton
+                    height: windowLayout.controlHeight
                     width: headerBar.toolWidth
                     objectName: "moreButton"
                     icon: "more"
@@ -3236,6 +3250,7 @@ Window {
                 // Settings: a visible control, never only a shortcut.
                 BarButton {
                     id: settingsButton
+                    height: windowLayout.controlHeight
                     width: headerBar.toolWidth
                     objectName: "settingsButton"
                     icon: "settings"
@@ -3264,8 +3279,8 @@ Window {
         Item {
             id: body
             width: parent.width
-            height: parent.height - tabStrip.height - headerBar.height - filterBar.height - adminBanner.height
-                    - chooserBar.height - interruptedNotice.height - jobDrawer.height - hints.height
+            height: Math.max(0, parent.height - tabStrip.height - headerBar.height - filterBar.height - adminBanner.height
+                    - chooserBar.height - interruptedNotice.height - jobDrawer.height - hints.height)
 
             Sidebar {
                 id: sidebar
@@ -3522,7 +3537,7 @@ Window {
         Rectangle {
             id: filterBar
             width: parent.width
-            height: (filterActive || searchActive) ? Tokens.controlHeight : 0
+            height: (filterActive || searchActive) ? windowLayout.controlHeight : 0
             visible: filterActive || searchActive
             color: Tokens.backgroundDark
             property bool filterActive: false
@@ -3676,6 +3691,7 @@ Window {
 
         HintStrip {
             id: hints
+            height: windowLayout.controlHeight
             width: parent.width
             preset: win.keyPreset
             // Bound for good: transient messages go to `message`, which
