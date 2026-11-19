@@ -420,18 +420,21 @@ fn main() {
     // Qt suppresses qDebug/qWarning output when stderr is not a terminal,
     // which hides QML errors from any automated run. Gust always wants them:
     // a silent QML failure is how a broken build looks healthy. Set only if
-    // the user has not expressed their own preference.
+    // the user has not expressed their own preference, and through
+    // `set_for_gust` so the applications Gust opens do not inherit it.
     if std::env::var_os("QT_FORCE_STDERR_LOGGING").is_none() {
-        std::env::set_var("QT_FORCE_STDERR_LOGGING", "1");
+        gust_core::childenv::set_for_gust("QT_FORCE_STDERR_LOGGING", "1");
     }
     if std::env::var_os("QT_ASSUME_STDERR_HAS_CONSOLE").is_none() {
-        std::env::set_var("QT_ASSUME_STDERR_HAS_CONSOLE", "1");
+        gust_core::childenv::set_for_gust("QT_ASSUME_STDERR_HAS_CONSOLE", "1");
     }
 
     // No GPU (a VM, a server, a machine whose driver is missing): Qt would
     // emulate OpenGL on the CPU through llvmpipe, which measured 2.5x the
     // memory and 1.5x the first-window time of Qt's own raster renderer.
-    // Decided from sysfs before Qt starts; only THIS process is affected,
+    // Decided from sysfs before Qt starts; only THIS process is affected
+    // (`set_for_gust`: an application opened from Gust gets the user's own
+    // value back, so it is not forced into software rendering too),
     // and a user's own QT_QUICK_BACKEND / GUST_RENDERER always wins (plan §9:
     // nothing global, nothing about the compositor).
     // The Settings choice applies unless the user already chose in the
@@ -459,7 +462,7 @@ fn main() {
         }
     };
     if software {
-        std::env::set_var("QT_QUICK_BACKEND", "software");
+        gust_core::childenv::set_for_gust("QT_QUICK_BACKEND", "software");
     }
     let mut app = QGuiApplication::new();
     let mut engine = QQmlApplicationEngine::new();
