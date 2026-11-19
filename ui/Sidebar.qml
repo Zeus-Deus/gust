@@ -42,6 +42,12 @@ Rectangle {
     component PlaceRow: Rectangle {
         property string placeKey
         property bool hovered: false
+        /// A Glyph name, drawn before the label ("" for none).
+        property string icon: ""
+        property bool dimmed: false
+        /// Where the row's text starts: after the icon when one is drawn.
+        readonly property real textInset: rowIcon.drawn
+            ? Tokens.rowPaddingX + rowIcon.width + Tokens.spaceLg : Tokens.rowPaddingX
         readonly property bool current: root.currentKey === placeKey
         objectName: "sidebar:" + placeKey
         color: current ? Tokens.withAlpha(Tokens.accent, 0.18)
@@ -55,6 +61,29 @@ Rectangle {
             color: Tokens.accent
             visible: parent.current
         }
+        Glyph {
+            id: rowIcon
+            name: parent.icon
+            visible: drawn
+            x: Tokens.rowPaddingX
+            anchors.verticalCenter: parent.verticalCenter
+            width: Tokens.fontHeading
+            size: Tokens.fontSubtitle
+            color: parent.current ? Tokens.accent
+                 : parent.dimmed ? Tokens.foregroundDim : Tokens.foreground
+        }
+    }
+
+    // A section's name: small capitals, spaced, as Omarchy's own apps set
+    // them, so it reads as a heading and never as one more place.
+    component SectionLabel: Text {
+        textFormat: Text.PlainText
+        leftPadding: Tokens.rowPaddingX
+        color: Tokens.foregroundDim
+        font.family: Tokens.fontFamily
+        font.pixelSize: Tokens.fontCaption
+        font.capitalization: Font.AllUppercase
+        font.letterSpacing: Tokens.fontCaption / 10
     }
 
     signal placeChosen(string path)
@@ -182,12 +211,12 @@ Rectangle {
         const homeRoot = root.model ? root.model.home_path : ""
         if (homeRoot.length === 0) return
         const candidates = [
-            { label: qsTr("Home"),        path: homeRoot,                     group: "Places" },
-            { label: qsTr("Documents"),   path: homeRoot + "/Documents",      group: "Places" },
-            { label: qsTr("Downloads"),   path: homeRoot + "/Downloads",      group: "Places" },
-            { label: qsTr("Pictures"),    path: homeRoot + "/Pictures",       group: "Places" },
-            { label: qsTr("Videos"),      path: homeRoot + "/Videos",         group: "Places" },
-            { label: qsTr("Music"),       path: homeRoot + "/Music",          group: "Places" },
+            { label: qsTr("Home"),        path: homeRoot,                     icon: "home" },
+            { label: qsTr("Documents"),   path: homeRoot + "/Documents",      icon: "documents" },
+            { label: qsTr("Downloads"),   path: homeRoot + "/Downloads",      icon: "downloads" },
+            { label: qsTr("Pictures"),    path: homeRoot + "/Pictures",       icon: "pictures" },
+            { label: qsTr("Videos"),      path: homeRoot + "/Videos",         icon: "videos" },
+            { label: qsTr("Music"),       path: homeRoot + "/Music",          icon: "music" },
         ]
         for (var i = 0; i < candidates.length; i++)
             places.append(candidates[i])
@@ -216,20 +245,14 @@ Rectangle {
         width: rail.width
         spacing: Tokens.spaceSm
 
-        Text {
-            textFormat: Text.PlainText
-            leftPadding: Tokens.rowPaddingX
-            text: "Places"
-            color: Tokens.foregroundDim
-            font.family: Tokens.fontFamily
-            font.pixelSize: Tokens.fontCaption
-        }
+        SectionLabel { text: qsTr("Places") }
 
         Repeater {
             id: placeRepeater
             model: places
             delegate: PlaceRow {
                 placeKey: "place:" + index
+                icon: model.icon
                 width: column.width
                 height: Tokens.rowHeight
                 hovered: hover.hovered
@@ -239,7 +262,7 @@ Rectangle {
                 Text {
                     textFormat: Text.PlainText
                     anchors.verticalCenter: parent.verticalCenter
-                    leftPadding: Tokens.rowPaddingX
+                    leftPadding: parent.textInset
                     text: model.label
                     color: Tokens.foreground
                     font.family: Tokens.fontFamily
@@ -279,6 +302,7 @@ Rectangle {
         PlaceRow {
             placeKey: "recent"
             visible: !root.picker
+            icon: "recent"
             width: column.width
             height: Tokens.rowHeight
             hovered: recentHover.hovered
@@ -286,7 +310,7 @@ Rectangle {
             Text {
                 textFormat: Text.PlainText
                 anchors.verticalCenter: parent.verticalCenter
-                leftPadding: Tokens.rowPaddingX
+                leftPadding: parent.textInset
                 text: qsTr("Recent")
                 color: Tokens.foreground
                 font.family: Tokens.fontFamily
@@ -305,6 +329,7 @@ Rectangle {
         PlaceRow {
             placeKey: "trash"
             visible: !root.picker
+            icon: "trash"
             width: column.width
             height: Tokens.rowHeight
             hovered: trashHover.hovered
@@ -312,7 +337,7 @@ Rectangle {
             Text {
                 textFormat: Text.PlainText
                 anchors.verticalCenter: parent.verticalCenter
-                leftPadding: Tokens.rowPaddingX
+                leftPadding: parent.textInset
                 text: qsTr("Trash")
                 color: Tokens.foreground
                 font.family: Tokens.fontFamily
@@ -334,13 +359,8 @@ Rectangle {
             height: Tokens.spaceXl
             visible: root.bookmarks.length > 0
         }
-        Text {
-            textFormat: Text.PlainText
-            leftPadding: Tokens.rowPaddingX
+        SectionLabel {
             text: qsTr("Bookmarks")
-            color: Tokens.foregroundDim
-            font.family: Tokens.fontFamily
-            font.pixelSize: Tokens.fontCaption
             visible: root.bookmarks.length > 0
         }
         Repeater {
@@ -350,13 +370,15 @@ Rectangle {
                 required property int index
                 required property var modelData
                 placeKey: "bookmark:" + index
+                icon: "bookmark"
+                dimmed: !modelData.exists
                 width: column.width
                 height: Tokens.rowHeight
                 hovered: bmMouse.containsMouse
                 Text {
                     textFormat: Text.PlainText
                     anchors.verticalCenter: parent.verticalCenter
-                    leftPadding: Tokens.rowPaddingX
+                    leftPadding: parent.textInset
                     width: column.width - Tokens.rowPaddingX
                     text: modelData.label
                     // A pinned folder that is gone (unplugged drive, deleted)
@@ -414,14 +436,9 @@ Rectangle {
             visible: root.devices.length > 0
         }
 
-        Text {
-            textFormat: Text.PlainText
+        SectionLabel {
             id: devicesHeader
-            leftPadding: Tokens.rowPaddingX
             text: qsTr("Devices")
-            color: Tokens.foregroundDim
-            font.family: Tokens.fontFamily
-            font.pixelSize: Tokens.fontCaption
             visible: root.devices.length > 0
         }
 
@@ -432,6 +449,7 @@ Rectangle {
                 required property int index
                 required property var modelData
                 placeKey: "device:" + index
+                icon: modelData.phone ? "phone" : "drive"
                 width: column.width
                 height: Tokens.rowHeight
                 hovered: deviceMouse.containsMouse
@@ -439,7 +457,7 @@ Rectangle {
                 Column {
                     anchors.verticalCenter: parent.verticalCenter
                     anchors.left: parent.left
-                    anchors.leftMargin: Tokens.rowPaddingX
+                    anchors.leftMargin: parent.textInset
                     anchors.right: parent.right
                     anchors.rightMargin: Tokens.rowPaddingX
                     spacing: 0
@@ -519,15 +537,10 @@ Rectangle {
         Item {
             width: column.width
             height: Tokens.rowHeight
-            Text {
-                textFormat: Text.PlainText
+            SectionLabel {
                 id: remoteHeader
                 anchors.verticalCenter: parent.verticalCenter
-                leftPadding: Tokens.rowPaddingX
                 text: qsTr("Remote")
-                color: Tokens.foregroundDim
-                font.family: Tokens.fontFamily
-                font.pixelSize: Tokens.fontCaption
             }
             Rectangle {
                 id: connectButton
@@ -572,12 +585,13 @@ Rectangle {
                 required property int index
                 required property var modelData
                 placeKey: "remote:" + index
+                icon: modelData.kind === "cloud" ? "cloud" : "computer"
                 width: column.width
                 height: Tokens.rowHeight
                 hovered: remoteMouse.containsMouse
                 Text {
                     anchors.verticalCenter: parent.verticalCenter
-                    leftPadding: Tokens.rowPaddingX
+                    leftPadding: parent.textInset
                     width: column.width - Tokens.rowPaddingX
                     // Colour alone never carries the state (plan §2 mockup F).
                     text: (modelData.label || modelData.name) + (modelData.lost ? qsTr("  ·  lost") : "")

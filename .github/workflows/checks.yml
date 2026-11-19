@@ -86,10 +86,18 @@ jobs:
         run: |
           python3 crates/app/tests/permissions_worker_regressions.py --source . --output "$RUNNER_TEMP/gust-permissions-worker"
           python3 crates/app/tests/work_guard_regressions.py --source . --output "$RUNNER_TEMP/gust-work-guard"
+      - name: Right-click menu in a short window (system Qt)
+        run: |
+          python3 tests/context-menu.py
+          QT_SCALE_FACTOR=2 python3 tests/context-menu.py
       - name: Grid thumbnail decoding and geometry (system Qt)
         run: |
           python3 tests/grid-thumbnail.py
           QT_SCALE_FACTOR=2 python3 tests/grid-thumbnail.py
+      - name: Toolbar button click, name and tip (system Qt)
+        run: |
+          python3 tests/bar-button.py
+          QT_SCALE_FACTOR=2 python3 tests/bar-button.py
       - name: Cursor dependencies and recycled views (isolated Qt Python)
         run: |
           python3 -m venv "$RUNNER_TEMP/gust-view-python"

@@ -259,6 +259,10 @@ impl qobject::DirModel {
             let status_phase = metrics.publish_phases.status.timer();
             let display = frame.all.key.display_path();
             let location_changed_by_token = old.all.key != frame.all.key;
+            if location_changed_by_token {
+                self.as_mut()
+                    .set_tab_disclosure_path(QString::from(&frame.all.key.tab_path()));
+            }
             let same_display = self.as_ref().location.to_string() == display;
             self.as_mut().set_location(QString::from(&display));
             if location_changed_by_token && same_display {

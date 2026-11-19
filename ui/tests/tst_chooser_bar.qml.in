@@ -852,6 +852,7 @@ Item {
             verify(win.chooserFits("settings"))
             win.chooserMode = "open"
             verify(!win.chooserFits("settings"))
+            verify(!win.chooserFits("new-tab"))
             verify(!win.chooserFits("toggle-split"))
             verify(win.chooserFits("rename"))
             // These run a program, and the ids are not in any list.

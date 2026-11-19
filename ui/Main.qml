@@ -8,7 +8,7 @@ Window {
 
     ListModel {
         id: tabList
-        ListElement { startPath: ""; label: "…"; pane: 0 }
+        ListElement { startPath: ""; label: "…"; fullPath: ""; pane: 0 }
     }
 
     // Instantiator, not Repeater: a Repeater needs a visual parent and
@@ -39,6 +39,12 @@ Window {
                 const cut = p.lastIndexOf("/")
                 return (cut >= 0 && cut < p.length - 1) ? p.substring(cut + 1) : p
             }
+            readonly property string tabPath: {
+                if (everActivated || startPath === "") return tab_disclosure_path
+                const token = startPath.startsWith("token:") ? startPath.substring(6) : token_for(startPath)
+                return tab_path_for_token(token)
+            }
+            onTabPathChanged: win.refreshTabLabels()
             onTabLabelChanged: win.refreshTabLabels()
             onLocationChanged: {
                 if (clipboard_busy()) {
@@ -449,6 +455,7 @@ Window {
         // Admission and older worker notifications are not this refresh's answer.
         if (win.integrationRefreshTarget !== ""
                 && win.revisionAtLeast(String(win.prefs.integration_refresh || "0"), win.integrationRefreshTarget)) {
+            settingsPanel.revealAfterLayout(settingsPanel.busyKey)
             settingsPanel.busyKey = ""
             win.integrationRefreshTarget = ""
         }
@@ -567,6 +574,20 @@ Window {
             out.push([Math.round(p.x), Math.round(p.y)])
         }
         return out
+    }
+
+    /// Complete captions inside the clipped strip, for the desktop QA harness.
+    function visibleTabLabels() {
+        const labels = []
+        for (let i = 0; i < tabRepeater.count; i++) {
+            const tab = tabRepeater.itemAt(i)
+            if (!tab || !tab.visible) continue
+            const caption = tab.caption
+            const left = caption.mapToItem(tabViewport, 0, 0).x
+            if (!caption.truncated && left >= 0 && left + caption.width <= tabViewport.width)
+                labels.push(caption.text)
+        }
+        return labels
     }
 
     function refreshDevices() {
@@ -1705,12 +1726,15 @@ Window {
     function refreshTabLabels() {
         for (let i = 0; i < tabList.count; i++) {
             const m = tabs.objectAt(i)
+            if (!m) continue
             // A tab not opened yet (restored, or opened in the background)
             // keeps the name it was given until it lists its folder.
-            const keep = m && !m.everActivated && tabList.get(i).startPath !== "" && i !== win.activeTab
-            const name = keep ? tabList.get(i).label : (m ? m.tabLabel : "…")
+            const keep = !m.everActivated && tabList.get(i).startPath !== "" && i !== win.activeTab
+            const name = keep ? tabList.get(i).label : m.tabLabel
             if (tabList.get(i).label !== name)
                 tabList.setProperty(i, "label", name)
+            if (tabList.get(i).fullPath !== m.tabPath)
+                tabList.setProperty(i, "fullPath", m.tabPath)
         }
     }
     onActiveTabChanged: {
@@ -2184,8 +2208,7 @@ Window {
         return true
     }
 
-    /// One page of the file type list. The menu does not scroll, so a list
-    /// taller than `room` rows ends in a row that opens the next page.
+    /// Keep each page above the footer. Longer lists end in a next-page entry.
     function chooserFilterPage(names, ticked, room, page) {
         const row = (i) => ({
             label: names[i], hint: i === ticked ? "✓" : "", action: "chooser-filter-" + i })
@@ -2215,7 +2238,7 @@ Window {
     /// What a dialog must not offer: a surface it cannot show (tabs, panes,
     /// Settings, panels) or a launch, when the job here is to pick.
     readonly property var chooserRefused: [
-        "settings", "trash-view", "recent", "open-tab", "bm-open-tab", "rp-open-tab",
+        "settings", "trash-view", "recent", "new-tab", "open-tab", "bm-open-tab", "rp-open-tab",
         "open-other-pane", "split", "unsplit", "toggle-split", "send-copy", "send-move",
         "open-with", "run", "terminal", "open-admin", "device-share-here",
         "device-share-folder", "device-send"
@@ -2511,6 +2534,7 @@ Window {
         else if (a === "paste-into") {
             win.transferStarted(dirModel, dirModel.clip_paste_into(dirModel.cursor), "paste")
         }
+        else if (a === "sort-menu") win.openSortMenu()
         else if (a === "view-rows") win.setView("rows")
         else if (a === "split") win.splitPane()
         else if (a === "unsplit") win.closePane(win.activePane)
@@ -2553,6 +2577,11 @@ Window {
         }
         else if (a === "permissions") win.askPermissions()
         else if (a === "new-file") win.askNewFile()
+        else if (a === "select-all") { dirModel.sel_all(); win.qaDump("select") }
+        else if (a === "undo") win.doUndo()
+        else if (a === "new-tab") win.newTab("")
+        else if (a === "palette") { palette.open(); return }
+        else if (a === "grep") { palette.openWith("grep "); return }
         else if (a === "invert-selection") { dirModel.sel_invert(); win.qaDump("select") }
         else if (a === "deselect-all") { dirModel.sel_clear(); win.qaDump("select") }
         else if (a === "owner") win.askOwner()
@@ -2591,7 +2620,9 @@ Window {
         }
         else if (a === "search") {
             win.openSearch()
+            return // Keep the keyboard in the search field.
         }
+        else if (a === "close-search") win.closeSearch(false)
         else if (a === "compress") {
             const cerr = dirModel.compress_selection(dirModel.cursor)
             if (cerr !== "") win.alertText = cerr
@@ -2831,7 +2862,8 @@ Window {
         const f = dirModel.sort_field
         const asc = dirModel.sort_ascending
         const mark = (on) => on ? "✓" : ""
-        const p = sortButton.mapToItem(null, 0, sortButton.height)
+        const anchor = actionTools.visible ? sortButton : moreButton
+        const p = anchor.mapToItem(null, 0, anchor.height)
         contextMenu.popup(p.x, p.y, [
             { label: qsTr("Name"), hint: mark(f === "name"), action: "sortto-name" },
             { label: qsTr("Kind"), hint: mark(f === "kind"), action: "sortto-kind" },
@@ -2842,6 +2874,71 @@ Window {
             { label: qsTr("Descending"), hint: mark(!asc), action: "sortdir-desc" }
         ])
         win.qaDump("sort-menu")
+    }
+
+    /// Undo the last change (Ctrl+Z and the More menu).
+    function doUndo() {
+        const label = dirModel.undo_label()
+        const err = dirModel.undo_last()
+        if (err === "") {
+            win.alertText = ""
+            hints.message = label === "Undo: remove the link" ? qsTr("Removed the link")
+                         : label === "Undo: remove the links" ? qsTr("Removed the links")
+                         : label === "Undo: put owners back" ? qsTr("Owners put back")
+                         : label === "Undo: remove the pasted image" ? qsTr("Removed the pasted image")
+                         : label === "Undo: put permissions back" ? qsTr("Permissions put back")
+                         : label === "Undo: restore the original name" ? qsTr("Restored the original name")
+                         : /^Undo: put \d+ names? back$/.test(label) ? qsTr("Names put back")
+                         : label === "Undo: put the tags back" ? qsTr("Tags put back")
+                         : label.startsWith("Undo: remove") ? "Copies removed"
+                         : label.startsWith("Undo: move") ? "Moved back"
+                         : "Restored from Trash"
+        } else {
+            win.alertText = "Cannot undo: " + err
+        }
+        win.qaDump("undo")
+    }
+
+    /// The toolbar's More menu, under its button: what the window can do
+    /// that has no button of its own, each with its key.
+    function openMoreMenu() {
+        if (!dirModel) return
+        if (quickLook.open) quickLook.hide()
+        win.alertText = ""
+        const sep = { separator: true }
+        const p = moreButton.mapToItem(null, 0, moreButton.height)
+        const overflow = actionTools.visible ? [] : [
+            filterBar.searchActive
+                ? { label: qsTr("Close search"), action: "close-search" }
+                : { label: qsTr("Search"), hint: "Ctrl+F", action: "search" },
+            { label: qsTr("Sort by %1").arg(sortButton.word), action: "sort-menu" },
+            ...viewSwitches.model.map(v => ({
+                label: v.nm, hint: win.viewMode === v.m ? "✓" : "", action: "view-" + v.m
+            })),
+            sep
+        ]
+        contextMenu.popup(p.x, p.y, win.chooserMenu([
+            ...overflow,
+            { label: qsTr("New folder"), hint: "Ctrl+N", action: "new-folder" },
+            { label: qsTr("New file"), hint: "", action: "new-file" },
+            { label: qsTr("Paste"), hint: "Ctrl+V", action: "paste", enabled: dirModel.can_paste() },
+            sep,
+            { label: qsTr("Select all"), hint: "Ctrl+A", action: "select-all", enabled: dirModel.count > 0 },
+            { label: qsTr("Undo"), hint: "Ctrl+Z", action: "undo" },
+            sep,
+            { label: qsTr("New tab"), hint: "Ctrl+T", action: "new-tab" },
+            win.paneCount > 1
+                ? { label: qsTr("Close second pane"), hint: "F3", action: "unsplit" }
+                : { label: qsTr("Two panes side by side"), hint: "F3", action: "split" },
+            { label: dirModel.show_hidden ? qsTr("Hide hidden files") : qsTr("Show hidden files"),
+              hint: "Ctrl+H", action: "toggle-hidden" },
+            { label: qsTr("Reload"), hint: "Ctrl+R", action: "reload" },
+            sep,
+            { label: qsTr("Search inside files…"), hint: "", action: "grep" },
+            { label: qsTr("All commands…"), hint: ":", action: "palette" },
+            { label: qsTr("Keyboard shortcuts"), hint: "F1", action: "keys" }
+        ]))
+        win.qaDump("more-menu")
     }
 
     /// Menu key / Shift+F10: the same menu, anchored under the cursor row.
@@ -3133,13 +3230,21 @@ Window {
     }
 
     Column {
+        id: windowLayout
         anchors.fill: parent
+
+        // Share the available height between the toolbar (1.5 rows), footer
+        // and file area (one each), plus the rows that are currently open.
+        readonly property real rowCount: 3.5 + (win.activePaneTabCount > 1 ? 1 : 0)
+            + (win.adminMode ? 1 : 0) + (filterBar.filterActive || filterBar.searchActive ? 1 : 0)
+        readonly property int controlHeight: Math.min(Tokens.controlHeight,
+            Math.floor(Math.max(0, height - chooserBar.height - chooserFooter.height) / rowCount))
 
         // The administrator window says so, on every screen of it.
         Rectangle {
             id: adminBanner
             width: parent.width
-            height: win.adminMode ? Tokens.controlHeight : 0
+            height: win.adminMode ? windowLayout.controlHeight : 0
             visible: win.adminMode
             color: Tokens.withAlpha(Tokens.danger, 0.16)
             Rectangle {
@@ -3180,12 +3285,13 @@ Window {
         // a strip showing it is chrome that earns nothing.
         Rectangle {
             id: tabStrip
+            z: 1 // Let the path tip extend over the toolbar below the strip.
             width: parent.width
             // Height and visibility both come from the SAME condition. Using
             // `height: visible ? X : 0` makes height depend on a sibling
             // binding's evaluation order: visible flipped true while height
             // stayed 0, so the strip was shown and occupied no space at all.
-            height: win.activePaneTabCount > 1 ? Tokens.controlHeight : 0
+            height: win.activePaneTabCount > 1 ? windowLayout.controlHeight : 0
             color: Tokens.barBackground
             visible: win.activePaneTabCount > 1
 
@@ -3196,98 +3302,175 @@ Window {
                 color: Tokens.withAlpha(Tokens.border, Tokens.borderAlpha)
             }
 
-            Row {
-                anchors.left: parent.left
+            Flickable {
+                id: tabViewport
+                anchors.fill: parent
                 anchors.leftMargin: Tokens.rowPaddingX
-                anchors.verticalCenter: parent.verticalCenter
-                spacing: Tokens.spaceSm
+                anchors.rightMargin: Tokens.rowPaddingX
+                contentWidth: tabRow.width
+                contentHeight: height
+                clip: true
+                flickableDirection: Flickable.HorizontalFlick
+                boundsBehavior: Flickable.StopAtBounds
 
-                Repeater {
-                    id: tabRepeater
-                    model: tabList
-                    delegate: Rectangle {
-                        // Only this pane's tabs. A strip mixing both panes
-                        // makes a click jump the user across the window.
-                        required property int pane
-                        visible: pane === win.activePane
-                        // `index` is supplied by the Repeater; `label` comes
-                        // from the ListModel role. Both must be declared or
-                        // the delegate fails to create — silently, leaving an
-                        // empty strip and one line in the log.
-                        required property int index
-                        required property string label
-                        readonly property bool current: index === win.activeTab
+                // Leave room for letters on both sides of a middle ellipsis,
+                // even when Search reduces the strip height. Scroll the rest.
+                TextMetrics {
+                    id: tabCaptionMetrics
+                    font.family: Tokens.fontFamily
+                    font.pixelSize: Tokens.fontCaption
+                    text: "MM…M"
+                }
+                readonly property int tabCount: Math.max(1, win.activePaneTabCount)
+                readonly property real tabBudget: Math.max(Math.ceil(tabCaptionMetrics.advanceWidth) + Tokens.spaceLg,
+                    (width - (tabCount - 1) * tabRow.spacing) / tabCount)
 
-                        implicitWidth: Math.min(Math.round(Tokens.rowHeight * 7),
-                                                Math.max(Math.round(Tokens.rowHeight * 3),
-                                                         tabText.implicitWidth
-                                                         + Tokens.spaceLg * 2))
-                        width: implicitWidth
-                        height: Math.round(Tokens.controlHeight * 0.8)
-                        radius: Tokens.radius
-                        color: current ? Tokens.withAlpha(Tokens.foreground, 0.12)
-                                       : "transparent"
-                        border.width: current ? Math.max(1, Tokens.borderWidth) : 0
-                        border.color: Tokens.withAlpha(Tokens.border, Tokens.borderAlpha)
+                function scrollTo(x) {
+                    contentX = Math.max(0, Math.min(x, contentWidth - width))
+                }
+                function revealActive() {
+                    const tab = tabRepeater.itemAt(win.activeTab)
+                    if (!tab || !tab.visible) return
+                    const right = tab.x + tab.width
+                    scrollTo(Math.max(right - width, Math.min(tab.x, contentX)))
+                }
+                onWidthChanged: {
+                    Qt.callLater(revealActive)
+                    if (visible) win.qaDump("tab-strip")
+                }
+                onMovementEnded: win.qaDump("tab-strip")
+                // A mouse wheel supplies vertical deltas even on a horizontal strip.
+                WheelHandler {
+                    enabled: tabViewport.contentWidth > tabViewport.width
+                    target: null
+                    acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
+                    onWheel: (event) => {
+                        const delta = event.pixelDelta.y || event.angleDelta.y / 120 * tabStrip.height
+                        tabViewport.scrollTo(tabViewport.contentX - delta)
+                        win.qaDump("tab-strip")
+                    }
+                }
+                Connections {
+                    target: win
+                    function onActiveTabChanged() { Qt.callLater(tabViewport.revealActive) }
+                }
 
-                        Text {
-                            textFormat: Text.PlainText
-                            id: tabText
-                            anchors.centerIn: parent
-                            width: parent.width - Tokens.spaceLg
-                            horizontalAlignment: Text.AlignHCenter
-                            elide: Text.ElideMiddle
-                            text: parent.label
-                            color: parent.current ? Tokens.foreground
-                                                  : Tokens.foregroundDim
-                            font.family: Tokens.fontFamily
-                            font.pixelSize: Tokens.fontCaption
-                        }
+                Row {
+                    id: tabRow
+                    onPositioningComplete: tabViewport.revealActive()
+                    anchors.verticalCenter: parent.verticalCenter
+                    spacing: Tokens.spaceSm
 
-                        MouseArea {
-                            id: tabMouse
-                            anchors.fill: parent
-                            acceptedButtons: Qt.LeftButton | Qt.MiddleButton
-                            // A few pixels before a click becomes a drag, so
-                            // a slightly imprecise click is still a click —
-                            // the same threshold the file list uses.
-                            property point pressAt: Qt.point(0, 0)
-                            property bool dragging: false
+                    Repeater {
+                        id: tabRepeater
+                        model: tabList
+                        delegate: Rectangle {
+                            // Only this pane's tabs. A strip mixing both panes
+                            // makes a click jump the user across the window.
+                            id: folderTab
+                            required property int pane
+                            visible: pane === win.activePane
+                            // `index` is supplied by the Repeater; `label` comes
+                            // from the ListModel role. Both must be declared or
+                            // the delegate fails to create — silently, leaving an
+                            // empty strip and one line in the log.
+                            required property int index
+                            required property string label
+                            required property string fullPath
+                            Accessible.role: Accessible.PageTab
+                            Accessible.name: fullPath
+                            Accessible.selectable: true
+                            Accessible.selected: current
+                            Accessible.onPressAction: win.activateTab(index)
+                            readonly property bool current: index === win.activeTab
+                            readonly property alias caption: tabText
 
-                            onPressed: (mouse) => {
-                                tabMouse.pressAt = Qt.point(mouse.x, mouse.y)
-                                tabMouse.dragging = false
+                            implicitWidth: Math.min(Math.round(Tokens.rowHeight * 7),
+                                                    Math.max(Math.round(Tokens.rowHeight * 3),
+                                                             tabText.implicitWidth
+                                                             + Tokens.spaceLg * 2))
+                            width: Math.min(implicitWidth, tabViewport.tabBudget)
+                            height: Math.round(tabStrip.height * 0.8)
+                            radius: Tokens.radius
+                            color: current ? Tokens.withAlpha(Tokens.foreground, 0.12)
+                                           : "transparent"
+                            border.width: current ? Math.max(1, Tokens.borderWidth) : 0
+                            border.color: Tokens.withAlpha(Tokens.border, Tokens.borderAlpha)
+
+                            Text {
+                                textFormat: Text.PlainText
+                                id: tabText
+                                Accessible.ignored: true
+                                anchors.centerIn: parent
+                                width: Math.max(0, parent.width - Tokens.spaceLg)
+                                horizontalAlignment: Text.AlignHCenter
+                                elide: Text.ElideMiddle
+                                text: parent.label
+                                color: parent.current ? Tokens.foreground
+                                                      : Tokens.foregroundDim
+                                font: tabCaptionMetrics.font
                             }
-                            onPositionChanged: (mouse) => {
-                                if (!(mouse.buttons & Qt.LeftButton)) return
-                                const dx = mouse.x - tabMouse.pressAt.x
-                                const dy = mouse.y - tabMouse.pressAt.y
-                                if (!tabMouse.dragging
-                                    && Math.abs(dx) + Math.abs(dy) < 8) return
-                                tabMouse.dragging = true
-                                const p = tabMouse.mapToItem(null, mouse.x, mouse.y)
-                                win.tabDragMoved(parent.index, p.x, p.y)
-                            }
-                            onReleased: (mouse) => {
-                                if (!tabMouse.dragging) return
-                                tabMouse.dragging = false
-                                const p = tabMouse.mapToItem(null, mouse.x, mouse.y)
-                                win.tabDragDropped(parent.index, p.x, p.y)
-                            }
-                            onCanceled: {
-                                tabMouse.dragging = false
-                                win.tabDragEnded()
-                            }
-                            onClicked: (mouse) => {
-                                if (tabMouse.dragging) return
-                                if (mouse.button === Qt.MiddleButton)
-                                    win.closeTab(parent.index)
-                                else
-                                    win.activateTab(parent.index)
+
+                            MouseArea {
+                                id: tabMouse
+                                hoverEnabled: true
+                                onEntered: tabPathTip.inspect(folderTab)
+                                onExited: tabPathTip.leave(folderTab)
+                                anchors.fill: parent
+                                acceptedButtons: Qt.LeftButton | Qt.MiddleButton
+                                preventStealing: true
+                                // A few pixels before a click becomes a drag, so
+                                // a slightly imprecise click is still a click —
+                                // the same threshold the file list uses.
+                                property point pressAt: Qt.point(0, 0)
+                                property bool dragging: false
+
+                                onPressed: (mouse) => {
+                                    tabPathTip.dismiss()
+                                    tabMouse.pressAt = Qt.point(mouse.x, mouse.y)
+                                    tabMouse.dragging = false
+                                }
+                                onPositionChanged: (mouse) => {
+                                    if (!(mouse.buttons & Qt.LeftButton)) return
+                                    const dx = mouse.x - tabMouse.pressAt.x
+                                    const dy = mouse.y - tabMouse.pressAt.y
+                                    if (!tabMouse.dragging
+                                        && Math.abs(dx) + Math.abs(dy) < 8) return
+                                    tabMouse.dragging = true
+                                    const p = tabMouse.mapToItem(null, mouse.x, mouse.y)
+                                    win.tabDragMoved(parent.index, p.x, p.y)
+                                }
+                                onReleased: (mouse) => {
+                                    if (!tabMouse.dragging) return
+                                    tabMouse.dragging = false
+                                    const p = tabMouse.mapToItem(null, mouse.x, mouse.y)
+                                    win.tabDragDropped(parent.index, p.x, p.y)
+                                }
+                                onCanceled: {
+                                    tabMouse.dragging = false
+                                    win.tabDragEnded()
+                                }
+                                onClicked: (mouse) => {
+                                    if (tabMouse.dragging) return
+                                    if (mouse.button === Qt.MiddleButton)
+                                        win.closeTab(parent.index)
+                                    else
+                                        win.activateTab(parent.index)
+                                }
                             }
                         }
                     }
                 }
+            }
+
+            TabPathTip {
+                id: tabPathTip
+                y: tabStrip.height
+                availableHeight: win.height - tabStrip.y - y
+                // Tab positions are relative to the horizontally scrolling row.
+                tabCenter: tab ? tabViewport.x + tab.x - tabViewport.contentX + tab.width / 2 : 0
+                onVisibleChanged: win.qaDump("tab-path")
+                onAtEndChanged: if (visible) win.qaDump("tab-path")
             }
         }
 
@@ -3295,8 +3478,19 @@ Window {
         Rectangle {
             id: headerBar
             width: parent.width
-            height: Math.round(Tokens.controlHeight * 1.5)
+            height: Math.round(windowLayout.controlHeight * 1.5)
             color: Tokens.barBackground
+
+            // Keep the themed button sizes until the two persistent rows
+            // would touch. Then shrink their horizontal padding and gaps
+            // together, independently of their height.
+            readonly property real preferredToolsWidth:
+                (1 + navButtons.count + menuTools.children.length) * Tokens.controlHeight
+                + navButtons.count * Tokens.spaceSm + (menuTools.children.length - 1) * Tokens.spaceXs
+                + 2 * Tokens.spaceLg
+            readonly property real horizontalFit: Math.min(1, width / Math.max(1, preferredToolsWidth))
+            readonly property int toolWidth: Math.floor(Tokens.controlHeight * horizontalFit)
+            readonly property int sideMargin: Math.floor(Tokens.spaceLg * horizontalFit)
 
             Rectangle {
                 anchors.bottom: parent.bottom
@@ -3308,98 +3502,97 @@ Window {
             Row {
                 id: leftTools
                 anchors.left: parent.left
-                anchors.leftMargin: Tokens.spaceLg
+                anchors.leftMargin: headerBar.sideMargin
                 anchors.verticalCenter: parent.verticalCenter
-                spacing: Tokens.spaceSm
+                spacing: Math.floor(Tokens.spaceSm * headerBar.horizontalFit)
 
                 // Sidebar toggle — the visible restore control for the rail.
-                Rectangle {
-                    width: Tokens.controlHeight
-                    height: Tokens.controlHeight
-                    color: sbHover.hovered ? Tokens.withAlpha(Tokens.foreground, 0.1) : "transparent"
-                    radius: Tokens.radius
+                BarButton {
+                    id: sidebarButton
+                    height: windowLayout.controlHeight
+                    width: headerBar.toolWidth
                     objectName: "sidebarToggle"
-                    HoverHandler { id: sbHover }
-                    Text {
-                        textFormat: Text.PlainText
-                        anchors.centerIn: parent
-                        text: "☰"
-                        color: Tokens.foreground
-                        font.family: Tokens.fontFamily
-                        font.pixelSize: Tokens.fontBody
-                    }
-                    MouseArea {
-                        anchors.fill: parent
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: win.sidebarVisible = !win.sidebarVisible
-                    }
-                    Accessible.role: Accessible.Button
-                    Accessible.name: win.sidebarVisible ? "Hide places sidebar" : "Show places sidebar"
+                    icon: "sidebar"
+                    label: win.sidebarVisible ? qsTr("Hide sidebar") : qsTr("Show sidebar")
+                    onClicked: win.sidebarVisible = !win.sidebarVisible
                 }
 
                 Repeater {
+                    id: navButtons
                     model: [
-                        { glyph: "‹", act: "back",    nm: "Back" },
-                        { glyph: "›", act: "forward", nm: "Forward" },
-                        { glyph: "↑", act: "up",      nm: "Up one folder" }
+                        { act: "back",    nm: qsTr("Back") },
+                        { act: "forward", nm: qsTr("Forward") },
+                        { act: "up",      nm: qsTr("Up one folder") }
                     ]
-                    delegate: Rectangle {
-                        width: Tokens.controlHeight
-                        height: Tokens.controlHeight
-                        radius: Tokens.radius
+                    delegate: BarButton {
+                        height: windowLayout.controlHeight
                         objectName: "nav-" + modelData.act
-                        property bool enabledAct: modelData.act === "back" ? win.canBack
-                                                : modelData.act === "forward" ? win.canForward
-                                                : true
-                        color: navHover.hovered && enabledAct
-                               ? Tokens.withAlpha(Tokens.foreground, 0.1) : "transparent"
-                        HoverHandler { id: navHover }
-                        Text {
-                            textFormat: Text.PlainText
-                            anchors.centerIn: parent
-                            text: modelData.glyph
-                            color: parent.enabledAct ? Tokens.foreground : Tokens.withAlpha(Tokens.foreground, 0.3)
-                            font.family: Tokens.fontFamily
-                            font.pixelSize: Tokens.fontSubtitle
+                        width: headerBar.toolWidth
+                        icon: modelData.act
+                        label: modelData.nm
+                        available: modelData.act === "back" ? win.canBack
+                                 : modelData.act === "forward" ? win.canForward
+                                 : true
+                        onClicked: {
+                            if (modelData.act === "back") dirModel.go_back()
+                            else if (modelData.act === "forward") dirModel.go_forward()
+                            else dirModel.navigate_up()
+                            win.focusList()
                         }
-                        MouseArea {
-                            anchors.fill: parent
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: {
-                                if (modelData.act === "back") dirModel.go_back()
-                                else if (modelData.act === "forward") dirModel.go_forward()
-                                else dirModel.navigate_up()
-                                win.focusList()
-                            }
-                        }
-                        Accessible.role: Accessible.Button
-                        Accessible.name: modelData.nm
                     }
-                }
-
-                Item { width: Tokens.spaceLg; height: 1 }
-
-                Breadcrumbs {
-                    id: crumbs
-                    onDragHover: (t) => { hints.message = t; win.qaDump("drag-hover") }
-                    onDragLanded: (m, e) => { hints.message = ""; win.transferStarted(m, e, "drop") }
-                    model: dirModel
-                    anchors.verticalCenter: parent.verticalCenter
-                    // Whatever the buttons on the right leave: a deep path
-                    // used to draw straight through them.
-                    width: Math.max(0, Math.min(implicitWidth,
-                        headerBar.width - rightTools.width - leftTools.x - x - Tokens.spaceLg * 3))
-                    onPathChosen: (p) => { dirModel.navigate(p); win.focusList() }
                 }
             }
 
-            // View switch: labelled, tooltipped, keyboard reachable.
+            Breadcrumbs {
+                id: crumbs
+                height: windowLayout.controlHeight
+                onDragHover: (t) => { hints.message = t; win.qaDump("drag-hover") }
+                onDragLanded: (m, e) => { hints.message = ""; win.transferStarted(m, e, "drop") }
+                model: dirModel
+                anchors.verticalCenter: parent.verticalCenter
+                x: leftTools.x + leftTools.width + Tokens.spaceLg + Tokens.spaceSm * 2
+                width: Math.max(0, Math.min(implicitWidth,
+                    (actionTools.visible ? actionTools.x : menuTools.x) - x - Tokens.spaceLg * 2))
+                onPathChosen: (p) => { dirModel.navigate(p); win.focusList() }
+            }
+
             Row {
-                id: rightTools
-                anchors.right: parent.right
-                anchors.rightMargin: Tokens.spaceLg
+                id: actionTools
+                anchors.right: menuTools.left
+                anchors.rightMargin: Tokens.spaceSm + Tokens.spaceXs * 2
                 anchors.verticalCenter: parent.verticalCenter
                 spacing: Tokens.spaceXs
+                // Measure the full row even while hidden, so resize, zoom and
+                // the current sort label can bring these actions back inline.
+                visible: x >= leftTools.x + leftTools.width + Tokens.spaceLg
+
+                // The everyday actions, one click away: they were reachable
+                // only by key or by right-clicking empty space, which a full
+                // list does not have.
+                BarButton {
+                    id: searchButton
+                    height: windowLayout.controlHeight
+                    objectName: "searchButton"
+                    icon: "search"
+                    label: qsTr("Search")
+                    keys: "Ctrl+F"
+                    active: filterBar.searchActive
+                    onClicked: {
+                        if (filterBar.searchActive) win.closeSearch(false)
+                        else win.openSearch()
+                    }
+                }
+                BarButton {
+                    id: newFolderButton
+                    height: windowLayout.controlHeight
+                    objectName: "newFolderButton"
+                    icon: "new-folder"
+                    label: qsTr("New folder")
+                    keys: "Ctrl+N"
+                    onClicked: win.askNewFolder()
+                }
+
+                Item { width: Tokens.spaceSm; height: 1 }
 
                 // Sort: what the list is ordered by, and a menu to change it,
                 // where Nautilus keeps the same control. Every view, not
@@ -3408,7 +3601,7 @@ Window {
                     id: sortButton
                     objectName: "sortButton"
                     width: sortText.implicitWidth + Tokens.spaceLg * 2
-                    height: Tokens.controlHeight
+                    height: windowLayout.controlHeight
                     color: sortHover.hovered ? Tokens.withAlpha(Tokens.foreground, 0.1) : "transparent"
                     radius: Tokens.radius
                     readonly property string word: {
@@ -3441,61 +3634,53 @@ Window {
                 Item { width: Tokens.spaceSm; height: 1 }
 
                 Repeater {
+                    id: viewSwitches
                     model: [
-                        { m: "rows",    glyph: "▤", nm: "Rows view" },
-                        { m: "grid",    glyph: "▦", nm: "Grid view" },
-                        { m: "columns", glyph: "⫼", nm: "Columns view" }
+                        { m: "rows",    nm: qsTr("Rows view") },
+                        { m: "grid",    nm: qsTr("Grid view") },
+                        { m: "columns", nm: qsTr("Columns view") }
                     ]
-                    delegate: Rectangle {
-                        width: Tokens.controlHeight
-                        height: Tokens.controlHeight
+                    delegate: BarButton {
+                        height: windowLayout.controlHeight
                         objectName: "viewswitch-" + modelData.m
-                        color: win.viewMode === modelData.m
-                               ? Tokens.withAlpha(Tokens.accent, 0.22)
-                               : (vsHover.hovered ? Tokens.withAlpha(Tokens.foreground, 0.1) : "transparent")
-                        border.width: win.viewMode === modelData.m ? Math.max(1, Tokens.borderWidth) : 0
-                        border.color: Tokens.accent
-                        radius: Tokens.radius
-
-                        HoverHandler { id: vsHover }
-
-                        Text {
-                            textFormat: Text.PlainText
-                            anchors.centerIn: parent
-                            text: modelData.glyph
-                            color: win.viewMode === modelData.m ? Tokens.foregroundBright : Tokens.foreground
-                            font.family: Tokens.fontFamily
-                            font.pixelSize: Tokens.fontBody
-                        }
-                        MouseArea {
-                            anchors.fill: parent
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: win.setView(modelData.m)
-                        }
-                        Accessible.role: Accessible.Button
-                        Accessible.name: modelData.nm
+                        icon: modelData.m
+                        label: modelData.nm
+                        active: win.viewMode === modelData.m
+                        onClicked: win.setView(modelData.m)
                     }
                 }
+            }
 
-                Item { width: Tokens.spaceSm; height: 1; visible: win.chooserMode === "" }
+            Row {
+                id: menuTools
+                anchors.right: parent.right
+                anchors.rightMargin: headerBar.sideMargin
+                anchors.verticalCenter: parent.verticalCenter
+                spacing: Math.floor(Tokens.spaceXs * headerBar.horizontalFit)
+
+                // Everything else the window can do, in words.
+                BarButton {
+                    id: moreButton
+                    height: windowLayout.controlHeight
+                    width: headerBar.toolWidth
+                    objectName: "moreButton"
+                    icon: "more"
+                    label: qsTr("More")
+                    onClicked: win.openMoreMenu()
+                }
 
                 // Settings: a visible control, never only a shortcut.
-                Rectangle {
+                BarButton {
+                    id: settingsButton
+                    height: windowLayout.controlHeight
+                    width: headerBar.toolWidth
                     objectName: "settingsButton"
                     visible: win.chooserMode === ""
-                    width: Tokens.controlHeight
-                    height: Tokens.controlHeight
-                    color: setHover.hovered ? Tokens.withAlpha(Tokens.foreground, 0.1) : "transparent"
-                    radius: Tokens.radius
-                    HoverHandler { id: setHover }
-                    Text {
-                        textFormat: Text.PlainText
-                        anchors.centerIn: parent
-                        text: "⛭"
-                        color: Tokens.foreground
-                        font.family: Tokens.fontFamily
-                        font.pixelSize: Tokens.fontBody
-                    }
+                    icon: "settings"
+                    label: win.prefsStatus === "unsaved" ? qsTr("Settings — not saved")
+                         : win.prefsStatus === "problem" ? qsTr("Settings — problem") : qsTr("Settings")
+                    keys: "Ctrl+,"
+                    onClicked: win.openSettings()
                     // A preferences failure stays visible here until a save
                     // succeeds: a failed sort or view save is otherwise silent.
                     Rectangle {
@@ -3509,15 +3694,6 @@ Window {
                         radius: Tokens.radius
                         color: Tokens.danger
                     }
-                    MouseArea {
-                        anchors.fill: parent
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: win.openSettings()
-                    }
-                    Accessible.role: Accessible.Button
-                    Accessible.name: win.prefsStatus === "unsaved" ? qsTr("Settings — not saved")
-                                     : win.prefsStatus === "problem" ? qsTr("Settings — problem") : qsTr("Settings")
-                    Accessible.description: win.prefsError
                 }
             }
         }
@@ -3526,9 +3702,8 @@ Window {
         Item {
             id: body
             width: parent.width
-            height: parent.height - tabStrip.height - headerBar.height - filterBar.height - adminBanner.height
-                    - chooserBar.height - chooserFooter.height - interruptedNotice.height
-                    - jobDrawer.height - hints.height
+            height: Math.max(0, parent.height - tabStrip.height - headerBar.height - filterBar.height - adminBanner.height
+                    - chooserBar.height - chooserFooter.height - interruptedNotice.height - jobDrawer.height - hints.height)
 
             Sidebar {
                 id: sidebar
@@ -3787,7 +3962,7 @@ Window {
         Rectangle {
             id: filterBar
             width: parent.width
-            height: (filterActive || searchActive) ? Tokens.controlHeight : 0
+            height: (filterActive || searchActive) ? windowLayout.controlHeight : 0
             visible: filterActive || searchActive
             color: Tokens.backgroundDark
             property bool filterActive: false
@@ -3801,15 +3976,23 @@ Window {
             onSearchActiveChanged: win.qaDump("searchbar")
 
             Row {
+                id: searchRow
                 anchors.fill: parent
                 anchors.leftMargin: Tokens.rowPaddingX
+                anchors.rightMargin: filterBar.searchActive ? Tokens.rowPaddingX : 0
                 spacing: Tokens.spaceLg
+                // Leave room to type before offering the optional keyboard hint.
+                readonly property real queryReserve: Math.min(width / 2, Tokens.fontBody * 8)
+                readonly property real querySpace: Math.max(0, width - searchLabel.width - spacing)
 
                 Text {
                     id: searchLabel
                     textFormat: Text.PlainText
                     anchors.verticalCenter: parent.verticalCenter
                     text: filterBar.searchActive ? qsTr("search") : "/"
+                    width: filterBar.searchActive ? Math.min(implicitWidth, Math.max(0, searchRow.width
+                                                       - searchRow.spacing - searchRow.queryReserve)) : implicitWidth
+                    elide: Text.ElideRight
                     color: Tokens.accent
                     font.family: Tokens.fontFamily
                     font.pixelSize: Tokens.fontBody
@@ -3845,8 +4028,7 @@ Window {
                     objectName: "searchInput"
                     visible: filterBar.searchActive
                     anchors.verticalCenter: parent.verticalCenter
-                    width: parent.width - searchHint.implicitWidth - searchLabel.implicitWidth
-                           - Tokens.spaceLg * 3 - Tokens.rowPaddingX * 2
+                    width: searchRow.querySpace - (searchHint.visible ? searchHint.width + searchRow.spacing : 0)
                     color: Tokens.foregroundBright
                     font.family: Tokens.fontFamily
                     font.pixelSize: Tokens.fontBody
@@ -3865,7 +4047,8 @@ Window {
                 }
                 Text {
                     id: searchHint
-                    visible: filterBar.searchActive
+                    visible: filterBar.searchActive && implicitWidth + searchRow.spacing
+                             + searchRow.queryReserve <= searchRow.querySpace
                     textFormat: Text.PlainText
                     anchors.verticalCenter: parent.verticalCenter
                     text: dirModel.finding
@@ -3949,6 +4132,7 @@ Window {
 
         HintStrip {
             id: hints
+            height: windowLayout.controlHeight
             width: parent.width
             preset: win.keyPreset
             pickerKeys: win.chooserHints
@@ -4260,25 +4444,7 @@ Window {
                     event.accepted = true; return
                 }
                 if (event.key === Qt.Key_Z) {
-                    const label = dirModel.undo_label()
-                    const err = dirModel.undo_last()
-                    if (err === "") {
-                        win.alertText = ""
-                        hints.message = label === "Undo: remove the link" ? qsTr("Removed the link")
-                                     : label === "Undo: remove the links" ? qsTr("Removed the links")
-                                     : label === "Undo: put owners back" ? qsTr("Owners put back")
-                                     : label === "Undo: remove the pasted image" ? qsTr("Removed the pasted image")
-                                     : label === "Undo: put permissions back" ? qsTr("Permissions put back")
-                                     : label === "Undo: restore the original name" ? qsTr("Restored the original name")
-                                     : /^Undo: put \d+ names? back$/.test(label) ? qsTr("Names put back")
-                                     : label === "Undo: put the tags back" ? qsTr("Tags put back")
-                                     : label.startsWith("Undo: remove") ? "Copies removed"
-                                     : label.startsWith("Undo: move") ? "Moved back"
-                                     : "Restored from Trash"
-                    } else {
-                        win.alertText = "Cannot undo: " + err
-                    }
-                    win.qaDump("undo")
+                    win.doUndo()
                     event.accepted = true; return
                 }
                 if (event.key === Qt.Key_C && (event.modifiers & Qt.ShiftModifier)) {
@@ -4569,6 +4735,7 @@ Window {
 
     SettingsPanel {
         id: settingsPanel
+        onCurrentChanged: win.qaDump("settings-row")
         // Bound, never assigned: every published snapshot reaches the panel.
         s: win.prefs
         status: win.prefsStatus
@@ -4656,6 +4823,7 @@ Window {
 
     ContextMenu {
         id: contextMenu
+        onHeightChanged: if (open) win.qaDump("context-menu")
         onChosen: (a) => win.runAction(a)
         onFinished: (a) => { if (win.dropMenuModel) win.releaseDropDrag() }
         onHighlightMoved: win.qaDump("context-menu")
@@ -4992,8 +5160,14 @@ Window {
         win.qaWrite(win.qaTakePending())
     }
 
+    function qaPoint(item, x = item.width / 2) {
+        const p = item.mapToItem(null, x, item.height / 2)
+        return [Math.round(p.x), Math.round(p.y)]
+    }
+
     function qaWrite(pending) {
         const tag = pending.tag
+        const upButton = navButtons.itemAt(2)
         const payload = {
             tag: tag,
             tags: pending.tags,
@@ -5019,6 +5193,9 @@ Window {
             filterBarActive: filterBar.filterActive,
             searchBarActive: filterBar.searchActive,
             searchText: searchInput.text,
+            searchFieldEdges: [win.qaPoint(searchInput, 0)[0], win.qaPoint(searchInput, searchInput.width)[0]],
+            searchTextFits: searchInput.contentWidth > 0 && searchInput.contentWidth < searchInput.width,
+            searchHintShown: searchHint.visible,
             finding: dirModel.finding,
             findNeedle: dirModel.findNeedle,
             tabCount: win.tabCount,
@@ -5101,6 +5278,7 @@ Window {
             hintsOverflow: Math.round(hints.mapToItem(null, 0, hints.height).y - win.height),
             jobPaused: win.job ? !!win.job.paused : false,
             jobPausePoint: jobDrawer.pausePoint(),
+            menuEdges: contextMenu.open ? contextMenu.horizontalEdges() : [],
             menuPoints: contextMenu.open ? contextMenu.itemPoints() : ({}),
             placePoints: sidebar.placePoints(),
             crumbPoints: crumbs.crumbPoints(),
@@ -5198,6 +5376,9 @@ Window {
             chooserPoints: chooserBar.active
                 ? Object.assign(chooserBar.points(), chooserFooter.points()) : null,
             settingsOpen: settingsPanel.open,
+            settingsPoints: settingsPanel.open ? { close: win.qaPoint(settingsPanel.closeButton) } : {},
+            settingsOptionPoints: settingsPanel.open ? settingsPanel.visibleOptionPoints() : {},
+            settingsScrollY: settingsPanel.scrollY,
             trashOpen: trashPanel.open,
             recentOpen: recentPanel.open,
             deleteTotal: dirModel.delete_total,
@@ -5220,6 +5401,7 @@ Window {
             keyPreset: win.keyPreset,
             sidebarVisible: win.sidebarVisible,
             density: Tokens.density,
+            spacingScale: Tokens.spacingScale,
             bookmarks: win.bookmarkList.map(b => b.label + "=" + b.path),
             jobState: win.job ? win.job.state : "",
             jobBytes: win.job ? (win.job.bytes_text || "") : "",
@@ -5270,6 +5452,15 @@ Window {
             windowHeight: win.height,
             places: win.placesInfo,
             tabCenters: win.tabCenters(),
+            visibleTabLabels: win.visibleTabLabels(),
+            tabDisclosure: tabPathTip.visible && tabPathTip.tab ? {
+                path: tabPathTip.text, accessibleName: tabPathTip.tab.Accessible.name,
+                truncated: tabPathTip.tab.caption.truncated,
+                center: win.qaPoint(tabPathTip),
+                right: tabPathTip.x + tabPathTip.width, left: tabPathTip.x,
+                top: tabStrip.y + tabPathTip.y, bottom: tabStrip.y + tabPathTip.y + tabPathTip.height,
+                atEnd: tabPathTip.atEnd
+            } : null,
             confirmTitle: confirm.title,
             confirmBody: confirm.body,
             confirmButtons: confirm.visible ? confirm.buttonCenters() : null,
@@ -5293,10 +5484,19 @@ Window {
                 const it = win.activePaneItem()
                 return it && it.iconInfo ? it.iconInfo() : []
             })(),
-            sortButtonPoint: (function () {
-                const p = sortButton.mapToItem(null, sortButton.width / 2, sortButton.height / 2)
-                return [Math.round(p.x), Math.round(p.y)]
-            })(),
+            sortButtonPoint: win.qaPoint(sortButton),
+            navButtonSize: [upButton.width, upButton.height],
+            toolbarPoints: {
+                sidebar: win.qaPoint(sidebarButton),
+                back: win.qaPoint(navButtons.itemAt(0)), forward: win.qaPoint(navButtons.itemAt(1)),
+                up: win.qaPoint(upButton), settings: win.qaPoint(settingsButton),
+                upEnd: win.qaPoint(upButton, upButton.width),
+                moreStart: win.qaPoint(moreButton, 0),
+                more: win.qaPoint(moreButton), search: win.qaPoint(searchButton),
+                newFolder: win.qaPoint(newFolderButton),
+                searchStart: win.qaPoint(searchButton, 0),
+                pathStart: win.qaPoint(crumbs, 0), pathEnd: win.qaPoint(crumbs, crumbs.width)
+            },
             sortButtonText: sortText.text,
             model: JSON.parse(dirModel.state_json())
         }

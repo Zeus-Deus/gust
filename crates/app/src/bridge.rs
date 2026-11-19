@@ -50,6 +50,7 @@ pub mod qobject {
         #[base = GustListModel]
         #[qproperty(QString, location)]
         #[qproperty(QString, location_display)]
+        #[qproperty(QString, tab_disclosure_path)]
         /// Fixed personal Home root, independent of the folder being browsed.
         #[qproperty(QString, home_path)]
         #[qproperty(i32, count)]
@@ -716,6 +717,9 @@ pub mod qobject {
         /// Open a restored tab's folder as its starting point (no history).
         #[qinvokable]
         fn start_at_token(self: Pin<&mut DirModel>, token: &QString);
+        /// Byte-exact display path for an unopened tab. Decoding does no I/O.
+        #[qinvokable]
+        fn tab_path_for_token(self: &DirModel, token: &QString) -> QString;
         /// A typed path as a location token (for tabs not yet opened).
         #[qinvokable]
         fn token_for(self: &DirModel, path: &QString) -> QString;
@@ -1178,6 +1182,7 @@ pub struct DirModelRust {
     delete_gen: u64,
     location: QString,
     location_display: QString,
+    tab_disclosure_path: QString,
     home_path: QString,
     count: i32,
     settled: bool,
@@ -1583,6 +1588,7 @@ impl DirModelRust {
         DirModelRust {
             location: QString::from(&home.to_string_lossy().to_string()),
             location_display: QString::from(&home.to_string_lossy().to_string()),
+            tab_disclosure_path: QString::from(&frame.all.key.tab_path()),
             home_path: QString::from(&std::env::var("HOME").unwrap_or_default()),
             count: 0,
             settled: false,
@@ -9600,6 +9606,12 @@ impl qobject::DirModel {
                 QString::from(&error)
             }
         }
+    }
+
+    fn tab_path_for_token(&self, token: &QString) -> QString {
+        LocationKey::from_token(&token.to_string())
+            .map(|key| QString::from(&key.tab_path()))
+            .unwrap_or_default()
     }
 
     fn token_for(&self, path: &QString) -> QString {
