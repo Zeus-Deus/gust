@@ -4,6 +4,7 @@
 
 pub mod actions;
 pub mod bookmarks;
+pub mod childenv;
 pub mod chooser;
 pub mod clipboard;
 pub mod columns;

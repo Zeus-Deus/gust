@@ -3254,6 +3254,9 @@ impl qobject::DirModel {
                 .collect(),
             show_hidden: self.show_hidden,
         };
+        // The new window decides its renderer and logging from the user's
+        // own environment, not from what this window chose for itself.
+        gust_core::childenv::for_gust_window(&mut cmd);
         if handoff.write(&handoff_path).is_ok() {
             cmd.env("GUST_HANDOFF", &handoff_path);
         }
@@ -8625,7 +8628,8 @@ impl qobject::DirModel {
         let mut started = 0usize;
         for argv in &runs {
             let mut cmd = std::process::Command::new(&argv[0]);
-            cmd.args(&argv[1..])
+            gust_core::childenv::for_user_app(&mut cmd)
+                .args(&argv[1..])
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null());
@@ -8768,7 +8772,7 @@ impl qobject::DirModel {
         if gust_core::open::which("xdg-terminal-exec").is_none() {
             return QString::from("no terminal launcher (xdg-terminal-exec) is installed");
         }
-        match std::process::Command::new(&argv[0])
+        match gust_core::childenv::for_user_app(&mut std::process::Command::new(&argv[0]))
             .args(&argv[1..])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())

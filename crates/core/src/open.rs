@@ -162,7 +162,8 @@ pub fn open_with_desktop_reporting(
             continue;
         }
         let mut cmd = command_for(opener, path);
-        cmd.stdin(Stdio::null())
+        crate::childenv::for_user_app(&mut cmd)
+            .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         match cmd.spawn() {
@@ -318,7 +319,8 @@ pub fn open_terminal_here(dir: &Path) -> Result<String, OpenRefusal> {
         return Err(OpenRefusal::Failed("not a folder".into()));
     }
     if let Some(mut cmd) = terminal_command(dir, |p| which(p).is_some()) {
-        cmd.stdin(Stdio::null())
+        crate::childenv::for_user_app(&mut cmd)
+            .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         if let Ok(child) = cmd.spawn() {
@@ -349,7 +351,8 @@ pub fn open_terminal_here(dir: &Path) -> Result<String, OpenRefusal> {
                 cmd.arg("--working-directory").arg(dir);
             }
         }
-        cmd.stdin(Stdio::null())
+        crate::childenv::for_user_app(&mut cmd)
+            .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         if let Ok(child) = cmd.spawn() {
@@ -390,7 +393,8 @@ pub fn run_in_terminal(program: &str, args: &[&str]) -> Result<String, OpenRefus
         for a in args {
             cmd.arg(a);
         }
-        cmd.stdin(Stdio::null())
+        crate::childenv::for_user_app(&mut cmd)
+            .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         if let Ok(child) = cmd.spawn() {

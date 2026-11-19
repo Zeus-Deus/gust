@@ -2511,6 +2511,17 @@ and multi-selection retain their desktop handlers. If mpv is absent, the
 activated file opens with its desktop handler. Launch errors return to the
 owning model; no system file associations are changed.
 
+Every program started for the user — an application, an opener, the media
+player, a terminal, a custom action, Run — is built through
+`gust_core::childenv::for_user_app(&mut Command)`. Gust sets variables for
+its own window before Qt starts (`QT_QUICK_BACKEND=software`,
+`QT_FORCE_STDERR_LOGGING`, `QT_ASSUME_STDERR_HAS_CONSOLE`) only through
+`childenv::set_for_gust`, which records the user's value; `for_user_app`
+restores that value or removes the variable, and drops the window-only
+instructions (`GUST_SELECT`, `GUST_HANDOFF`, `GUST_READY_FILE`,
+`GUST_CHOOSER*`, `GUST_ADMIN*`). Nothing else is touched, and Gust's own
+helpers and re-execs do not use it.
+
 ## 6.19 The clipboard other applications can see
 
 §9's Interop list asks for "current clipboard offers", and §10 records that

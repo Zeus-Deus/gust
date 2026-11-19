@@ -339,7 +339,7 @@ pub fn launch(handler: &Handler, path: &Path) -> Result<String, super::OpenRefus
             "{program} is not installed"
         )));
     }
-    std::process::Command::new(&program)
+    crate::childenv::for_user_app(&mut std::process::Command::new(&program))
         .args(&args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -409,7 +409,7 @@ pub fn launch_many(handler: &Handler, paths: &[PathBuf]) -> MultiOpen {
         if super::which(&program).is_none() {
             return MultiOpen::Refused(format!("{program} is not installed"));
         }
-        return match std::process::Command::new(&program)
+        return match crate::childenv::for_user_app(&mut std::process::Command::new(&program))
             .args(&argv[1..])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
