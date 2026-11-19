@@ -47,8 +47,10 @@ Window {
                 }
                 win.sessionChanged()
                 win.noteSplitTabMoved(tabModel)
-                if (win.pendingShareOpenModel === tabModel && confirm.purpose === "share-open")
-                    confirm.close()
+                if (win.pendingShareOpen && win.pendingShareOpen.model === tabModel) {
+                    win.finishShareOpen(false)
+                    if (confirm.visible && confirm.purpose === "share-open") confirm.close()
+                }
             }
             // Mounts and connections finish on a worker; every tab reports
             // here, so a result still lands if the user switched tabs.
@@ -553,28 +555,51 @@ Window {
     // --- network shares (DESIGN §6.14) -----------------------------------
     property string shareAddress: ""
     property string shareUser: ""
-    property var pendingShareOpenModel: null
+    property var pendingShareOpen: null
 
     function askOpenShare(model, name) {
-        const canAsk = win.connectionOwner === model && connectPanel.open && !confirm.visible
-        win.finishPlaceFeedback("share", name, "", model)
-        if (!canAsk) {
+        if (win.connectionOwner !== model || !connectPanel.open) {
             model.share_finish(false)
+            win.finishPlaceFeedback("share", name, "", model)
             return
         }
-        win.pendingShareOpenModel = model
+        win.pendingShareOpen = { model: model, name: name }
+        connectPanel.feedbackTitle = qsTr("Shared folder is ready")
+        win.offerPendingShareOpen()
+    }
+
+    function offerPendingShareOpen() {
+        const pending = win.pendingShareOpen
+        if (!pending || confirm.visible || conflictDialog.visible
+            || prompt.visible || prompt.claimingFocus
+            || win.closing || win.closeNow || win.prefsClosing) return
+        if (win.connectionOwner !== pending.model || !connectPanel.open
+            || !pending.model.share_open_pending()) {
+            win.finishShareOpen(false)
+            return
+        }
         confirm.purpose = "share-open"
         confirm.open(qsTr("Open Windows share?"),
-                     qsTr("%1 is mounted. The desktop shares SMB connections across apps, so Gust cannot verify which account is in use.").arg(name),
+                     qsTr("%1 is mounted. The desktop shares SMB connections across apps, so Gust cannot verify which account is in use.").arg(pending.name),
                      qsTr("Open share"), false)
         win.qaDump("share-open-question")
     }
 
     function finishShareOpen(open) {
-        const model = win.pendingShareOpenModel
-        win.pendingShareOpenModel = null
-        if (model) model.share_finish(open)
+        const pending = win.pendingShareOpen
+        if (!pending) return
+        win.pendingShareOpen = null
+        win.finishPlaceFeedback("share", pending.name, "", pending.model)
+        pending.model.share_finish(open)
         win.qaDump(open ? "share-open-confirmed" : "share-open-cancelled")
+    }
+
+    function shareDialogClosed() {
+        if (confirm.purpose === "share-open") {
+            confirm.purpose = "trash"
+            win.finishShareOpen(false)
+        }
+        if (win.pendingShareOpen) Qt.callLater(win.offerPendingShareOpen)
     }
 
     /// Ask for the address first. A typo is caught here, before anybody
@@ -1183,8 +1208,8 @@ Window {
         if (error !== "") win.finishPlaceFeedback("setup-install", key, error, model)
     }
     function forgetConnectionOwner(model) {
-        if (win.pendingShareOpenModel === model) {
-            win.pendingShareOpenModel = null
+        if (win.pendingShareOpen && win.pendingShareOpen.model === model) {
+            win.pendingShareOpen = null
             if (confirm.purpose === "share-open" && confirm.visible) confirm.close()
         }
         if (win.pendingTailnet && win.pendingTailnet.model === model) win.pendingTailnet = null
@@ -4086,7 +4111,11 @@ Window {
         allowEmpty: mode === "share-user"
         emptyAcceptText: mode === "share-user" ? qsTr("Connect automatically") : ""
         onVisibleChanged: win.qaDump("prompt")
-        onClosed: { if (connectPanel.open) connectPanel.refocus(); else win.focusList() }
+        onClosed: {
+            if (connectPanel.open) connectPanel.refocus()
+            else win.focusList()
+            if (win.pendingShareOpen) Qt.callLater(win.offerPendingShareOpen)
+        }
         onAccepted: (text) => {
             // The share steps chain: each one opens the next rather than
             // finishing, so they return early.
@@ -4182,7 +4211,11 @@ Window {
             if (a.startsWith("setup-install:")) win.installSupport(a.substring(14))
             else win.runAction(a)
         }
-        onClosed: { win.focusList(); win.qaDump("connect-closed") }
+        onClosed: {
+            win.finishShareOpen(false)
+            win.focusList()
+            win.qaDump("connect-closed")
+        }
         onVisibleChanged: win.qaDump("connect")
         onSelectionKeyChanged: win.qaDump("connect-select")
     }
@@ -4390,6 +4423,7 @@ Window {
             win.focusList()
             // Run after close()/cancel() and their current handlers unwind.
             Qt.callLater(() => win.drainConflicts())
+            if (win.pendingShareOpen) Qt.callLater(win.offerPendingShareOpen)
         }
     }
 
@@ -4413,10 +4447,7 @@ Window {
         preferCancel: purpose === "share-open"
         onVisibleChanged: win.qaDump("confirm")
         onClosed: {
-            if (confirm.purpose === "share-open") {
-                confirm.purpose = "trash"
-                if (win.pendingShareOpenModel) win.finishShareOpen(false)
-            }
+            win.shareDialogClosed()
             // The keyboard returns to the panel the question was asked over;
             // focusList() leaves an open panel alone on purpose.
             if (connectPanel.open) connectPanel.refocus()

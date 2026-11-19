@@ -43,6 +43,56 @@ fn wait(
     }
 }
 #[test]
+fn smb_consent_survives_same_folder_reload_and_is_discarded_on_navigation() {
+    let app = QCoreApplication::new();
+    let app = app.as_ref().unwrap();
+    let fixture = Fixture::new();
+    let origin = fixture.0.join("a");
+    let share = fixture.0.join("b");
+    let mut model = qobject::gust_test_new_model();
+    model.pin_mut().navigate_path(origin.clone());
+    wait(app, &model, |m| m.settled && m.count == 1000);
+
+    let mount_path = share.clone();
+    let (finish_mount, mount_ready) = std::sync::mpsc::channel();
+    model
+        .pin_mut()
+        .place_op("share", String::new(), "Mounting".into(), move || {
+            mount_ready.recv().unwrap();
+            PlaceOutcome::ConfirmShare(mount_path)
+        });
+    let starting_generation = model.generation;
+    model.pin_mut().reload();
+    assert_ne!(model.generation, starting_generation);
+    finish_mount.send(()).unwrap();
+    wait(app, &model, |m| m.share_open_pending() && m.settled);
+
+    let before_confirmation = model.generation;
+    model.pin_mut().reload();
+    assert_ne!(model.generation, before_confirmation);
+    assert!(model.share_open_pending());
+    model.pin_mut().share_finish(true);
+    wait(app, &model, |m| {
+        m.settled && m.key == LocationKey::local(&share)
+    });
+    assert!(!model.share_open_pending());
+
+    let mount_path = share.clone();
+    model
+        .pin_mut()
+        .place_op("share", String::new(), "Mounting".into(), move || {
+            PlaceOutcome::ConfirmShare(mount_path)
+        });
+    wait(app, &model, |m| m.share_open_pending());
+    model.pin_mut().navigate_path(origin.clone());
+    assert!(!model.share_open_pending());
+    model.pin_mut().share_finish(true);
+    wait(app, &model, |m| {
+        m.settled && m.key == LocationKey::local(&origin)
+    });
+}
+
+#[test]
 fn actual_qt_navigation_layout_persistent_mapping_metadata_and_hold() {
     let app = QCoreApplication::new();
     let app = app.as_ref().unwrap();

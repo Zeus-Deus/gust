@@ -72,15 +72,17 @@ QtObject {
     controller = (source / "ui/tests/tst_connection_controller.qml.in").read_text()
     main_source = (source / "ui/Main.qml").read_text()
     controller = controller.replace("@PLACES_ARRIVED@", block(main_source, "function placesArrived("))
-    functions = ["askOpenShare", "finishShareOpen", "connectPlace", "tailnetUserEntered", "placeDone", "beginPlaceFeedback", "finishPlaceFeedback", "startTailnetAttempt", "shareAddressEntered", "sharePasswordEntered", "connectShare", "forgetConnectionOwner", "installSupport", "openPhone", "requireSupport"]
+    functions = ["askOpenShare", "offerPendingShareOpen", "finishShareOpen", "shareDialogClosed", "connectPlace", "tailnetUserEntered", "placeDone", "beginPlaceFeedback", "finishPlaceFeedback", "startTailnetAttempt", "shareAddressEntered", "sharePasswordEntered", "connectShare", "forgetConnectionOwner", "installSupport", "openPhone", "requireSupport"]
     controller = controller.replace("@CONNECTION_FUNCTIONS@", "\n".join(
         block(main_source, "function " + name + "(") for name in functions if "function " + name + "(" in main_source))
     dialog = block(main_source, "    ConfirmDialog {\n        id: confirm\n")
-    for handler in ("Closed", "Accepted", "Rejected"):
+    for handler in ("Accepted", "Rejected"):
         branch = block(block(dialog, "on" + handler + ":"),
                        'if (confirm.purpose === "share-open")')
         controller = controller.replace("@SHARE_" + handler.upper() + "@", branch)
     controller = controller.replace("@CONNECT_HANDLER@", block(main_source, "onConnectRequested:"))
+    connect_panel = main_source[main_source.index("    ConnectPanel {"):]
+    controller = controller.replace("@CONNECT_CLOSED@", block(connect_panel, "onClosed:"))
     controller = controller.replace("@ACTION_HANDLER@", block(main_source, "onActionRequested: (a) => { connectPanel" ) if "onActionRequested: (a) => { connectPanel" in main_source
                                     else block(main_source[main_source.index("    ConnectPanel {"):], "onActionRequested:"))
     controller = controller.replace("@CLOUD_BRANCH@", block(main_source, 'else if (a === "cloud-setup")'))

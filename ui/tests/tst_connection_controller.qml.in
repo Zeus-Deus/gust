@@ -38,7 +38,10 @@ Item {
         property var connectionOwner: null
         property string shareAddress: ""
         property string shareUser: ""
-        property var pendingShareOpenModel: null
+        property var pendingShareOpen: null
+        property bool closing: false
+        property bool closeNow: false
+        property bool prefsClosing: false
         property var pendingTailnet: null
         property string pendingTailnetUser: ""
         property var hints: ({message: ""})
@@ -65,7 +68,12 @@ Item {
             function cloud_setup() { cloudSetupCalls += 1; return returnError }
             function share_check(address) { return "" }
             function share_mount(address, user, domain, password) { return remote_connect(address) }
-            function share_finish(open) { if (open) navigationCalls += 1 }
+            property bool mountedSharePending: false
+            function share_open_pending() { return mountedSharePending }
+            function share_finish(open) {
+                if (open && mountedSharePending) navigationCalls += 1
+                mountedSharePending = false
+            }
             function request_places() {}
         }
         function cloudSetupAction() { const a = "cloud-setup"; if (false) {} @CLOUD_BRANCH@ }
@@ -77,6 +85,7 @@ Item {
         function refreshActiveModel() {}
         function removeModel(index, object) { @OBJECT_REMOVED@ }
         function refreshPlaces() {}
+        function focusList() {}
         @CONNECTION_FUNCTIONS@
         function qaDump(tag) {}
         function runningJobModels() { return [] }
@@ -86,7 +95,7 @@ Item {
             id: confirm
             property string purpose: "trash"
             preferCancel: purpose === "share-open"
-            onClosed: { @SHARE_CLOSED@ }
+            onClosed: win.shareDialogClosed()
             onAccepted: { @SHARE_ACCEPTED@ }
             onRejected: { @SHARE_REJECTED@ }
         }
@@ -109,6 +118,9 @@ Item {
         connectPanel.operation = null; connectPanel.feedbackTitle = ""; connectPanel.feedbackBody = ""; connectPanel.feedbackFailed = false
         connectPanel.hide(); connectPanel.supportKey = ""; win.connectionOwner = null; win.dirModel = fakeModel
         fakeModel.place_busy = false; fakeModel.returnError = ""; fakeModel.connectCalls = 0
+        fakeModel.mountedSharePending = false
+        win.prompt.visible = false
+        win.prompt.claimingFocus = false
         win.placesInfo = {sshfs: true, computers: [{name: "studio", routes: [
             {kind: "ssh", name: "studio-lan", detail: "192.0.2.10", online: true, connected: false}]}]}
 
@@ -312,6 +324,42 @@ Item {
         compare(connectPanel.statusBody, fakeModel.returnError)
         compare(connectPanel.open, true)
     }
+    function completeSmbMount() {
+        fakeModel.place_busy = false
+        fakeModel.mountedSharePending = true
+        // The mount succeeded, but the worker cannot vouch for its account.
+        win.askOpenShare(fakeModel, "nas/shared")
+    }
+    function test_smb_offer_waits_for_the_close_question_to_be_dismissed() {
+        fakeModel.navigationCalls = 0
+        win.connectShare("//nas/shared", "entered-account", "")
+        confirm.purpose = "close"
+        confirm.open("A transfer is still running", "Wait for the transfer?", "Stop and close", true)
+        completeSmbMount()
+        compare(confirm.purpose, "close")
+        compare(connectPanel.busy, true, "The decision still belongs to the running connection")
+        compare(fakeModel.navigationCalls, 0)
+        keyClick(Qt.Key_Return)
+        tryCompare(confirm, "purpose", "share-open")
+        verify(confirm.visible)
+        compare(fakeModel.navigationCalls, 0)
+        const point = confirm.buttonCenters().confirm
+        mouseClick(confirm, point[0], point[1])
+        compare(fakeModel.navigationCalls, 1)
+        compare(connectPanel.busy, false)
+    }
+    function test_smb_offer_is_discarded_when_its_tab_navigates_while_queued() {
+        fakeModel.navigationCalls = 0
+        win.connectShare("//nas/shared", "", "")
+        confirm.purpose = "close"
+        confirm.open("A transfer is still running", "Wait for the transfer?", "Stop and close", true)
+        completeSmbMount()
+        fakeModel.mountedSharePending = false
+        keyClick(Qt.Key_Return)
+        tryCompare(connectPanel, "busy", false)
+        verify(!confirm.visible)
+        compare(fakeModel.navigationCalls, 0)
+    }
     function test_smb_mount_success_waits_for_an_explicit_open_data() {
         return [{tag: "cancel", open: false}, {tag: "open-share", open: true}]
     }
@@ -319,9 +367,7 @@ Item {
         fakeModel.navigationCalls = 0
         win.connectShare("//nas/shared", "entered-account", "")
         compare(connectPanel.busy, true)
-        fakeModel.place_busy = false
-        // The mount succeeded, but the worker cannot vouch for its account.
-        win.askOpenShare(fakeModel, "nas/shared")
+        completeSmbMount()
         verify(confirm.visible)
         compare(fakeModel.navigationCalls, 0)
         verify(confirm.body.indexOf("cannot verify which account") >= 0)
@@ -334,28 +380,26 @@ Item {
         }
         compare(confirm.visible, false)
         compare(fakeModel.navigationCalls, row.open ? 1 : 0)
-        compare(win.pendingShareOpenModel, null)
+        compare(win.pendingShareOpen, null)
     }
     function test_late_smb_mount_after_dismissing_connect_has_no_open_offer() {
         fakeModel.navigationCalls = 0
         win.connectShare("//nas/shared", "", "")
         connectPanel.hide()
-        fakeModel.place_busy = false
-        win.askOpenShare(fakeModel, "nas/shared")
+        completeSmbMount()
         compare(connectPanel.busy, false)
         compare(confirm.visible, false)
         compare(fakeModel.navigationCalls, 0)
-        compare(win.pendingShareOpenModel, null)
+        compare(win.pendingShareOpen, null)
     }
     function test_closing_the_smb_owner_dismisses_its_open_question() {
         fakeModel.navigationCalls = 0
         win.connectShare("//nas/shared", "", "")
-        fakeModel.place_busy = false
-        win.askOpenShare(fakeModel, "nas/shared")
+        completeSmbMount()
         verify(confirm.visible)
         win.removeModel(0, fakeModel)
         compare(confirm.visible, false)
-        compare(win.pendingShareOpenModel, null)
+        compare(win.pendingShareOpen, null)
         compare(fakeModel.navigationCalls, 0)
     }
     function test_closing_the_initiating_tab_releases_progress_without_claiming_cancellation() {

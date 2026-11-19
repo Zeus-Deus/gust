@@ -2173,9 +2173,11 @@ GVfs can coalesce simultaneous requests from different desktop apps for
 the same SMB mount. Its success response establishes that the folder is
 mounted, while the login identity is unknown. Gust asks before opening the
 folder, with Cancel focused. Cancel leaves the desktop's shared mount
-available to other apps. If the originating tab moves to another location
-or closes, the pending decision is discarded. NFS opens directly because
-it has no account login step.
+available to other apps. Gust keeps the decision pending behind another
+dialog and offers it once that dialog closes, while the originating tab
+and Connect intent are still current. Same-folder refreshes preserve the
+decision. Navigation to a different location or closing the originating
+tab discards it. NFS opens directly because it has no account login step.
 
 ### NFS asks for nothing
 

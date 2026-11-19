@@ -468,6 +468,8 @@ pub mod qobject {
             domain: QString,
             password: QString,
         ) -> QString;
+        #[qinvokable]
+        fn share_open_pending(self: &DirModel) -> bool;
         /// Consume the pending SMB decision for this tab.
         #[qinvokable]
         fn share_finish(self: Pin<&mut DirModel>, open: bool);
@@ -1155,6 +1157,7 @@ pub struct DirModelRust {
     frame: std::sync::Arc<crate::projection::Frame>,
     runtime: crate::projection::Runtime,
     requested_key: LocationKey,
+    navigation_epoch: u64,
     request_revision: u64,
     sort_request_revision: u64,
     selection_revision: u64,
@@ -1253,8 +1256,8 @@ pub struct DirModelRust {
     finding: bool,
     find_needle: QString,
     place_busy: bool,
-    /// A mounted SMB folder and the navigation generation that requested it.
-    pending_share_open: Option<(u64, PathBuf)>,
+    /// A mounted SMB folder awaiting consent in this tab.
+    pending_share_open: Option<PathBuf>,
     peek_hash: QString,
     /// What was selected when the current rubber band started.
     band_base: Option<std::sync::Arc<crate::projection::BandBase>>,
@@ -1508,6 +1511,14 @@ impl Default for DirModelRust {
 }
 
 impl DirModelRust {
+    fn request_location(&mut self, key: LocationKey) {
+        if key != self.requested_key {
+            self.navigation_epoch = self.navigation_epoch.wrapping_add(1);
+            self.pending_share_open = None;
+            self.requested_key = key;
+        }
+    }
+
     fn fresh(home: PathBuf) -> Self {
         let frame = crate::projection::Frame::empty(LocationKey::local(&home));
         let runtime = crate::projection::Runtime::new(frame.clone());
@@ -1541,6 +1552,7 @@ impl DirModelRust {
             frame,
             runtime,
             requested_key: LocationKey::local(&home),
+            navigation_epoch: 0,
             request_revision: 0,
             sort_request_revision: 0,
             selection_revision: 0,
@@ -1908,6 +1920,7 @@ impl qobject::DirModel {
         self.as_mut().set_place_busy(true);
         self.as_mut().set_status(QString::from(&busy));
         let gen = self.as_ref().generation;
+        let navigation_epoch = self.as_ref().navigation_epoch;
         let spawned = std::thread::Builder::new()
             .name(format!("gust-{op}"))
             .spawn(move || {
@@ -1943,8 +1956,8 @@ impl qobject::DirModel {
                         }
                         PlaceOutcome::ConfirmShare(path) => {
                             model.as_mut().set_status(QString::default());
-                            if model.as_ref().generation == gen {
-                                model.as_mut().rust_mut().pending_share_open = Some((gen, path));
+                            if model.as_ref().navigation_epoch == navigation_epoch {
+                                model.as_mut().rust_mut().pending_share_open = Some(path);
                                 model.as_mut().share_open_requested(nameq);
                             } else {
                                 model.as_mut().place_done(opq, nameq, QString::default());
@@ -3718,12 +3731,14 @@ impl qobject::DirModel {
         QString::default()
     }
 
+    fn share_open_pending(&self) -> bool {
+        self.pending_share_open.is_some()
+    }
+
     fn share_finish(mut self: Pin<&mut Self>, open: bool) {
         let pending = self.as_mut().rust_mut().pending_share_open.take();
-        if let Some((generation, path)) = pending {
-            if open && self.as_ref().generation == generation {
-                self.navigate_path(path);
-            }
+        if let Some(path) = pending.filter(|_| open) {
+            self.navigate_path(path);
         }
     }
 
@@ -6100,7 +6115,7 @@ impl qobject::DirModel {
             let mut r = self.as_mut().rust_mut();
             r.back.push(old);
             r.forward.clear();
-            r.requested_key = LocationKey::local(&p);
+            r.request_location(LocationKey::local(&p));
             r.type_ahead.clear();
         }
         self.as_mut().set_filter(QString::default());
@@ -6118,7 +6133,7 @@ impl qobject::DirModel {
             let mut r = self.as_mut().rust_mut();
             r.back.push(old);
             r.forward.clear();
-            r.requested_key = parent;
+            r.request_location(parent);
             r.type_ahead.clear();
         }
         self.load_current();
@@ -6134,7 +6149,7 @@ impl qobject::DirModel {
         {
             let mut r = self.as_mut().rust_mut();
             r.forward.push(cur);
-            r.requested_key = prev;
+            r.request_location(prev);
             r.type_ahead.clear();
         }
         self.load_current();
@@ -6150,7 +6165,7 @@ impl qobject::DirModel {
         {
             let mut r = self.as_mut().rust_mut();
             r.back.push(cur);
-            r.requested_key = next;
+            r.request_location(next);
             r.type_ahead.clear();
         }
         self.load_current();
