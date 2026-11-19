@@ -2794,7 +2794,7 @@ Window {
     function drainConflicts() {
         // cancelled() precedes close(): never present a queued owner while
         // the previous dialog is still visible or owns its answer route.
-        if (win.conflictModel || conflictDialog.visible) return
+        if (win.conflictModel || conflictDialog.visible || confirm.visible) return
         while (win.conflictQueue.length > 0) {
             const m = win.conflictQueue[0]
             win.conflictQueue = win.conflictQueue.slice(1)
@@ -4122,7 +4122,8 @@ Window {
         emptyAcceptText: mode === "share-user" ? qsTr("Connect automatically") : ""
         onVisibleChanged: win.qaDump("prompt")
         onClosed: {
-            if (connectPanel.open) connectPanel.refocus()
+            // A worker can open a question while the text prompt fades out.
+            if (connectPanel.open && !confirm.visible && !conflictDialog.visible) connectPanel.refocus()
             else win.focusList()
             if (win.pendingShareOpen) Qt.callLater(win.offerPendingShareOpen)
         }
@@ -4466,6 +4467,8 @@ Window {
             // A close still waiting on preferences did not ask over this
             // question; it asks now if a failure or the deadline came meanwhile.
             if (win.prefsClosing) Qt.callLater(win.prefsClose, null)
+            // A late paste may be waiting for this question to release focus.
+            if (win.conflictQueue.length) Qt.callLater(win.drainConflicts)
         }
         onAccepted: {
             if (confirm.purpose === "share-open") {

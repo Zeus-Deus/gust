@@ -59,7 +59,7 @@ QtObject {
     function withAlpha(c, a) { return Qt.rgba(c.r, c.g, c.b, a) }
 }
 ''')
-    names = ["ui/ConnectPanel.qml", "ui/DeviceSharingPanel.qml", "ui/SharingButton.qml", "ui/ScrollIndicator.qml", "ui/WheelScroll.qml", "ui/ConfirmDialog.qml", "ui/Main.qml",
+    names = ["ui/ConnectPanel.qml", "ui/DeviceSharingPanel.qml", "ui/SharingButton.qml", "ui/ScrollIndicator.qml", "ui/WheelScroll.qml", "ui/ConfirmDialog.qml", "ui/ConflictDialog.qml", "ui/Main.qml",
              "ui/tests/tst_device_sharing.qml",
              "ui/tests/tst_connections.qml", "ui/tests/tst_connection_controller.qml.in",
              "crates/app/tests/connection_regressions.py", "crates/app/tests/tab_model_regressions.py"]
@@ -73,9 +73,20 @@ QtObject {
     main_source = (source / "ui/Main.qml").read_text()
     controller = controller.replace("@PLACES_ARRIVED@", block(main_source, "function placesArrived("))
     functions = ["askOpenShare", "offerPendingShareOpen", "finishShareOpen", "shareDialogClosed", "connectPlace", "tailnetUserEntered", "placeDone", "beginPlaceFeedback", "finishPlaceFeedback", "startTailnetAttempt", "shareAddressEntered", "sharePasswordEntered", "connectShare", "forgetConnectionOwner", "installSupport", "openPhone", "requireSupport"]
+    functions += ["pasteFinished", "transferStarted", "queueConflict", "drainConflicts",
+                  "conflictOwnerLive", "showNextConflict", "forgetConflictOwner"]
     controller = controller.replace("@CONNECTION_FUNCTIONS@", "\n".join(
         block(main_source, "function " + name + "(") for name in functions if "function " + name + "(" in main_source))
     dialog = block(main_source, "    ConfirmDialog {\n        id: confirm\n")
+    prompt = block(main_source, "    TextPrompt {\n        id: prompt\n")
+    controller = controller.replace("@PROMPT_CLOSED@", block(prompt, "onClosed:"))
+    default_focus = next(line.strip() for line in dialog.splitlines() if line.strip().startswith("preferCancel:"))
+    controller = controller.replace("@CONFIRM_DEFAULT@", default_focus)
+    controller = controller.replace("@CONFIRM_CLOSED@", block(dialog, "onClosed:"))
+    controller = controller.replace("@CONFLICT_DIALOG@", block(main_source, "    ConflictDialog {"))
+    for signal in ("Paste_ready", "Share_open_requested"):
+        handler = next(line.strip() for line in main_source.splitlines() if line.strip().startswith("on" + signal + ":"))
+        controller = controller.replace("@" + signal.upper() + "@", handler)
     for handler in ("Accepted", "Rejected"):
         branch = block(block(dialog, "on" + handler + ":"),
                        'if (confirm.purpose === "share-open")')

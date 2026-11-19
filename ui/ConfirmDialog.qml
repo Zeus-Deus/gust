@@ -164,7 +164,7 @@ Rectangle {
         }
     }
 
-    Keys.onEscapePressed: { root.rejected(); root.close() }
+    Keys.onEscapePressed: (event) => { if (!event.isAutoRepeat) { root.rejected(); root.close() } }
 
     Accessible.role: Accessible.Dialog
     Accessible.name: root.title

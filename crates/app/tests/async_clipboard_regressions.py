@@ -119,6 +119,7 @@ TestCase {
     QtObject { id: jobTimer; property int starts: 0; function start() { starts++ } }
     QtObject { id: quickLook; property bool open: false; function hide() { open = false } }
     QtObject { id: settingsPanel; property bool open: false; function hide() { open = false } }
+    QtObject { id: confirm; property bool visible: false }
     QtObject { id: keepButton; function forceActiveFocus() {} }
     QtObject { id: tabList; readonly property int count: win.liveModels.length }
     QtObject { id: tabs; function objectAt(index) { return win.liveModels[index] || null } }

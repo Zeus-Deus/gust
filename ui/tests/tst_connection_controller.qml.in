@@ -13,14 +13,29 @@ Item {
         property var lostPlaces: []
         property var seenLostRoutes: []
         property var dirModel: ({places_json: "{}", location: "/local"})
-        property var prompt: ({visible: false, claimingFocus: false, promptCalls: 0,
-            openWith: function() { this.visible = true; this.promptCalls += 1 },
-            close: function() { this.visible = false }})
+        property alias prompt: fixturePrompt
+        QtObject {
+            id: fixturePrompt
+            property bool visible: false
+            property bool claimingFocus: false
+            property int promptCalls: 0
+            property string mode: ""
+            property string errorText: ""
+            property bool secret: false
+            signal closed()
+            function openWith() { visible = true; promptCalls += 1 }
+            function close() { visible = false }
+            @PROMPT_CLOSED@
+        }
         QtObject { id: palette; property bool visible: false }
         property var quickLook: ({open: false})
-        property var conflictDialog: ({visible: false})
+        property var conflictModel: null
+        property var conflictQueue: []
+        QtObject { id: tabList; readonly property int count: 1 }
+        QtObject { id: tabs; function objectAt(index) { return index === 0 ? fakeModel : null } }
+        QtObject { id: jobTimer; function start() {} }
         property var contextMenu: ({open: false})
-        property var settingsPanel: ({open: false})
+        QtObject { id: settingsPanel; property bool open: false }
         property var renameCard: ({open: false})
         property var permissionsDialog: ({open: false})
         property var trashPanel: ({open: false})
@@ -44,7 +59,7 @@ Item {
         property bool prefsClosing: false
         property var pendingTailnet: null
         property string pendingTailnetUser: ""
-        property var hints: ({message: ""})
+        QtObject { id: hints; property string message: "" }
         QtObject {
             id: fakeModel
             property bool place_busy: false
@@ -68,6 +83,16 @@ Item {
             function cloud_setup() { cloudSetupCalls += 1; return returnError }
             function share_check(address) { return "" }
             function share_mount(address, user, domain, password) { return remote_connect(address) }
+            readonly property var tabModel: fakeModel
+            signal paste_ready(string message, bool allowImage)
+            signal share_open_requested(string name)
+            @PASTE_READY@
+            @SHARE_OPEN_REQUESTED@
+            property var clash: null
+            property string answer: ""
+            function conflict_json() { return clash ? JSON.stringify(clash) : "" }
+            function conflict_answer(choice, all) { answer = choice; clash = null; return "" }
+            function conflict_cancel() { clash = null }
             property bool mountedSharePending: false
             function share_open_pending() { return mountedSharePending }
             function share_finish(open) {
@@ -81,7 +106,6 @@ Item {
             if (action.startsWith("remote-on:")) dirModel.remote_connect(action.substring(10))
             else if (action === "cloud-setup") cloudSetupAction()
         }
-        function forgetConflictOwner(model) {}
         function refreshActiveModel() {}
         function removeModel(index, object) { @OBJECT_REMOVED@ }
         function refreshPlaces() {}
@@ -97,11 +121,12 @@ Item {
             @ACTION_HANDLER@
             @CONNECT_CLOSED@
         }
+        @CONFLICT_DIALOG@
         ConfirmDialog {
             id: confirm
             property string purpose: "trash"
-            preferCancel: purpose === "share-open"
-            onClosed: win.shareDialogClosed()
+            @CONFIRM_DEFAULT@
+            @CONFIRM_CLOSED@
             onAccepted: { @SHARE_ACCEPTED@ }
             onRejected: { @SHARE_REJECTED@ }
         }
@@ -334,7 +359,63 @@ Item {
         fakeModel.place_busy = false
         fakeModel.mountedSharePending = true
         // The mount succeeded, but the worker cannot vouch for its account.
-        win.askOpenShare(fakeModel, "nas/shared")
+        fakeModel.share_open_requested("nas/shared")
+    }
+    function test_smb_and_clipboard_conflict_take_separate_keypresses_data() {
+        return [{tag: "smb-then-file", smbFirst: true, folder: false},
+                {tag: "smb-then-folder", smbFirst: true, folder: true},
+                {tag: "file-then-smb", smbFirst: false, folder: false},
+                {tag: "folder-then-smb", smbFirst: false, folder: true}]
+    }
+    function test_smb_and_clipboard_conflict_take_separate_keypresses(row) {
+        fakeModel.navigationCalls = 0
+        fakeModel.answer = ""
+        const choice = row.folder ? "merge" : "keep-both"
+        win.transferStarted(fakeModel, "?clipboard", "paste")
+        win.connectShare("//nas/shared", "", "")
+        wait(0) // Let the Connect panel take focus before either worker returns.
+        if (row.smbFirst) {
+            completeSmbMount()
+            verify(waitForRendering(confirm))
+            verify(findChild(confirm, "cancelButton").activeFocus)
+        }
+        fakeModel.clash = {name: "fixture", canMerge: row.folder, canReplace: true, count: 1, index: 0,
+                           existingSize: "1 B", incomingSize: "2 B", existingTime: "today", incomingTime: "today"}
+        fakeModel.paste_ready("?conflict", false)
+        if (!row.smbFirst) {
+            verify(waitForRendering(conflictDialog))
+            completeSmbMount()
+        }
+        // The username prompt emits closed after its fade, possibly after both workers.
+        fixturePrompt.closed()
+        wait(0)
+
+        if (row.smbFirst) {
+            verify(confirm.visible)
+            verify(findChild(confirm, "cancelButton").activeFocus, "Late paste must leave Cancel focused")
+            verify(!conflictDialog.visible)
+            keyClick(Qt.Key_Return)
+            verify(!confirm.visible)
+            compare(win.pendingShareOpen, null)
+        } else {
+            verify(!confirm.visible)
+            verify(win.pendingShareOpen !== null)
+        }
+        tryCompare(conflictDialog, "visible", true)
+        compare(conflictDialog.focusedChoice(), choice)
+        compare(fakeModel.answer, "", "The conflict still needs its own keypress")
+        compare(fakeModel.navigationCalls, 0)
+        keyClick(Qt.Key_Return)
+        compare(fakeModel.answer, choice)
+        verify(!conflictDialog.visible)
+        if (!row.smbFirst) {
+            tryCompare(confirm, "visible", true)
+            verify(findChild(confirm, "cancelButton").activeFocus)
+            keyClick(Qt.Key_Return)
+            verify(!confirm.visible)
+        }
+        compare(win.pendingShareOpen, null)
+        compare(fakeModel.navigationCalls, 0)
     }
     function test_smb_offer_waits_for_the_close_question_to_be_dismissed() {
         fakeModel.navigationCalls = 0
@@ -469,7 +550,13 @@ Item {
         compare(win.recoveryOpened, 1)
         compare(connectionRecovery.routeKey, "tailnet:studio")
     }
-    function cleanup() { recovery.close() }
+    function cleanup() {
+        recovery.close()
+        connectPanel.hide()
+        if (confirm.visible) confirm.close()
+        wait(0)
+        if (conflictDialog.visible) conflictDialog.cancel()
+    }
     function test_healthy_alternative_keeps_a_lost_mount_accessible() {
         const ssh = route("ssh", "studio-lan", false)
         const tail = route("tailnet", "studio", true)

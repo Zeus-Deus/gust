@@ -155,6 +155,7 @@ TestCase {
         property bool closing: false
         property bool closeNow: false
         property var pendingShareOpen: null
+        property var conflictQueue: []
         property int quitCalls: 0
         property bool prefsClosing: false
         property string prefsCloseTarget: ""
