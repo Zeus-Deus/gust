@@ -1754,7 +1754,7 @@ Three places touch a path before any worker does, and all three are bounded:
 
 | Place | Why it must be bounded |
 |---|---|
-| `startup_location()` | Runs before the window exists. Unbounded, Gust never paints at all. |
+| `startup()` | Runs before the window exists. Unbounded, Gust never paints at all. |
 | `navigate()` | Runs on the UI thread. Unbounded, the whole window freezes. |
 | the listing worker | Unbounded, the folder never settles and the worker never returns. |
 
