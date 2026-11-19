@@ -26,6 +26,7 @@ fn main() {
         "ui/InterruptedNotice.qml",
         "ui/SettingsPanel.qml",
         "ui/ChooserBar.qml",
+        "ui/ChooserFooter.qml",
         "ui/TrashPanel.qml",
         "ui/RecentPanel.qml",
         "ui/KeyMapPanel.qml",

@@ -360,6 +360,7 @@ dependencies = [
  "hashbrown 0.17.1",
  "rustix",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

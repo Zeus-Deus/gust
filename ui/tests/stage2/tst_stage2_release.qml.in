@@ -60,6 +60,7 @@ Item {
         function focusPane(p) {}
         function focusList() {}
         function transferStarted(m, err, tag) { transfers = transfers.concat([[tag, err]]) }
+        function chooserMenu(items) { return items }
         function contextItems(row) {
             return [{ label: "Copy", hint: "", action: "copy" }, { label: "Sub", hint: "", action: "sub" }]
         }

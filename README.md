@@ -123,7 +123,7 @@ opening a window. It is a Model Context Protocol server on stdio:
 It only copies: nothing on a device is replaced or deleted, and hidden files
 are never sent. Over USB, an iPhone or iPad accepts files into an app's own
 folder (VLC, Documents…), not into Photos; Taildrop delivers to the device's
-Tailscale inbox. See [DESIGN §6.27](docs/DESIGN.md).
+Tailscale inbox. See [DESIGN §6.28](docs/DESIGN.md).
 
 ## Layout
 

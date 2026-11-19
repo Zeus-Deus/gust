@@ -3,7 +3,7 @@
 //! Sending is a copy and nothing else: one regular file at a time through
 //! the engine's single-file copy, with "keep both" or "skip" on a name
 //! clash. There is no move, replace, merge, delete or eject here
-//! (DESIGN §6.27).
+//! (DESIGN §6.28).
 
 use crate::admit;
 use crate::devices::{self, Endpoint, Failure};

@@ -5,7 +5,9 @@
 //! `~/.config/xdg-desktop-portal/hyprland-portals.conf`, remembering what was
 //! there, and puts it back exactly on opt-out.
 
-use gust_core::portal_conf::{claim, release, same_config, CHOOSER_KEY};
+use gust_core::portal_conf::{
+    add_rule, claim, has_rule, release, remove_rule, same_config, CHOOSER_KEY, RULE_BEGIN,
+};
 
 const SYSTEM_DEFAULT: &str = "[preferred]\ndefault=hyprland;gtk\n";
 
@@ -60,4 +62,35 @@ fn a_file_gust_created_is_recognised_as_unchanged_even_without_a_final_newline()
     let released = release(&claimed, prev.as_deref());
     assert!(same_config(&released, system));
     assert!(!same_config(&released, "[preferred]\ndefault=gtk"));
+}
+
+#[test]
+fn the_float_rule_is_one_marked_block_that_comes_off_exactly() {
+    let user = "-- my rules\no.window(\"mpv\", { float = true })";
+    let on = add_rule(user);
+    assert!(has_rule(&on));
+    assert!(on.contains("gust-chooser"));
+    assert!(on.contains("floating-window"));
+    // Adding twice changes nothing.
+    assert_eq!(add_rule(&on), on);
+    assert_eq!(remove_rule(&on), format!("{user}\n"));
+}
+
+#[test]
+fn removing_the_float_rule_leaves_a_file_without_one_alone() {
+    let user = "o.window(\"mpv\", { float = true })\n";
+    assert_eq!(remove_rule(user), user);
+}
+
+#[test]
+fn a_block_without_its_end_marker_keeps_everything_after_it() {
+    let text = format!("before\n{RULE_BEGIN}\no.window(\"gust-chooser\", {{}})\nmine = true\n");
+    assert_eq!(remove_rule(&text), text);
+    assert!(has_rule(&remove_rule(&text)));
+}
+
+#[test]
+fn lines_after_the_block_survive_removal() {
+    let on = add_rule("before\n") + "after\n";
+    assert_eq!(remove_rule(&on), "before\nafter\n");
 }

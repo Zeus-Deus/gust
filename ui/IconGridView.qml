@@ -20,6 +20,9 @@ FocusScope {
         return grid.indexAt(p.x, p.y)
     }
     signal dropReleased(int row)
+    /// A plain click selects the row as well as moving the cursor. A folder
+    /// dialog answers with the selection, so there a click has to be a choice.
+    property bool clickSelects: false
     property bool dragActive: false
     /// A selection band is held down on empty space (press to release).
     readonly property bool bandActive: gridBand.pressed
@@ -345,7 +348,9 @@ FocusScope {
                                 root.model.sel_toggle(index)
                             else if (mouse.modifiers & Qt.ShiftModifier)
                                 root.model.sel_range_to(index)
-                            else {
+                            else if (root.clickSelects) {
+                                root.model.sel_only(index)
+                            } else {
                                 root.model.sel_clear()
                                 root.model.focus_row(index)
                             }

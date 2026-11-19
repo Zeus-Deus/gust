@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 publish = false
 
-# `gust --mcp`: device transfers for AI agents (DESIGN §6.27). No Qt.
+# `gust --mcp`: device transfers for AI agents (DESIGN §6.28). No Qt.
 
 [dependencies]
 gust-core.workspace = true

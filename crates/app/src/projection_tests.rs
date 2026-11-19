@@ -36,6 +36,7 @@ fn request(revision: u64, query: &str) -> Request {
         request: revision,
         selection_revision: 0,
         query: query.into(),
+        chooser_globs: Arc::default(),
         sort: SortSpec::default(),
         sort_revision: 0,
         hidden: false,
@@ -331,6 +332,7 @@ fn clone_frame_for_test(frame: &Frame) -> Frame {
         display_revision: frame.display_revision,
         source_display_revision: frame.source_display_revision,
         query: frame.query.clone(),
+        chooser_globs: frame.chooser_globs.clone(),
         sort: frame.sort,
         sort_revision: frame.sort_revision,
         hidden: frame.hidden,
@@ -1494,4 +1496,137 @@ fn cancelled_size_preparation_transfers_partial_pages_to_existing_retirement() {
         .unwrap()
         .join()
         .unwrap();
+}
+
+#[test]
+fn chooser_projection_keeps_folders_links_and_search_basenames_in_listing_order() {
+    use gust_core::entry::EntryKind;
+    use std::os::unix::ffi::OsStringExt;
+    let base = Frame::empty(LocationKey::local("/old"));
+    let mut snapshot = DirectorySnapshot::empty(LocationKey::local("/old"), 1);
+    snapshot.complete = Completeness::Complete;
+    snapshot.entries = vec![
+        Entry::new("folder.png".into(), EntryKind::Dir),
+        Entry::new("link.png".into(), EntryKind::Symlink),
+        Entry::new("nested.png/report.TXT".into(), EntryKind::File),
+        Entry::new("nested.txt/picture.png".into(), EntryKind::File),
+        Entry::new(
+            OsString::from_vec(b"raw-\xff.txt".to_vec()),
+            EntryKind::File,
+        ),
+    ];
+    let mut retired = Retirement::default();
+    let mut request = request(1, "");
+    request.chooser_globs = Arc::from(["*.txt".into()]);
+    let projected = prepare(
+        &base,
+        Arc::new(Entries::new(snapshot, 1)),
+        &request,
+        None,
+        None,
+        &mut retired,
+        &|| false,
+    )
+    .unwrap();
+    let names: Vec<_> = projected
+        .visible
+        .iter()
+        .map(|&i| projected.all[i].name.clone())
+        .collect();
+    assert_eq!(
+        names,
+        vec![
+            OsString::from("folder.png"),
+            "link.png".into(),
+            "nested.png/report.TXT".into(),
+            OsString::from_vec(b"raw-\xff.txt".to_vec())
+        ]
+    );
+    assert_eq!(projected.chooser_globs, request.chooser_globs);
+}
+
+#[test]
+fn chooser_filter_reconciles_selection_and_marks_keep_displayed_filter() {
+    let base = Frame::empty(LocationKey::local("/old"));
+    let backing = entries(&["report.txt".into(), "picture.png".into()], "/old", 1);
+    let mut retired = Retirement::default();
+    let original = prepare(
+        &base,
+        backing,
+        &request(1, ""),
+        None,
+        None,
+        &mut retired,
+        &|| false,
+    )
+    .unwrap();
+    let selected = prepare(
+        &original,
+        original.all.clone(),
+        &request(1, ""),
+        Some(&Gesture::Only("picture.png".into())),
+        None,
+        &mut retired,
+        &|| false,
+    )
+    .unwrap();
+    assert_eq!(selected.selection.len(), 1);
+    let mut filter = request(2, "");
+    filter.chooser_globs = Arc::from(["*.txt".into()]);
+    let text = prepare(
+        &selected,
+        selected.all.clone(),
+        &filter,
+        None,
+        None,
+        &mut retired,
+        &|| false,
+    )
+    .unwrap();
+    assert!(
+        text.selection.is_empty(),
+        "hidden selected file cannot stay an answer"
+    );
+    assert_eq!(text.all[text.visible[0]].name, "report.txt");
+    let marks = prepare_marks(&text, &request(3, ""), &|| false).unwrap();
+    assert_eq!(marks.chooser_globs, filter.chooser_globs);
+    let selected_text = prepare(
+        &text,
+        text.all.clone(),
+        &request(3, ""),
+        Some(&Gesture::All),
+        None,
+        &mut retired,
+        &|| false,
+    )
+    .unwrap();
+    assert_eq!(selected_text.chooser_globs, filter.chooser_globs);
+    assert_eq!(
+        selected_text.selection.names_vec(),
+        vec![OsString::from("report.txt")]
+    );
+}
+
+#[test]
+fn newest_chooser_filter_supersedes_a_held_completion() {
+    let mut current = frame(2_000);
+    let runtime = Runtime::new(current.clone());
+    let mut first = request(2, "");
+    first.chooser_globs = Arc::from(["*.png".into()]);
+    runtime.request(first);
+    let until = Instant::now() + Duration::from_secs(10);
+    while runtime.slots()["completion"] != true {
+        assert!(Instant::now() < until);
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(runtime.take(true).is_none());
+    let mut latest = request(3, "");
+    latest.chooser_globs = Arc::from(["file*".into()]);
+    runtime.request(latest.clone());
+    let next = receive(&runtime);
+    assert_eq!(next.request, latest.request);
+    assert_eq!(next.chooser_globs, latest.chooser_globs);
+    assert_eq!(next.visible.len(), 2_000);
+    install(&runtime, &mut current, next);
+    wait_retired(&runtime);
 }

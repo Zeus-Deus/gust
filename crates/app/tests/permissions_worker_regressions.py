@@ -88,6 +88,14 @@ def main():
                     search.append(directory)
                 if filename.endswith(".rlib"):
                     libraries[artifact["target"]["name"]] = filename
+            # A cached top-level convenience hardlink can lag a subsequent
+            # build of the hashed artifact. Use the rlib paired with Cargo's
+            # current metadata when that build-dir layout supplies one.
+            for filename in artifact.get("filenames", []):
+                metadata = Path(filename)
+                library = metadata.with_suffix(".rlib")
+                if metadata.suffix == ".rmeta" and library.is_file():
+                    libraries[artifact["target"]["name"]] = str(library)
     externs = []
     for directory in search:
         externs.extend(["-L", f"dependency={directory}"])
