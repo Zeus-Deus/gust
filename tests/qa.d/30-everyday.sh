@@ -131,7 +131,7 @@ goto "$d30d" || bad "could not open $d30d"
 wait_for "d['model']['count']" "2" 10 >/dev/null
 typ "src"; sleep 1.2; ctrl c; sleep 0.4
 typ "dest"; sleep 1.2; key Return
-wait_for "d['model']['location']" "$d30d/dest" 10 >/dev/null
+wait_location "$d30d/dest" 10 >/dev/null
 ctrl v
 wait_for "d['jobRunning']" "True" 20 >/dev/null
 if [[ "$MOUSE_OK" == 1 && "$(state "d['jobRunning']")" == True ]]; then
@@ -199,7 +199,7 @@ rm -rf "$d30f"
 if [[ "$MOUSE_OK" == 1 ]]; then
   # Arrow keys reach the list again after clicking a sidebar place.
   wclick left "$(pt_of placePoints Documents)"; sleep 0.8
-  wait_for "d['model']['location']" "$FIXTURE/Documents" 10 >/dev/null
+  wait_location "$FIXTURE/Documents" 10 >/dev/null
   key Down; key Down
   expect "after a sidebar click, arrows move the list cursor" "d['model']['cursor']" "2"
   # Clicking the folder already shown does not reload it.
@@ -213,13 +213,13 @@ else
   bad "no pointer injection: the sidebar bug checks did NOT run"
 fi
 
-say "30g · restore tabs on start (Settings → Tabs at start)"
+say "30g · restore tabs on start (Settings → When Gust opens)"
 rm -f "$FIXTURE/.local/state/gust/tabs.toml"
 stop_gust; start_gust "$FIXTURE"
 wait_for "d['model']['settled']" "True" 20 >/dev/null
 ctrl comma; wait_for "d['settingsOpen']" "True" 8 >/dev/null
 key Down; key Down; key Down; key Down; key Right; sleep 0.6
-expect "Tabs at start: Reopen last" "str(d['settings'].get('restore_tabs'))" "True"
+expect "When Gust opens: Last time's tabs" "str(d['settings'].get('restore_tabs'))" "True"
 shot 30g-settings
 key Escape; sleep 0.4
 ctrl t; sleep 0.8
@@ -232,8 +232,8 @@ stop_gust; start_gust
 wait_for "d['tabCount']" "2" 20 >/dev/null
 expect "both tabs came back" "d['tabCount']" "2"
 expect "the second tab was the one on screen" "d['activeTab']" "1"
-wait_for "d['activeTabPath']" "$FIXTURE/Documents" 10 >/dev/null
-expect "and it is in Documents again" "d['activeTabPath']" "$FIXTURE/Documents"
+wait_for "d['activeTabPath']" "$(display_path "$FIXTURE/Documents")" 10 >/dev/null
+expect "and it is in Documents again" "d['activeTabPath']" "$(display_path "$FIXTURE/Documents")"
 expect "in Grid, as it was left" "d['view']" "grid"
 expect "the restored window still shows its hint strip" "d['hintsOverflow'] <= 0" "True"
 m="$(stat -c %a "$FIXTURE/.local/state/gust/tabs.toml" 2>/dev/null)"
@@ -242,7 +242,7 @@ shot 30g-restored-tabs
 ctrl w; sleep 0.6
 ctrl comma; wait_for "d['settingsOpen']" "True" 8 >/dev/null
 key Down; key Down; key Down; key Down; key Left; sleep 0.6
-expect "Tabs at start back to Fresh" "str(d['settings'].get('restore_tabs'))" "False"
+expect "When Gust opens: back to One new tab" "str(d['settings'].get('restore_tabs'))" "False"
 key Escape
 stop_gust; rm -f "$FIXTURE/.local/state/gust/tabs.toml"; start_gust "$FIXTURE"
 wait_for "d['model']['settled']" "True" 20 >/dev/null
@@ -285,7 +285,7 @@ print($1)"; }
 if [[ -s "$ADMIN_STATE" ]]; then
   ok "polkit started the administrator window"
   [[ "$(astate "d['adminMode']")" == True ]] && ok "it knows it is the administrator window" || bad "adminMode is $(astate "d['adminMode']")"
-  [[ "$(astate "d['model']['location']")" == "$FIXTURE" ]] && ok "it opened the folder that was on screen" || bad "admin location $(astate "d['model']['location']")"
+  [[ "$(astate "d['model']['location']")" == "$(display_path "$FIXTURE")" ]] && ok "it opened the folder that was on screen" || bad "admin location $(astate "d['model']['location']")"
   apid="$(pgrep -u root -x gust | head -1)"
   [[ -n "$apid" ]] && ok "it runs as root (pid $apid), the main window does not" || bad "no root gust process"
   pgrep -u "$(id -u)" -x gust >/dev/null && ok "the user's own window is still open" || bad "the main window went away"
@@ -297,7 +297,7 @@ if [[ -s "$ADMIN_STATE" ]]; then
   [[ "$(astate "d['model']['cursor_name']")" == admin-note.txt ]] && ok "the keyboard reaches the administrator window" || bad "admin cursor: $(astate "d['model']['cursor_name']")"
   # Shown where every refusal to run a file is shown: the hint strip.
   [[ "$(astate "d['hintShown']")" == *"never opened or run"* ]] && ok "Enter on a file is refused there, in words" || bad "admin hint: $(astate "d['hintShown']")"
-  [[ "$(astate "d['model']['location']")" == "$FIXTURE" ]] && ok "and nothing was opened" || bad "admin moved to $(astate "d['model']['location']")"
+  [[ "$(astate "d['model']['location']")" == "$(display_path "$FIXTURE")" ]] && ok "and nothing was opened" || bad "admin moved to $(astate "d['model']['location']")"
   [[ "$(astate "d['hintsCut']")" == 0 ]] && ok "no key hint is cut in half beside the refusal" || bad "cut hints: $(astate "d['hintsCut']")"
   [[ "$(state "d['hintsCut']")" == 0 ]] && ok "nor in the half-width main window" || bad "main window cut hints: $(state "d['hintsCut']")"
   shot 30h-admin-refusal

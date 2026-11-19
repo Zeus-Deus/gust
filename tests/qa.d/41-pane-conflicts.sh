@@ -17,8 +17,8 @@ else
       read -r ax ay <<<"$(state "' '.join(map(str, d['rowPoints']['clash.txt']))")"
       key F3; goto "$B"
       wait_for "d['model']['settled']" "True" 15 >/dev/null
-      expect "left location is independent" "d['paneLocations'][0]" "$A"
-      expect "right location is independent" "d['paneLocations'][1]" "$B"
+      expect "left location is independent" "d['paneLocations'][0]" "$(display_path "$A")"
+      expect "right location is independent" "d['paneLocations'][1]" "$(display_path "$B")"
       read -r bx by <<<"$(state "' '.join(map(str, d['rowPoints']['clash.txt']))")"
       read -r WX WY WW WH <<<"$(win_geo)"
       if [[ "$direction" == a-to-b ]]; then

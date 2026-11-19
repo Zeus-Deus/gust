@@ -16,7 +16,7 @@ else
       read -r tx ty <<<"$(state "' '.join(map(str, d['placePoints']['Documents']))")"
       DEST="$FIXTURE/Documents/copy.txt"
     else
-      read -r tx ty <<<"$(state "' '.join(map(str, d['crumbPoints']['$ROOT']))")"
+      read -r tx ty <<<"$(state "' '.join(map(str, d['crumbPoints'][sys.argv[2]]))" "$ROOT")"
       DEST="$ROOT/copy.txt"
     fi
     vm wtype -M ctrl -s 5000 -m ctrl >/dev/null 2>&1 & modifier_pid=$!

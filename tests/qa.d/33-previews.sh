@@ -21,7 +21,7 @@ MD
 printf 'not audio' > "$pv/broken.mp3"
 
 # A stand-in opener: records what Enter asked it to open; opens no window.
-stub="$pv/.bin"; mkdir -p "$stub"
+stub="$qa_run_dir/preview-bin"; mkdir -p "$stub"
 cat > "$stub/xdg-open" <<'STUB'
 #!/bin/sh
 printf '%s\n' "$@" > /tmp/gust-fixture-OPENED

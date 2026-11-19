@@ -14,8 +14,8 @@ else
   mouse drag $((WX + sx)) $((WY + sy)) $((WX + WW - 12)) $((WY + WH / 2)) 1
   wait_for "d['paneCount']" "2" 10 >/dev/null
   expect "a folder held to the right edge opens a pane" "d['paneCount']" "2"
-  expect "the new pane shows that folder" "d['paneLocations'][1]" "$FIXTURE/Projects"
-  expect "the left pane stays where it was" "d['paneLocations'][0]" "$FIXTURE"
+  expect "the new pane shows that folder" "d['paneLocations'][1]" "$(display_path "$FIXTURE/Projects")"
+  expect "the left pane stays where it was" "d['paneLocations'][0]" "$(display_path "$FIXTURE")"
   [[ -d "$FIXTURE/Projects" ]] && ok "the dragged folder was not moved" || bad "the edge drop moved Projects"
   shot 49-edge-drop
   key F3; sleep 0.8
@@ -26,19 +26,19 @@ else
   mouse drag $((WX + px)) $((WY + py)) $((WX + WW * 5 / 6)) $((WY + WH / 2)) 1
   wait_for "d['paneCount']" "2" 10 >/dev/null
   expect "a place held over the right third opens a pane" "d['paneCount']" "2"
-  expect "showing that place" "d['paneLocations'][1]" "$FIXTURE/Documents"
+  expect "showing that place" "d['paneLocations'][1]" "$(display_path "$FIXTURE/Documents")"
   shot 49-place-right
   key F3; sleep 0.8
   expect "closing it leaves one tab" "d['tabCount']" "1"
 
   mouse drag $((WX + px)) $((WY + py)) $((WX + sx)) $((WY + WH / 2)) 1
-  wait_for "d['model']['location']" "$FIXTURE/Documents" 10 >/dev/null
-  expect "a place held over the left third opens in this pane" "d['model']['location']" "$FIXTURE/Documents"
+  wait_location "$FIXTURE/Documents" 10 >/dev/null
+  expect_location "a place held over the left third opens in this pane" "$FIXTURE/Documents"
   expect "without splitting" "d['paneCount']" "1"
 
   # A transfer makes the split's own tab the user's, even once undone.
   key BackSpace
-  wait_for "d['model']['location']" "$FIXTURE" 10 >/dev/null
+  wait_location "$FIXTURE" 10 >/dev/null
   printf 'move me\n' > "$FIXTURE/snap-move.txt"
   wait_for "'snap-move.txt' in d['rowPoints']" "True" 10 >/dev/null
   read -r dx dy <<<"$(state "' '.join(map(str, d['rowPoints']['Documents']))")"

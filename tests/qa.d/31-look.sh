@@ -27,7 +27,7 @@ MOUNTED=0
 if sudo -n mount --bind "$look/target" "$look/mounted" 2>/dev/null; then MOUNTED=1; fi
 # Documents is special only because user-dirs.dirs says so.
 mkdir -p "$FIXTURE/.config"
-printf 'XDG_DOCUMENTS_DIR="%s"\n' "$look/Documents" > "$FIXTURE/.config/user-dirs.dirs"
+printf '%s\n' 'XDG_DOCUMENTS_DIR="$HOME/look/Documents"' > "$FIXTURE/.config/user-dirs.dirs"
 # look(name, i): field i of the drawn look (0 shape, 1 family, 2 label, 3 glyph).
 look_of() { echo "next((r['look'].split(chr(9))[$2] for r in d['icons'] if r['name']=='$1'),'?')"; }
 

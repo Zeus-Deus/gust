@@ -499,25 +499,27 @@ pub fn write_result(out: &Path, picked: &[PathBuf]) -> std::io::Result<()> {
     write_answer(out, picked, None)
 }
 
-/// Which file type the answer was given under.
-pub fn parse_filter(out: &Path) -> Option<usize> {
-    let bytes = std::fs::read(out).ok()?;
-    bytes
-        .split(|b| *b == 0)
+/// Read paths and the selected filter from the same answer, including byte names.
+pub fn read_answer(out: &Path) -> (Vec<PathBuf>, Option<usize>) {
+    let bytes = std::fs::read(out).unwrap_or_default();
+    let mut fields = bytes.split(|b| *b == 0);
+    let paths = fields
+        .clone()
+        .filter(|s| s.starts_with(b"/"))
+        .map(|s| PathBuf::from(OsStr::from_bytes(s)))
+        .collect();
+    let filter = fields
         .find_map(|s| s.strip_prefix(b"filter:"))
-        .and_then(|n| std::str::from_utf8(n).ok()?.parse().ok())
+        .and_then(|n| std::str::from_utf8(n).ok()?.parse().ok());
+    (paths, filter)
 }
 
-/// Read what was picked; empty means cancelled. Only absolute paths count.
+pub fn parse_filter(out: &Path) -> Option<usize> {
+    read_answer(out).1
+}
+
 pub fn parse_result(out: &Path) -> Vec<PathBuf> {
-    let Ok(bytes) = std::fs::read(out) else {
-        return Vec::new();
-    };
-    bytes
-        .split(|b| *b == 0)
-        .filter(|s| s.first() == Some(&b'/'))
-        .map(|s| PathBuf::from(std::ffi::OsStr::from_bytes(s)))
-        .collect()
+    read_answer(out).0
 }
 
 /// The portal's `uris` answer.

@@ -14,7 +14,6 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/.." && pwd)"
-FIXTURE="${GUST_FIXTURE:-/tmp/gust-fixture}"
 OUTDIR="${1:-${GUST_QA_OUT:-/tmp/gust-qa}}"
 BIN="${GUST_BIN:-$REPO/target/debug/gust}"
 LOG="$OUTDIR/gust.log"
@@ -48,10 +47,6 @@ echo "$$" >&9
 STATE="$OUTDIR/qa-state.json"
 rm -f "$STATE"
 
-# A run that dies must not leave the app it started behind.
-cleanup() { pkill -x gust 2>/dev/null || true; }
-trap cleanup EXIT INT TERM
-
 if [[ ! -x "$BIN" ]]; then
   echo "gust qa: no binary at $BIN" >&2
   echo "gust qa: build it first, or set GUST_BIN." >&2
@@ -67,6 +62,15 @@ PASS=0; FAIL=0; RESULTS=()
 say()  { printf '\n\033[1m== %s\033[0m\n' "$*"; }
 ok()   { PASS=$((PASS+1)); RESULTS+=("PASS $*"); printf '  \033[32mPASS\033[0m %s\n' "$*"; }
 bad()  { FAIL=$((FAIL+1)); RESULTS+=("FAIL $*"); printf '  \033[31mFAIL\033[0m %s\n' "$*"; }
+
+say "fixture"
+# A completed or interrupted run may still contain evidence or mounts.
+# Honour explicit roots only when the fixture builder admits them.
+source "$HERE/qa-fixture.sh"
+prepare_fixture || exit 1
+mkdir -p "$FIXTURE/.local/share" "$FIXTURE/.cache" || exit 1
+rm -f /tmp/gust-fixture-EXECUTED
+[[ -d "$FIXTURE/Projects" ]] && ok "fixture built at $FIXTURE" || bad "fixture missing"
 
 vm()   { "$HERE/vmsession" "$@" 9>&-; }
 
@@ -105,14 +109,14 @@ state() {
   python3 -c "
 import json,sys
 try:
-    d=json.load(open('$STATE'))
+    d=json.load(open(sys.argv[1]))
 except Exception as e:
     print('NO_STATE'); sys.exit(0)
 try:
     print($1)
 except Exception as e:
     print('ERR:'+str(e))
-"
+" "$STATE" "${@:2}"
 }
 
 # expect <label> <expr> <expected>
@@ -137,34 +141,31 @@ expect_contains() {
   fi
 }
 
+# Extra env(1) arguments for a section's device settings or supervised launch.
+qa_launch_env=()
+
+# Pass paths as individual arguments through vmsession, including the isolated
+# HOME and every XDG base. A fixture name can contain quotes and newlines.
+launch_gust() {
+  local snapshot="$1"
+  shift
+  vm env HOME="$FIXTURE" XDG_DATA_HOME="$FIXTURE/.local/share" \
+    XDG_CACHE_HOME="$FIXTURE/.cache" XDG_CONFIG_HOME="$FIXTURE/.config" \
+    XDG_STATE_HOME="$FIXTURE/.local/state" GUST_OMARCHY_STATE="$REAL_STATE" \
+    GUST_QA_STATE="$snapshot" PATH="${QA_PATH_PREPEND:+$QA_PATH_PREPEND:}$PATH" \
+    "${qa_launch_env[@]}" "$BIN" "$@"
+}
+
 start_gust() {
-  local start_args=""
-  if [[ "$#" -gt 0 ]]; then printf -v start_args '%q ' "$@"; fi
+  # Cleanup becomes necessary only when the runner starts managing Gust.
+  trap 'pkill -x gust 2>/dev/null || true' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
   pkill -x gust 2>/dev/null || true
   sleep 0.4
   rm -f "$STATE"
-  cat > /tmp/gust-qa-run.sh <<EOF
-#!/usr/bin/env bash
-exec > "$LOG" 2>&1
-export HOME="$FIXTURE"
-export XDG_DATA_HOME="$FIXTURE/.local/share"
-export XDG_CACHE_HOME="$FIXTURE/.cache"
-# Every XDG base, or a test Gust reads (and could write) the real user's
-# settings, bookmarks and journal through the inherited session values.
-export XDG_CONFIG_HOME="$FIXTURE/.config"
-export XDG_STATE_HOME="$FIXTURE/.local/state"
-export GUST_OMARCHY_STATE="$REAL_STATE"
-export GUST_QA_STATE="$STATE"
-# A section may put stand-ins for desktop programs first on PATH (28-run
-# replaces the terminal launcher so no window takes the keyboard).
-${QA_PATH_PREPEND:+export PATH="$QA_PATH_PREPEND:\$PATH"}
-# ...and stand-ins for what the system reports (37-phones points sysfs, the
-# udev database and the GVfs backend list at a fake tree).
-${QA_ENV:+export $QA_ENV}
-exec "$BIN" $start_args
-EOF
-  chmod +x /tmp/gust-qa-run.sh
-  vm /tmp/gust-qa-run.sh 9>&- &
+  launch_gust "$STATE" "$@" > "$LOG" 2>&1 9>&- &
+  qa_gust_job=$!
   for _ in $(seq 1 30); do
     [[ -f "$STATE" ]] && break
     sleep 0.4
@@ -220,16 +221,43 @@ palette_run() {
   sleep 0.9
 }
 
-# Navigate to an absolute path through the palette (a typed path is
-# recognised as a path, not an action).
+# Match LocationKey::display_path (crates/core/src/location.rs). Only the
+# projection escapes controls and bidi marks. File operations keep the bytes.
+display_path() {
+  python3 - "$1" <<'PYTHON'
+import os, sys
+path = os.fsencode(sys.argv[1]).decode("utf-8", "replace")
+for c in path:
+    n = ord(c)
+    if (n < 0x20 or 0x7f <= n <= 0x9f or n in (0x061c, 0x200e, 0x200f)
+            or 0x202a <= n <= 0x202e or 0x2066 <= n <= 0x2069):
+        sys.stdout.write(f"<U+{n:04X}>")
+    else:
+        sys.stdout.write(c)
+PYTHON
+}
+
+expect_location() { expect "$1" "d['model']['location']" "$(display_path "$2")"; }
+wait_location() { wait_for "d['model']['location']" "$(display_path "$1")" "${2:-20}"; }
+
+# Ctrl+L accepts ~ and ~/child even when HOME itself cannot be typed into a
+# single-line field. Sibling paths sharing a prefix must stay absolute.
 goto() {
-  local target="$1"
+  local path="$1" input="$1"
+  case "$path" in
+    "$FIXTURE")   input='~' ;;
+    "$FIXTURE"/*) input="~/${path#"$FIXTURE"/}" ;;
+  esac
   for _ in 1 2 3; do
-    palette_run "$target"
-    if wait_for "d['model']['location']" "$target" 10; then
+    ctrl l
+    wait_for "d['paletteOpen']" "True" 8 || continue
+    typ "$input"
+    key Return
+    if wait_location "$path" "${2:-10}"; then
       return 0
     fi
   done
+  bad "could not navigate to $(display_path "$path") (got $(state "d['model']['location']"))" >&2
   return 1
 }
 
@@ -282,17 +310,3 @@ if [[ "${FOREIGN:-0}" -gt 0 ]]; then
 else
   ok "no other windows are competing for input"
 fi
-
-say "fixture"
-# A run killed mid-section can leave a bind mount or a mode-000 folder in the
-# fixture (qa §31 makes both), and make-fixture's rm -rf then fails on them.
-if [[ -d "$FIXTURE" ]]; then
-  grep -F " $FIXTURE/" /proc/self/mountinfo | awk '{print $5}' | sort -r \
-    | while read -r m; do sudo -n umount "$m" 2>/dev/null; done
-  chmod -R u+rwx "$FIXTURE" 2>/dev/null
-fi
-"$HERE/make-fixture.sh" "$FIXTURE" >/dev/null
-mkdir -p "$FIXTURE/.local/share" "$FIXTURE/.cache"
-rm -f /tmp/gust-fixture-EXECUTED
-[[ -d "$FIXTURE/Projects" ]] && ok "fixture built at $FIXTURE" || bad "fixture missing"
-

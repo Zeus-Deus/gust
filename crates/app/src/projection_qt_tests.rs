@@ -240,6 +240,7 @@ fn actual_qt_navigation_layout_persistent_mapping_metadata_and_hold() {
     }
     typed_destination_tokens_match_actual_navigation(app, &mut model, &fixture);
     newer_focus_survives_held_relist(app, &mut model, &fixture);
+    asked_for_hidden_entry_takes_the_cursor(app, &mut model, &fixture);
     equal_viewport_filter_measures_new_folders(app, &mut model, &fixture);
     publication_attribution_reenters_qt(app, &fixture);
     marks_do_not_reset_or_layout(app, &mut model, &fixture);
@@ -1346,6 +1347,52 @@ fn publication_attribution_reenters_qt(app: &QCoreApplication, fixture: &Fixture
         drop(model);
         app.process_events();
     }
+}
+
+/// `gust folder/.env` with hidden files off: the window shows hidden files
+/// so the cursor can land on the file that was asked for.
+fn asked_for_hidden_entry_takes_the_cursor(
+    app: &QCoreApplication,
+    model: &mut cxx::UniquePtr<qobject::DirModel>,
+    fixture: &Fixture,
+) {
+    let root = fixture.0.join("asked-hidden");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("visible.txt"), b"shown").unwrap();
+    std::fs::write(root.join(".env"), b"hidden").unwrap();
+    model.pin_mut().navigate_path(root.clone());
+    wait(app, model, |m| m.settled && m.count == 1);
+    assert!(!model.show_hidden, "hidden files start off");
+    model.pin_mut().stop_watch();
+
+    // What startup does with the resolved argument, then the first listing.
+    let start = crate::cli::resolve_startup(&root.join(".env"), &fixture.0);
+    assert_eq!(start.folder, root);
+    {
+        let mut state = model.pin_mut().rust_mut();
+        state.focus_name = start.focus;
+        state.reveal_focus();
+    }
+    model.pin_mut().start_live_relist();
+    wait(app, model, |m| {
+        !m.live_busy && m.count == 2 && m.focus_name.is_none()
+    });
+    assert_eq!(model.entry_name(model.cursor).to_string(), ".env");
+
+    // An ordinary file asks for nothing to be revealed.
+    {
+        let mut state = model.pin_mut().rust_mut();
+        state.show_hidden = false;
+        state.focus_name = Some("visible.txt".into());
+        state.reveal_focus();
+    }
+    assert!(!model.show_hidden);
+    model.pin_mut().start_live_relist();
+    wait(app, model, |m| {
+        !m.live_busy && m.count == 1 && m.focus_name.is_none()
+    });
+    assert_eq!(model.entry_name(model.cursor).to_string(), "visible.txt");
+    model.pin_mut().stop_watch();
 }
 
 fn newer_focus_survives_held_relist(
