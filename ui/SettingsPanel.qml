@@ -121,13 +121,26 @@ Item {
         else if (r.key === "file_dialogs") root.dialogsRequested(value === "true")
         else root.changed(r.key, value)
     }
-    // Keep the keyboard selection inside the scrolling body.
-    onCurrentChanged: {
+    function revealSelection() {
         const row = rowRepeater.itemAt(current)
         if (!row) return
-        if (row.y < body.contentY) body.contentY = row.y
-        else if (row.y + row.height > body.contentY + body.height)
-            body.contentY = row.y + row.height - body.height
+        // Show the title and note too when the row fits. In a taller row,
+        // only the selected button needs to follow the keyboard.
+        let target = row
+        if (row.height > body.height) {
+            const value = valueOf(row.modelData.key)
+            const index = row.modelData.options.findIndex(option => option[0] === value)
+            target = row.buttons.itemAt(Math.max(0, index))
+            if (!target) return
+        }
+        const y = target.mapToItem(body.contentItem, 0, 0).y
+        if (y < body.contentY) body.contentY = y
+        else if (y + target.height > body.contentY + body.height)
+            body.contentY = y + target.height - body.height
+    }
+    function moveRow(dir) {
+        root.current = Math.max(0, Math.min(root.rows.length - 1, root.current + dir))
+        revealSelection()
     }
     function step(dir) {
         const r = root.rows[root.current]
@@ -135,6 +148,8 @@ Item {
         let i = r.options.findIndex(o => o[0] === cur)
         i = Math.max(0, Math.min(r.options.length - 1, i + dir))
         if (r.options[i][0] !== cur) choose(root.current, r.options[i][0])
+        // Applying a preference can change the layout (for example, density).
+        Qt.callLater(revealSelection)
     }
 
     Rectangle {
@@ -148,8 +163,8 @@ Item {
         focus: root.open
         Keys.onPressed: (event) => {
             if (event.key === Qt.Key_Escape) { root.hide(); event.accepted = true }
-            else if (event.key === Qt.Key_Down || event.key === Qt.Key_J) { root.current = Math.min(root.rows.length - 1, root.current + 1); event.accepted = true }
-            else if (event.key === Qt.Key_Up || event.key === Qt.Key_K) { root.current = Math.max(0, root.current - 1); event.accepted = true }
+            else if (event.key === Qt.Key_Down || event.key === Qt.Key_J) { root.moveRow(1); event.accepted = true }
+            else if (event.key === Qt.Key_Up || event.key === Qt.Key_K) { root.moveRow(-1); event.accepted = true }
             else if (event.key === Qt.Key_Right || event.key === Qt.Key_L) { root.step(1); event.accepted = true }
             else if (event.key === Qt.Key_Left || event.key === Qt.Key_H) { root.step(-1); event.accepted = true }
             else if (event.key === Qt.Key_R && root.failed) { root.retryRequested(); event.accepted = true }
