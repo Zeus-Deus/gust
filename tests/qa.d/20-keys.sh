@@ -78,11 +78,11 @@ expect "F3 again unsplits" "d['paneCount']" "1"
 expect "and leaves no stray tab" "d['tabCount']" "1"
 key F3; sleep 0.8
 typ "Pro"; key Return
-wait_for "d['paneLocations'][1]" "$FIXTURE/Projects" 10 >/dev/null
+wait_for "d['paneLocations'][1]" "$(display_path "$FIXTURE/Projects")" 10 >/dev/null
 key F3; sleep 0.8
 expect "a split tab the user moved stays as a tab" "d['tabCount']" "2"
 ctrl w; key BackSpace
-wait_for "d['model']['location']" "$FIXTURE" 10 >/dev/null
+wait_location "$FIXTURE" 10 >/dev/null
 
 say "20g · middle-click a folder opens it in a new tab (real mouse)"
 if [[ "$MOUSE_OK" == 1 ]]; then
@@ -102,8 +102,8 @@ if [[ "$MOUSE_OK" == 1 ]]; then
   shot 20g-middle-click
   # Background tabs load when first shown; switching to it must land there.
   vm wtype -M ctrl -k 2 -m ctrl >/dev/null 2>&1
-  wait_for "d['model']['location']" "$FIXTURE/Projects" 15 >/dev/null
-  expect "the new tab opens on Projects" "d['model']['location']" "$FIXTURE/Projects"
+  wait_location "$FIXTURE/Projects" 15 >/dev/null
+  expect_location "the new tab opens on Projects" "$FIXTURE/Projects"
   ctrl w; sleep 0.4
   rm -rf "$FIXTURE"/aa-pad-*
 else
@@ -118,13 +118,13 @@ start_gust "$FIXTURE"
 wait_for "d['model']['settled']" "True" 20 >/dev/null
 expect "the preset is read" "d['preset']" "windows"
 typ "Proj"; sleep 1.2; key Return
-wait_for "d['model']['location']" "$FIXTURE/Projects" >/dev/null
+wait_location "$FIXTURE/Projects" >/dev/null
 key BackSpace; sleep 0.8
-expect "Backspace goes BACK in Windows" "d['model']['location']" "$FIXTURE"
+expect_location "Backspace goes BACK in Windows" "$FIXTURE"
 vm wtype -M alt -k Right -m alt >/dev/null 2>&1; sleep 0.8
-expect "Alt+→ goes forward" "d['model']['location']" "$FIXTURE/Projects"
+expect_location "Alt+→ goes forward" "$FIXTURE/Projects"
 vm wtype -M alt -k Up -m alt >/dev/null 2>&1; sleep 0.8
-expect "Alt+↑ goes up" "d['model']['location']" "$FIXTURE"
+expect_location "Alt+↑ goes up" "$FIXTURE"
 stop_gust
 printf 'key_preset = "mac"\n' > "$FIXTURE/.config/gust/settings.toml"
 start_gust "$FIXTURE"
@@ -133,7 +133,7 @@ typ "Proj"; sleep 1.2; key Return; sleep 0.8
 expect "Enter renames in the Mac preset" "d['promptMode']" "rename"
 key Escape; sleep 0.4
 vm wtype -M ctrl -k Down -m ctrl >/dev/null 2>&1; sleep 0.8
-expect "Ctrl+↓ opens in the Mac preset" "d['model']['location']" "$FIXTURE/Projects"
+expect_location "Ctrl+↓ opens in the Mac preset" "$FIXTURE/Projects"
 stop_gust
 rm -f "$FIXTURE/.config/gust/settings.toml"
 start_gust "$FIXTURE"

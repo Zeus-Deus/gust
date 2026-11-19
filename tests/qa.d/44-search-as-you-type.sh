@@ -36,7 +36,7 @@ wait_for "d['model']['cursor_name']" "Work" 5 >/dev/null
 expect "Esc leaves the results" "d['finding']" "False"
 expect "Esc closes the field" "d['searchBarActive']" "False"
 expect "Esc returns to the row you were on" "d['model']['cursor_name']" "Work"
-expect "Esc returns to the folder you were in" "d['model']['location']" "$SRCH"
+expect_location "Esc returns to the folder you were in" "$SRCH"
 
 ctrl f
 wait_for "d['searchBarActive']" "True" 5 >/dev/null

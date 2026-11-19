@@ -5,7 +5,7 @@
 # runs in the default terminal (xdg-terminal-exec), never through a shell.
 
 say "28a · Run… asks first; Enter cancels; Run runs it"
-d28="$FIXTURE/run"
+d28="$qa_run_dir/run"
 marker=/tmp/gust-fixture-RAN
 rm -rf "$d28" "$marker"; mkdir -p "$d28"
 printf '#!/bin/sh\ntouch %s\n' "$marker" > "$d28/hello.sh"; chmod 755 "$d28/hello.sh"
@@ -103,7 +103,7 @@ key x; sleep 1.0
   && ok "toggles after a row shift still change only plain.sh" \
   || bad "a row shift retargeted the switch: $(stat -c '%n %a' "$d28"/*)"
 key h; sleep 2.0
-expect "after the reload, h hashes the file shown" "d['quickLookHash']" "$(sha256sum "$d28/plain.sh" | cut -c1-64)"
+expect "after the reload, h hashes the file shown" "d['quickLookHash']" "$(sha256sum < "$d28/plain.sh" | cut -c1-64)"
 expect "and the cursor followed it" "d['model']['cursor_name']" "plain.sh"
 key Escape; sleep 0.4
 # Identity is byte-exact, not display text: a newline in a name and its

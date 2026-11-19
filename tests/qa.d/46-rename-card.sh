@@ -26,7 +26,7 @@ expect_contains "nothing changes until you edit" "d['renameCardSummary']" "No na
 # Tab to Find, type, Tab to Replace, type, Enter = Replace all.
 key Tab; typ "IMG_"; key Tab; typ "beach-"; key Return; sleep 0.6
 expect_contains "Replace all shows what will happen" "d['renameCardSummary']" "3 files will be renamed"
-expect "nothing on disk changed yet" "str(__import__('os').path.exists('$RN/IMG_0001.JPG'))" "True"
+[[ -f "$RN/IMG_0001.JPG" ]] && ok "nothing on disk changed yet" || bad "IMG_0001.JPG disappeared"
 shot 46-rename-card
 
 # Back to the list (Tab from Replace), make the first line collide with a
