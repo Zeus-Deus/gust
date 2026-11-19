@@ -4,10 +4,17 @@
 //! private passdb and a throwaway account, so no real credential exists to
 //! leak. Run with the fixture up:
 //!
+//!   cargo build -p gust-app
 //!   ./tests/smb-fixture.sh start
 //!   cargo test -p gust-remote --test smb_live -- --test-threads=1
+//!
+//! GUST_BIN can point to a different build of Gust for the path lookup.
+//! Set GUST_SMB_REQUIRED=1 and GUST_SMB_KEYRING_REQUIRED=1 to require the
+//! saved-login case. It needs dbus-run-session, gnome-keyring-daemon and
+//! secret-tool in addition to the Samba fixture.
 
 use gust_remote::shares::*;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 fn fixture_root() -> String {
@@ -16,6 +23,24 @@ fn fixture_root() -> String {
 
 fn runtime_dir() -> String {
     std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/run/user/1000".into())
+}
+
+fn smb_path_helper() -> PathBuf {
+    std::env::var_os("GUST_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/gust"))
+        .canonicalize()
+        .expect("build Gust with cargo build -p gust-app or set GUST_BIN")
+}
+
+fn mount(
+    share: &Share,
+    password: String,
+    runtime: &str,
+    timeout: Duration,
+) -> Result<PathBuf, ShareError> {
+    let helper = (share.kind == ShareKind::Smb).then(smb_path_helper);
+    gust_remote::shares::mount(share, password, runtime, timeout, helper.as_deref())
 }
 
 fn fixture_password() -> Option<String> {
@@ -80,14 +105,6 @@ fn wait_mounted(mp: &std::path::Path) -> bool {
 /// rather than inheriting whatever an earlier case left behind.
 fn ensure_unmounted(share: &Share) {
     let _ = unmount(share);
-    let mp = share.mount_point(&runtime_dir());
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    while std::time::Instant::now() < deadline {
-        if !mp.exists() {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(200));
-    }
 }
 
 /// Mount for a test, tolerating GVfs's already-mounted answer.
@@ -97,13 +114,190 @@ fn ensure_unmounted(share: &Share) {
 fn mount_for_test(share: &Share, pw: String) -> std::path::PathBuf {
     let mp = match mount(share, pw, &runtime_dir(), Duration::from_secs(30)) {
         Ok(mp) => mp,
-        Err(ShareError::Refused(m)) if m.contains("already mounted") => {
-            share.mount_point(&runtime_dir())
-        }
+        Err(ShareError::AlreadyMounted(mp)) => mp,
         Err(e) => panic!("the fixture share should mount: {e:?}"),
     };
     assert!(wait_mounted(&mp), "mount point never became usable: {mp:?}");
     mp
+}
+
+/// The fixture requires a named account. Start a fresh session so saved
+/// credentials can be exercised without consulting the user's desktop bus
+/// or keyring. The password is stored in the temporary session collection.
+#[test]
+fn automatic_login_uses_the_saved_smb_account() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    need_fixture!();
+    for tool in ["gnome-keyring-daemon", "secret-tool"] {
+        gust_testkit::skip_unless!(
+            gust_testkit::have(tool),
+            "SMB_KEYRING",
+            "missing session keyring fixture tool {tool}"
+        );
+    }
+    with_isolated_smb_session(
+        "automatic_login_uses_the_saved_smb_account",
+        "keyring",
+        || {
+            let named = test_share();
+            let mut store = Command::new("timeout")
+                .args([
+                    "10s",
+                    "secret-tool",
+                    "store",
+                    "--label=Gust disposable SMB fixture",
+                    "--collection=/org/freedesktop/secrets/collection/session",
+                    "server",
+                    &named.server,
+                    "protocol",
+                    "smb",
+                    "user",
+                    named.user.as_deref().unwrap(),
+                    "domain",
+                    named.domain.as_deref().unwrap(),
+                    "xdg:schema",
+                    "org.gnome.keyring.NetworkPassword",
+                ])
+                .stdin(Stdio::piped())
+                .spawn()
+                .unwrap();
+            store
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(fixture_password().unwrap().as_bytes())
+                .unwrap();
+            assert!(
+                store.wait().unwrap().success(),
+                "could not seed the session keyring"
+            );
+
+            let automatic = parse_address(&named.uri(), ShareKind::Smb).unwrap();
+            let path = mount(
+                &automatic,
+                String::new(),
+                &runtime_dir(),
+                Duration::from_secs(25),
+            )
+            .expect("automatic login should mount the named-only fixture");
+            let actual = std::fs::read(path.join("hello.txt"));
+            unmount(&automatic).expect("disconnect the fixture share");
+            let expected =
+                std::fs::read(std::path::Path::new(&fixture_root()).join("share/hello.txt"))
+                    .expect("read the fixture's independent backing file");
+            assert_eq!(actual.expect("read through the saved account"), expected);
+        },
+    );
+}
+
+#[test]
+fn guest_login_opens_a_mixed_case_smb_subfolder() {
+    let fixture = std::path::PathBuf::from(fixture_root()).join("guest/SubDir/guest.txt");
+    gust_testkit::skip_unless!(
+        fixture.is_file(),
+        "SMB",
+        "guest share fixture not running (tests/smb-fixture.sh start)"
+    );
+    with_isolated_smb_session(
+        "guest_login_opens_a_mixed_case_smb_subfolder",
+        "guest",
+        || {
+            let open = |address| parse_address(address, ShareKind::Smb).unwrap();
+            let share = open("smb://LOCALHOST/GuEsT/SubDir");
+            let connect = |share| {
+                mount(
+                    share,
+                    String::new(),
+                    &runtime_dir(),
+                    Duration::from_secs(25),
+                )
+            };
+            let path = connect(&share).expect("open the nested guest folder with an empty keyring");
+            let actual = std::fs::read(path.join("guest.txt"));
+            assert_eq!(
+                connect(&share),
+                Err(ShareError::AlreadyMounted(
+                    path.parent().unwrap().to_path_buf()
+                )),
+            );
+            let root = open("smb://localhost/guest");
+            assert_eq!(
+                connect(&open("smb://LOCALHOST/GUEST/missing")),
+                Err(ShareError::AlreadyMounted(
+                    path.parent().unwrap().to_path_buf()
+                )),
+            );
+            unmount(&root).expect("disconnect the guest share");
+            assert!(
+                path.ends_with("SubDir"),
+                "opened the wrong directory: {path:?}"
+            );
+            assert_eq!(
+                actual.expect("guest can read the fixture"),
+                std::fs::read(fixture).unwrap()
+            );
+        },
+    );
+}
+
+fn with_isolated_smb_session(test: &str, tag: &str, run: impl FnOnce()) {
+    use std::os::unix::fs::DirBuilderExt;
+    use std::process::Command;
+
+    const CHILD: &str = "GUST_SMB_SESSION_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        run();
+        return;
+    }
+    gust_testkit::skip_unless!(
+        gust_testkit::have("dbus-run-session"),
+        "SMB",
+        "missing dbus-run-session for isolated SMB tests"
+    );
+    let root = std::env::temp_dir().join(format!("gust-smb-{tag}-{}", std::process::id()));
+    let runtime = root.join("run");
+    let mut private = std::fs::DirBuilder::new();
+    private.mode(0o700);
+    private.create(&root).unwrap();
+    private.create(&runtime).unwrap();
+    let home = root.join("home");
+    std::fs::create_dir(&home).unwrap();
+    let output = Command::new("timeout")
+        .args(["--kill-after=2s", "45s", "dbus-run-session", "--"])
+        .arg(std::env::current_exe().unwrap())
+        .args(["--exact", test, "--nocapture"])
+        .env_clear()
+        .env(
+            "PATH",
+            std::env::var_os("PATH").unwrap_or_else(|| "/usr/bin:/bin".into()),
+        )
+        .env("HOME", &home)
+        .env("GUST_BIN", smb_path_helper())
+        .env("XDG_RUNTIME_DIR", &runtime)
+        .env("LANG", "C.UTF-8")
+        .env("USER", test_share().user.unwrap())
+        .env(
+            "GUST_SMB_FIXTURE",
+            std::fs::canonicalize(fixture_root()).unwrap(),
+        )
+        .env("GUST_SMB_REQUIRED", "1")
+        .env(CHILD, "1")
+        .output()
+        .unwrap();
+    let _ = std::fs::remove_dir_all(home);
+    // A failed child can leave the GVfs FUSE mount visible for a moment.
+    // Only remove empty directories here so cleanup never traverses it.
+    let _ = std::fs::remove_dir(runtime.join("gvfs"));
+    let _ = std::fs::remove_dir(runtime);
+    let _ = std::fs::remove_dir(root);
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]
@@ -122,7 +316,7 @@ fn a_share_mounts_and_lists() {
         .expect("the fixture share should mount");
     assert!(
         wait_mounted(&mp),
-        "the predicted mount point never became usable: {mp:?}"
+        "the resolved mount point never became usable: {mp:?}"
     );
 
     // The seeded contents must be visible through the mount.
@@ -137,15 +331,14 @@ fn a_share_mounts_and_lists() {
     );
 }
 
-/// The mount point is predicted from the connection parameters, not scraped
-/// out of gio's stdout — so it is language-independent.
+/// The resolved GVfs folder belongs to the private runtime directory.
 #[test]
-fn the_predicted_mount_point_is_the_real_one() {
+fn smb_returns_a_usable_gvfs_path() {
     need_fixture!();
     let share = test_share();
     let pw = fixture_password().unwrap();
     let mp = mount_for_test(&share, pw);
-    assert_eq!(mp, share.mount_point(&runtime_dir()));
+    assert!(mp.starts_with(std::path::Path::new(&runtime_dir()).join("gvfs")));
     assert!(wait_mounted(&mp), "mount point not usable: {mp:?}");
 }
 
@@ -176,29 +369,8 @@ fn a_write_reaches_the_backend() {
 fn a_bad_password_is_refused_clearly() {
     need_fixture!();
     let mut share = test_share();
-    // A different share name, so this cannot reuse the mount from another
-    // test — GVfs keeps a mount alive once it exists.
-    share.share = "shared".into();
     share.user = Some("nosuchuser".into());
-
-    // GVfs returns an EXISTING mount instead of authenticating again, so an
-    // already-mounted share makes this test prove nothing. Unmount first and
-    // assert the mount is really gone, otherwise the auth path is untested
-    // and the case must say so rather than passing.
-    let _ = unmount(&share);
-    let mp_guess = share.mount_point(&runtime_dir());
-    let cleared = {
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        let mut gone = false;
-        while std::time::Instant::now() < deadline {
-            if !mp_guess.exists() {
-                gone = true;
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(200));
-        }
-        gone
-    };
+    ensure_unmounted(&share);
 
     let err = mount(
         &share,
@@ -208,18 +380,8 @@ fn a_bad_password_is_refused_clearly() {
     );
     match err {
         Err(ShareError::AuthFailed) => {}
-        Ok(_) => {
-            // Only tolerable if we could not clear the pre-existing mount.
-            assert!(
-                !cleared,
-                "A WRONG PASSWORD WAS ACCEPTED: the share was unmounted first, \
-                 so GVfs really did authenticate and let it through"
-            );
-            eprintln!(
-                "SKIP DETAIL: a pre-existing GVfs mount could not be cleared, \
-                 so the auth path was not exercised by this run"
-            );
-        }
+        Ok(_) => panic!("a wrong password mounted the fixture share"),
+        Err(ShareError::AlreadyMounted(path)) => panic!("auth fixture is still mounted: {path:?}"),
         Err(other) => {
             let m = other.message();
             assert!(
@@ -346,7 +508,7 @@ fn the_predicted_nfs_mount_point_is_the_real_one() {
         Duration::from_secs(30),
     )
     .expect("mount");
-    assert_eq!(mp, share.mount_point(&runtime_dir()));
+    assert_eq!(mp, share.nfs_mount_point(&runtime_dir()));
     assert!(
         mp.to_string_lossy().contains("prefix=%2F"),
         "GVfs uses a percent-encoded prefix: {mp:?}"

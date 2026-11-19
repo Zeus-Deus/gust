@@ -366,6 +366,16 @@ fn main() {
     // Folder arguments are OS bytes, not necessarily Unicode. Checking a
     // CLI flag must not panic before byte-preserving folder admission.
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
+    if args
+        .first()
+        .is_some_and(|arg| arg == gust_remote::shares::SMB_PATH_HELPER_ARG)
+    {
+        let status = match args.as_slice() {
+            [_, uri] => gust_remote::shares::serve_smb_local_path(uri),
+            _ => 1,
+        };
+        std::process::exit(status);
+    }
     // After `--` everything is a path, even one spelled like an option.
     let flags = cli::flags(&args);
     if let Some(pos) = flags.iter().position(|a| a == "--default") {

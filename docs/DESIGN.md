@@ -2166,6 +2166,36 @@ never in a log line, and never in Gust's places file — which stores the
 server and share only. Re-connecting asks again, or the user's keyring
 answers; Gust does not become a second place their password lives.
 
+For SMB, a blank username selects automatic login and skips Gust's password
+prompt. GVfs may use the session's Kerberos, cached, or keyring credentials.
+If GVfs prompts for authentication, `gio mount --anonymous` requests guest
+access. The username prompt describes that order before the user connects.
+Entering a username continues to send credentials through stdin. Submitting
+the username by keyboard requires a fresh press, so holding Enter at the
+address step cannot select automatic login on the next step.
+
+A headless Gust helper asks GIO's mount tracker for the original SMB URI's
+local path. GVfs owns the mapping, including case-folded server and share names
+and the requested subdirectory. The lookup does not stat the remote folder.
+If the share is already mounted, Gust shows its resolved root and lets the
+user explicitly open it or disconnect before retrying. The directory name
+identifies the share but carries no login identity.
+
+After GIO accepts a new SMB mount, Gust checks directory readiness in a
+bounded helper using the remainder of the connection deadline. During a
+quick reconnect or a slow server response, the FUSE folder can take longer
+to become usable.
+
+GVfs can coalesce simultaneous requests from different desktop apps for
+the same SMB mount. Its success response establishes that the folder is
+mounted, while the login identity is unknown. Gust asks before opening the
+folder, with Cancel focused. Cancel leaves the desktop's shared mount
+available to other apps. Gust keeps the decision pending behind another
+dialog and offers it once that dialog closes, while the originating tab
+and Connect intent are still current. Same-folder refreshes preserve the
+decision. Navigation to a different location or closing the originating
+tab discards it. NFS opens directly because it has no account login step.
+
 ### NFS asks for nothing
 
 NFS authorises by **address**, not by account: an export lists the clients
@@ -2181,7 +2211,7 @@ test is what caught it.
 
 ### What is deliberately not built
 
-Anonymous/guest shares and LAN discovery via Avahi.
+LAN discovery via Avahi.
 
 ## 6.15 Archives
 

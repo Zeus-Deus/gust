@@ -53,10 +53,15 @@ Window {
                 }
                 win.sessionChanged()
                 win.noteSplitTabMoved(tabModel)
+                if (win.pendingShareOpen && win.pendingShareOpen.model === tabModel) {
+                    win.finishShareOpen(false)
+                    if (confirm.visible && confirm.purpose === "share-open") confirm.close()
+                }
             }
             // Mounts and connections finish on a worker; every tab reports
             // here, so a result still lands if the user switched tabs.
             onPlace_done: (op, name, message) => win.placeDone(op, name, message, tabModel)
+            onShare_open_requested: (name) => win.askOpenShare(tabModel, name)
             onLaunch_done: (success, message) => {
                 if (success) hints.message = message
                 else win.queueOpenFailure(message)
@@ -601,6 +606,52 @@ Window {
     // --- network shares (DESIGN §6.14) -----------------------------------
     property string shareAddress: ""
     property string shareUser: ""
+    property var pendingShareOpen: null
+
+    function askOpenShare(model, name) {
+        if (win.connectionOwner !== model || !connectPanel.open) {
+            model.share_finish(false)
+            win.finishPlaceFeedback("share", name, "", model)
+            return
+        }
+        win.pendingShareOpen = { model: model, name: name }
+        connectPanel.feedbackTitle = qsTr("Shared folder is ready")
+        win.offerPendingShareOpen()
+    }
+
+    function offerPendingShareOpen() {
+        const pending = win.pendingShareOpen
+        if (!pending || confirm.visible || conflictDialog.visible
+            || prompt.visible || prompt.claimingFocus
+            || win.closing || win.closeNow || win.prefsClosing) return
+        if (win.connectionOwner !== pending.model || !connectPanel.open
+            || !pending.model.share_open_pending()) {
+            win.finishShareOpen(false)
+            return
+        }
+        confirm.purpose = "share-open"
+        confirm.open(qsTr("Open Windows share?"),
+                     qsTr("%1 is mounted. The desktop shares SMB connections across apps, so Gust cannot verify which account is in use.").arg(pending.name),
+                     qsTr("Open share"), false)
+        win.qaDump("share-open-question")
+    }
+
+    function finishShareOpen(open) {
+        const pending = win.pendingShareOpen
+        if (!pending) return
+        win.pendingShareOpen = null
+        win.finishPlaceFeedback("share", pending.name, "", pending.model)
+        pending.model.share_finish(open)
+        win.qaDump(open ? "share-open-confirmed" : "share-open-cancelled")
+    }
+
+    function shareDialogClosed() {
+        if (confirm.purpose === "share-open") {
+            confirm.purpose = "trash"
+            win.finishShareOpen(false)
+        }
+        if (win.pendingShareOpen) Qt.callLater(win.offerPendingShareOpen)
+    }
 
     /// Ask for the address first. A typo is caught here, before anybody
     /// types a secret.
@@ -637,11 +688,17 @@ Window {
         prompt.secret = false
         prompt.mode = "share-user"
         prompt.openWith(qsTr("Username for that share"), "",
-                        qsTr("Leave empty if the share needs no account"))
+                        qsTr("Leave blank to try system credentials first, then guest access."))
         win.qaDump("share-prompt")
     }
 
     function shareUserEntered(text) {
+        if (text.trim() === "") {
+            prompt.close()
+            win.connectShare(win.shareAddress, "", "")
+            win.shareAddress = ""
+            return
+        }
         win.shareUser = text
         // The only masked prompt in Gust. The value goes straight to GIO
         // and is not kept afterwards.
@@ -1215,6 +1272,10 @@ Window {
         if (error !== "") win.finishPlaceFeedback("setup-install", key, error, model)
     }
     function forgetConnectionOwner(model) {
+        if (win.pendingShareOpen && win.pendingShareOpen.model === model) {
+            win.pendingShareOpen = null
+            if (confirm.purpose === "share-open" && confirm.visible) confirm.close()
+        }
         if (win.pendingTailnet && win.pendingTailnet.model === model) win.pendingTailnet = null
         if (win.connectionOwner !== model) return
         const pending = connectPanel.operation
@@ -3137,7 +3198,7 @@ Window {
     function drainConflicts() {
         // cancelled() precedes close(): never present a queued owner while
         // the previous dialog is still visible or owns its answer route.
-        if (win.conflictModel || conflictDialog.visible) return
+        if (win.conflictModel || conflictDialog.visible || confirm.visible) return
         while (win.conflictQueue.length > 0) {
             const m = win.conflictQueue[0]
             win.conflictQueue = win.conflictQueue.slice(1)
@@ -4592,8 +4653,15 @@ Window {
         id: prompt
         anchors.fill: parent
         property string mode: ""
+        allowEmpty: mode === "share-user"
+        emptyAcceptText: mode === "share-user" ? qsTr("Connect automatically") : ""
         onVisibleChanged: win.qaDump("prompt")
-        onClosed: { if (connectPanel.open) connectPanel.refocus(); else win.focusList() }
+        onClosed: {
+            // A worker can open a question while the text prompt fades out.
+            if (connectPanel.open && !confirm.visible && !conflictDialog.visible) connectPanel.refocus()
+            else win.focusList()
+            if (win.pendingShareOpen) Qt.callLater(win.offerPendingShareOpen)
+        }
         onAccepted: (text) => {
             // The share steps chain: each one opens the next rather than
             // finishing, so they return early.
@@ -4691,7 +4759,11 @@ Window {
             if (a.startsWith("setup-install:")) win.installSupport(a.substring(14))
             else win.runAction(a)
         }
-        onClosed: { win.focusList(); win.qaDump("connect-closed") }
+        onClosed: {
+            win.finishShareOpen(false)
+            win.focusList()
+            win.qaDump("connect-closed")
+        }
         onVisibleChanged: win.qaDump("connect")
         onSelectionKeyChanged: win.qaDump("connect-select")
     }
@@ -4901,6 +4973,7 @@ Window {
             win.focusList()
             // Run after close()/cancel() and their current handlers unwind.
             Qt.callLater(() => win.drainConflicts())
+            if (win.pendingShareOpen) Qt.callLater(win.offerPendingShareOpen)
         }
     }
 
@@ -4921,8 +4994,10 @@ Window {
         // What this confirmation is FOR. Two different questions must never
         // share one handler by accident.
         property string purpose: "trash"
+        preferCancel: purpose === "share-open"
         onVisibleChanged: win.qaDump("confirm")
         onClosed: {
+            win.shareDialogClosed()
             // The keyboard returns to the panel the question was asked over;
             // focusList() leaves an open panel alone on purpose.
             if (confirm.purpose === "chooser-replace") chooserFooter.focusName()
@@ -4932,8 +5007,14 @@ Window {
             // A close still waiting on preferences did not ask over this
             // question; it asks now if a failure or the deadline came meanwhile.
             if (win.prefsClosing) Qt.callLater(win.prefsClose, null)
+            // A late paste may be waiting for this question to release focus.
+            if (win.conflictQueue.length) Qt.callLater(win.drainConflicts)
         }
         onAccepted: {
+            if (confirm.purpose === "share-open") {
+                win.finishShareOpen(true)
+                return
+            }
             if (confirm.purpose === "chooser-replace") {
                 win.chooserReplaceConfirmed()
                 return
@@ -5041,6 +5122,10 @@ Window {
             win.qaDump("trashed")
         }
         onRejected: {
+            if (confirm.purpose === "share-open") {
+                win.finishShareOpen(false)
+                return
+            }
             if (confirm.purpose === "chooser-replace") {
                 win.chooserAsked = null
                 win.qaDump("chooser-replace-cancelled")

@@ -61,7 +61,7 @@ QtObject {
 FUNCTIONS = ["selectionSettling", "refreshChooserTarget", "chooserAccept", "chooserChecked", "chooserForgetCheck",
              "chooserAskReplace", "chooserReplaceConfirmed", "chooserAnswer", "chooserCancel",
              "chooserActivate", "chooserReturn", "chooserFits", "chooserMenu", "chooserFilterPage",
-             "openMoreMenu", "runAction", "runKeyAction"]
+             "openMoreMenu", "runAction", "runKeyAction", "shareDialogClosed"]
 
 
 def main():

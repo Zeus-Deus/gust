@@ -160,6 +160,10 @@ pub mod qobject {
         #[qsignal]
         fn place_done(self: Pin<&mut DirModel>, op: QString, name: QString, message: QString);
 
+        /// GVfs mounted a shared SMB folder. The account in use is unknown.
+        #[qsignal]
+        fn share_open_requested(self: Pin<&mut DirModel>, name: QString);
+
         /// A requested application or terminal launch finished on a worker.
         #[qsignal]
         fn launch_done(self: Pin<&mut DirModel>, success: bool, message: QString);
@@ -513,6 +517,11 @@ pub mod qobject {
             domain: QString,
             password: QString,
         ) -> QString;
+        #[qinvokable]
+        fn share_open_pending(self: &DirModel) -> bool;
+        /// Consume the pending SMB decision for this tab.
+        #[qinvokable]
+        fn share_finish(self: Pin<&mut DirModel>, open: bool);
         /// Check an address before asking for a password, so a typo is
         /// caught without the user typing a secret first.
         #[qinvokable]
@@ -1201,6 +1210,7 @@ pub struct DirModelRust {
     frame: std::sync::Arc<crate::projection::Frame>,
     runtime: crate::projection::Runtime,
     requested_key: LocationKey,
+    navigation_epoch: u64,
     request_revision: u64,
     sort_request_revision: u64,
     selection_revision: u64,
@@ -1306,6 +1316,8 @@ pub struct DirModelRust {
     finding: bool,
     find_needle: QString,
     place_busy: bool,
+    /// A mounted SMB folder awaiting consent in this tab.
+    pending_share_open: Option<PathBuf>,
     peek_hash: QString,
     /// What was selected when the current rubber band started.
     band_base: Option<std::sync::Arc<crate::projection::BandBase>>,
@@ -1409,6 +1421,8 @@ enum PlaceOutcome {
         path: std::path::PathBuf,
         status: String,
     },
+    /// Offer to open an SMB mount once the user accepts the shared account.
+    ConfirmShare(PathBuf),
     /// Report success with a status line.
     Done(String),
     /// Browse this folder, and tell the user something they must not miss
@@ -1582,6 +1596,14 @@ impl Default for DirModelRust {
 }
 
 impl DirModelRust {
+    fn request_location(&mut self, key: LocationKey) {
+        if key != self.requested_key {
+            self.navigation_epoch = self.navigation_epoch.wrapping_add(1);
+            self.pending_share_open = None;
+            self.requested_key = key;
+        }
+    }
+
     fn fresh(home: PathBuf) -> Self {
         let frame = crate::projection::Frame::empty(LocationKey::local(&home));
         let runtime = crate::projection::Runtime::new(frame.clone());
@@ -1616,6 +1638,7 @@ impl DirModelRust {
             frame,
             runtime,
             requested_key: LocationKey::local(&home),
+            navigation_epoch: 0,
             request_revision: 0,
             sort_request_revision: 0,
             selection_revision: 0,
@@ -1682,6 +1705,7 @@ impl DirModelRust {
             finding: false,
             find_needle: QString::from(""),
             place_busy: false,
+            pending_share_open: None,
             peek_hash: QString::default(),
             band_base: None,
             band_active: false,
@@ -2042,6 +2066,7 @@ impl qobject::DirModel {
         self.as_mut().set_place_busy(true);
         self.as_mut().set_status(QString::from(&busy));
         let gen = self.as_ref().generation;
+        let navigation_epoch = self.as_ref().navigation_epoch;
         let spawned = std::thread::Builder::new()
             .name(format!("gust-{op}"))
             .spawn(move || {
@@ -2074,6 +2099,15 @@ impl qobject::DirModel {
                                 model.as_mut().set_status(QString::from(&status));
                             }
                             model.as_mut().place_done(opq, nameq, QString::default());
+                        }
+                        PlaceOutcome::ConfirmShare(path) => {
+                            model.as_mut().set_status(QString::default());
+                            if model.as_ref().navigation_epoch == navigation_epoch {
+                                model.as_mut().rust_mut().pending_share_open = Some(path);
+                                model.as_mut().share_open_requested(nameq);
+                            } else {
+                                model.as_mut().place_done(opq, nameq, QString::default());
+                            }
                         }
                         PlaceOutcome::Done(status) => {
                             model.as_mut().set_status(QString::from(&status));
@@ -4033,7 +4067,7 @@ impl qobject::DirModel {
         }
     }
 
-    /// Mount a share and browse it.
+    /// Mount a share. SMB browsing waits for a separate user decision.
     ///
     /// The password arrives here, goes straight into GIO's stdin, and is
     /// dropped. It is never stored, never logged, never put in argv, and
@@ -4046,7 +4080,7 @@ impl qobject::DirModel {
         domain: QString,
         password: QString,
     ) -> QString {
-        use gust_remote::shares::{mount, parse_address};
+        use gust_remote::shares::{mount, parse_address, ShareKind};
 
         let text = address.to_string();
         let mut share = match parse_address(&text, Self::share_kind_for(&text)) {
@@ -4073,7 +4107,14 @@ impl qobject::DirModel {
             format!("Connecting to {label}…"),
             move || {
                 // Bounded: a server that never answers fails after the deadline.
-                match mount(&share, secret, &runtime, std::time::Duration::from_secs(25)) {
+                match mount(
+                    &share,
+                    secret,
+                    &runtime,
+                    std::time::Duration::from_secs(25),
+                    None,
+                ) {
+                    Ok(mp) if share.kind == ShareKind::Smb => PlaceOutcome::ConfirmShare(mp),
                     Ok(mp) => PlaceOutcome::Open {
                         path: mp,
                         status: format!("Connected to {label}"),
@@ -4083,6 +4124,17 @@ impl qobject::DirModel {
             },
         );
         QString::default()
+    }
+
+    fn share_open_pending(&self) -> bool {
+        self.pending_share_open.is_some()
+    }
+
+    fn share_finish(mut self: Pin<&mut Self>, open: bool) {
+        let pending = self.as_mut().rust_mut().pending_share_open.take();
+        if let Some(path) = pending.filter(|_| open) {
+            self.navigate_path(path);
+        }
     }
 
     // --- removable devices (DESIGN §6.13) --------------------------------
@@ -6460,7 +6512,7 @@ impl qobject::DirModel {
             let mut r = self.as_mut().rust_mut();
             r.back.push(old);
             r.forward.clear();
-            r.requested_key = LocationKey::local(&p);
+            r.request_location(LocationKey::local(&p));
             r.type_ahead.clear();
         }
         self.as_mut().set_filter(QString::default());
@@ -6478,7 +6530,7 @@ impl qobject::DirModel {
             let mut r = self.as_mut().rust_mut();
             r.back.push(old);
             r.forward.clear();
-            r.requested_key = parent;
+            r.request_location(parent);
             r.type_ahead.clear();
         }
         self.load_current();
@@ -6494,7 +6546,7 @@ impl qobject::DirModel {
         {
             let mut r = self.as_mut().rust_mut();
             r.forward.push(cur);
-            r.requested_key = prev;
+            r.request_location(prev);
             r.type_ahead.clear();
         }
         self.load_current();
@@ -6510,7 +6562,7 @@ impl qobject::DirModel {
         {
             let mut r = self.as_mut().rust_mut();
             r.back.push(cur);
-            r.requested_key = next;
+            r.request_location(next);
             r.type_ahead.clear();
         }
         self.load_current();

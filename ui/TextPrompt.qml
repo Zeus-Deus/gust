@@ -14,6 +14,8 @@ FocusScope {
     property string title: ""
     property string hint: ""
     property string errorText: ""
+    property bool allowEmpty: false
+    property string emptyAcceptText: ""
     // The row this prompt refers to; -1 when it is not about a row.
     property int targetRow: -1
 
@@ -147,7 +149,7 @@ FocusScope {
                             root.close()
                             event.accepted = true
                         } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
-                            if (field.text.length > 0)
+                            if (!event.isAutoRepeat && (root.allowEmpty || field.text.length > 0))
                                 root.accepted(field.text)
                             event.accepted = true
                         }
@@ -207,7 +209,8 @@ FocusScope {
                         textFormat: Text.PlainText
                         id: okLabel
                         anchors.centerIn: parent
-                        text: qsTr("OK")
+                        text: root.allowEmpty && root.emptyAcceptText !== "" && field.text.trim() === ""
+                              ? root.emptyAcceptText : qsTr("OK")
                         color: Tokens.foregroundBright
                         font.family: Tokens.fontFamily
                         font.pixelSize: Tokens.fontBody
@@ -217,7 +220,7 @@ FocusScope {
                         id: okArea
                         anchors.fill: parent
                         hoverEnabled: true
-                        onClicked: if (field.text.length > 0) root.accepted(field.text)
+                        onClicked: if (root.allowEmpty || field.text.length > 0) root.accepted(field.text)
                     }
                 }
             }

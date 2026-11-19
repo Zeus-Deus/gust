@@ -103,6 +103,8 @@ Item {
         property int filterMenus: 0
         property string alertText: ""
         property bool prefsClosing: false
+        property var pendingShareOpen: null
+        property var conflictQueue: []
 
 @STATE@
 @FUNCTIONS@

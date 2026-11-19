@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # A real SMB server, built out of nothing but this machine.
 #
-# An unprivileged smbd on a high port, serving one directory, with its own
+# An unprivileged smbd on a high port, serving two directories, with its own
 # private user database. Nothing here touches the system's samba config, no
 # system service is started, and the only account is a throwaway created for
 # the test — so there is no credential of the user's to leak.
@@ -19,13 +19,14 @@ ROOT="${GUST_SMB_FIXTURE:-/tmp/gust-smb-fixture}"
 # rather than quietly testing something else.
 PORT="${GUST_SMB_PORT:-445}"
 SHARE="$ROOT/share"
+GUEST="$ROOT/guest"
 PRIV="$ROOT/private"
 CONF="$ROOT/smb.conf"
 LOGD="$ROOT/log"
 USER="$(id -un)"
 
 start() {
-  mkdir -p "$SHARE" "$PRIV" "$LOGD" "$ROOT/lock" "$ROOT/state" "$ROOT/cache" \
+  mkdir -p "$SHARE" "$GUEST/SubDir" "$PRIV" "$LOGD" "$ROOT/lock" "$ROOT/state" "$ROOT/cache" \
            "$ROOT/ncalrpc"
   chmod 700 "$PRIV"
 
@@ -60,12 +61,20 @@ start() {
     smb1 unix extensions = no
     server min protocol = SMB2
     passdb backend = tdbsam:$PRIV/passdb.tdb
+    map to guest = Bad User
 
 [shared]
     path = $SHARE
     read only = no
     guest ok = no
     valid users = $USER
+    force user = $USER
+
+[guest]
+    path = $GUEST
+    read only = yes
+    guest ok = yes
+    guest only = yes
     force user = $USER
 EOF
   chmod 600 "$CONF"
@@ -118,6 +127,7 @@ EOF
   printf 'hello from the smb share\n' > "$SHARE/hello.txt"
   mkdir -p "$SHARE/subdir"
   printf 'nested\n' > "$SHARE/subdir/inner.txt"
+  printf 'guest folder from the smb fixture\n' > "$GUEST/SubDir/guest.txt"
 
   echo "smb fixture up:"
   echo "  share    $SHARE"

@@ -225,6 +225,10 @@ Rectangle {
                                       : btn.primary ? Tokens.accent
                                       : Tokens.withAlpha(Tokens.border, Tokens.borderAlpha)
                         activeFocusOnTab: enabledChoice
+                        function activate() {
+                            if (modelData.id === "cancel") root.cancel()
+                            else root.pick(modelData.id)
+                        }
                         Component.onCompleted: {
                             if (modelData.id === "keep-both") keepButton.target = btn
                             if (modelData.id === "merge") mergeButton.target = btn
@@ -244,11 +248,11 @@ Rectangle {
                             anchors.fill: parent
                             hoverEnabled: true
                             enabled: btn.enabledChoice
-                            onClicked: modelData.id === "cancel" ? root.cancel() : root.pick(modelData.id)
+                            onClicked: btn.activate()
                         }
-                        Keys.onReturnPressed: modelData.id === "cancel" ? root.cancel() : root.pick(modelData.id)
-                        Keys.onEnterPressed: modelData.id === "cancel" ? root.cancel() : root.pick(modelData.id)
-                        Keys.onSpacePressed: modelData.id === "cancel" ? root.cancel() : root.pick(modelData.id)
+                        Keys.onReturnPressed: (event) => { if (!event.isAutoRepeat) btn.activate() }
+                        Keys.onEnterPressed: (event) => { if (!event.isAutoRepeat) btn.activate() }
+                        Keys.onSpacePressed: (event) => { if (!event.isAutoRepeat) btn.activate() }
                         Accessible.role: Accessible.Button
                         Accessible.name: modelData.label
                     }
@@ -285,7 +289,7 @@ Rectangle {
         }
     }
 
-    Keys.onEscapePressed: root.cancel()
+    Keys.onEscapePressed: (event) => { if (!event.isAutoRepeat) root.cancel() }
     Keys.onPressed: (e) => {
         if (e.key === Qt.Key_R) { root.pick("replace"); e.accepted = true }
         else if (e.key === Qt.Key_K) { root.pick("keep-both"); e.accepted = true }
