@@ -44,56 +44,44 @@ fn run_default(mode: &str) -> i32 {
         eprintln!("gust: cannot find your config directory (is HOME set?)");
         return 1;
     };
-    let current = MimeApps::parse(&std::fs::read_to_string(&mime_path).unwrap_or_default());
+    let desktops = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
 
     match mode {
         "on" => {
-            // Claiming twice must not record gust.desktop as the "previous"
-            // value, which would make rollback restore Gust over itself.
-            if state.exists() && current.get("inode/directory").as_deref() == Some(GUST_DESKTOP) {
-                println!("gust is already the default file manager");
-                claim_show_in_folder();
-                return 0;
+            let done = match claim(&mime_path, &state, &desktops) {
+                Ok(done) => done,
+                Err(e) => {
+                    eprintln!("gust: cannot update {}: {e}", mime_path.display());
+                    return 1;
+                }
+            };
+            for line in done.lines() {
+                println!("{line}");
             }
-            let (next, prev) = plan_claim(&current);
-            if let Err(e) = write_atomic(&state, &prev.to_text()) {
-                eprintln!("gust: cannot record the previous default: {e}");
-                return 1;
-            }
-            if let Err(e) = write_atomic(&mime_path, &next.to_text()) {
-                eprintln!("gust: cannot update {}: {e}", mime_path.display());
-                return 1;
-            }
-            let was = prev
-                .entries
-                .get("inode/directory")
-                .and_then(|v| v.clone())
-                .unwrap_or_else(|| "nothing".into());
-            println!("gust is now the default file manager (was: {was})");
             claim_show_in_folder();
-            println!("run `gust --default off` to put it back");
+            if !done.already {
+                println!("run `gust --default off` to put it back");
+            }
             0
         }
         "off" => {
-            let Ok(text) = std::fs::read_to_string(&state) else {
-                println!("gust was not set as the default; nothing to undo");
-                return 0;
+            let done = match release(&mime_path, &state) {
+                Ok(Some(done)) => done,
+                Ok(None) => {
+                    println!("gust was not set as the default; nothing to undo");
+                    return 0;
+                }
+                Err(e) => {
+                    eprintln!("gust: cannot update {}: {e}", mime_path.display());
+                    return 1;
+                }
             };
-            let prev = PreviousDefaults::from_text(&text);
-            let (next, skipped) = plan_release(&current, &prev);
-            if let Err(e) = write_atomic(&mime_path, &next.to_text()) {
-                eprintln!("gust: cannot update {}: {e}", mime_path.display());
-                return 1;
-            }
-            let _ = std::fs::remove_file(&state);
-            for s in &skipped {
-                // A later choice by something else is reported, not undone.
-                println!("left alone: {s}");
-            }
             if let Some(dir) = gust_core::filemanager1::user_service_dir() {
                 let _ = gust_core::filemanager1::release_service(&dir);
             }
-            println!("the previous default file manager has been restored");
+            for line in done.lines() {
+                println!("{line}");
+            }
             0
         }
         other => {
