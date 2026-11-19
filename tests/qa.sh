@@ -875,7 +875,7 @@ LEFT="$(find "$RO/dest" -maxdepth 1 -name '.gust-staging-*' | wc -l)"
 [[ "$(cat "$RO/src/wanted.txt")" == "payload" ]] \
   && ok "the source survived a failed copy" || bad "source damaged by a failed copy"
 
-say "10q · Thumbnails: only safe kinds, produced in a sandbox, UI stays live"
+say "10q · Grid navigation and per-file thumbnail results"
 TH="$FIXTURE/pictures"
 rm -rf "$TH"; mkdir -p "$TH"
 images=()
@@ -904,7 +904,6 @@ key Return
 wait_for "d['view']" "grid" 20 >/dev/null
 expect "grid view is active" "d['view']" "grid"
 
-# Exercise the Grid before waiting for all thumbnail work to finish.
 key End
 expect "End selects the last Grid item" "d['model']['cursor'] == d['model']['count'] - 1 and d['model']['count'] > 1" "True"
 
@@ -914,11 +913,13 @@ else
   bad "thumbnail results did not match the picture fixtures"
 fi
 
-# Leaving the folder must abandon the pass.
 vm wtype -M ctrl -k l -m ctrl >/dev/null 2>&1; sleep 0.8
 typ "$FIXTURE"; key Return
-wait_for "d['model']['location']" "$FIXTURE" >/dev/null
-ok "navigating away from a thumbnailing folder is clean"
+if wait_for "d['model']['location']" "$FIXTURE"; then
+  ok "the location bar returned from Pictures to the fixture"
+else
+  bad "the location bar did not return from Pictures to the fixture"
+fi
 
 say "10r · An explicit view choice is remembered per location"
 VW="$FIXTURE/viewmem"
