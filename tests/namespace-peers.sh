@@ -16,6 +16,11 @@ flock /tmp/gust-build.lock cargo test --no-run --locked -p gust-remote \
     --test sshfs_live --test rclone_live --test rclone_failure_matrix \
     --message-format=json-render-diagnostics > "$manifest"
 
+writeback_env=()
+if [[ -v GUST_RCLONE_WRITEBACK ]]; then
+    writeback_env=(--setenv GUST_RCLONE_WRITEBACK "$GUST_RCLONE_WRITEBACK")
+fi
+
 for suite in sshfs_live rclone_live rclone_failure_matrix; do
     binary=$(python3 - "$manifest" "$suite" <<'PY'
 import json, sys
@@ -37,6 +42,7 @@ PY
         --ro-bind "$binary" /suite --ro-bind tests/rclone-fixture.sh /rclone-fixture \
         --clearenv --setenv PATH /usr/bin:/bin --setenv HOME /root --setenv USER gust \
         --setenv LANG C --setenv GUST_ALL_REQUIRED 1 --setenv XDG_RUNTIME_DIR /run/user/0 \
+        "${writeback_env[@]}" \
         bash -eu -s -- "$suite" <<'GUEST'
 printf 'root:x:0:0:root:/root:/bin/sh\n' > /etc/passwd
 printf 'root:x:0:\n' > /etc/group
