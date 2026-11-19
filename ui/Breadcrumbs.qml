@@ -26,6 +26,10 @@ Item {
     // but were invisible until implicitWidth was bound to the content.
     implicitHeight: Tokens.controlHeight
     implicitWidth: crumbRow.implicitWidth
+    // A path too long for the bar keeps its END in view (where the user
+    // is), marks the cut, and never draws over the buttons beside it.
+    readonly property bool overflowing: crumbRow.implicitWidth > width + 1
+    clip: overflowing
 
     /// What the path bar shows, as text, for tests: visible separators and
     /// crumb labels in order, space-separated.
@@ -42,7 +46,7 @@ Item {
 
     Row {
         id: crumbRow
-        anchors.left: parent.left
+        x: root.overflowing ? root.width - crumbRow.implicitWidth : 0
         anchors.verticalCenter: parent.verticalCenter
         spacing: 0
 
@@ -53,7 +57,15 @@ Item {
             model: (root.revision, root.model) ? root.model.breadcrumbs() : []
 
             delegate: Row {
+                id: crumb
                 spacing: 0
+                // How much of this crumb's box lies under the cut mark. A
+                // drop there must not land in a folder whose name the mark
+                // hides: Qt offers a drag to whatever lies beneath an item
+                // that does not take it, so covering the crumb is not enough.
+                readonly property real hiddenWidth: !root.overflowing ? 0
+                    : Math.max(0, Math.min(crumbBox.width,
+                                           cut.width - (crumbRow.x + crumb.x + crumbBox.x)))
                 readonly property bool sepShown: sep.visible
                 readonly property string crumbLabel: crumbText.text
                 // Each crumb is "path\tlabel" (a mounted place is named by
@@ -103,9 +115,13 @@ Item {
 
                     // Drop onto a crumb: into that parent folder.
                     DragTarget {
+                        objectName: "crumbDrop"
                         receiver: root.model
                         anchors.fill: parent
-                        path: crumbPath
+                        // Only the part of the crumb that can be seen takes
+                        // a drop; a crumb wholly under the mark takes none.
+                        anchors.leftMargin: crumb.hiddenWidth
+                        path: crumb.hiddenWidth >= crumbBox.width ? "" : crumbPath
                         onHover: (t) => root.dragHover(t)
                         onLanded: (m, e) => root.dragLanded(m, e)
                     }
@@ -115,6 +131,30 @@ Item {
                 }
             }
         }
+    }
+
+    // The cut: the bar's own colour over the half-shown crumb, and an
+    // ellipsis that says there is more to the left. Up still goes there.
+    Rectangle {
+        id: cut
+        objectName: "crumbCutBox"
+        visible: root.overflowing
+        anchors.left: parent.left
+        width: cutMark.implicitWidth + Tokens.spaceLg
+        height: parent.height
+        color: Tokens.barBackground
+        Text {
+            id: cutMark
+            objectName: "crumbCut"
+            textFormat: Text.PlainText
+            anchors.centerIn: parent
+            text: "…"
+            color: Tokens.foregroundDim
+            font.family: Tokens.fontFamily
+            font.pixelSize: Tokens.fontBody
+        }
+        // A crumb hidden under the mark must not take its click.
+        MouseArea { anchors.fill: parent }
     }
 
     // Rebuild when the location changes. Assigning rep.model here would
