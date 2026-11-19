@@ -44,6 +44,32 @@ TestCase {
         verify(!scroller().interactive)
     }
 
+    function test_action_and_shortcut_share_the_frame_when_resized() {
+        const wide = test.width
+        try {
+            menu.popup(wide, 10, [{label: "Two panes side by side", hint: "Ctrl+Shift+Return", action: "split"}])
+            const label = findChild(menu, "menuLabel")
+            const shortcut = findChild(menu, "menuShortcut")
+            const preferred = frame().width
+            verify(preferred < wide - 2 * Tokens.spaceSm)
+            verify(!label.truncated && !shortcut.truncated)
+            test.width = 150
+            tryCompare(frame(), "width", test.width - 2 * Tokens.spaceSm)
+            compare(frame().x, Tokens.spaceSm)
+            verify(label.width > 0 && shortcut.width > 0)
+            verify(label.x >= 0 && label.x + label.width < shortcut.x)
+            verify(shortcut.x + shortcut.width <= frame().width)
+            tryCompare(label, "truncated", true)
+            tryCompare(shortcut, "truncated", true)
+            test.width = wide
+            tryCompare(frame(), "width", preferred)
+            tryCompare(label, "truncated", false)
+            tryCompare(shortcut, "truncated", false)
+        } finally {
+            test.width = wide
+        }
+    }
+
     function test_a_long_menu_stays_inside_a_short_window() {
         menu.popup(10, 150, entries(19))
         const f = frame()

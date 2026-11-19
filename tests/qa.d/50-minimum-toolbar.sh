@@ -28,6 +28,19 @@ toolbar_menu_click() {
   toolbar_click toolbarPoints more && toolbar_click menuPoints "$1"
 }
 
+check_more_width() {
+  expect "both More popup edges fit inside the client" \
+    "0 < d['menuEdges'][0] < d['menuEdges'][1] < d['windowWidth']" "True"
+}
+
+check_search_query() {
+  typ "probe"
+  expect "typing reaches the focused Search field and starts the query" \
+    "(d['focusOwner'], d['searchText'], d['findNeedle'])" "('searchInput', 'probe', 'probe')"
+  expect "the complete query fits inside the visible field" \
+    "0 <= d['searchFieldEdges'][0] < d['searchFieldEdges'][1] <= d['windowWidth'] and d['searchTextFits']" "True"
+}
+
 roomy_settings_options() {
   local preset
   key Down
@@ -98,8 +111,12 @@ second_tab_toolbar() {
 
   toolbar_click toolbarPoints more || return 1
   expect "More opens with two tabs" "d['menuOpen']" "True"
+  check_more_width
+  shot "50-more-second-tab-roomy"
   toolbar_click menuPoints Search || return 1
   expect "the overflow Search action takes its click" "d['searchBarActive']" "True"
+  check_search_query
+  shot "50-search-second-tab-roomy"
   key Escape
   toolbar_click toolbarPoints settings || return 1
   expect "Settings opens with two tabs" "d['settingsOpen']" "True"
@@ -177,6 +194,9 @@ minimum_toolbar() {
         "0 < d['toolbarPoints']['pathStart'][0] < d['toolbarPoints']['pathEnd'][0] <= d['toolbarPoints']['searchStart'][0]" "True"
       toolbar_click toolbarPoints search || return 1
       expect "the adjacent Search button takes its click" "d['searchBarActive']" "True"
+      check_search_query
+      expect "the search hint fits at normal spacing" "d['searchHintShown']" "True"
+      shot "50-search-$zoom"
       key Escape
       toolbar_click toolbarPoints newFolder || return 1
       expect "the adjacent New folder button takes its click" "d['promptOpen']" "True"
@@ -184,6 +204,7 @@ minimum_toolbar() {
     fi
     toolbar_click toolbarPoints more || return 1
     expect "More opens at zoom $zoom" "d['menuOpen']" "True"
+    check_more_width
     if [[ "$zoom" == 1.6 ]]; then shot "50-overflow-$zoom"; fi
     key End
     expect "End reveals the last More action" "d['menuCurrent']" "Keyboard shortcuts"
@@ -206,9 +227,12 @@ minimum_toolbar() {
       shot "50-wide-$zoom"
       toolbar_click toolbarPoints search || return 1
       expect "widening restores the inline Search button" "d['searchBarActive']" "True"
+      check_search_query
+      expect "widening leaves room for the search hint" "d['searchHintShown']" "True"
       key Escape
       toolbar_click toolbarPoints more || return 1
       expect "wide More omits the inline Search action" "d['menuOpen'] and 'Search' not in d['menuItems']" "True"
+      check_more_width
     fi
   done
 }

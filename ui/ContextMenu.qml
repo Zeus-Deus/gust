@@ -87,7 +87,7 @@ Item {
             hintMetrics.text = list[i].hint || ""
             wh = Math.max(wh, hintMetrics.advanceWidth)
         }
-        menu.width = Math.ceil(Tokens.rowPaddingX * 2 + wl + (wh > 0 ? Tokens.spaceXxl * 2 + wh : 0))
+        menu.preferredWidth = Math.ceil(Tokens.rowPaddingX * 2 + wl + (wh > 0 ? Tokens.spaceXxl * 2 + wh : 0))
         const m = Tokens.spaceSm
         // Never taller than the window: a long menu in a short (tiled) or
         // zoomed window used to run off the bottom, taking its last
@@ -95,7 +95,6 @@ Item {
         menu.fullHeight = Math.ceil(h)
         menu.height = Math.min(menu.fullHeight, Math.max(rowH + padY * 2, root.height - m * 2))
         scroller.contentY = 0
-        menu.x = Math.max(m, Math.min(px, root.width - menu.width - m))
         menu.y = py + menu.height + m <= root.height
                  ? py
                  : Math.max(m, py - menu.height)
@@ -104,6 +103,8 @@ Item {
         visible = true
         keys.forceActiveFocus()
     }
+
+    function horizontalEdges() { return [menu.x, menu.x + menu.width] }
 
     /// Centre of each entry by label, in window coordinates (qa).
     function itemPoints() {
@@ -175,6 +176,9 @@ Item {
     Rectangle {
         id: menu
         objectName: "contextMenu"
+        property real preferredWidth: 0
+        width: Math.min(preferredWidth, Math.max(0, root.width - 2 * Tokens.spaceSm))
+        x: Math.max(Tokens.spaceSm, Math.min(root.lastAt.x, root.width - width - Tokens.spaceSm))
         color: Tokens.menuBackground
         border.width: Math.max(1, Tokens.borderWidth)
         border.color: Tokens.border
@@ -212,10 +216,13 @@ Item {
                 id: menuRepeater
                 model: root.items
                 delegate: Item {
+                    id: entry
                     required property var modelData
                     required property int index
                     width: menu.width
                     height: modelData.separator ? root.sepH : root.rowH
+                    readonly property real textBudget: Math.max(0, width - 2 * Tokens.rowPaddingX
+                                                                - (shortcut.text ? Tokens.spaceSm : 0))
 
                     Rectangle {
                         visible: modelData.separator === true
@@ -245,10 +252,14 @@ Item {
                     }
 
                     Text {
+                        id: entryLabel
+                        objectName: "menuLabel"
                         textFormat: Text.PlainText
                         visible: !modelData.separator
                         anchors.verticalCenter: parent.verticalCenter
                         x: Tokens.rowPaddingX
+                        width: entry.textBudget - shortcut.width
+                        elide: Text.ElideRight
                         text: modelData.label || ""
                         font.family: Tokens.fontFamily
                         font.pixelSize: Tokens.fontBody
@@ -258,11 +269,19 @@ Item {
                              : Tokens.foreground
                     }
                     Text {
+                        id: shortcut
+                        objectName: "menuShortcut"
                         textFormat: Text.PlainText
                         visible: !modelData.separator && (modelData.hint || "") !== ""
                         anchors.verticalCenter: parent.verticalCenter
                         anchors.right: parent.right
                         anchors.rightMargin: Tokens.rowPaddingX
+                        // Share a crowded row. A short action or shortcut leaves
+                        // its unused space to the other column.
+                        width: Math.min(implicitWidth, Math.max(entry.textBudget / 2,
+                                                               entry.textBudget - entryLabel.implicitWidth))
+                        horizontalAlignment: Text.AlignRight
+                        elide: Text.ElideRight
                         text: modelData.hint || ""
                         font.family: Tokens.fontFamily
                         font.pixelSize: Tokens.fontSmall

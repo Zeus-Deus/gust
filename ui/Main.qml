@@ -3549,15 +3549,23 @@ Window {
             onSearchActiveChanged: win.qaDump("searchbar")
 
             Row {
+                id: searchRow
                 anchors.fill: parent
                 anchors.leftMargin: Tokens.rowPaddingX
+                anchors.rightMargin: filterBar.searchActive ? Tokens.rowPaddingX : 0
                 spacing: Tokens.spaceLg
+                // Leave room to type before offering the optional keyboard hint.
+                readonly property real queryReserve: Math.min(width / 2, Tokens.fontBody * 8)
+                readonly property real querySpace: Math.max(0, width - searchLabel.width - spacing)
 
                 Text {
                     id: searchLabel
                     textFormat: Text.PlainText
                     anchors.verticalCenter: parent.verticalCenter
                     text: filterBar.searchActive ? qsTr("search") : "/"
+                    width: filterBar.searchActive ? Math.min(implicitWidth, Math.max(0, searchRow.width
+                                                       - searchRow.spacing - searchRow.queryReserve)) : implicitWidth
+                    elide: Text.ElideRight
                     color: Tokens.accent
                     font.family: Tokens.fontFamily
                     font.pixelSize: Tokens.fontBody
@@ -3592,8 +3600,7 @@ Window {
                     objectName: "searchInput"
                     visible: filterBar.searchActive
                     anchors.verticalCenter: parent.verticalCenter
-                    width: parent.width - searchHint.implicitWidth - searchLabel.implicitWidth
-                           - Tokens.spaceLg * 3 - Tokens.rowPaddingX * 2
+                    width: searchRow.querySpace - (searchHint.visible ? searchHint.width + searchRow.spacing : 0)
                     color: Tokens.foregroundBright
                     font.family: Tokens.fontFamily
                     font.pixelSize: Tokens.fontBody
@@ -3612,7 +3619,8 @@ Window {
                 }
                 Text {
                     id: searchHint
-                    visible: filterBar.searchActive
+                    visible: filterBar.searchActive && implicitWidth + searchRow.spacing
+                             + searchRow.queryReserve <= searchRow.querySpace
                     textFormat: Text.PlainText
                     anchors.verticalCenter: parent.verticalCenter
                     text: dirModel.finding
@@ -4700,6 +4708,9 @@ Window {
             filterBarActive: filterBar.filterActive,
             searchBarActive: filterBar.searchActive,
             searchText: searchInput.text,
+            searchFieldEdges: [win.qaPoint(searchInput, 0)[0], win.qaPoint(searchInput, searchInput.width)[0]],
+            searchTextFits: searchInput.contentWidth > 0 && searchInput.contentWidth < searchInput.width,
+            searchHintShown: searchHint.visible,
             finding: dirModel.finding,
             findNeedle: dirModel.findNeedle,
             tabCount: win.tabCount,
@@ -4782,6 +4793,7 @@ Window {
             hintsOverflow: Math.round(hints.mapToItem(null, 0, hints.height).y - win.height),
             jobPaused: win.job ? !!win.job.paused : false,
             jobPausePoint: jobDrawer.pausePoint(),
+            menuEdges: contextMenu.open ? contextMenu.horizontalEdges() : [],
             menuPoints: contextMenu.open ? contextMenu.itemPoints() : ({}),
             placePoints: sidebar.placePoints(),
             crumbPoints: crumbs.crumbPoints(),
