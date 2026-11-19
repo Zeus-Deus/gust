@@ -117,6 +117,75 @@ compact_toolbar_actions() {
   done
 }
 
+hover_tab() {
+  local point x y
+  point="$(toolbar_point tabCenters "$1")" || return 1
+  read -r x y <<<"$point"
+  mouse move "$x" "$y"
+}
+
+inspect_restored_tabs() {
+  local test_home year index path x y point
+  test_home="$(mktemp -d "$FIXTURE/tabs-XXXXXXXX")" || return 1
+  local FIXTURE="$test_home"
+  # Only the first restored tab has listed its folder. Hover must identify
+  # the unopened targets while Search still owns the keyboard.
+  mkdir -p "$FIXTURE/.config/gust" "$FIXTURE/.local/state/gust"
+  printf 'restore_tabs = true\ndensity = "roomy"\n' > "$FIXTURE/.config/gust/settings.toml"
+  python3 - "$FIXTURE" <<'PYTABS' || return 1
+import os, sys
+from pathlib import Path
+home = Path(sys.argv[1])
+with (home / ".local/state/gust/tabs.toml").open("w") as session:
+    names = ("Aloe", "release-2025-build", "release-2026-build", "long-folder-" * 15,
+             "Reed", "Pine", "Sage", "Rose")
+    for name in names:
+        folder = home / name
+        folder.mkdir()
+        print(f'tab = "local:{os.fsencode(folder).hex()} rows"', file=session)
+PYTABS
+  start_gust || return 1
+  vm hyprctl dispatch 'hl.dsp.window.float()' >/dev/null
+  vm hyprctl dispatch 'hl.dsp.window.resize({ x = 520, y = 320 })' >/dev/null
+  for _ in {1..4}; do ctrl equal; done
+  toolbar_menu_click Search || return 1
+  expect "ambiguous tabs at minimum size with large text" \
+    "(d['windowWidth'], d['windowHeight'], d['zoom'], d['settings']['density'], d['tabCount'])" "(520, 320, 1.6, 'roomy', 8)"
+  for year in 2025 2026; do
+    index=$((year - 2024))
+    path="$FIXTURE/release-$year-build"
+    hover_tab "$index" || return 1
+    wait_for "d['tabDisclosure'] and d['tabDisclosure']['path']" "$path" || {
+      bad "hover did not disclose $path"
+      return 1
+    }
+    expect "the elided $year tab exposes its full accessible name" \
+      "d['tabDisclosure']['truncated'] and d['tabDisclosure']['accessibleName']" "$path"
+    expect "the $year disclosure fits inside the window" \
+      "0 <= d['tabDisclosure']['left'] < d['tabDisclosure']['right'] <= d['windowWidth'] and 0 <= d['tabDisclosure']['top'] < d['tabDisclosure']['bottom'] <= d['windowHeight']" "True"
+    expect "inspecting $year leaves the folder, tabs and Search focus alone" \
+      "(d['activeTab'], d['tabCount'], d['searchBarActive'], d['focusOwner'])" "(0, 8, True, 'searchInput')"
+    shot "50-tab-path-$year"
+  done
+  # A path taller than the remaining client area can be read to its end.
+  hover_tab 3 || return 1
+  wait_for "d['tabDisclosure'] and not d['tabDisclosure']['atEnd']" True || return 1
+  point="$(toolbar_point tabDisclosure center)" || return 1
+  read -r x y <<<"$point"
+  for _ in {1..8}; do
+    mouse wheel "$x" "$y" -12 || return 1
+    [[ "$(state "d['tabDisclosure'] and d['tabDisclosure']['atEnd']")" == True ]] && break
+  done
+  expect "the long path scrolls to its last line with the original tab active" \
+    "d['tabDisclosure'] and d['tabDisclosure']['atEnd'] and d['activeTab'] == 0" True
+  hover_tab 2 || return 1
+  wait_for "d['tabDisclosure'] and d['tabDisclosure']['path']" "$FIXTURE/release-2026-build" || return 1
+  toolbar_click tabCenters 2 middle || return 1
+  expect "middle-click closes the inspected 2026 tab" "(d['activeTab'], d['tabCount'])" "(0, 7)"
+  toolbar_click tabCenters 1 || return 1
+  expect "the inspected 2025 tab opens the disclosed folder" "d['activeTabPath']" "$FIXTURE/release-2025-build"
+}
+
 second_tab_toolbar() {
   local index point x y
   local -a names=(Aloe Fern Moss Iris Reed Pine Sage Rose)
@@ -225,6 +294,7 @@ minimum_toolbar() {
     expect "theme spacing scale" "d['spacingScale']" "$spacing"
     if [[ "$base" == 28 ]]; then
       second_tab_toolbar || return 1
+      inspect_restored_tabs || return 1
       continue
     fi
     shot "50-settings-$zoom$shot_suffix"

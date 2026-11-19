@@ -668,6 +668,9 @@ pub mod qobject {
         /// Open a restored tab's folder as its starting point (no history).
         #[qinvokable]
         fn start_at_token(self: Pin<&mut DirModel>, token: &QString);
+        /// Full display path for an unopened tab. Decoding does no I/O.
+        #[qinvokable]
+        fn display_for_token(self: &DirModel, token: &QString) -> QString;
         /// A typed path as a location token (for tabs not yet opened).
         #[qinvokable]
         fn token_for(self: &DirModel, path: &QString) -> QString;
@@ -9200,6 +9203,12 @@ impl qobject::DirModel {
                 QString::from(&error)
             }
         }
+    }
+
+    fn display_for_token(&self, token: &QString) -> QString {
+        LocationKey::from_token(&token.to_string())
+            .map(|key| QString::from(&key.display_path()))
+            .unwrap_or_default()
     }
 
     fn token_for(&self, path: &QString) -> QString {

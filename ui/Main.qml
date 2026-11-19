@@ -8,7 +8,7 @@ Window {
 
     ListModel {
         id: tabList
-        ListElement { startPath: ""; label: "…"; pane: 0 }
+        ListElement { startPath: ""; label: "…"; fullPath: ""; pane: 0 }
     }
 
     // Instantiator, not Repeater: a Repeater needs a visual parent and
@@ -39,6 +39,11 @@ Window {
                 const cut = p.lastIndexOf("/")
                 return (cut >= 0 && cut < p.length - 1) ? p.substring(cut + 1) : p
             }
+            readonly property string tabPath: {
+                if (everActivated || startPath === "") return location
+                return startPath.startsWith("token:") ? display_for_token(startPath.substring(6)) : startPath
+            }
+            onTabPathChanged: win.refreshTabLabels()
             onTabLabelChanged: win.refreshTabLabels()
             onLocationChanged: {
                 if (clipboard_busy()) {
@@ -1629,12 +1634,15 @@ Window {
     function refreshTabLabels() {
         for (let i = 0; i < tabList.count; i++) {
             const m = tabs.objectAt(i)
+            if (!m) continue
             // A tab not opened yet (restored, or opened in the background)
             // keeps the name it was given until it lists its folder.
-            const keep = m && !m.everActivated && tabList.get(i).startPath !== "" && i !== win.activeTab
-            const name = keep ? tabList.get(i).label : (m ? m.tabLabel : "…")
+            const keep = !m.everActivated && tabList.get(i).startPath !== "" && i !== win.activeTab
+            const name = keep ? tabList.get(i).label : m.tabLabel
             if (tabList.get(i).label !== name)
                 tabList.setProperty(i, "label", name)
+            if (tabList.get(i).fullPath !== m.tabPath)
+                tabList.setProperty(i, "fullPath", m.tabPath)
         }
     }
     onActiveTabChanged: {
@@ -2955,6 +2963,7 @@ Window {
         // a strip showing it is chrome that earns nothing.
         Rectangle {
             id: tabStrip
+            z: 1 // Let the path tip extend over the toolbar below the strip.
             width: parent.width
             // Height and visibility both come from the SAME condition. Using
             // `height: visible ? X : 0` makes height depend on a sibling
@@ -3036,6 +3045,7 @@ Window {
                         delegate: Rectangle {
                             // Only this pane's tabs. A strip mixing both panes
                             // makes a click jump the user across the window.
+                            id: folderTab
                             required property int pane
                             visible: pane === win.activePane
                             // `index` is supplied by the Repeater; `label` comes
@@ -3044,6 +3054,12 @@ Window {
                             // empty strip and one line in the log.
                             required property int index
                             required property string label
+                            required property string fullPath
+                            Accessible.role: Accessible.PageTab
+                            Accessible.name: fullPath
+                            Accessible.selectable: true
+                            Accessible.selected: current
+                            Accessible.onPressAction: win.activateTab(index)
                             readonly property bool current: index === win.activeTab
                             readonly property alias caption: tabText
 
@@ -3062,6 +3078,7 @@ Window {
                             Text {
                                 textFormat: Text.PlainText
                                 id: tabText
+                                Accessible.ignored: true
                                 anchors.centerIn: parent
                                 width: Math.max(0, parent.width - Tokens.spaceLg)
                                 horizontalAlignment: Text.AlignHCenter
@@ -3074,6 +3091,9 @@ Window {
 
                             MouseArea {
                                 id: tabMouse
+                                hoverEnabled: true
+                                onEntered: tabPathTip.inspect(folderTab)
+                                onExited: tabPathTip.leave(folderTab)
                                 anchors.fill: parent
                                 acceptedButtons: Qt.LeftButton | Qt.MiddleButton
                                 preventStealing: true
@@ -3084,6 +3104,7 @@ Window {
                                 property bool dragging: false
 
                                 onPressed: (mouse) => {
+                                    tabPathTip.dismiss()
                                     tabMouse.pressAt = Qt.point(mouse.x, mouse.y)
                                     tabMouse.dragging = false
                                 }
@@ -3118,6 +3139,16 @@ Window {
                         }
                     }
                 }
+            }
+
+            TabPathTip {
+                id: tabPathTip
+                y: tabStrip.height
+                availableHeight: win.height - tabStrip.y - y
+                // Tab positions are relative to the horizontally scrolling row.
+                tabCenter: tab ? tabViewport.x + tab.x - tabViewport.contentX + tab.width / 2 : 0
+                onVisibleChanged: win.qaDump("tab-path")
+                onAtEndChanged: if (visible) win.qaDump("tab-path")
             }
         }
 
@@ -5029,6 +5060,14 @@ Window {
             places: win.placesInfo,
             tabCenters: win.tabCenters(),
             visibleTabLabels: win.visibleTabLabels(),
+            tabDisclosure: tabPathTip.visible && tabPathTip.tab ? {
+                path: tabPathTip.text, accessibleName: tabPathTip.tab.Accessible.name,
+                truncated: tabPathTip.tab.caption.truncated,
+                center: win.qaPoint(tabPathTip),
+                right: tabPathTip.x + tabPathTip.width, left: tabPathTip.x,
+                top: tabStrip.y + tabPathTip.y, bottom: tabStrip.y + tabPathTip.y + tabPathTip.height,
+                atEnd: tabPathTip.atEnd
+            } : null,
             confirmTitle: confirm.title,
             confirmBody: confirm.body,
             confirmButtons: confirm.visible ? confirm.buttonCenters() : null,

@@ -1154,6 +1154,9 @@ Nothing is shared between tabs except the window itself.
   existing call site keeps working and there is one definition of "current".
 - **A tab never does I/O until it is looked at.** Opening five tabs must not
   start five listings; a background tab lists when first activated.
+- Hovering a tab reveals its full path before selection or close. The strip
+  exposes the same path as the tab's accessible name. For a background or
+  restored tab, the unopened target supplies the display text without I/O.
 - Closing the last tab closes nothing — the window keeps one tab, because a
   file manager with no tab has nothing to show.
 - **A running job belongs to the tab that started it.** Closing that tab

@@ -36,6 +36,7 @@ fn main() {
         "ui/Emblem.qml",
         "ui/Glyph.qml",
         "ui/BarButton.qml",
+        "ui/TabPathTip.qml",
         "ui/DragTarget.qml",
         "ui/ConnectPanel.qml",
         "ui/DeviceSharingPanel.qml",
