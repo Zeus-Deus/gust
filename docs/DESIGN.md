@@ -2467,6 +2467,9 @@ Starting a desktop opener only submits the request. The file list and Recent
 leave success unannounced. If the opener reports a launch failure, the window
 names the file, gives the reported reason and points to Open with…. An empty
 Open with menu cannot establish why the desktop failed to open the file.
+For selected documents of different types, Gust submits each file separately.
+If a submission fails, the warning gives the reason and accounts for how many
+requests reached an opener. A later launch failure still names its file.
 
 ### One launch, many arguments
 

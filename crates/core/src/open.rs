@@ -61,7 +61,7 @@ pub fn is_runnable(path: &Path, mode: Option<u32>) -> bool {
 /// is that the path is one argument and no shell is involved.
 pub fn command_for(opener: &str, path: &Path) -> Command {
     let mut cmd = Command::new(opener);
-    if opener == "gio" {
+    if matches!(opener, "gio" | "handlr") {
         cmd.arg("open");
     }
     // `--` so a filename beginning with '-' is never read as a flag.
@@ -82,7 +82,7 @@ const OPEN_FAILED_WINDOW: Duration = Duration::from_secs(5);
 /// What `on_refusal` is told when the opener itself reports failure.
 pub const OPENER_REPORTED_FAILURE: &str = "the desktop launcher reported a failure";
 
-/// A gio open process exits after dispatch. xdg-open can stay alive with
+/// gio and handlr exit after dispatch. xdg-open can stay alive with
 /// the application, so only its early failures describe the open request.
 fn refusal_from_exit(opener: &str, code: Option<i32>, elapsed: Duration) -> Option<OpenRefusal> {
     let reason = match (opener, code) {
@@ -91,6 +91,7 @@ fn refusal_from_exit(opener: &str, code: Option<i32>, elapsed: Duration) -> Opti
         }
         ("xdg-open", Some(4)) if elapsed <= OPEN_FAILED_WINDOW => OPENER_REPORTED_FAILURE,
         ("gio", Some(2)) => OPENER_REPORTED_FAILURE,
+        ("handlr", Some(code)) if code != 0 => OPENER_REPORTED_FAILURE,
         _ => return None,
     };
     Some(OpenRefusal::Failed(reason.into()))
@@ -540,13 +541,16 @@ mod tests {
     }
 
     #[test]
-    fn gio_gets_its_subcommand_and_a_terminator() {
-        let p = Path::new("/tmp/-leading-dash.txt");
-        let cmd = command_for("gio", p);
-        let args: Vec<_> = cmd.get_args().collect();
-        assert_eq!(args[0], "open");
-        assert_eq!(args[1], "--", "a leading dash must not become a flag");
-        assert_eq!(args[2], p.as_os_str());
+    fn gio_and_handlr_get_the_open_subcommand_and_one_path() {
+        let path = Path::new("-two words.txt");
+        for opener in ["gio", "handlr"] {
+            let cmd = command_for(opener, path);
+            assert_eq!(cmd.get_program(), opener);
+            assert_eq!(
+                cmd.get_args().collect::<Vec<_>>(),
+                [OsStr::new("open"), OsStr::new("--"), path.as_os_str()]
+            );
+        }
     }
 
     /// A fake opener: a script in a temp dir, run by `sh` so the test never
@@ -625,6 +629,16 @@ mod tests {
         for code in [Some(0), Some(1), Some(4), None] {
             assert_eq!(refusal_from_exit("gio", code, Duration::ZERO), None);
         }
+    }
+
+    #[test]
+    fn handlr_reports_unsuccessful_dispatch() {
+        let elapsed = Duration::from_secs(60);
+        assert_eq!(refusal_from_exit("handlr", Some(0), elapsed), None);
+        assert_eq!(
+            refusal_from_exit("handlr", Some(1), elapsed),
+            Some(OpenRefusal::Failed(OPENER_REPORTED_FAILURE.into())),
+        );
     }
 
     #[test]

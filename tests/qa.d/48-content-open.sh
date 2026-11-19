@@ -121,11 +121,14 @@ expect "dismissal leaves no success hint" "d['hintStatus'].startswith('Opened ')
 shot 48-recent-dismissed
 
 # Mixed file types dispatch separately and can fail after the count is shown.
-typ "fix.patch"; ctrl space
-sleep 1.3
-typ "report.PDF"; ctrl space
-expect "two different file types selected" "d['selCount']" "2"
-key Return
+open_mixed_pair() {
+  key Escape; typ "$1"; ctrl space
+  sleep 1.3
+  typ "$2"; ctrl space
+  expect "$1 and $2 selected" "d['selCount']" "2"
+  key Return
+}
+open_mixed_pair "fix.patch" "report.PDF"
 wait_for "'fix.patch' in d['alertText']" "True" 20 >/dev/null
 expect_contains "mixed selection names the failed file" "d['hintShown']" 'Could not open "fix.patch"'
 expect_contains "mixed selection counts submitted requests" "d['hintStatus']" 'Sent 2 files to the desktop opener'
@@ -145,6 +148,44 @@ mv "$registry/bin/gio" "$registry/gio"
 key Escape; typ "fix.patch"
 key Return
 expect_contains "missing desktop opener explains the refusal" "d['hintShown']" 'no desktop opener was found'
+
+# Keep MIME detection working while Gust's PATH has no opener. Without it,
+# Enter could fall back to the cursor row and miss the multi-file path.
+cat > "$registry/bin/xdg-mime" <<'STUB'
+#!/bin/sh
+PATH=/usr/bin exec xdg-mime "$@"
+STUB
+chmod 755 "$registry/bin/xdg-mime"
+open_mixed_pair "fix.patch" "report.PDF"
+expect_contains "both files refused before dispatch" "d['alertText']" '2 files'
+expect_contains "mixed selection reports the missing opener" "d['hintShown']" 'no desktop opener was found'
+shot 48-mixed-no-opener
+
+# With only handlr available, inspect the actual argv and its launch result.
+cat > "$registry/bin/handlr" <<'STUB'
+#!/bin/sh
+printf '%s\0' "$@" > "${0%/*}/argv"
+case "$3" in *.patch) exit 1 ;; esac
+STUB
+chmod 755 "$registry/bin/handlr"
+key Escape; typ "fix.patch"; key Return
+if cmp -s "$registry/bin/argv" <(printf '%s\0' open -- "$d48/fix.patch"); then
+  ok "handlr received open, -- and the exact file path"
+else
+  bad "handlr received incorrect arguments"
+fi
+wait_for "'fix.patch' in d['alertText']" "True" 20 >/dev/null
+expect_contains "handlr dispatch failure reaches the window" "d['alertText']" 'Could not open "fix.patch"'
+shot 48-handlr-launch-failure
+
+# A dangling link fails before spawn. The PDF can still be submitted.
+ln -s "$d48/missing-target" "$d48/unavailable.txt"
+wait_for "'unavailable.txt' in d['model']['visible']" "True" 20 >/dev/null
+open_mixed_pair "unavailable.txt" "report.PDF"
+expect_contains "partial dispatch counts submitted files" "d['alertText']" 'Sent 1 of 2 files'
+expect_contains "partial dispatch identifies the refused file" "d['hintShown']" 'unavailable.txt'
+expect_contains "partial dispatch explains the refusal" "d['hintShown']" 'the file no longer exists'
+shot 48-mixed-partial-dispatch
 
 unset QA_PATH_PREPEND
 stop_gust; start_gust "$FIXTURE"

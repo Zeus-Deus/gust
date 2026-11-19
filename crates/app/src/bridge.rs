@@ -1881,10 +1881,7 @@ fn open_reporting(
         let Some(thread) = thread else {
             return;
         };
-        let reason = match refusal {
-            gust_core::open::OpenRefusal::Failed(reason) => reason,
-            other => other.to_string(),
-        };
+        let reason = open_refusal_reason(refusal);
         let message = format!(
             "Could not open \"{name}\": {reason}. Right-click → Open with… to choose an app."
         );
@@ -1896,6 +1893,13 @@ fn open_reporting(
             );
         });
     })
+}
+
+fn open_refusal_reason(refusal: gust_core::open::OpenRefusal) -> String {
+    match refusal {
+        gust_core::open::OpenRefusal::Failed(reason) => reason,
+        other => other.to_string(),
+    }
 }
 
 impl qobject::DirModel {
@@ -3356,19 +3360,7 @@ impl qobject::DirModel {
                 // Mixed kinds: open them one at a time with their own
                 // defaults, which is what the user would get by pressing
                 // Enter on each.
-                let mut opened = 0usize;
-                for p in &paths {
-                    let mode = std::fs::metadata(p).ok().map(|m| {
-                        use std::os::unix::fs::PermissionsExt;
-                        m.permissions().mode()
-                    });
-                    if open_reporting(self.as_ref().qt_thread_handle(), p, mode).is_ok() {
-                        opened += 1;
-                    }
-                }
-                let msg = format!("Sent {opened} files to the desktop opener");
-                self.as_mut().set_status(QString::from(&msg));
-                return QString::from(format!("OK:{msg}"));
+                return self.open_mixed_selection(&paths);
             }
         }
 
@@ -3385,6 +3377,35 @@ impl qobject::DirModel {
                 QString::from(format!("OK:{msg}"))
             }
         }
+    }
+
+    fn open_mixed_selection(mut self: Pin<&mut Self>, paths: &[PathBuf]) -> QString {
+        use std::os::unix::fs::PermissionsExt;
+        let total = paths.len();
+        let mut refusals = Vec::new();
+        for path in paths {
+            let mode = std::fs::metadata(path).ok().map(|m| m.permissions().mode());
+            if let Err(error) = open_reporting(self.as_ref().qt_thread_handle(), path, mode) {
+                let name = path.file_name().unwrap_or_default().to_string_lossy();
+                refusals.push((name, open_refusal_reason(error)));
+            }
+        }
+
+        if let Some((_, first_reason)) = refusals.first() {
+            let sent = total - refusals.len();
+            if sent == 0 && refusals.iter().all(|(_, reason)| reason == first_reason) {
+                return QString::from(format!("Could not open {total} files: {first_reason}"));
+            }
+            let details = refusals
+                .into_iter()
+                .map(|(name, reason)| format!("{name}: {reason}"))
+                .collect::<Vec<_>>()
+                .join(" · ");
+            return QString::from(format!("Sent {sent} of {total} files. {details}"));
+        }
+        let msg = format!("Sent {total} files to the desktop opener");
+        self.as_mut().set_status(QString::from(&msg));
+        QString::from(format!("OK:{msg}"))
     }
 
     // --- open with (DESIGN §6.17) ----------------------------------------
