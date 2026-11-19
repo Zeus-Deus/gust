@@ -628,11 +628,8 @@ Window {
             return
         }
         if (op === "open") {
-            // The opener started, then reported that it could not open the file:
-            // "Opened name" was premature, so take it back and say why.
-            if (hints.message === qsTr("Opened ") + name) hints.message = ""
             win.alertText = message
-            win.qaDump("open-no-handler")
+            win.qaDump("open-failed")
             return
         }
         if (!message.startsWith("ASKKEY:") && !message.startsWith("ASK:"))
@@ -1972,7 +1969,7 @@ Window {
         if (r.startsWith("blocked:"))
             hints.message = r.substring(8)
         else if (r === "file")
-            hints.message = qsTr("Opened ") + dirModel.entry_name(row)
+            hints.message = ""
         win.qaDump("activate")
     }
 
@@ -4132,7 +4129,7 @@ Window {
         onOpenRequested: (path) => {
             const err = dirModel.open_path(path)
             recentPanel.error = err
-            if (err === "") { hints.message = qsTr("Opened ") + path; recentPanel.hide() }
+            if (err === "") { hints.message = ""; recentPanel.hide() }
             win.qaDump("recent-open")
         }
         onRevealRequested: (path) => { recentPanel.hide(); dirModel.reveal(path); win.qaDump("recent-reveal") }

@@ -2463,6 +2463,11 @@ viewer showing five images** — you can move between them. Five separate
 viewers, each holding one photograph, is five windows to close and no way to
 flip through them.
 
+Starting a desktop opener only submits the request. The file list and Recent
+leave success unannounced. If the opener reports a launch failure, the window
+names the file, gives the reported reason and points to Open with…. An empty
+Open with menu cannot establish why the desktop failed to open the file.
+
 ### One launch, many arguments
 
 The handler's `Exec` line says which it can take:

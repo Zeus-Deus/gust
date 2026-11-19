@@ -11,8 +11,8 @@ done
 cat > "$d48/.bin/xdg-open" <<'STUB'
 #!/bin/sh
 printf '%s\n' "$@" >> "$(dirname "$0")/opened"
-# Like the real one when no application can take the file.
-case "$1" in *.nohandler) exit 4 ;; esac
+# xdg-open also returns 4 when a configured app fails to launch.
+case "$1" in *.nohandler|*.patch) exit 4 ;; esac
 STUB
 cat > "$d48/.bin/mpv" <<'STUB'
 #!/usr/bin/python3
@@ -49,8 +49,7 @@ key Escape; typ "orphan.nohandler"
 expect "cursor on orphan.nohandler" "d['model']['cursor_name']" "orphan.nohandler"
 key Return
 wait_for "'orphan.nohandler' in d['alertText']" "True" 20 >/dev/null
-# "No app is set up to open …" when the type has no association, "Could not
-# open …" when it has one that failed: either way the file is named.
+# An opener failure names the file and offers a way to choose an app.
 expect_contains "a file the desktop could not open says so" "d['alertText']" 'open "orphan.nohandler"'
 shot 48-no-application
 key Escape
@@ -61,6 +60,91 @@ expect "Run refuses content without a confirmation" "d['confirmOpen']" "False"
 expect_contains "Run points back to Open" "d['alertText']" "use Open instead of Run"
 shot 48-content-is-not-a-program
 key Escape
+
+# Only the administrator associates an editor, and only with the parent type.
+# Keep this complete desktop registry separate from the rest of the fixture.
+registry="$d48/.desktop"
+mkdir -p "$registry"/{admin,user,data/applications,system,bin}
+ln -s /usr/share/mime "$registry/system/mime"
+ln -s "$(command -v gio)" "$registry/bin/gio"
+cat > "$registry/admin/mimeapps.list" <<'ASSOCIATIONS'
+[Added Associations]
+text/plain=qa-editor.desktop;
+ASSOCIATIONS
+cat > "$registry/data/applications/qa-editor.desktop" <<'EDITOR'
+[Desktop Entry]
+Type=Application
+Name=QA Editor
+Exec=/usr/bin/true %f
+Path=/nonexistent-gust-qa-editor-directory
+EDITOR
+printf '%s\n' '--- old' '+++ new' '@@ -1 +1 @@' '-old' '+new' > "$d48/fix.patch"
+python3 - "$d48/fix.patch" "$registry/data/recently-used.xbel" <<'PYTHON'
+from pathlib import Path
+from sys import argv
+from xml.etree.ElementTree import Element, SubElement, ElementTree
+doc = Element("xbel")
+SubElement(doc, "bookmark", href=Path(argv[1]).as_uri())
+ElementTree(doc).write(argv[2])
+PYTHON
+registry_env=("XDG_CONFIG_HOME=$registry/user" "XDG_CONFIG_DIRS=$registry/admin"
+              "XDG_DATA_HOME=$registry/data" "XDG_DATA_DIRS=$registry/system")
+printf -v open_env '%q ' "${registry_env[@]}"
+# Ask the real desktop resolver to verify the fixture before exercising Gust.
+mime_report="$(env "${registry_env[@]}" LC_ALL=C gio mime text/x-diff)"
+if [[ "${mime_report%%$'\n'*}" == *"qa-editor.desktop" ]]; then
+  ok "the administrator's editor is the inherited default for patches"
+else
+  bad "the isolated desktop did not resolve the patch editor: $mime_report"
+fi
+stop_gust; QA_ENV="$open_env" start_gust "$d48"
+key Escape; typ "fix.patch"
+expect "cursor on fix.patch" "d['model']['cursor_name']" "fix.patch"
+key Return
+wait_for "'fix.patch' in d['alertText']" "True" 20 >/dev/null
+expect_contains "failed associated app names the patch" "d['alertText']" 'Could not open "fix.patch"'
+expect_contains "failed open offers an alternative" "d['alertText']" 'Open with'
+shot 48-associated-launch-failure
+key Escape
+
+# Recent used to set an "Opened <full path>" hint as soon as the opener spawned.
+palette_run "Recent files"
+expect "Recent opened" "d['recentOpen']" "True"
+key Return
+wait_for "'fix.patch' in d['alertText'] and not d['recentOpen']" "True" 20 >/dev/null
+expect_contains "Recent reports the failed open" "d['alertText']" 'Could not open "fix.patch"'
+expect "Recent never announces success on spawn" "d['hintStatus'].startswith('Opened ')" "False"
+shot 48-recent-launch-failure
+key Home
+expect "the warning was dismissed" "d['alertText']" ""
+expect "dismissal leaves no success hint" "d['hintStatus'].startswith('Opened ')" "False"
+shot 48-recent-dismissed
+
+# Mixed file types dispatch separately and can fail after the count is shown.
+typ "fix.patch"; ctrl space
+sleep 1.3
+typ "report.PDF"; ctrl space
+expect "two different file types selected" "d['selCount']" "2"
+key Return
+wait_for "'fix.patch' in d['alertText']" "True" 20 >/dev/null
+expect_contains "mixed selection names the failed file" "d['hintShown']" 'Could not open "fix.patch"'
+expect_contains "mixed selection counts submitted requests" "d['hintStatus']" 'Sent 2 files to the desktop opener'
+
+# Give only Gust a PATH containing real gio and no xdg-open. The valid editor's
+# missing working directory makes GIO return 2 during launch.
+printf -v gio_path 'PATH=%q' "$registry/bin"
+stop_gust; QA_ENV="$open_env$gio_path" start_gust "$d48"
+key Escape; typ "fix.patch"
+key Return
+wait_for "'fix.patch' in d['alertText']" "True" 20 >/dev/null
+expect_contains "gio fallback reports launch failure" "d['alertText']" 'Could not open "fix.patch"'
+shot 48-gio-launch-failure
+
+# With the last opener gone, even dispatch fails. Keep that specific reason.
+mv "$registry/bin/gio" "$registry/gio"
+key Escape; typ "fix.patch"
+key Return
+expect_contains "missing desktop opener explains the refusal" "d['hintShown']" 'no desktop opener was found'
 
 unset QA_PATH_PREPEND
 stop_gust; start_gust "$FIXTURE"

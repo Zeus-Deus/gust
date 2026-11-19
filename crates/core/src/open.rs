@@ -80,19 +80,20 @@ pub fn command_for(opener: &str, path: &Path) -> Command {
 const OPEN_FAILED_WINDOW: Duration = Duration::from_secs(5);
 
 /// What `on_refusal` is told when the opener itself reports failure.
-pub const OPENER_REPORTED_FAILURE: &str = "the desktop could not open it";
+pub const OPENER_REPORTED_FAILURE: &str = "the desktop launcher reported a failure";
 
-/// What an opener's exit says about the open, if anything.
-///
-/// `xdg-open` exits 3 ("a required tool could not be found") or 4 ("the
-/// action failed") when the open did not happen. Neither says WHY: 4 is also
-/// what an installed, associated application that fails to start produces.
-/// So this is a plain failure, never [`OpenRefusal::NoHandler`]; a caller
-/// that wants to blame a missing association has to check for one. Other
-/// openers and other codes are not interpreted: guessing would invent errors.
+/// A gio open process exits after dispatch. xdg-open can stay alive with
+/// the application, so only its early failures describe the open request.
 fn refusal_from_exit(opener: &str, code: Option<i32>, elapsed: Duration) -> Option<OpenRefusal> {
-    (opener == "xdg-open" && matches!(code, Some(3 | 4)) && elapsed <= OPEN_FAILED_WINDOW)
-        .then(|| OpenRefusal::Failed(OPENER_REPORTED_FAILURE.into()))
+    let reason = match (opener, code) {
+        ("xdg-open", Some(3)) if elapsed <= OPEN_FAILED_WINDOW => {
+            "a required desktop tool is missing"
+        }
+        ("xdg-open", Some(4)) if elapsed <= OPEN_FAILED_WINDOW => OPENER_REPORTED_FAILURE,
+        ("gio", Some(2)) => OPENER_REPORTED_FAILURE,
+        _ => return None,
+    };
+    Some(OpenRefusal::Failed(reason.into()))
 }
 
 /// Wait for a detached child on a worker thread, so the caller never blocks
@@ -176,7 +177,7 @@ pub fn open_with_desktop_reporting(
     }
     match last_err {
         Some(e) => Err(OpenRefusal::Failed(e)),
-        None => Err(OpenRefusal::NoHandler),
+        None => Err(OpenRefusal::Failed("no desktop opener was found".into())),
     }
 }
 
@@ -568,7 +569,10 @@ mod tests {
 
     #[test]
     fn an_opener_that_reports_failure_is_a_failure_not_a_missing_app() {
-        for code in [3, 4] {
+        for (code, reason) in [
+            (3, "a required desktop tool is missing"),
+            (4, OPENER_REPORTED_FAILURE),
+        ] {
             let (d, child) = fake_opener(&format!("none-{code}"), &format!("exit {code}"));
             let (tx, rx) = std::sync::mpsc::channel();
             watch_opener("xdg-open", child, move |refusal| {
@@ -576,8 +580,8 @@ mod tests {
             });
             assert_eq!(
                 rx.recv_timeout(Duration::from_secs(10)).ok(),
-                Some(OpenRefusal::Failed(OPENER_REPORTED_FAILURE.into())),
-                "xdg-open exit {code} means the open failed, not why"
+                Some(OpenRefusal::Failed(reason.into())),
+                "xdg-open exit {code}"
             );
             std::fs::remove_dir_all(&d).ok();
         }
@@ -601,14 +605,6 @@ mod tests {
     #[test]
     fn only_a_prompt_xdg_open_failure_is_reported() {
         let soon = Duration::from_millis(200);
-        assert_eq!(
-            refusal_from_exit("xdg-open", Some(3), soon),
-            Some(OpenRefusal::Failed(OPENER_REPORTED_FAILURE.into()))
-        );
-        assert_eq!(
-            refusal_from_exit("xdg-open", Some(4), soon),
-            Some(OpenRefusal::Failed(OPENER_REPORTED_FAILURE.into()))
-        );
         for code in [Some(0), Some(1), Some(2), None] {
             assert_eq!(refusal_from_exit("xdg-open", code, soon), None, "{code:?}");
         }
@@ -618,8 +614,17 @@ mod tests {
             refusal_from_exit("xdg-open", Some(4), Duration::from_secs(3600)),
             None
         );
-        // Other openers' codes mean other things.
-        assert_eq!(refusal_from_exit("gio", Some(4), soon), None);
+    }
+
+    #[test]
+    fn gio_reports_a_dispatch_failure_even_if_the_desktop_took_time_to_reply() {
+        assert_eq!(
+            refusal_from_exit("gio", Some(2), Duration::from_secs(60)),
+            Some(OpenRefusal::Failed(OPENER_REPORTED_FAILURE.into())),
+        );
+        for code in [Some(0), Some(1), Some(4), None] {
+            assert_eq!(refusal_from_exit("gio", code, Duration::ZERO), None);
+        }
     }
 
     #[test]

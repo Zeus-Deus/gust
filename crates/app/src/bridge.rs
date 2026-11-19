@@ -1864,32 +1864,6 @@ fn human_time(mtime: i64) -> String {
     gust_core::properties::relative_time(mtime, now, offset)
 }
 
-/// What to tell the user when the desktop's opener reported failure.
-///
-/// The opener does not say why. Only when Gust itself found no application
-/// for the file's type (`Some(false)`) is the missing association named; an
-/// associated application that failed to start, or a type that could not be
-/// determined, is a plain "could not open" with the way to try another app.
-fn open_failure_message(name: &str, has_handler: Option<bool>) -> String {
-    match has_handler {
-        Some(false) => {
-            format!("No app is set up to open \"{name}\". Right-click → Open with… to choose one.")
-        }
-        _ => format!("Could not open \"{name}\". Right-click → Open with… to try another app."),
-    }
-}
-
-/// Is any application set up for a file whose type, and what that type is a
-/// kind of, is `lineage`?
-///
-/// The desktop falls back from the specific type to the general: a patch
-/// (`text/x-diff`) opens in the editor associated only with `text/plain`.
-/// Looking at the exact type alone would report such a desktop as having no
-/// application, so absence is established only when the whole line is empty.
-fn association_exists(lineage: &[String], has_handler: impl Fn(&str) -> bool) -> bool {
-    lineage.iter().any(|kind| has_handler(kind))
-}
-
 /// Open through the desktop. An opener can start and still fail to open the
 /// file; that answer arrives on a worker and reaches the window as
 /// `place_done("open", …)`, so nothing here waits for it.
@@ -1903,20 +1877,17 @@ fn open_reporting(
         .unwrap_or_default()
         .to_string_lossy()
         .into_owned();
-    let target = path.to_path_buf();
-    gust_core::open::open_with_desktop_reporting(path, mode, move |_failed| {
+    gust_core::open::open_with_desktop_reporting(path, mode, move |refusal| {
         let Some(thread) = thread else {
             return;
         };
-        // Still on the worker: the association lookup reads files.
-        let has_handler = qobject::DirModel::mime_of(&target).map(|mime| {
-            let dirs = gust_core::open::with::application_dirs();
-            association_exists(
-                &gust_core::mimeparents::lineage_beside(&mime, &dirs),
-                |kind| !gust_core::open::with::handlers_for(kind).is_empty(),
-            )
-        });
-        let message = open_failure_message(&name, has_handler);
+        let reason = match refusal {
+            gust_core::open::OpenRefusal::Failed(reason) => reason,
+            other => other.to_string(),
+        };
+        let message = format!(
+            "Could not open \"{name}\": {reason}. Right-click → Open with… to choose an app."
+        );
         let _ = thread.queue(move |model| {
             model.place_done(
                 QString::from("open"),
@@ -3395,7 +3366,7 @@ impl qobject::DirModel {
                         opened += 1;
                     }
                 }
-                let msg = format!("Opened {opened} files");
+                let msg = format!("Sent {opened} files to the desktop opener");
                 self.as_mut().set_status(QString::from(&msg));
                 return QString::from(format!("OK:{msg}"));
             }
@@ -9933,54 +9904,6 @@ fn empty_reason_for(error: &str) -> String {
         "No such file or directory" => "This folder no longer exists".into(),
         "Permission denied" => "You don't have permission to open this folder".into(),
         _ => format!("Can't open this folder: {e}"),
-    }
-}
-
-#[cfg(test)]
-mod open_failure_message_tests {
-    use super::{association_exists, open_failure_message};
-
-    /// A desktop whose only association is an editor for text/plain, a
-    /// `.patch` file of type text/x-diff, and a launch that failed: the
-    /// editor IS configured (through the type's parent), so the message
-    /// must not send the user to set one up.
-    #[test]
-    fn an_inherited_handler_that_failed_is_not_a_missing_app() {
-        let lineage = gust_core::mimeparents::lineage("text/x-diff", &[]);
-        let only_plain_text = |kind: &str| kind == "text/plain";
-        assert!(!only_plain_text("text/x-diff"), "no direct association");
-        let has = association_exists(&lineage, only_plain_text);
-        assert!(has);
-        let message = open_failure_message("fix.patch", Some(has));
-        assert!(
-            message.starts_with("Could not open \"fix.patch\""),
-            "{message}"
-        );
-    }
-
-    #[test]
-    fn no_app_is_claimed_only_when_the_whole_line_has_none() {
-        let lineage = gust_core::mimeparents::lineage("application/x-nothing", &[]);
-        assert!(!association_exists(&lineage, |_| false));
-        // A catch-all association for any file still counts as an app.
-        assert!(association_exists(&lineage, |kind| kind == "application/octet-stream"));
-    }
-
-    #[test]
-    fn a_missing_association_is_named_only_when_it_was_established() {
-        let none = open_failure_message("a.xyz", Some(false));
-        assert!(
-            none.starts_with("No app is set up to open \"a.xyz\""),
-            "{none}"
-        );
-        // An associated app that failed to start, or an unknown type, is not
-        // blamed on a missing association.
-        for has in [Some(true), None] {
-            let failed = open_failure_message("a.pdf", has);
-            assert!(failed.starts_with("Could not open \"a.pdf\""), "{failed}");
-            assert!(!failed.contains("No app is set up"), "{failed}");
-            assert!(failed.contains("Open with…"), "{failed}");
-        }
     }
 }
 
