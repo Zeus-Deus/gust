@@ -94,12 +94,10 @@ pub fn without_colours(names: &[String]) -> Vec<String> {
 /// The raw stored value of `path` (not following a final link). `None`
 /// when it has no tags or its filesystem cannot hold them.
 pub fn read_raw(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
-    let mut buf = vec![0u8; MAX_VALUE];
+    // Most rows have no tags. Allocate owned bytes only when the attribute exists.
+    let mut buf = [std::mem::MaybeUninit::uninit(); MAX_VALUE];
     match rustix::fs::lgetxattr(path, ATTR, &mut buf[..]) {
-        Ok(n) => {
-            buf.truncate(n);
-            Ok(Some(buf))
-        }
+        Ok((value, _)) => Ok(Some(value.to_vec())),
         Err(e) if e == rustix::io::Errno::NODATA || e == rustix::io::Errno::NOTSUP => Ok(None),
         // ERANGE: larger than any real tag list. Treated as untagged for
         // display; writing refuses rather than clobber what it cannot read.
