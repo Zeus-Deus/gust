@@ -53,6 +53,13 @@ fn actual_qt_navigation_layout_persistent_mapping_metadata_and_hold() {
     qobject::gust_test_attach_probe(model.pin_mut());
     model.pin_mut().navigate_path(fixture.0.join("a"));
     wait(app, &model, |m| m.settled && m.count == 1001);
+    // Chooser Enter uses the same raw token boundary as ordinary navigation.
+    assert_eq!(model.pin_mut().chooser_enter(0).to_string(), "folder");
+    let raw_key = LocationKey::local(fixture.0.join("a").join(&raw));
+    wait(app, &model, |m| m.settled && m.key == raw_key);
+    assert_eq!(model.count, 0);
+    model.pin_mut().navigate_path(fixture.0.join("a"));
+    wait(app, &model, |m| m.settled && m.count == 1001);
     model
         .pin_mut()
         .apply_sort_to(&QString::from("name"), true, false);
@@ -77,7 +84,18 @@ fn actual_qt_navigation_layout_persistent_mapping_metadata_and_hold() {
     assert_eq!(model.published_row(200), -1);
     // The old row still names A while B is requested and held.
     model.pin_mut().hold_live_updates(true);
+    model
+        .chooser_token
+        .store(7, std::sync::atomic::Ordering::SeqCst);
     model.pin_mut().navigate_path(fixture.0.join("b"));
+    assert_ne!(
+        model
+            .chooser_token
+            .load(std::sync::atomic::Ordering::SeqCst),
+        7,
+        "Save checks expire on requested navigation, before held publication"
+    );
+    assert!(!model.chooser_accept(&QString::default()).is_empty());
     assert_eq!(model.key, LocationKey::local(fixture.0.join("a")));
     assert!(model
         .path_of_row(0)
@@ -270,6 +288,7 @@ fn pending_selection_refuses_readonly_targets_and_recovers(
 
     model.pin_mut().sel_only(0);
     assert!(model.selection_pending);
+    assert!(!model.chooser_accept(&QString::default()).is_empty());
     // Even an invalid row must refuse before constructing its target/plan.
     assert_eq!(model.drag_preview(i32::MAX, 1).to_string(), REFUSAL);
     assert_eq!(

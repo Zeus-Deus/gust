@@ -21,9 +21,11 @@ THEME = '''    property QtObject tokens: QtObject {
         property int icons_rev: 0
         property string name: "fixture"
         property bool is_light: false
+        property real fontBase: 12
+        property real spacingScale: 1
         function color(k) { return "#808080" }
         function metric(k) {
-            return ({ font_base: 12, spacing_scale: 1, selected_background_alpha: 0.2,
+            return ({ font_base: fontBase, spacing_scale: spacingScale, selected_background_alpha: 0.2,
                       normal_border_alpha: 0.5, border_width: 1 })[k] || 0
         }
         function icon_look(k) { return "" }

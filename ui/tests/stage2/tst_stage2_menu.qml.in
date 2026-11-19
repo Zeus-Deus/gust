@@ -54,7 +54,9 @@ Item {
         function focusPane(p) {}
         function focusList() {}
         function refreshPlaces() {}
+        function syncFilterBar() {}
         // What the menu says depends on the selection it opens on.
+        function chooserMenu(items) { return items }
         function contextItems(row) {
             return row < 0 ? [{ label: "New folder" }]
                            : [{ label: "Open " + dirModel.sel_count() + " · " + dirModel.entry_name(row) }]

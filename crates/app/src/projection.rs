@@ -234,6 +234,7 @@ pub struct Frame {
     pub display_revision: u64,
     pub source_display_revision: u64,
     pub query: String,
+    pub chooser_globs: Arc<[String]>,
     pub sort: SortSpec,
     pub sort_revision: u64,
     pub hidden: bool,
@@ -268,6 +269,7 @@ impl Frame {
             display_revision: 0,
             source_display_revision: 0,
             query: String::new(),
+            chooser_globs: Arc::default(),
             sort: SortSpec::default(),
             sort_revision: 0,
             hidden: false,
@@ -318,6 +320,7 @@ pub struct Request {
     pub request: u64,
     pub selection_revision: u64,
     pub query: String,
+    pub chooser_globs: Arc<[String]>,
     pub sort: SortSpec,
     pub sort_revision: u64,
     pub hidden: bool,
@@ -501,6 +504,7 @@ impl State {
         self.current(&self.base.all)
             && (self.base.request != self.desired.request
                 || self.base.query != self.desired.query
+                || self.base.chooser_globs != self.desired.chooser_globs
                 || self.base.sort != self.desired.sort
                 || self.base.sort_revision != self.desired.sort_revision
                 || self.base.hidden != self.desired.hidden)
@@ -716,6 +720,7 @@ impl Runtime {
             request: 0,
             selection_revision: 0,
             query: String::new(),
+            chooser_globs: Arc::default(),
             sort: SortSpec::default(),
             sort_revision: 0,
             hidden: false,
@@ -1490,6 +1495,7 @@ impl Pane {
         // Suppress automatic panic retry. A new user request remains possible.
         s.desired.request = s.base.request;
         s.desired.query = s.base.query.clone();
+        s.desired.chooser_globs = s.base.chooser_globs.clone();
         s.desired.sort = s.base.sort;
         s.desired.hidden = s.base.hidden;
         self.metrics.errors.fetch_add(1, Ordering::Relaxed);
@@ -1542,13 +1548,35 @@ fn prepare(
     let visible = if selection_only {
         base.visible.clone()
     } else {
-        Arc::new(projection::filter_indices(
+        let mut visible = projection::filter_indices(
             &entries,
             &order,
             &PreparedQuery::new(&request.query),
             request.hidden,
             cancel,
-        )?)
+        )?;
+        if !request.chooser_globs.is_empty() {
+            let mut kept = 0;
+            for row in 0..visible.len() {
+                if row % 128 == 0 && cancel.checkpoint() {
+                    return Err(projection::ProjectionError::Cancelled);
+                }
+                let entry = &entries[visible[row]];
+                use std::os::unix::ffi::OsStrExt;
+                let name = entry.name.as_os_str().as_bytes();
+                let file = name.rsplit(|b| *b == b'/').next().unwrap_or(name);
+                if matches!(
+                    entry.kind,
+                    gust_core::entry::EntryKind::Dir | gust_core::entry::EntryKind::Symlink
+                ) || gust_core::chooser::filter_shows(&request.chooser_globs, file)
+                {
+                    visible[kept] = visible[row];
+                    kept += 1;
+                }
+            }
+            visible.truncate(kept);
+        }
+        Arc::new(visible)
     };
     if !same && entries.key == base.all.key {
         for (row, entry) in entries.iter().enumerate() {
@@ -1829,6 +1857,11 @@ fn prepare(
             } else {
                 request.query.clone()
             },
+            chooser_globs: if selection_only {
+                base.chooser_globs.clone()
+            } else {
+                request.chooser_globs.clone()
+            },
             sort: if selection_only {
                 base.sort
             } else {
@@ -1920,6 +1953,7 @@ fn prepare_marks(
         display_revision: base.display_revision + 1,
         source_display_revision: base.display_revision,
         query: base.query.clone(),
+        chooser_globs: base.chooser_globs.clone(),
         sort: base.sort,
         sort_revision: base.sort_revision,
         hidden: base.hidden,

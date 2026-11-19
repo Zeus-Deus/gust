@@ -14,6 +14,7 @@ Item {
     z: 60
 
     property bool open: false
+    property bool picker: false
     /// The parsed places_json from the model.
     property var places: ({})
     property var operation: null
@@ -29,6 +30,7 @@ Item {
             || (key === "ssh" && root.needsSshfs ? {key: "ssh", packages: ["sshfs"], installable: false} : null)
     }
     readonly property bool missingSupport: root.requirement !== null && root.requirement.packages.length > 0
+    readonly property bool canInstallSupport: !root.picker && !root.busy && root.missingSupport && root.requirement.installable
     readonly property bool checkingSupport: root.supportKey !== "" && root.requirement === null
     readonly property bool supportReady: root.supportKey !== "" && root.requirement !== null && !root.missingSupport
     readonly property string supportTitle: {
@@ -55,7 +57,7 @@ Item {
         }
     }
     function installSupport() {
-        if (root.busy || !root.missingSupport || !root.requirement.installable) return
+        if (!root.canInstallSupport) return
         root.actionRequested("setup-install:" + root.requirement.key)
     }
     signal refreshRequested()
@@ -209,7 +211,7 @@ Item {
         }
 
         const mobile = p.mobile || []
-        if (mobile.length > 0) {
+        if (!root.picker && mobile.length > 0) {
             out.push({ type: "head", text: qsTr("Phones and tablets") })
             for (const device of mobile)
                 out.push(Object.assign({}, device, { type: "place", kind: "mobile", label: device.name,
@@ -226,9 +228,11 @@ Item {
                        online: true, connected: c.connected, lost: c.lost, path: c.path, user: "" })
 
         out.push({ type: "head", text: qsTr("Add") })
-        out.push({ type: "action", action: "cloud-setup", text: qsTr("Add cloud storage…") })
+        if (!root.picker)
+            out.push({ type: "action", action: "cloud-setup", text: qsTr("Add cloud storage…") })
         out.push({ type: "action", action: "share-add", text: qsTr("Add a Windows or NFS share…") })
-        out.push({ type: "action", action: "device-sharing", text: qsTr("Send or get files…") })
+        if (!root.picker)
+            out.push({ type: "action", action: "device-sharing", text: qsTr("Send or get files…") })
         return out
     }
     /// The height of the rows, summed by type, BEFORE any delegate exists
@@ -439,7 +443,7 @@ Item {
                         Rectangle {
                             id: installButton
                             objectName: "connectionInstallSupport"
-                            visible: root.missingSupport && root.requirement.installable && !root.busy
+                            visible: root.canInstallSupport
                             width: installLabel.implicitWidth + Tokens.spaceLg
                             height: visible ? Tokens.controlHeight : 0
                             color: Tokens.accent

@@ -55,6 +55,12 @@ must instrument new fixture early returns. Individual fixture flags such as
 `GUST_SSHFS_REQUIRED=1` and `GUST_PREVIEWS_REQUIRED=1` remain supported by their
 owning crates. No fixture service or live clipboard is enabled implicitly.
 
+The app test suite needs `dbus-daemon` for its display-free chooser lifecycle
+tests. They use private buses to check that closing a request or disconnecting
+its owner reaps that chooser while other callers remain active. A FIFO holds
+one result read to check that the dispatcher still handles cancellation and
+discards a late result after the same request path is reused.
+
 Use minimal selectors and the shared `/tmp/gust-build.lock` for compilation in
 this development environment. `tests/release-gates.py` acquires it nonblockingly
 around Rust/model checks; `packaging/build-artifact.py` owns it for release builds.
@@ -209,6 +215,27 @@ some global process termination. Do not use them on a shared/human desktop or
 as the native release gate. Their old evidence does not qualify a new artifact.
 No native/theme or benchmark acceptance is run automatically on public hosted CI.
 
+The two legacy desktop QA runners allocate a private workspace under `/tmp`
+for each run. By default it holds the fixture home and auxiliary test trees.
+Set `GUST_FIXTURE` to use a new or empty directory under `/tmp` as the fixture
+home. The runner leaves that directory in place and allocates the auxiliary
+trees in its own workspace. The cross-filesystem deletion test uses a fresh
+directory on `/dev/shm` when available.
+
+Cleanup after a passing run is best-effort. It requires private user and mount
+namespaces, verifies the workspace identity, and checks for mounts before
+removal. If cleanup cannot proceed safely, the runner logs the retained path.
+Failed and interrupted runs retain their workspace. Set `GUST_KEEP_FIXTURE=1`
+to retain it after success as well. Screenshots and results go to the separate
+output directory.
+
+In section 10n, a supervised Gust instance pastes 2,000 nonempty files.
+An 8 MiB Linux file-size limit interrupts a write to the ninth file. The
+runner records the child's fatal signal and staged byte count in
+`10n-interruption.log`, checks for premature publication via inotify,
+compares every published file with its source, and reopens the folder to
+verify that Gust sweeps the staging file.
+
 ### Focused remote listing state journey
 
 ```sh
@@ -346,3 +373,15 @@ filters, audio seeking and stopping, PDF pages, Up/Down zoom in the viewer
 and preview, and Quick Look in Rows, Grid and Columns. It needs mpv, wtype,
 hyprctl, grim, ImageMagick, ffmpeg, Poppler and the sandbox/audio helpers
 used by Quick Look.
+
+### Local SSHFS and WebDAV peers
+
+On Arch Linux, run `tests/namespace-peers.sh` with bubblewrap, FUSE 3,
+sshfs, OpenSSH client tools, rclone and iproute2 installed. The driver builds
+the three integration binaries under the build lease. Each runs in a fresh
+unprivileged user, network, PID and mount namespace with its own loopback and
+temporary storage. Only the guest can reach its SFTP or WebDAV server. Its
+mount capability applies within that user namespace. The host needs
+unprivileged user namespaces and a readable/writable `/dev/fuse`.
+The independent SFTP backing directory and the WebDAV VFS cache exercise
+different completion semantics. Neither fixture requires a provider account.

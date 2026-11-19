@@ -206,6 +206,21 @@ impl LocationKey {
     pub fn display_path(&self) -> String {
         escape_for_display(&self.location)
     }
+
+    /// Full tab path for hover and accessibility. A plain absolute path and
+    /// a qualified spelling have disjoint prefixes, even for literal % escapes.
+    pub fn tab_path(&self) -> String {
+        if let Some(path) = self.as_path().filter(|p| p.is_absolute()) {
+            let display = self.display_path();
+            if display.as_bytes() == self.location.as_bytes() {
+                return display;
+            }
+            return crate::clipboard::path_to_uri(path);
+        }
+        let mut out = format!("{}:", self.provider.as_str());
+        crate::clipboard::push_uri_path(&mut out, self.location.as_bytes());
+        out
+    }
 }
 
 /// Is `target` the folder `current` already shows? Trailing and doubled
@@ -510,6 +525,30 @@ mod tests {
         let back = LocationKey::from_token(&token).expect("token parses");
         assert_eq!(back.location(), raw.as_os_str());
         assert_eq!(back, key);
+    }
+
+    #[test]
+    fn tab_paths_identify_exact_bytes_and_provider() {
+        for (raw, shown) in [
+            ("/Café 100%".as_bytes(), "/Café 100%"),
+            (b"relative/path", "local:relative/path"),
+            (b"/release<U+000A>", "/release<U+000A>"),
+            (b"/release%0A", "/release%0A"),
+            (b"/release\n", "file:///release%0A"),
+            (b"/release\xfe", "file:///release%FE"),
+            (b"/release\xff", "file:///release%FF"),
+            ("/release\u{fffd}".as_bytes(), "/release\u{fffd}"),
+            ("/a\u{202e}".as_bytes(), "file:///a%E2%80%AE"),
+        ] {
+            assert_eq!(LocationKey::local(OsStr::from_bytes(raw)).tab_path(), shown);
+        }
+        for provider in [ProviderId::Sftp, ProviderId::Gio, ProviderId::Rclone] {
+            let key = LocationKey::new(provider, OsString::from_vec(b"/share/%\xff".to_vec()));
+            assert_eq!(
+                key.tab_path(),
+                format!("{}:/share/%25%FF", provider.as_str())
+            );
+        }
     }
 
     #[test]

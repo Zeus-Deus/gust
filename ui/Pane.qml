@@ -16,6 +16,8 @@ Item {
     property var model: null
     /// "rows" | "grid" | "columns" — this pane's own choice.
     property string viewMode: "rows"
+    /// A plain click selects as well as moving the cursor (folder dialogs).
+    property bool clickSelects: false
     /// Whether a drop should move rather than copy (the window decides).
     property bool dropAsMove: false
 
@@ -79,6 +81,7 @@ Item {
 
     RowsView {
         id: rowsView
+        clickSelects: pane.clickSelects
         anchors.fill: parent
         visible: pane.viewMode === "rows"
         model: pane.model
@@ -103,6 +106,7 @@ Item {
 
     IconGridView {
         id: gridView
+        clickSelects: pane.clickSelects
         anchors.fill: parent
         visible: pane.viewMode === "grid"
         model: pane.model
@@ -125,6 +129,7 @@ Item {
 
     ColumnsView {
         id: columnsView
+        clickSelects: pane.clickSelects
         anchors.fill: parent
         visible: pane.viewMode === "columns"
         model: pane.model

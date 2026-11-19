@@ -44,56 +44,44 @@ fn run_default(mode: &str) -> i32 {
         eprintln!("gust: cannot find your config directory (is HOME set?)");
         return 1;
     };
-    let current = MimeApps::parse(&std::fs::read_to_string(&mime_path).unwrap_or_default());
+    let desktops = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
 
     match mode {
         "on" => {
-            // Claiming twice must not record gust.desktop as the "previous"
-            // value, which would make rollback restore Gust over itself.
-            if state.exists() && current.get("inode/directory").as_deref() == Some(GUST_DESKTOP) {
-                println!("gust is already the default file manager");
-                claim_show_in_folder();
-                return 0;
+            let done = match claim(&mime_path, &state, &desktops) {
+                Ok(done) => done,
+                Err(e) => {
+                    eprintln!("gust: cannot update {}: {e}", mime_path.display());
+                    return 1;
+                }
+            };
+            for line in done.lines() {
+                println!("{line}");
             }
-            let (next, prev) = plan_claim(&current);
-            if let Err(e) = write_atomic(&state, &prev.to_text()) {
-                eprintln!("gust: cannot record the previous default: {e}");
-                return 1;
-            }
-            if let Err(e) = write_atomic(&mime_path, &next.to_text()) {
-                eprintln!("gust: cannot update {}: {e}", mime_path.display());
-                return 1;
-            }
-            let was = prev
-                .entries
-                .get("inode/directory")
-                .and_then(|v| v.clone())
-                .unwrap_or_else(|| "nothing".into());
-            println!("gust is now the default file manager (was: {was})");
             claim_show_in_folder();
-            println!("run `gust --default off` to put it back");
+            if !done.already {
+                println!("run `gust --default off` to put it back");
+            }
             0
         }
         "off" => {
-            let Ok(text) = std::fs::read_to_string(&state) else {
-                println!("gust was not set as the default; nothing to undo");
-                return 0;
+            let done = match release(&mime_path, &state) {
+                Ok(Some(done)) => done,
+                Ok(None) => {
+                    println!("gust was not set as the default; nothing to undo");
+                    return 0;
+                }
+                Err(e) => {
+                    eprintln!("gust: cannot update {}: {e}", mime_path.display());
+                    return 1;
+                }
             };
-            let prev = PreviousDefaults::from_text(&text);
-            let (next, skipped) = plan_release(&current, &prev);
-            if let Err(e) = write_atomic(&mime_path, &next.to_text()) {
-                eprintln!("gust: cannot update {}: {e}", mime_path.display());
-                return 1;
-            }
-            let _ = std::fs::remove_file(&state);
-            for s in &skipped {
-                // A later choice by something else is reported, not undone.
-                println!("left alone: {s}");
-            }
             if let Some(dir) = gust_core::filemanager1::user_service_dir() {
                 let _ = gust_core::filemanager1::release_service(&dir);
             }
-            println!("the previous default file manager has been restored");
+            for line in done.lines() {
+                println!("{line}");
+            }
             0
         }
         other => {
@@ -124,8 +112,11 @@ fn run_file_dialogs(mode: &str) -> i32 {
     match mode {
         "on" => {
             if text.as_deref().is_some_and(is_claimed) {
+                // Still add the rule: this may be an upgrade from a version
+                // that answered dialogs without floating them.
+                let floated = sync_float_rule(true);
                 println!("gust already answers Open/Save dialogs");
-                return 0;
+                return report_float_rule(floated);
             }
             let (next, previous) = claim(text.as_deref(), &sys);
             if let Some(st) = &state {
@@ -148,8 +139,9 @@ fn run_file_dialogs(mode: &str) -> i32 {
         }
         "off" => {
             let Some(text) = text else {
+                let floated = sync_float_rule(false);
                 println!("gust was not answering Open/Save dialogs; nothing to undo");
-                return 0;
+                return report_float_rule(floated);
             };
             let rec = state
                 .as_ref()
@@ -176,6 +168,7 @@ fn run_file_dialogs(mode: &str) -> i32 {
             return 1;
         }
     }
+    let floated = sync_float_rule(mode == "on");
     // The portal reads its config at start; restart it so the change is
     // live now. Harmless when it is not running under systemd.
     let _ = std::process::Command::new("systemctl")
@@ -188,7 +181,51 @@ fn run_file_dialogs(mode: &str) -> i32 {
     } else {
         println!("Open and Save dialogs are back to the previous chooser");
     }
-    0
+    report_float_rule(floated)
+}
+
+fn report_float_rule(result: Result<(), String>) -> i32 {
+    match result {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("gust: {e}");
+            1
+        }
+    }
+}
+
+/// Add or remove the rule that floats chooser windows, in the file Omarchy
+/// loads after its defaults. No such file means this is not Omarchy: the
+/// dialog then simply tiles, and nothing is written.
+fn sync_float_rule(on: bool) -> Result<(), String> {
+    use gust_core::portal_conf::{add_rule, has_rule, remove_rule, windows_path};
+    let Some(path) = windows_path().filter(|p| p.exists()) else {
+        return Ok(());
+    };
+    let shown = path.display();
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("cannot read {shown}: {e}"))?;
+    if has_rule(&remove_rule(&text)) {
+        return Err(format!(
+            "the gust block in {shown} has lost its end marker; remove it by hand"
+        ));
+    }
+    let next = if on {
+        add_rule(&text)
+    } else {
+        remove_rule(&text)
+    };
+    if next == text {
+        return Ok(());
+    }
+    gust_core::omarchy_keys::write_atomic(&path, &next)
+        .map_err(|e| format!("cannot update {shown}: {e}"))?;
+    // Hyprland picks up the change on reload; harmless if not running.
+    let _ = std::process::Command::new("hyprctl")
+        .arg("reload")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    Ok(())
 }
 
 /// Add or remove Gust's marked block in `~/.config/hypr/bindings.lua`, the
@@ -410,18 +447,21 @@ fn main() {
     // Qt suppresses qDebug/qWarning output when stderr is not a terminal,
     // which hides QML errors from any automated run. Gust always wants them:
     // a silent QML failure is how a broken build looks healthy. Set only if
-    // the user has not expressed their own preference.
+    // the user has not expressed their own preference, and through
+    // `set_for_gust` so the applications Gust opens do not inherit it.
     if std::env::var_os("QT_FORCE_STDERR_LOGGING").is_none() {
-        std::env::set_var("QT_FORCE_STDERR_LOGGING", "1");
+        gust_core::childenv::set_for_gust("QT_FORCE_STDERR_LOGGING", "1");
     }
     if std::env::var_os("QT_ASSUME_STDERR_HAS_CONSOLE").is_none() {
-        std::env::set_var("QT_ASSUME_STDERR_HAS_CONSOLE", "1");
+        gust_core::childenv::set_for_gust("QT_ASSUME_STDERR_HAS_CONSOLE", "1");
     }
 
     // No GPU (a VM, a server, a machine whose driver is missing): Qt would
     // emulate OpenGL on the CPU through llvmpipe, which measured 2.5x the
     // memory and 1.5x the first-window time of Qt's own raster renderer.
-    // Decided from sysfs before Qt starts; only THIS process is affected,
+    // Decided from sysfs before Qt starts; only THIS process is affected
+    // (`set_for_gust`: an application opened from Gust gets the user's own
+    // value back, so it is not forced into software rendering too),
     // and a user's own QT_QUICK_BACKEND / GUST_RENDERER always wins (plan §9:
     // nothing global, nothing about the compositor).
     // The Settings choice applies unless the user already chose in the
@@ -449,9 +489,14 @@ fn main() {
         }
     };
     if software {
-        std::env::set_var("QT_QUICK_BACKEND", "software");
+        gust_core::childenv::set_for_gust("QT_QUICK_BACKEND", "software");
     }
     let mut app = QGuiApplication::new();
+    // A dialog has its own Wayland app id, so a window rule can float it
+    // without touching Gust's ordinary windows (DESIGN §6.27).
+    if std::env::var_os("GUST_CHOOSER").is_some_and(|mode| !mode.is_empty()) {
+        QGuiApplication::set_desktop_file_name(&QString::from("gust-chooser"));
+    }
     let mut engine = QQmlApplicationEngine::new();
 
     // A failed QML load must be LOUD and must exit non-zero. Silently running

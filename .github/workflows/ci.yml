@@ -75,7 +75,7 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get -o Dir::Cache::archives="$RUNNER_TEMP/gust-apt-cache" \
             install -y --no-install-recommends \
-            bubblewrap gvfs-backends just libarchive-dev libarchive-tools \
+            bubblewrap dbus-daemon gvfs-backends just libarchive-dev libarchive-tools \
             libdbus-1-dev libglib2.0-bin libwayland-dev util-linux \
             qt6-base-dev qt6-declarative-dev qt6-declarative-dev-tools
           test -x /usr/lib/qt6/bin/qmllint
@@ -112,6 +112,10 @@ jobs:
       - name: Build Qt application
         if: steps.changes.outputs.code == 'true'
         run: cargo build --workspace --locked
+
+      - name: Verify desktop service name ownership
+        if: steps.changes.outputs.code == 'true'
+        run: ./tests/desktop-service-names.sh target/debug/gust
 
       - name: Report test coverage
         if: ${{ always() && steps.changes.outputs.code == 'true' }}

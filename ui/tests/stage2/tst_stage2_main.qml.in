@@ -54,11 +54,13 @@ Item {
     QtObject {
         id: chooserBar
         property bool active: false
+        property bool canAccept: true
         property string mode: ""
         property string name: ""
         property string error: ""
         function focusName() {}
     }
+    QtObject { id: chooserFooter; property string name: "" }
     QtObject { id: hints; property string message: "" }
     QtObject { id: tabList; property int count: 2 }
     QtObject { id: tabs; function objectAt(i) { return i === 0 ? model : other } }
@@ -71,6 +73,7 @@ Item {
         id: model
         property bool selection_pending: false
         property int count: 5
+        property bool filter_pending: false
         property int cursor: 2
         property int selected: 3
         property var calls: []
@@ -104,7 +107,14 @@ Item {
         property var menuIntent: null
         function qaDump(tag) { dumps.push(tag) }
         function qaFlush() {}
+        property bool chooserAnswered: false
+        property bool chooserBusy: false
+        property bool chooserKeysFree: true
+        property string chooserMode: ""
+        function refreshChooserTarget() {}
+        function chooserAnswer(name) { chooserBar.error = dirModel.chooser_accept(name) }
         function askRun(row) { runs.push(row) }
+        function chooserMenu(items) { return items }
         function contextItems(row) {
             return row < 0 ? [{ label: "New folder" }] : [{ label: "Open " + dirModel.sel_count() + " items" }]
         }
@@ -143,7 +153,7 @@ Item {
                 { tag: "bulk-pattern", run: () => win.askBulkPattern(), effect: () => prompt.opened.length },
                 { tag: "rename", run: () => win.askRename(), effect: () => renameCard.opened.length },
                 { tag: "owner", run: () => win.askOwner(), effect: () => prompt.opened.length },
-                { tag: "chooser-open", run: () => win.chooserAccept(),
+                { tag: "chooser-open", run: () => { win.chooserMode = "open"; win.chooserAccept(); win.chooserMode = "" },
                   effect: () => model.calls.filter(c => c === "chooser_accept").length },
                 { tag: "open-many", run: () => win.activateRow(2),
                   effect: () => model.calls.filter(c => c === "activate_selection").length }

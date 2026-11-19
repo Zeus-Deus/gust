@@ -716,7 +716,17 @@ the rollback is the part that must be right.
   after Gust claimed it, `--default off` leaves that newer choice alone
   rather than stamping an old value over it (§8: "uninstall/rollback
   preserves later edits").
-- Written atomically, and never as root.
+- **Gust is never its own predecessor.** A key that already names Gust
+  (set by `xdg-mime` or the desktop's chooser) is not claimed and not
+  recorded, so `--default off` leaves it as found and says the default was
+  not changed instead of announcing a restore.
+- Written atomically, and never as root. A `mimeapps.list` that is a
+  symbolic link (dotfile managers) is written through to its target, which
+  keeps its mode; a new file is owner-only.
+- `~/.config/<desktop>-mimeapps.list` for `$XDG_CURRENT_DESKTOP` is read
+  before `mimeapps.list`. It is never edited; when it sends folders
+  elsewhere, `--default on` names the file and says folders will still open
+  with that app.
 - The state file lives beside Gust's own config, not in the user's XDG
   defaults, so removing Gust cannot corrupt unrelated associations.
 
@@ -1154,6 +1164,13 @@ Nothing is shared between tabs except the window itself.
   existing call site keeps working and there is one definition of "current".
 - **A tab never does I/O until it is looked at.** Opening five tabs must not
   start five listings; a background tab lists when first activated.
+- Hovering a tab reveals its full path before selection or close. The strip
+  exposes the same path as the tab's accessible name. For a background or
+  restored tab, the unopened target supplies the display text without I/O.
+  Show ordinary absolute local paths verbatim. When a local path contains
+  invalid UTF-8 or needs display escaping, show its byte-preserving file URI.
+  Provider-qualified locations use their own provider and percent-encoded
+  location bytes. Navigation continues to use the original key.
 - Closing the last tab closes nothing — the window keeps one tab, because a
   file manager with no tab has nothing to show.
 - **A running job belongs to the tab that started it.** Closing that tab
@@ -2457,7 +2474,14 @@ paths stay raw OS bytes, so a name that is not UTF-8 still opens.
 `Terminal=true` entries are launched through a terminal, because an editor
 with no terminal simply vanishes. That holds for a multi-file launch too, and
 the terminal is the desktop's own (`xdg-terminal-exec`) before `$TERMINAL` or
-a guess at an installed one.
+a guess at an installed one. For terminal apps, cloud setup and opening a
+terminal in a folder, a worker first checks `--print-id`, then the older
+`--test` mode, against a private registry whose only entry runs `/bin/false`.
+Older launchers can dispatch that entry when they ignore an option. Gust
+uses the first mode that prints the expected entry ID or command to look
+up the user's configured terminal. If neither mode is supported or the
+configured lookup fails, Gust tries the next candidate. Once a terminal starts,
+Gust reaps it without retrying the command.
 
 ### What it will not do
 
@@ -2475,6 +2499,14 @@ Select five photographs, press Enter, and the right outcome is **one image
 viewer showing five images** — you can move between them. Five separate
 viewers, each holding one photograph, is five windows to close and no way to
 flip through them.
+
+Starting a desktop opener only submits the request. The file list and Recent
+leave success unannounced. If the opener reports a launch failure, the window
+names the file, gives the reported reason and points to Open with…. An empty
+Open with menu cannot establish why the desktop failed to open the file.
+For selected documents of different types, Gust submits each file separately.
+If a submission fails, the warning gives the reason and accounts for how many
+requests reached an opener. A later launch failure still names its file.
 
 ### One launch, many arguments
 
@@ -2523,6 +2555,17 @@ bindings apply to this player process only. Non-media, explicit Open with…,
 and multi-selection retain their desktop handlers. If mpv is absent, the
 activated file opens with its desktop handler. Launch errors return to the
 owning model; no system file associations are changed.
+
+Every program started for the user — an application, an opener, the media
+player, a terminal, a custom action, Run — is built through
+`gust_core::childenv::for_user_app(&mut Command)`. Gust sets variables for
+its own window before Qt starts (`QT_QUICK_BACKEND=software`,
+`QT_FORCE_STDERR_LOGGING`, `QT_ASSUME_STDERR_HAS_CONSOLE`) only through
+`childenv::set_for_gust`, which records the user's value; `for_user_app`
+restores that value or removes the variable, and drops the window-only
+instructions (`GUST_SELECT`, `GUST_HANDOFF`, `GUST_READY_FILE`,
+`GUST_CHOOSER*`, `GUST_ADMIN*`). Nothing else is touched, and Gust's own
+helpers and re-execs do not use it.
 
 ## 6.19 The clipboard other applications can see
 
@@ -2886,7 +2929,123 @@ folder changes; a partial result is an alert. In a small or zoomed window
 the choices scroll and their columns narrow and wrap; Cancel and Apply
 stay pinned below them, and the focused box is scrolled into view.
 
-## 6.27 Agent tools (`gust --mcp`)
+## 6.27 Other apps' Open and Save dialogs
+
+`gust --portal` answers `org.freedesktop.impl.portal.FileChooser`. Every call
+starts one window in chooser mode and waits for it on its own thread. A chooser
+is a dialog: it floats, it is sized like one, and it answers exactly what it
+was asked.
+
+### What the window receives
+
+| Variable | Meaning |
+|---|---|
+| `GUST_CHOOSER` | `open`, `open-many`, `open-folder`, `save`, `save-many` |
+| `GUST_CHOOSER_TITLE` | the app's title |
+| `GUST_CHOOSER_ACCEPT` | the app's button label, mnemonics removed; unset when it sent none |
+| `GUST_CHOOSER_NAME` | suggested name (`save`) |
+| `GUST_CHOOSER_FILES` | path of a private file of NUL-separated names, raw bytes (`save-many`) |
+| `GUST_CHOOSER_FILTERS` | JSON `{"current":n,"filters":[{"name":..,"globs":[..]}]}`; unset when there are none |
+| `GUST_CHOOSER_RESULT` | private result file: NUL-separated absolute paths, then `filter:<n>` when there are filters |
+
+The service expands MIME rules to globs through `shared-mime-info`'s `globs2`
+before it starts the window, so the window never reads files to filter rows.
+It matches the preferred filter by its full original name and rule list. If
+the retained entries have no exact match, the preferred filter gets its own
+slot within the same limits.
+
+The window writes and syncs a private sibling file, then renames it to the
+result path. Every record ends in NUL. A complete answer contains one or more
+absolute paths and, when filters were offered, one final valid filter index.
+Malformed answers return code 2 with no results. A committed answer survives
+a later window error. A normal exit without a result file returns code 1.
+
+### The rules
+
+- **The highlighted row never decides.** The cursor is where the keyboard is,
+  not a choice. `open-folder` returns the one selected folder, otherwise the
+  folder on screen. A plain click selects in `open-folder`, because a click
+  is a choice and a cursor is not. The primary button always names what it
+  will return.
+- **Replacing a file is asked about.** `save` and `save-many` check their
+  targets on a worker (`chooser_check`, the UI thread never stats), and any
+  existing target opens a confirmation with Cancel as the focused default. A
+  name that is an existing folder opens that folder; nothing is returned.
+- **Nothing is written here.** The app writes the file after Gust answers, so
+  there is no undo journal entry; the confirmation is the safety.
+- **The app learns the file type.** The answer's `current_filter` is the filter
+  showing at accept, exactly as the app sent it, so an export picks its format.
+- **Only the newest question gets an answer.** A check that returns after
+  another overlay took over answers nothing, and the user presses Save again.
+- **Filters hide files, never folders.** Links stay in a listing, because a
+  link may be a folder; search results match by file name. Matching ignores
+  ASCII case.
+  The filter set is per process, because a chooser is one window. Selected globs
+  travel with each background projection request and displayed frame (§2.2), including
+  Find results. Changing file type queues a new projection; acceptance waits
+  for its publication and pending selection, so a hidden file cannot become
+  the answer or be returned with a different filter. Reconciliation and matching
+  stay on the cancellable CPU worker. A new load invalidates outstanding Save
+  checks before the displayed location changes.
+- **Ctrl+Return accepts in every mode.** Return keeps its usual meaning.
+- **The app can cancel.** `Request.Close` on the call's handle ends that window
+  and answers code 2, and only the bus name that made the call may send it. A
+  handle already in use by the same sender answers code 2 with no window.
+  Disconnecting cancels only that sender's requests. The service reaps closed
+  windows and discards late results even if a caller reuses the handle.
+  MIME expansion, names-file preparation and the single read of paths and filter
+  run on workers so another request can still be closed during filesystem I/O.
+- **A window that cannot start is not a cancel.** A failed spawn, or an exit
+  with an error and nothing picked, answers code 2, not 1.
+- **An app's request is bounded.** Globs, filters and labels have limits, and
+  the filter list is cut down rather than failing to fit one environment string.
+- **Names stay bytes.** `SaveFiles` names reach the answer byte for byte. A
+  name that cannot be used, or two that land on one target, refuse the call,
+  because the answer must match the names one to one.
+- **Links to folders are folders**, from the listing's `link_dir`. Until a
+  link's target is read nothing is decided about it. Entering a row only ever
+  navigates: a link that stopped being a folder shows why, and nothing launches.
+- **The Save field holds exact names.** A name it cannot hold unchanged is not
+  offered, and the name being checked does not change during the check.
+- **A stalled mount cannot pile up workers.** A check stops at its next target
+  once it is stale or forgotten, and at most four run; beyond that the dialog
+  says so.
+
+### The dialog
+
+A chooser is 875x600 unless a compositor rule sizes it, and reads as a dialog,
+not a file manager with a bar added:
+
+- `ChooserBar` on top: Cancel, the app's title, and the primary button. Cancel
+  never moves, and a long name elides inside the button.
+- `ChooserFooter` under the list, only when there is something to hold: the
+  Save name, how many files a `save-many` places, the file type.
+- The strip at the bottom lists the dialog's keys, not the file manager's.
+- Tabs, panes, Settings, Recent, Trash and anything that launches a file are
+  gone, from menus and shortcuts as well as from sight. A dialog never starts
+  a program, and never saves the session of the window it is not.
+- Ctrl+Return is a window shortcut. Under an overlay it is used up and does
+  nothing, because a focused button would otherwise take it as Return; the
+  rename card alone keeps it, for its own apply.
+
+A Save's answer is bound to the name and folder that were checked: leaving the
+folder drops the check, and a name field is read-only while one is out.
+
+### Floating
+
+A chooser window's Wayland app id is `gust-chooser`, never `gust`, so a rule can
+tell a dialog from a file manager window. `gust --file-dialogs on` adds one
+marked block to `~/.config/hypr/windows.lua`, which puts that id in Omarchy's
+own `floating-window` treatment, and `off` removes exactly that block. Without
+that file nothing is written and the dialog tiles like any other window.
+
+### Deliberately not built
+
+- `choices` (app-defined extra controls).
+- `parent_window`: Qt has no public way to use an xdg-foreign handle, so a
+  chooser is centred by the rule, not attached to its app.
+
+## 6.28 Agent tools (`gust --mcp`)
 
 `gust --mcp` is a headless Model Context Protocol server on stdin/stdout,
 handled before any Qt object exists (crate `gust-agent`). It serves revision

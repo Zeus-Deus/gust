@@ -1,4 +1,4 @@
-//! A Model Context Protocol server over stdin/stdout (DESIGN §6.27).
+//! A Model Context Protocol server over stdin/stdout (DESIGN §6.28).
 //!
 //! Serves revision 2026-07-28 statelessly (every request carries its version
 //! in `_meta`) and the `initialize` handshake of 2025-11-25 and 2025-06-18

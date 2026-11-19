@@ -9,6 +9,7 @@ rustix.workspace = true
 serde.workspace = true
 serde_json = { workspace = true, features = ["arbitrary_precision"] }
 toml.workspace = true
+tempfile = "3.27"
 wl-clipboard-rs = "0.9"
 
 [dev-dependencies]

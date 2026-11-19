@@ -8,7 +8,7 @@ Window {
 
     ListModel {
         id: tabList
-        ListElement { startPath: ""; label: "…"; pane: 0 }
+        ListElement { startPath: ""; label: "…"; fullPath: ""; pane: 0 }
     }
 
     // Instantiator, not Repeater: a Repeater needs a visual parent and
@@ -39,6 +39,12 @@ Window {
                 const cut = p.lastIndexOf("/")
                 return (cut >= 0 && cut < p.length - 1) ? p.substring(cut + 1) : p
             }
+            readonly property string tabPath: {
+                if (everActivated || startPath === "") return tab_disclosure_path
+                const token = startPath.startsWith("token:") ? startPath.substring(6) : token_for(startPath)
+                return tab_path_for_token(token)
+            }
+            onTabPathChanged: win.refreshTabLabels()
             onTabLabelChanged: win.refreshTabLabels()
             onLocationChanged: {
                 if (clipboard_busy()) {
@@ -51,6 +57,11 @@ Window {
             // Mounts and connections finish on a worker; every tab reports
             // here, so a result still lands if the user switched tabs.
             onPlace_done: (op, name, message) => win.placeDone(op, name, message, tabModel)
+            onLaunch_done: (success, message) => {
+                if (success) hints.message = message
+                else win.queueOpenFailure(message)
+                win.qaDump("launch-done")
+            }
             onPaste_ready: (message, allowImage) => win.pasteFinished(tabModel, message, allowImage)
             onPermissions_done: (token, error, message, partial) => {
                 if (token !== 0) return
@@ -366,6 +377,30 @@ Window {
     // A refusal or failure the user must read. Any new action clears it, so
     // a stale warning never lingers over unrelated state.
     property string alertText: ""
+    // Workers may update alertText while the user is reading an open failure.
+    property string currentOpenFailure: ""
+    readonly property string actionAlert: win.currentOpenFailure || win.alertText
+    property list<string> pendingOpenFailures: []
+    function queueOpenFailure(message) {
+        win.pendingOpenFailures.push(message)
+        win.showNextOpenFailure()
+    }
+    function showNextOpenFailure() {
+        if (win.actionAlert === "" && win.pendingOpenFailures.length > 0)
+            win.currentOpenFailure = win.pendingOpenFailures.shift()
+    }
+    function dismissAlert() {
+        if (win.currentOpenFailure !== "")
+            win.currentOpenFailure = ""
+        else
+            win.alertText = ""
+    }
+    // Let the action that cleared the strip finish setting its own feedback.
+    onActionAlertChanged: {
+        if (win.actionAlert === "" && win.pendingOpenFailures.length > 0)
+            Qt.callLater(win.showNextOpenFailure)
+    }
+
     /// Aliases of remote places connected right now. Refreshed after every
     /// connect/disconnect rather than polled, so the rail always reflects
     /// what actually happened.
@@ -420,6 +455,7 @@ Window {
         // Admission and older worker notifications are not this refresh's answer.
         if (win.integrationRefreshTarget !== ""
                 && win.revisionAtLeast(String(win.prefs.integration_refresh || "0"), win.integrationRefreshTarget)) {
+            settingsPanel.revealAfterLayout(settingsPanel.busyKey)
             settingsPanel.busyKey = ""
             win.integrationRefreshTarget = ""
         }
@@ -491,6 +527,7 @@ Window {
     }
     property bool defaultShowHidden: false
     function openSettings() {
+        if (win.chooserMode) return
         win.menuIntent = null
         // Picks up edits made elsewhere and the desktop's integration state,
         // read by the worker; the panel follows when they arrive.
@@ -537,6 +574,20 @@ Window {
             out.push([Math.round(p.x), Math.round(p.y)])
         }
         return out
+    }
+
+    /// Complete captions inside the clipped strip, for the desktop QA harness.
+    function visibleTabLabels() {
+        const labels = []
+        for (let i = 0; i < tabRepeater.count; i++) {
+            const tab = tabRepeater.itemAt(i)
+            if (!tab || !tab.visible) continue
+            const caption = tab.caption
+            const left = caption.mapToItem(tabViewport, 0, 0).x
+            if (!caption.truncated && left >= 0 && left + caption.width <= tabViewport.width)
+                labels.push(caption.text)
+        }
+        return labels
     }
 
     function refreshDevices() {
@@ -625,6 +676,11 @@ Window {
             if (message !== "") win.alertText = message
             else { win.alertText = ""; hints.message = name }
             win.qaDump("paste-image" + (message === "" ? "" : "-failed"))
+            return
+        }
+        if (op === "open") {
+            win.queueOpenFailure(message)
+            win.qaDump("open-failed")
             return
         }
         if (!message.startsWith("ASKKEY:") && !message.startsWith("ASK:"))
@@ -1131,6 +1187,13 @@ Window {
         if (!win.connectionOwner || (owner && owner !== win.connectionOwner)) return
         if (connectPanel.completeFeedback(op, name, message)) {
             win.connectionOwner = null
+            if (op === "cloud-setup") {
+                connectPanel.feedbackTitle = message !== "" ? qsTr("Cloud storage setup needs attention") : qsTr("Continue setup in your terminal")
+                if (message === "") {
+                    connectPanel.feedbackBody = qsTr("Finish rclone config in the terminal, then check again.")
+                    hints.message = connectPanel.feedbackBody
+                }
+            }
             if (op === "setup-install") {
                 connectPanel.feedbackTitle = message === "" ? qsTr("Connection support is installed") : qsTr("Setup did not finish")
                 if (message === "") connectPanel.feedbackBody = name === "apple"
@@ -1141,6 +1204,7 @@ Window {
         }
     }
     function installSupport(key) {
+        if (win.chooserMode) return
         if (connectPanel.busy) { connectPanel.showFeedback("", "", false); return }
         connectPanel.showSupport(key)
         if (!connectPanel.missingSupport || !connectPanel.requirement.installable) return
@@ -1279,6 +1343,26 @@ Window {
     readonly property bool dropAsMove: false
     property bool sidebarVisible: true
 
+    // --- another app's Open or Save dialog (DESIGN §6.27) -----------------
+    /// "" in an ordinary window. Set once at start, never bound: a binding
+    /// here would rewrite the window size on every tab switch.
+    property string chooserMode: ""
+    /// chooser_target(): what accepting returns right now.
+    property var chooserTarget: ({ kind: "none", name: "", count: 0 })
+    /// No overlay owns the keyboard, so accepting cannot reach past one.
+    readonly property bool chooserKeysFree: !win.overlayUp && !quickLook.open && !keyMapPanel.open
+    /// The newest chooser_check still waiting. 0 is none; -1 is the moment
+    /// inside the call, because a refusal is answered before it returns.
+    property int chooserToken: 0
+    readonly property bool chooserBusy: chooserToken !== 0
+    property var chooserEarly: null
+    /// The name and folder a check or a Replace question was about.
+    /// chooser_accept reads the folder on screen, so an answer is only good
+    /// while both still hold.
+    property var chooserAsked: null
+    /// The answer is written. Nothing may write a second one.
+    property bool chooserAnswered: false
+
     // --- tabs ---------------------------------------------------------
     //
     // A tab IS a DirModel: the model already owns location, history,
@@ -1335,6 +1419,7 @@ Window {
     /// Open the second pane, moving the active tab into it when there is
     /// more than one to spare, or opening a fresh tab there when there is not.
     function splitPane() {
+        if (win.chooserMode) return
         if (win.paneCount > 1) {
             hints.message = qsTr("Already two panes")
             return
@@ -1527,6 +1612,7 @@ Window {
     /// (DESIGN §6.7 rule 4); with one pane there is no other side, and
     /// refusing with a reason beats doing nothing.
     function sendToOtherPane(asMove) {
+        if (win.chooserMode) return
         if (win.paneCount < 2) {
             win.alertText = qsTr("Only one pane is open — split first (:split)")
             win.qaDump("pane-send-refused")
@@ -1641,12 +1727,15 @@ Window {
     function refreshTabLabels() {
         for (let i = 0; i < tabList.count; i++) {
             const m = tabs.objectAt(i)
+            if (!m) continue
             // A tab not opened yet (restored, or opened in the background)
             // keeps the name it was given until it lists its folder.
-            const keep = m && !m.everActivated && tabList.get(i).startPath !== "" && i !== win.activeTab
-            const name = keep ? tabList.get(i).label : (m ? m.tabLabel : "…")
+            const keep = !m.everActivated && tabList.get(i).startPath !== "" && i !== win.activeTab
+            const name = keep ? tabList.get(i).label : m.tabLabel
             if (tabList.get(i).label !== name)
                 tabList.setProperty(i, "label", name)
+            if (tabList.get(i).fullPath !== m.tabPath)
+                tabList.setProperty(i, "fullPath", m.tabPath)
         }
     }
     onActiveTabChanged: {
@@ -1699,6 +1788,7 @@ Window {
 
     /// `path` is a target (see navigateTarget); none opens this folder again.
     function newTab(path) {
+        if (win.chooserMode) return
         const here = path && path !== "" ? path : win.hereTarget(dirModel)
         // Opens BESIDE the active tab, not at the end: "open in new tab"
         // should land where the eye already is.
@@ -1911,13 +2001,14 @@ Window {
         // it opens it does not count as visible. The palette closing in that
         // window used to steal the keyboard, leaving a prompt on screen that
         // could not be typed into.
-        if (palette.visible || confirm.visible || connectionRecovery.visible || contextMenu.open
-            || conflictDialog.visible || settingsPanel.open || trashPanel.open || recentPanel.open || connectPanel.open
-            || prompt.visible || prompt.claimingFocus || renameCard.open || permissionsDialog.open
-            || deviceSharing.open)
-            return
+        if (win.overlayUp) return
         listFocus.forceActiveFocus()
     }
+    readonly property bool overlayUp:
+        palette.visible || confirm.visible || connectionRecovery.visible || contextMenu.open
+        || conflictDialog.visible || settingsPanel.open || trashPanel.open || recentPanel.open || connectPanel.open
+        || prompt.visible || prompt.claimingFocus || renameCard.open || permissionsDialog.open
+        || deviceSharing.open
 
     /// Open Quick Look for the cursor row, or close it if it is already up.
     /// Never launches the file: peek_row reads bytes and metadata only.
@@ -1933,38 +2024,245 @@ Window {
         win.qaDump("quicklook")
     }
 
-    /// Choosing for another app: hand back the pick and close. Nothing is
-    /// opened, copied or changed — the app does what it wants with it.
+    /// Ask the model what accepting would return. The button's words come
+    /// from this, so it runs after every change to the list, never on a timer.
+    function refreshChooserTarget() {
+        if (win.chooserMode === "") return
+        try { win.chooserTarget = JSON.parse(dirModel.chooser_target()) } catch (e) {}
+        win.qaDump("chooser-target")
+    }
+
+    /// Choosing for another app: the primary button, Return in the name
+    /// field and Ctrl+Return all land here. Nothing is opened, copied or
+    /// changed; the app does what it wants with the answer.
     function chooserAccept() {
-        // A Save is never answered by a stray Return meant for the list:
-        // Return in the list opens folders; only the name field or the
-        // Save button accept (DESIGN: dialogs never act on a guess).
-        // An Open answers with the selection, so it must have landed.
-        if (win.selectionSettling()) return
-        const err = dirModel.chooser_accept(chooserBar.name)
+        if (win.chooserAnswered || win.chooserBusy || !win.chooserKeysFree) return
+        if (win.selectionSettling() || dirModel.filter_pending) return
+        win.refreshChooserTarget()
+        if (!chooserBar.canAccept) return
+        chooserBar.error = ""
+        const name = chooserFooter.name
+        if (win.chooserMode !== "save" && win.chooserMode !== "save-many") {
+            win.chooserAnswer(name)
+            return
+        }
+        // A Save replaces whatever is there, so the disk is asked first, on
+        // a worker. Cancel keeps working meanwhile: a stalled mount never
+        // traps the user in here.
+        win.chooserAsked = { name: name, location: dirModel.location }
+        win.chooserToken = -1
+        win.chooserEarly = null
+        const token = dirModel.chooser_check(name)
+        win.chooserToken = token
+        const early = win.chooserEarly
+        win.chooserEarly = null
+        if (early && early.token === token) win.chooserChecked(token, early.status)
+        win.qaDump("chooser-check")
+    }
+
+    /// chooser_checked: the disk's answer about the name that was asked.
+    function chooserChecked(token, statusJson) {
+        if (win.chooserToken === -1) {
+            win.chooserEarly = { token: token, status: statusJson }
+            return
+        }
+        // Only the newest question counts. Leaving the folder also drops it
+        // (chooserForgetCheck), so an old "clear" cannot bless a new folder.
+        if (token === 0 || token !== win.chooserToken) return
+        win.chooserToken = 0
+        let status
+        try { status = JSON.parse(statusJson) }
+        catch (e) { status = { state: "error", message: qsTr("Could not check the name") } }
+        const asked = win.chooserAsked
+        // Something else took over while the disk answered. Its question is
+        // the one on screen, so this answer waits for the user to ask again.
+        if (!win.chooserKeysFree) {
+            win.chooserAsked = null
+            hints.message = qsTr("Not saved yet: press Save again")
+            return
+        }
+        if (status.state === "clear") {
+            win.chooserAsked = null
+            win.chooserAnswer(asked.name)
+        } else if (status.state === "replaces") {
+            win.chooserAskReplace(status.names)
+        } else if (status.state === "folder") {
+            // The typed name is a folder: open it and keep the name, which
+            // may be meant for a file inside.
+            win.chooserAsked = null
+            dirModel.navigate(status.path)
+            chooserFooter.focusName()
+        } else {
+            win.chooserAsked = null
+            chooserBar.error = status.message
+        }
+        win.qaDump("chooser-checked")
+    }
+
+    /// The folder changed under a check that had not answered.
+    function chooserForgetCheck() {
+        if (!win.chooserBusy) return
+        dirModel.chooser_forget()
+        win.chooserToken = 0
+        win.chooserAsked = null
+    }
+
+    function chooserAskReplace(names) {
+        const shown = names.slice(0, 3).join(", ")
+        const more = names.length - 3
+        confirm.purpose = "chooser-replace"
+        if (names.length === 1)
+            confirm.open(qsTr("Replace “%1”?").arg(names[0]),
+                qsTr("A file with this name is already in this folder. Replacing it overwrites what it holds."),
+                qsTr("Replace"), true)
+        else
+            confirm.open(qsTr("Replace %1 files?").arg(names.length),
+                (more > 0 ? qsTr("Already in this folder: %1 and %2 more.").arg(shown).arg(more)
+                          : qsTr("Already in this folder: %1.").arg(shown))
+                    + " " + qsTr("Replacing them overwrites what they hold."),
+                qsTr("Replace"), true)
+    }
+
+    function chooserReplaceConfirmed() {
+        const asked = win.chooserAsked
+        win.chooserAsked = null
+        if (!asked) return
+        if (asked.location !== dirModel.location) {
+            chooserBar.error = qsTr("The folder changed. Check the name and save again.")
+            return
+        }
+        win.chooserAnswer(asked.name)
+    }
+
+    /// Write the answer and close. The only path to chooser_accept, and the
+    /// flag makes it the only time.
+    function chooserAnswer(name) {
+        if (win.chooserAnswered) return
+        const err = dirModel.chooser_accept(name)
         chooserBar.error = err
         win.qaDump("chooser-accept")
-        if (err === "") {
-            win.qaFlush()
-            Qt.quit()
+        if (err !== "") return
+        win.chooserAnswered = true
+        Qt.quit()
+    }
+
+    function chooserCancel() {
+        win.chooserForgetCheck()
+        Qt.quit()
+    }
+
+    /// The bottom strip's keys in a dialog. The most useful come first: a
+    /// narrow window drops hints from the end.
+    readonly property var chooserHints: {
+        const m = win.chooserMode
+        if (m === "") return []
+        const saving = m === "save" || m === "save-many"
+        const typing = chooserFooter.nameFocused
+        const list = [
+            { k: "Enter", d: typing ? qsTr("save") : m === "open" || m === "open-many" ? qsTr("open") : qsTr("open folder") },
+            { k: "Ctrl+Enter", d: saving ? qsTr("save") : qsTr("choose") },
+            { k: "Esc", d: dirModel.selection_text !== "" && !typing ? qsTr("clear selection") : qsTr("cancel") }
+        ]
+        if (m === "open-many" || m === "open-folder") list.splice(2, 0, { k: "Ctrl+Space", d: qsTr("select") })
+        if (!typing) list.push({ k: "Ctrl+H", d: qsTr("hidden files") })
+        return list
+    }
+
+    /// Return or a double-click on a row of a dialog. Folders open; no file
+    /// is ever launched from here, and a row is only a choice where the
+    /// dialog is choosing files.
+    function chooserActivate(row) {
+        if (row < 0 || row >= dirModel.count) return
+        const kind = dirModel.chooser_enter(row)
+        if (kind === "folder") {
+            win.qaDump("activate")
+        } else if (kind === "pending") {
+            hints.message = qsTr("Still reading that link: press Enter again")
+        } else if (win.chooserMode === "open" || win.chooserMode === "open-many") {
+            dirModel.focus_row(row)
+            win.chooserAccept()
+        } else if (win.chooserMode === "save") {
+            // The name being checked is the one that gets answered: it does
+            // not change underneath the question.
+            if (win.chooserBusy) return
+            // To replace it the user still presses Save, and is asked.
+            const name = dirModel.chooser_file_name(row)
+            if (name === "") {
+                hints.message = qsTr("This name cannot be typed here")
+                return
+            }
+            chooserFooter.name = name
+            chooserFooter.focusName()
+        } else {
+            hints.message = win.chooserMode === "open-folder"
+                ? qsTr("This dialog chooses a folder") : qsTr("This dialog saves into a folder")
         }
     }
 
+    /// Return in the list of a dialog. It means one thing in every preset:
+    /// Mac's Enter-to-rename has no place here, and the hint says "open".
+    function chooserReturn(event) {
+        if (win.chooserMode === "" || (event.key !== Qt.Key_Return && event.key !== Qt.Key_Enter)
+                || (event.modifiers & ~Qt.KeypadModifier) !== Qt.NoModifier)
+            return false
+        win.activateRow(dirModel.cursor)
+        return true
+    }
+
+    /// Keep each page above the footer. Longer lists end in a next-page entry.
+    function chooserFilterPage(names, ticked, room, page) {
+        const row = (i) => ({
+            label: names[i], hint: i === ticked ? "✓" : "", action: "chooser-filter-" + i })
+        if (names.length <= room) return names.map((name, i) => row(i))
+        const size = Math.max(1, room - 1)
+        const pages = Math.ceil(names.length / size)
+        const shown = ((page % pages) + pages) % pages
+        const out = []
+        for (let i = shown * size; i < Math.min(names.length, (shown + 1) * size); i++) out.push(row(i))
+        out.push({ label: qsTr("More file types…"), hint: (shown + 1) + "/" + pages,
+                   action: "chooser-types-page-" + (shown + 1) })
+        return out
+    }
+
+    /// The file type button: the shared menu, with the current type ticked.
+    function openChooserFilterMenu(page) {
+        if (quickLook.open) quickLook.hide()
+        // Above its button: below it there is only the hint strip.
+        const p = chooserFooter.filterPoint()
+        const room = Math.floor((p.y - Tokens.spaceSm - contextMenu.padY * 2) / contextMenu.rowH)
+        const items = win.chooserFilterPage(chooserFooter.filters, chooserFooter.filterIndex,
+                                            room, page || 0)
+        contextMenu.popup(p.x, p.y - contextMenu.padY * 2 - contextMenu.rowH * items.length, items)
+        win.qaDump("chooser-filter-menu")
+    }
+
+    /// What a dialog must not offer: a surface it cannot show (tabs, panes,
+    /// Settings, panels) or a launch, when the job here is to pick.
+    readonly property var chooserRefused: [
+        "settings", "trash-view", "recent", "new-tab", "open-tab", "bm-open-tab", "rp-open-tab",
+        "open-other-pane", "split", "unsplit", "toggle-split", "send-copy", "send-move",
+        "open-with", "run", "terminal", "open-admin", "cloud-setup", "device-share-here",
+        "device-share-folder", "device-send", "device-sharing"
+    ]
+    function chooserFits(a) {
+        if (win.chooserMode === "") return true
+        if (a.startsWith("openwith:") || a.startsWith("custom:") || a.startsWith("device-share:")) return false
+        return win.chooserRefused.indexOf(a) < 0
+    }
+
+    /// A menu's entries that make sense here, without doubled separators.
+    function chooserMenu(items) {
+        const out = []
+        for (const it of items) {
+            if (it.separator ? out.length > 0 && !out[out.length - 1].separator : win.chooserFits(it.action))
+                out.push(it)
+        }
+        if (out.length > 0 && out[out.length - 1].separator) out.pop()
+        return out
+    }
+
     function activateRow(row) {
-        // Saving: Enter on a file puts its name in the field (to replace it,
-        // the user still presses Save); folders open as usual.
-        if (chooserBar.active && chooserBar.mode === "save" && !dirModel.is_dir(row)) {
-            chooserBar.name = dirModel.entry_name(row)
-            chooserBar.focusName()
-            return
-        }
-        // In an Open dialog, Enter on a file is "Open"; folders still open.
-        if (chooserBar.active && chooserBar.mode !== "save" && chooserBar.mode !== "open-folder"
-                && !dirModel.is_dir(row)) {
-            dirModel.focus_row(row)
-            win.chooserAccept()
-            return
-        }
+        if (win.chooserMode) { win.chooserActivate(row); return }
         // Several files selected: one viewer showing all of them beats five
         // viewers showing one each (DESIGN §6.18). Returns "" when this is
         // not a multi-file situation, so ordinary activation still runs.
@@ -1972,13 +2270,14 @@ Window {
         if (win.selectionSettling()) return
         if (dirModel.sel_count() > 1) {
             const many = dirModel.activate_selection()
+            if (many === "pending") return
             if (many.startsWith("OK:")) {
                 hints.message = many.substring(3)
                 win.qaDump("activate-many")
                 return
             }
             if (many !== "") {
-                win.alertText = many
+                win.queueOpenFailure(many)
                 win.qaDump("activate-refused")
                 return
             }
@@ -1990,7 +2289,7 @@ Window {
         if (r.startsWith("blocked:"))
             hints.message = r.substring(8)
         else if (r === "file")
-            hints.message = qsTr("Opened ") + dirModel.entry_name(row)
+            hints.message = ""
         win.qaDump("activate")
     }
 
@@ -2009,6 +2308,7 @@ Window {
     }
 
     function runKeyAction(a) {
+        if (!win.chooserFits(a)) return false
         if (a.startsWith("tag-")) {
             win.applyTag(a.substring(4))
             return true
@@ -2103,6 +2403,7 @@ Window {
     property var pendingRunModel: null
     property int pendingRunToken: 0
     function askRun(row) {
+        if (win.chooserMode) return
         const model = dirModel
         const target = JSON.parse(model.run_prepare(row))
         if (target.error) {
@@ -2129,6 +2430,7 @@ Window {
     /// Middle-click on a folder: open it in a new tab behind this one, as a
     /// browser does (Flea #219). Appended, so no other tab index moves.
     function openRowInBackgroundTab(model, row) {
+        if (win.chooserMode) return
         if (!model || !model.is_dir(row)) return
         const target = win.rowTarget(model, row)
         if (target === "") { win.rowGone(); return }
@@ -2143,7 +2445,18 @@ Window {
     /// Every command the palette and the right-click menu can run. One
     /// dispatcher, so a menu entry and its palette twin can never drift.
     function runAction(a) {
+        if (!win.chooserFits(a)) return
         if (a === "open") win.activateRow(dirModel.cursor)
+        else if (a.startsWith("chooser-types-page-")) {
+            win.openChooserFilterMenu(parseInt(a.substring(19)))
+        }
+        else if (a.startsWith("chooser-filter-")) {
+            const i = parseInt(a.substring(15))
+            dirModel.chooser_set_filter(i)
+            chooserFooter.filterIndex = dirModel.chooser_filter_index()
+            win.focusList()
+            win.qaDump("chooser-filter")
+        }
         else if (a === "quicklook") win.toggleQuickLook()
         else if (a === "settings") win.openSettings()
         else if (a === "trash-view") { trashPanel.show(dirModel.trash_list()); win.qaDump("trash-open") }
@@ -2221,6 +2534,7 @@ Window {
         else if (a === "paste-into") {
             win.transferStarted(dirModel, dirModel.clip_paste_into(dirModel.cursor), "paste")
         }
+        else if (a === "sort-menu") win.openSortMenu()
         else if (a === "view-rows") win.setView("rows")
         else if (a === "split") win.splitPane()
         else if (a === "unsplit") win.closePane(win.activePane)
@@ -2263,6 +2577,11 @@ Window {
         }
         else if (a === "permissions") win.askPermissions()
         else if (a === "new-file") win.askNewFile()
+        else if (a === "select-all") { dirModel.sel_all(); win.qaDump("select") }
+        else if (a === "undo") win.doUndo()
+        else if (a === "new-tab") win.newTab("")
+        else if (a === "palette") { palette.open(); return }
+        else if (a === "grep") { palette.openWith("grep "); return }
         else if (a === "invert-selection") { dirModel.sel_invert(); win.qaDump("select") }
         else if (a === "deselect-all") { dirModel.sel_clear(); win.qaDump("select") }
         else if (a === "owner") win.askOwner()
@@ -2290,10 +2609,7 @@ Window {
         else if (a === "noop") { /* nothing to do */ }
         else if (a.startsWith("openwith:")) {
             const msg = dirModel.open_with_id(dirModel.cursor, a.substring(9))
-            // "OK:" marks success: the window does not change, so
-            // without a line here nothing appears to have happened.
-            if (msg.startsWith("OK:")) hints.message = msg.substring(3)
-            else if (msg !== "") win.alertText = msg
+            if (msg !== "") win.alertText = msg
             win.qaDump("open-with")
         }
         else if (a === "bulk") {
@@ -2304,7 +2620,9 @@ Window {
         }
         else if (a === "search") {
             win.openSearch()
+            return // Keep the keyboard in the search field.
         }
+        else if (a === "close-search") win.closeSearch(false)
         else if (a === "compress") {
             const cerr = dirModel.compress_selection(dirModel.cursor)
             if (cerr !== "") win.alertText = cerr
@@ -2367,14 +2685,8 @@ Window {
             if (connectPanel.busy) { connectPanel.showFeedback("", "", false); return }
             if (!win.requireSupport("cloud")) return
             connectPanel.supportKey = "cloud"
-            // rclone's own config tool, in a terminal. Gust never asks
-            // for a cloud password and never sees one.
-            const serr = dirModel.cloud_setup()
-            if (serr !== "") win.alertText = serr
-            const instruction = qsTr("Finish rclone config in the terminal, then check again.")
-            connectPanel.showFeedback(serr !== "" ? qsTr("Cloud storage setup needs attention") : qsTr("Continue setup in your terminal"),
-                serr || instruction, serr !== "")
-            if (serr === "") hints.message = instruction
+            if (!win.beginPlaceFeedback("cloud-setup", "", qsTr("Opening a terminal…"))) return
+            win.connectionOwner.cloud_setup()
             win.qaDump("cloud-setup")
         }
         else if (a.startsWith("remote-on:")) {
@@ -2503,7 +2815,7 @@ Window {
         if (quickLook.open) quickLook.hide()
     }
     function popupContextMenu(row, x, y, fromKeyboard) {
-        contextMenu.popup(x, y, win.contextItems(row))
+        contextMenu.popup(x, y, win.chooserMenu(win.contextItems(row)))
         if (fromKeyboard) contextMenu.current = contextMenu.step(-1, 1)
         win.qaDump("context-menu")
     }
@@ -2550,7 +2862,8 @@ Window {
         const f = dirModel.sort_field
         const asc = dirModel.sort_ascending
         const mark = (on) => on ? "✓" : ""
-        const p = sortButton.mapToItem(null, 0, sortButton.height)
+        const anchor = actionTools.visible ? sortButton : moreButton
+        const p = anchor.mapToItem(null, 0, anchor.height)
         contextMenu.popup(p.x, p.y, [
             { label: qsTr("Name"), hint: mark(f === "name"), action: "sortto-name" },
             { label: qsTr("Kind"), hint: mark(f === "kind"), action: "sortto-kind" },
@@ -2561,6 +2874,71 @@ Window {
             { label: qsTr("Descending"), hint: mark(!asc), action: "sortdir-desc" }
         ])
         win.qaDump("sort-menu")
+    }
+
+    /// Undo the last change (Ctrl+Z and the More menu).
+    function doUndo() {
+        const label = dirModel.undo_label()
+        const err = dirModel.undo_last()
+        if (err === "") {
+            win.alertText = ""
+            hints.message = label === "Undo: remove the link" ? qsTr("Removed the link")
+                         : label === "Undo: remove the links" ? qsTr("Removed the links")
+                         : label === "Undo: put owners back" ? qsTr("Owners put back")
+                         : label === "Undo: remove the pasted image" ? qsTr("Removed the pasted image")
+                         : label === "Undo: put permissions back" ? qsTr("Permissions put back")
+                         : label === "Undo: restore the original name" ? qsTr("Restored the original name")
+                         : /^Undo: put \d+ names? back$/.test(label) ? qsTr("Names put back")
+                         : label === "Undo: put the tags back" ? qsTr("Tags put back")
+                         : label.startsWith("Undo: remove") ? "Copies removed"
+                         : label.startsWith("Undo: move") ? "Moved back"
+                         : "Restored from Trash"
+        } else {
+            win.alertText = "Cannot undo: " + err
+        }
+        win.qaDump("undo")
+    }
+
+    /// The toolbar's More menu, under its button: what the window can do
+    /// that has no button of its own, each with its key.
+    function openMoreMenu() {
+        if (!dirModel) return
+        if (quickLook.open) quickLook.hide()
+        win.alertText = ""
+        const sep = { separator: true }
+        const p = moreButton.mapToItem(null, 0, moreButton.height)
+        const overflow = actionTools.visible ? [] : [
+            filterBar.searchActive
+                ? { label: qsTr("Close search"), action: "close-search" }
+                : { label: qsTr("Search"), hint: "Ctrl+F", action: "search" },
+            { label: qsTr("Sort by %1").arg(sortButton.word), action: "sort-menu" },
+            ...viewSwitches.model.map(v => ({
+                label: v.nm, hint: win.viewMode === v.m ? "✓" : "", action: "view-" + v.m
+            })),
+            sep
+        ]
+        contextMenu.popup(p.x, p.y, win.chooserMenu([
+            ...overflow,
+            { label: qsTr("New folder"), hint: "Ctrl+N", action: "new-folder" },
+            { label: qsTr("New file"), hint: "", action: "new-file" },
+            { label: qsTr("Paste"), hint: "Ctrl+V", action: "paste", enabled: dirModel.can_paste() },
+            sep,
+            { label: qsTr("Select all"), hint: "Ctrl+A", action: "select-all", enabled: dirModel.count > 0 },
+            { label: qsTr("Undo"), hint: "Ctrl+Z", action: "undo" },
+            sep,
+            { label: qsTr("New tab"), hint: "Ctrl+T", action: "new-tab" },
+            win.paneCount > 1
+                ? { label: qsTr("Close second pane"), hint: "F3", action: "unsplit" }
+                : { label: qsTr("Two panes side by side"), hint: "F3", action: "split" },
+            { label: dirModel.show_hidden ? qsTr("Hide hidden files") : qsTr("Show hidden files"),
+              hint: "Ctrl+H", action: "toggle-hidden" },
+            { label: qsTr("Reload"), hint: "Ctrl+R", action: "reload" },
+            sep,
+            { label: qsTr("Search inside files…"), hint: "", action: "grep" },
+            { label: qsTr("All commands…"), hint: ":", action: "palette" },
+            { label: qsTr("Keyboard shortcuts"), hint: "F1", action: "keys" }
+        ]))
+        win.qaDump("more-menu")
     }
 
     /// Menu key / Shift+F10: the same menu, anchored under the cursor row.
@@ -2669,7 +3047,7 @@ Window {
     /// (admin, chooser, restore off, an untouched window before loading);
     /// otherwise the refusal, and the tabs stay dirty to be retried.
     function saveSession() {
-        if (win.adminMode) { win.sessionDirty = false; return "" }
+        if (win.adminMode || win.chooserMode) { win.sessionDirty = false; return "" }
         if (!win.prefsStarted) {
             // Last time's tabs have not been offered back yet. An untouched
             // window has nothing of the user's to keep, and its placeholder
@@ -2852,13 +3230,21 @@ Window {
     }
 
     Column {
+        id: windowLayout
         anchors.fill: parent
+
+        // Share the available height between the toolbar (1.5 rows), footer
+        // and file area (one each), plus the rows that are currently open.
+        readonly property real rowCount: 3.5 + (win.activePaneTabCount > 1 ? 1 : 0)
+            + (win.adminMode ? 1 : 0) + (filterBar.filterActive || filterBar.searchActive ? 1 : 0)
+        readonly property int controlHeight: Math.min(Tokens.controlHeight,
+            Math.floor(Math.max(0, height - chooserBar.height - chooserFooter.height) / rowCount))
 
         // The administrator window says so, on every screen of it.
         Rectangle {
             id: adminBanner
             width: parent.width
-            height: win.adminMode ? Tokens.controlHeight : 0
+            height: win.adminMode ? windowLayout.controlHeight : 0
             visible: win.adminMode
             color: Tokens.withAlpha(Tokens.danger, 0.16)
             Rectangle {
@@ -2882,16 +3268,30 @@ Window {
             Accessible.name: qsTr("Administrator window")
         }
 
+        // Another app's Open/Save dialog: Cancel, what it asked, the answer.
+        ChooserBar {
+            id: chooserBar
+            width: parent.width
+            mode: win.chooserMode
+            target: win.chooserTarget
+            busy: win.chooserBusy
+            hereName: dirModel ? dirModel.tabLabel : ""
+            hasName: chooserFooter.hasName
+            onAccepted: win.chooserAccept()
+            onCancelled: win.chooserCancel()
+        }
+
         // Tab strip. Hidden with a single tab: one tab is not a choice, and
         // a strip showing it is chrome that earns nothing.
         Rectangle {
             id: tabStrip
+            z: 1 // Let the path tip extend over the toolbar below the strip.
             width: parent.width
             // Height and visibility both come from the SAME condition. Using
             // `height: visible ? X : 0` makes height depend on a sibling
             // binding's evaluation order: visible flipped true while height
             // stayed 0, so the strip was shown and occupied no space at all.
-            height: win.activePaneTabCount > 1 ? Tokens.controlHeight : 0
+            height: win.activePaneTabCount > 1 ? windowLayout.controlHeight : 0
             color: Tokens.barBackground
             visible: win.activePaneTabCount > 1
 
@@ -2902,98 +3302,175 @@ Window {
                 color: Tokens.withAlpha(Tokens.border, Tokens.borderAlpha)
             }
 
-            Row {
-                anchors.left: parent.left
+            Flickable {
+                id: tabViewport
+                anchors.fill: parent
                 anchors.leftMargin: Tokens.rowPaddingX
-                anchors.verticalCenter: parent.verticalCenter
-                spacing: Tokens.spaceSm
+                anchors.rightMargin: Tokens.rowPaddingX
+                contentWidth: tabRow.width
+                contentHeight: height
+                clip: true
+                flickableDirection: Flickable.HorizontalFlick
+                boundsBehavior: Flickable.StopAtBounds
 
-                Repeater {
-                    id: tabRepeater
-                    model: tabList
-                    delegate: Rectangle {
-                        // Only this pane's tabs. A strip mixing both panes
-                        // makes a click jump the user across the window.
-                        required property int pane
-                        visible: pane === win.activePane
-                        // `index` is supplied by the Repeater; `label` comes
-                        // from the ListModel role. Both must be declared or
-                        // the delegate fails to create — silently, leaving an
-                        // empty strip and one line in the log.
-                        required property int index
-                        required property string label
-                        readonly property bool current: index === win.activeTab
+                // Leave room for letters on both sides of a middle ellipsis,
+                // even when Search reduces the strip height. Scroll the rest.
+                TextMetrics {
+                    id: tabCaptionMetrics
+                    font.family: Tokens.fontFamily
+                    font.pixelSize: Tokens.fontCaption
+                    text: "MM…M"
+                }
+                readonly property int tabCount: Math.max(1, win.activePaneTabCount)
+                readonly property real tabBudget: Math.max(Math.ceil(tabCaptionMetrics.advanceWidth) + Tokens.spaceLg,
+                    (width - (tabCount - 1) * tabRow.spacing) / tabCount)
 
-                        implicitWidth: Math.min(Math.round(Tokens.rowHeight * 7),
-                                                Math.max(Math.round(Tokens.rowHeight * 3),
-                                                         tabText.implicitWidth
-                                                         + Tokens.spaceLg * 2))
-                        width: implicitWidth
-                        height: Math.round(Tokens.controlHeight * 0.8)
-                        radius: Tokens.radius
-                        color: current ? Tokens.withAlpha(Tokens.foreground, 0.12)
-                                       : "transparent"
-                        border.width: current ? Math.max(1, Tokens.borderWidth) : 0
-                        border.color: Tokens.withAlpha(Tokens.border, Tokens.borderAlpha)
+                function scrollTo(x) {
+                    contentX = Math.max(0, Math.min(x, contentWidth - width))
+                }
+                function revealActive() {
+                    const tab = tabRepeater.itemAt(win.activeTab)
+                    if (!tab || !tab.visible) return
+                    const right = tab.x + tab.width
+                    scrollTo(Math.max(right - width, Math.min(tab.x, contentX)))
+                }
+                onWidthChanged: {
+                    Qt.callLater(revealActive)
+                    if (visible) win.qaDump("tab-strip")
+                }
+                onMovementEnded: win.qaDump("tab-strip")
+                // A mouse wheel supplies vertical deltas even on a horizontal strip.
+                WheelHandler {
+                    enabled: tabViewport.contentWidth > tabViewport.width
+                    target: null
+                    acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
+                    onWheel: (event) => {
+                        const delta = event.pixelDelta.y || event.angleDelta.y / 120 * tabStrip.height
+                        tabViewport.scrollTo(tabViewport.contentX - delta)
+                        win.qaDump("tab-strip")
+                    }
+                }
+                Connections {
+                    target: win
+                    function onActiveTabChanged() { Qt.callLater(tabViewport.revealActive) }
+                }
 
-                        Text {
-                            textFormat: Text.PlainText
-                            id: tabText
-                            anchors.centerIn: parent
-                            width: parent.width - Tokens.spaceLg
-                            horizontalAlignment: Text.AlignHCenter
-                            elide: Text.ElideMiddle
-                            text: parent.label
-                            color: parent.current ? Tokens.foreground
-                                                  : Tokens.foregroundDim
-                            font.family: Tokens.fontFamily
-                            font.pixelSize: Tokens.fontCaption
-                        }
+                Row {
+                    id: tabRow
+                    onPositioningComplete: tabViewport.revealActive()
+                    anchors.verticalCenter: parent.verticalCenter
+                    spacing: Tokens.spaceSm
 
-                        MouseArea {
-                            id: tabMouse
-                            anchors.fill: parent
-                            acceptedButtons: Qt.LeftButton | Qt.MiddleButton
-                            // A few pixels before a click becomes a drag, so
-                            // a slightly imprecise click is still a click —
-                            // the same threshold the file list uses.
-                            property point pressAt: Qt.point(0, 0)
-                            property bool dragging: false
+                    Repeater {
+                        id: tabRepeater
+                        model: tabList
+                        delegate: Rectangle {
+                            // Only this pane's tabs. A strip mixing both panes
+                            // makes a click jump the user across the window.
+                            id: folderTab
+                            required property int pane
+                            visible: pane === win.activePane
+                            // `index` is supplied by the Repeater; `label` comes
+                            // from the ListModel role. Both must be declared or
+                            // the delegate fails to create — silently, leaving an
+                            // empty strip and one line in the log.
+                            required property int index
+                            required property string label
+                            required property string fullPath
+                            Accessible.role: Accessible.PageTab
+                            Accessible.name: fullPath
+                            Accessible.selectable: true
+                            Accessible.selected: current
+                            Accessible.onPressAction: win.activateTab(index)
+                            readonly property bool current: index === win.activeTab
+                            readonly property alias caption: tabText
 
-                            onPressed: (mouse) => {
-                                tabMouse.pressAt = Qt.point(mouse.x, mouse.y)
-                                tabMouse.dragging = false
+                            implicitWidth: Math.min(Math.round(Tokens.rowHeight * 7),
+                                                    Math.max(Math.round(Tokens.rowHeight * 3),
+                                                             tabText.implicitWidth
+                                                             + Tokens.spaceLg * 2))
+                            width: Math.min(implicitWidth, tabViewport.tabBudget)
+                            height: Math.round(tabStrip.height * 0.8)
+                            radius: Tokens.radius
+                            color: current ? Tokens.withAlpha(Tokens.foreground, 0.12)
+                                           : "transparent"
+                            border.width: current ? Math.max(1, Tokens.borderWidth) : 0
+                            border.color: Tokens.withAlpha(Tokens.border, Tokens.borderAlpha)
+
+                            Text {
+                                textFormat: Text.PlainText
+                                id: tabText
+                                Accessible.ignored: true
+                                anchors.centerIn: parent
+                                width: Math.max(0, parent.width - Tokens.spaceLg)
+                                horizontalAlignment: Text.AlignHCenter
+                                elide: Text.ElideMiddle
+                                text: parent.label
+                                color: parent.current ? Tokens.foreground
+                                                      : Tokens.foregroundDim
+                                font: tabCaptionMetrics.font
                             }
-                            onPositionChanged: (mouse) => {
-                                if (!(mouse.buttons & Qt.LeftButton)) return
-                                const dx = mouse.x - tabMouse.pressAt.x
-                                const dy = mouse.y - tabMouse.pressAt.y
-                                if (!tabMouse.dragging
-                                    && Math.abs(dx) + Math.abs(dy) < 8) return
-                                tabMouse.dragging = true
-                                const p = tabMouse.mapToItem(null, mouse.x, mouse.y)
-                                win.tabDragMoved(parent.index, p.x, p.y)
-                            }
-                            onReleased: (mouse) => {
-                                if (!tabMouse.dragging) return
-                                tabMouse.dragging = false
-                                const p = tabMouse.mapToItem(null, mouse.x, mouse.y)
-                                win.tabDragDropped(parent.index, p.x, p.y)
-                            }
-                            onCanceled: {
-                                tabMouse.dragging = false
-                                win.tabDragEnded()
-                            }
-                            onClicked: (mouse) => {
-                                if (tabMouse.dragging) return
-                                if (mouse.button === Qt.MiddleButton)
-                                    win.closeTab(parent.index)
-                                else
-                                    win.activateTab(parent.index)
+
+                            MouseArea {
+                                id: tabMouse
+                                hoverEnabled: true
+                                onEntered: tabPathTip.inspect(folderTab)
+                                onExited: tabPathTip.leave(folderTab)
+                                anchors.fill: parent
+                                acceptedButtons: Qt.LeftButton | Qt.MiddleButton
+                                preventStealing: true
+                                // A few pixels before a click becomes a drag, so
+                                // a slightly imprecise click is still a click —
+                                // the same threshold the file list uses.
+                                property point pressAt: Qt.point(0, 0)
+                                property bool dragging: false
+
+                                onPressed: (mouse) => {
+                                    tabPathTip.dismiss()
+                                    tabMouse.pressAt = Qt.point(mouse.x, mouse.y)
+                                    tabMouse.dragging = false
+                                }
+                                onPositionChanged: (mouse) => {
+                                    if (!(mouse.buttons & Qt.LeftButton)) return
+                                    const dx = mouse.x - tabMouse.pressAt.x
+                                    const dy = mouse.y - tabMouse.pressAt.y
+                                    if (!tabMouse.dragging
+                                        && Math.abs(dx) + Math.abs(dy) < 8) return
+                                    tabMouse.dragging = true
+                                    const p = tabMouse.mapToItem(null, mouse.x, mouse.y)
+                                    win.tabDragMoved(parent.index, p.x, p.y)
+                                }
+                                onReleased: (mouse) => {
+                                    if (!tabMouse.dragging) return
+                                    tabMouse.dragging = false
+                                    const p = tabMouse.mapToItem(null, mouse.x, mouse.y)
+                                    win.tabDragDropped(parent.index, p.x, p.y)
+                                }
+                                onCanceled: {
+                                    tabMouse.dragging = false
+                                    win.tabDragEnded()
+                                }
+                                onClicked: (mouse) => {
+                                    if (tabMouse.dragging) return
+                                    if (mouse.button === Qt.MiddleButton)
+                                        win.closeTab(parent.index)
+                                    else
+                                        win.activateTab(parent.index)
+                                }
                             }
                         }
                     }
                 }
+            }
+
+            TabPathTip {
+                id: tabPathTip
+                y: tabStrip.height
+                availableHeight: win.height - tabStrip.y - y
+                // Tab positions are relative to the horizontally scrolling row.
+                tabCenter: tab ? tabViewport.x + tab.x - tabViewport.contentX + tab.width / 2 : 0
+                onVisibleChanged: win.qaDump("tab-path")
+                onAtEndChanged: if (visible) win.qaDump("tab-path")
             }
         }
 
@@ -3001,8 +3478,19 @@ Window {
         Rectangle {
             id: headerBar
             width: parent.width
-            height: Math.round(Tokens.controlHeight * 1.5)
+            height: Math.round(windowLayout.controlHeight * 1.5)
             color: Tokens.barBackground
+
+            // Keep the themed button sizes until the two persistent rows
+            // would touch. Then shrink their horizontal padding and gaps
+            // together, independently of their height.
+            readonly property real preferredToolsWidth:
+                (1 + navButtons.count + menuTools.children.length) * Tokens.controlHeight
+                + navButtons.count * Tokens.spaceSm + (menuTools.children.length - 1) * Tokens.spaceXs
+                + 2 * Tokens.spaceLg
+            readonly property real horizontalFit: Math.min(1, width / Math.max(1, preferredToolsWidth))
+            readonly property int toolWidth: Math.floor(Tokens.controlHeight * horizontalFit)
+            readonly property int sideMargin: Math.floor(Tokens.spaceLg * horizontalFit)
 
             Rectangle {
                 anchors.bottom: parent.bottom
@@ -3014,98 +3502,97 @@ Window {
             Row {
                 id: leftTools
                 anchors.left: parent.left
-                anchors.leftMargin: Tokens.spaceLg
+                anchors.leftMargin: headerBar.sideMargin
                 anchors.verticalCenter: parent.verticalCenter
-                spacing: Tokens.spaceSm
+                spacing: Math.floor(Tokens.spaceSm * headerBar.horizontalFit)
 
                 // Sidebar toggle — the visible restore control for the rail.
-                Rectangle {
-                    width: Tokens.controlHeight
-                    height: Tokens.controlHeight
-                    color: sbHover.hovered ? Tokens.withAlpha(Tokens.foreground, 0.1) : "transparent"
-                    radius: Tokens.radius
+                BarButton {
+                    id: sidebarButton
+                    height: windowLayout.controlHeight
+                    width: headerBar.toolWidth
                     objectName: "sidebarToggle"
-                    HoverHandler { id: sbHover }
-                    Text {
-                        textFormat: Text.PlainText
-                        anchors.centerIn: parent
-                        text: "☰"
-                        color: Tokens.foreground
-                        font.family: Tokens.fontFamily
-                        font.pixelSize: Tokens.fontBody
-                    }
-                    MouseArea {
-                        anchors.fill: parent
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: win.sidebarVisible = !win.sidebarVisible
-                    }
-                    Accessible.role: Accessible.Button
-                    Accessible.name: win.sidebarVisible ? "Hide places sidebar" : "Show places sidebar"
+                    icon: "sidebar"
+                    label: win.sidebarVisible ? qsTr("Hide sidebar") : qsTr("Show sidebar")
+                    onClicked: win.sidebarVisible = !win.sidebarVisible
                 }
 
                 Repeater {
+                    id: navButtons
                     model: [
-                        { glyph: "‹", act: "back",    nm: "Back" },
-                        { glyph: "›", act: "forward", nm: "Forward" },
-                        { glyph: "↑", act: "up",      nm: "Up one folder" }
+                        { act: "back",    nm: qsTr("Back") },
+                        { act: "forward", nm: qsTr("Forward") },
+                        { act: "up",      nm: qsTr("Up one folder") }
                     ]
-                    delegate: Rectangle {
-                        width: Tokens.controlHeight
-                        height: Tokens.controlHeight
-                        radius: Tokens.radius
+                    delegate: BarButton {
+                        height: windowLayout.controlHeight
                         objectName: "nav-" + modelData.act
-                        property bool enabledAct: modelData.act === "back" ? win.canBack
-                                                : modelData.act === "forward" ? win.canForward
-                                                : true
-                        color: navHover.hovered && enabledAct
-                               ? Tokens.withAlpha(Tokens.foreground, 0.1) : "transparent"
-                        HoverHandler { id: navHover }
-                        Text {
-                            textFormat: Text.PlainText
-                            anchors.centerIn: parent
-                            text: modelData.glyph
-                            color: parent.enabledAct ? Tokens.foreground : Tokens.withAlpha(Tokens.foreground, 0.3)
-                            font.family: Tokens.fontFamily
-                            font.pixelSize: Tokens.fontSubtitle
+                        width: headerBar.toolWidth
+                        icon: modelData.act
+                        label: modelData.nm
+                        available: modelData.act === "back" ? win.canBack
+                                 : modelData.act === "forward" ? win.canForward
+                                 : true
+                        onClicked: {
+                            if (modelData.act === "back") dirModel.go_back()
+                            else if (modelData.act === "forward") dirModel.go_forward()
+                            else dirModel.navigate_up()
+                            win.focusList()
                         }
-                        MouseArea {
-                            anchors.fill: parent
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: {
-                                if (modelData.act === "back") dirModel.go_back()
-                                else if (modelData.act === "forward") dirModel.go_forward()
-                                else dirModel.navigate_up()
-                                win.focusList()
-                            }
-                        }
-                        Accessible.role: Accessible.Button
-                        Accessible.name: modelData.nm
                     }
-                }
-
-                Item { width: Tokens.spaceLg; height: 1 }
-
-                Breadcrumbs {
-                    id: crumbs
-                    onDragHover: (t) => { hints.message = t; win.qaDump("drag-hover") }
-                    onDragLanded: (m, e) => { hints.message = ""; win.transferStarted(m, e, "drop") }
-                    model: dirModel
-                    anchors.verticalCenter: parent.verticalCenter
-                    // Whatever the buttons on the right leave: a deep path
-                    // used to draw straight through them.
-                    width: Math.max(0, Math.min(implicitWidth,
-                        headerBar.width - rightTools.width - leftTools.x - x - Tokens.spaceLg * 3))
-                    onPathChosen: (p) => { dirModel.navigate(p); win.focusList() }
                 }
             }
 
-            // View switch: labelled, tooltipped, keyboard reachable.
+            Breadcrumbs {
+                id: crumbs
+                height: windowLayout.controlHeight
+                onDragHover: (t) => { hints.message = t; win.qaDump("drag-hover") }
+                onDragLanded: (m, e) => { hints.message = ""; win.transferStarted(m, e, "drop") }
+                model: dirModel
+                anchors.verticalCenter: parent.verticalCenter
+                x: leftTools.x + leftTools.width + Tokens.spaceLg + Tokens.spaceSm * 2
+                width: Math.max(0, Math.min(implicitWidth,
+                    (actionTools.visible ? actionTools.x : menuTools.x) - x - Tokens.spaceLg * 2))
+                onPathChosen: (p) => { dirModel.navigate(p); win.focusList() }
+            }
+
             Row {
-                id: rightTools
-                anchors.right: parent.right
-                anchors.rightMargin: Tokens.spaceLg
+                id: actionTools
+                anchors.right: menuTools.left
+                anchors.rightMargin: Tokens.spaceSm + Tokens.spaceXs * 2
                 anchors.verticalCenter: parent.verticalCenter
                 spacing: Tokens.spaceXs
+                // Measure the full row even while hidden, so resize, zoom and
+                // the current sort label can bring these actions back inline.
+                visible: x >= leftTools.x + leftTools.width + Tokens.spaceLg
+
+                // The everyday actions, one click away: they were reachable
+                // only by key or by right-clicking empty space, which a full
+                // list does not have.
+                BarButton {
+                    id: searchButton
+                    height: windowLayout.controlHeight
+                    objectName: "searchButton"
+                    icon: "search"
+                    label: qsTr("Search")
+                    keys: "Ctrl+F"
+                    active: filterBar.searchActive
+                    onClicked: {
+                        if (filterBar.searchActive) win.closeSearch(false)
+                        else win.openSearch()
+                    }
+                }
+                BarButton {
+                    id: newFolderButton
+                    height: windowLayout.controlHeight
+                    objectName: "newFolderButton"
+                    icon: "new-folder"
+                    label: qsTr("New folder")
+                    keys: "Ctrl+N"
+                    onClicked: win.askNewFolder()
+                }
+
+                Item { width: Tokens.spaceSm; height: 1 }
 
                 // Sort: what the list is ordered by, and a menu to change it,
                 // where Nautilus keeps the same control. Every view, not
@@ -3114,7 +3601,7 @@ Window {
                     id: sortButton
                     objectName: "sortButton"
                     width: sortText.implicitWidth + Tokens.spaceLg * 2
-                    height: Tokens.controlHeight
+                    height: windowLayout.controlHeight
                     color: sortHover.hovered ? Tokens.withAlpha(Tokens.foreground, 0.1) : "transparent"
                     radius: Tokens.radius
                     readonly property string word: {
@@ -3147,60 +3634,53 @@ Window {
                 Item { width: Tokens.spaceSm; height: 1 }
 
                 Repeater {
+                    id: viewSwitches
                     model: [
-                        { m: "rows",    glyph: "▤", nm: "Rows view" },
-                        { m: "grid",    glyph: "▦", nm: "Grid view" },
-                        { m: "columns", glyph: "⫼", nm: "Columns view" }
+                        { m: "rows",    nm: qsTr("Rows view") },
+                        { m: "grid",    nm: qsTr("Grid view") },
+                        { m: "columns", nm: qsTr("Columns view") }
                     ]
-                    delegate: Rectangle {
-                        width: Tokens.controlHeight
-                        height: Tokens.controlHeight
+                    delegate: BarButton {
+                        height: windowLayout.controlHeight
                         objectName: "viewswitch-" + modelData.m
-                        color: win.viewMode === modelData.m
-                               ? Tokens.withAlpha(Tokens.accent, 0.22)
-                               : (vsHover.hovered ? Tokens.withAlpha(Tokens.foreground, 0.1) : "transparent")
-                        border.width: win.viewMode === modelData.m ? Math.max(1, Tokens.borderWidth) : 0
-                        border.color: Tokens.accent
-                        radius: Tokens.radius
-
-                        HoverHandler { id: vsHover }
-
-                        Text {
-                            textFormat: Text.PlainText
-                            anchors.centerIn: parent
-                            text: modelData.glyph
-                            color: win.viewMode === modelData.m ? Tokens.foregroundBright : Tokens.foreground
-                            font.family: Tokens.fontFamily
-                            font.pixelSize: Tokens.fontBody
-                        }
-                        MouseArea {
-                            anchors.fill: parent
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: win.setView(modelData.m)
-                        }
-                        Accessible.role: Accessible.Button
-                        Accessible.name: modelData.nm
+                        icon: modelData.m
+                        label: modelData.nm
+                        active: win.viewMode === modelData.m
+                        onClicked: win.setView(modelData.m)
                     }
                 }
+            }
 
-                Item { width: Tokens.spaceSm; height: 1 }
+            Row {
+                id: menuTools
+                anchors.right: parent.right
+                anchors.rightMargin: headerBar.sideMargin
+                anchors.verticalCenter: parent.verticalCenter
+                spacing: Math.floor(Tokens.spaceXs * headerBar.horizontalFit)
+
+                // Everything else the window can do, in words.
+                BarButton {
+                    id: moreButton
+                    height: windowLayout.controlHeight
+                    width: headerBar.toolWidth
+                    objectName: "moreButton"
+                    icon: "more"
+                    label: qsTr("More")
+                    onClicked: win.openMoreMenu()
+                }
 
                 // Settings: a visible control, never only a shortcut.
-                Rectangle {
+                BarButton {
+                    id: settingsButton
+                    height: windowLayout.controlHeight
+                    width: headerBar.toolWidth
                     objectName: "settingsButton"
-                    width: Tokens.controlHeight
-                    height: Tokens.controlHeight
-                    color: setHover.hovered ? Tokens.withAlpha(Tokens.foreground, 0.1) : "transparent"
-                    radius: Tokens.radius
-                    HoverHandler { id: setHover }
-                    Text {
-                        textFormat: Text.PlainText
-                        anchors.centerIn: parent
-                        text: "⛭"
-                        color: Tokens.foreground
-                        font.family: Tokens.fontFamily
-                        font.pixelSize: Tokens.fontBody
-                    }
+                    visible: win.chooserMode === ""
+                    icon: "settings"
+                    label: win.prefsStatus === "unsaved" ? qsTr("Settings — not saved")
+                         : win.prefsStatus === "problem" ? qsTr("Settings — problem") : qsTr("Settings")
+                    keys: "Ctrl+,"
+                    onClicked: win.openSettings()
                     // A preferences failure stays visible here until a save
                     // succeeds: a failed sort or view save is otherwise silent.
                     Rectangle {
@@ -3214,15 +3694,6 @@ Window {
                         radius: Tokens.radius
                         color: Tokens.danger
                     }
-                    MouseArea {
-                        anchors.fill: parent
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: win.openSettings()
-                    }
-                    Accessible.role: Accessible.Button
-                    Accessible.name: win.prefsStatus === "unsaved" ? qsTr("Settings — not saved")
-                                     : win.prefsStatus === "problem" ? qsTr("Settings — problem") : qsTr("Settings")
-                    Accessible.description: win.prefsError
                 }
             }
         }
@@ -3231,14 +3702,15 @@ Window {
         Item {
             id: body
             width: parent.width
-            height: parent.height - tabStrip.height - headerBar.height - filterBar.height - adminBanner.height
-                    - chooserBar.height - interruptedNotice.height - jobDrawer.height - hints.height
+            height: Math.max(0, parent.height - tabStrip.height - headerBar.height - filterBar.height - adminBanner.height
+                    - chooserBar.height - chooserFooter.height - interruptedNotice.height - jobDrawer.height - hints.height)
 
             Sidebar {
                 id: sidebar
                 width: win.sidebarVisible ? Math.round(180 * Tokens.spacingScale) : 0
                 height: parent.height
                 visible: win.sidebarVisible
+                picker: win.chooserMode !== ""
                 model: dirModel
                 activePanel: trashPanel.open ? "trash" : recentPanel.open ? "recent" : ""
                 onPlaceChosen: (p) => { dirModel.navigate(p); win.focusList() }
@@ -3252,11 +3724,11 @@ Window {
                 onRemoteChosen: (p) => { dirModel.navigate(p); win.focusList() }
                 onRemoteMenu: (kind, name, x, y) => {
                     win.remoteMenuPlace = { kind: kind, name: name }
-                    contextMenu.popup(x, y, [
+                    contextMenu.popup(x, y, win.chooserMenu([
                         { label: qsTr("Open in new tab"), hint: "", action: "rp-open-tab" },
                         { separator: true },
                         { label: qsTr("Disconnect"), hint: "", action: "rp-off" }
-                    ])
+                    ]))
                     win.qaDump("remote-menu")
                 }
                 devices: win.deviceList
@@ -3288,12 +3760,12 @@ Window {
                 onRecentChosen: win.runAction("recent")
                 onBookmarkMenu: (path, x, y) => {
                     win.bookmarkMenuPath = path
-                    contextMenu.popup(x, y, [
+                    contextMenu.popup(x, y, win.chooserMenu([
                         { label: qsTr("Open"), hint: "", action: "bm-open" },
                         { label: qsTr("Open in new tab"), hint: "", action: "bm-open-tab" },
                         { separator: true },
                         { label: qsTr("Remove from Bookmarks"), hint: "", action: "bm-remove" }
-                    ])
+                    ]))
                 }
             }
 
@@ -3308,6 +3780,7 @@ Window {
                 // chrome that earns nothing is not shown (DESIGN §6.7).
                 Pane {
                     id: paneA
+                    clickSelects: win.chooserMode === "open-folder"
                     x: 0
                     y: 0
                     width: win.paneCount > 1
@@ -3329,7 +3802,7 @@ Window {
                     onDropMenu: (r, x, y) => { win.focusPane(0); win.openDropMenu(win.paneAModel, r, x, y) }
                     onDropDone: (owner) => { win.transferStarted(owner, "", "drop") }
                     onContextRequested: (r, x, y) => { win.focusPane(0); win.openContextMenu(r, x, y) }
-                    canEdgeSplit: win.paneCount < 2
+                    canEdgeSplit: win.paneCount < 2 && win.chooserMode === ""
                     onOpenInSplit: (target, label) => win.openPathInPane(target, 1, label)
                 }
 
@@ -3489,7 +3962,7 @@ Window {
         Rectangle {
             id: filterBar
             width: parent.width
-            height: (filterActive || searchActive) ? Tokens.controlHeight : 0
+            height: (filterActive || searchActive) ? windowLayout.controlHeight : 0
             visible: filterActive || searchActive
             color: Tokens.backgroundDark
             property bool filterActive: false
@@ -3503,15 +3976,23 @@ Window {
             onSearchActiveChanged: win.qaDump("searchbar")
 
             Row {
+                id: searchRow
                 anchors.fill: parent
                 anchors.leftMargin: Tokens.rowPaddingX
+                anchors.rightMargin: filterBar.searchActive ? Tokens.rowPaddingX : 0
                 spacing: Tokens.spaceLg
+                // Leave room to type before offering the optional keyboard hint.
+                readonly property real queryReserve: Math.min(width / 2, Tokens.fontBody * 8)
+                readonly property real querySpace: Math.max(0, width - searchLabel.width - spacing)
 
                 Text {
                     id: searchLabel
                     textFormat: Text.PlainText
                     anchors.verticalCenter: parent.verticalCenter
                     text: filterBar.searchActive ? qsTr("search") : "/"
+                    width: filterBar.searchActive ? Math.min(implicitWidth, Math.max(0, searchRow.width
+                                                       - searchRow.spacing - searchRow.queryReserve)) : implicitWidth
+                    elide: Text.ElideRight
                     color: Tokens.accent
                     font.family: Tokens.fontFamily
                     font.pixelSize: Tokens.fontBody
@@ -3547,8 +4028,7 @@ Window {
                     objectName: "searchInput"
                     visible: filterBar.searchActive
                     anchors.verticalCenter: parent.verticalCenter
-                    width: parent.width - searchHint.implicitWidth - searchLabel.implicitWidth
-                           - Tokens.spaceLg * 3 - Tokens.rowPaddingX * 2
+                    width: searchRow.querySpace - (searchHint.visible ? searchHint.width + searchRow.spacing : 0)
                     color: Tokens.foregroundBright
                     font.family: Tokens.fontFamily
                     font.pixelSize: Tokens.fontBody
@@ -3567,7 +4047,8 @@ Window {
                 }
                 Text {
                     id: searchHint
-                    visible: filterBar.searchActive
+                    visible: filterBar.searchActive && implicitWidth + searchRow.spacing
+                             + searchRow.queryReserve <= searchRow.querySpace
                     textFormat: Text.PlainText
                     anchors.verticalCenter: parent.verticalCenter
                     text: dirModel.finding
@@ -3591,12 +4072,17 @@ Window {
             }
         }
 
-        // Another app's Open/Save dialog: what it asked, and the answer.
-        ChooserBar {
-            id: chooserBar
+        // The rest of a dialog: the Save name and the file type.
+        ChooserFooter {
+            id: chooserFooter
             width: parent.width
+            mode: win.chooserMode
+            busy: win.chooserBusy
+            onNameChanged: chooserBar.error = ""
             onAccepted: win.chooserAccept()
-            onCancelled: Qt.quit()
+            onCancelled: win.chooserCancel()
+            onFilterMenuRequested: win.openChooserFilterMenu()
+            onListWanted: win.focusList()
         }
 
         InterruptedNotice {
@@ -3646,8 +4132,10 @@ Window {
 
         HintStrip {
             id: hints
+            height: windowLayout.controlHeight
             width: parent.width
             preset: win.keyPreset
+            pickerKeys: win.chooserHints
             // Bound for good: transient messages go to `message`, which
             // gives way when the folder, tab or pane changes. Writing
             // to `status` here destroyed this binding after the first action
@@ -3656,7 +4144,10 @@ Window {
             // Bound, not assigned: a selection is live state and must not go
             // stale behind a message some earlier keystroke left here.
             selection: win.selectionText
-            alert: win.alertText !== "" ? win.alertText : win.prefsNotice !== "" ? win.prefsNotice : dirModel.notice
+            alert: win.actionAlert || win.prefsNotice || dirModel.notice
+            showingOpenFailure: win.currentOpenFailure !== ""
+            queuedOpenFailures: win.pendingOpenFailures.length
+            onDismissAlert: { win.dismissAlert(); win.qaDump("hint") }
             dialog: confirm.visible || connectionRecovery.visible
             onStatusChanged: win.qaDump("hint")
             onMessageChanged: win.qaDump("hint")
@@ -3682,11 +4173,14 @@ Window {
         focus: true
         z: -1
 
+        // Beside the Tab order of a dialog's buttons and fields.
+        activeFocusOnTab: win.chooserMode !== ""
+
         Keys.onPressed: (event) => {
             // A warning is about the action that produced it. The next
             // keystroke moves on, so it must not linger over unrelated state.
-            if (win.alertText !== "" && event.key !== Qt.Key_Z)
-                win.alertText = ""
+            if (event.key !== Qt.Key_Z)
+                win.dismissAlert()
 
             // h in Quick Look computes the file's SHA-256 (on a worker;
             // Escape or closing stops it). Checked before the key table so
@@ -3729,6 +4223,8 @@ Window {
                 if (used) { win.qaDump("quicklook-key"); event.accepted = true; return }
             }
 
+            if (win.chooserReturn(event)) { event.accepted = true; return }
+
             // Preset-aware chords from the shared key table (gust-core
             // keymap.rs), which also renders the ? key map: a shortcut and
             // its documentation cannot drift apart.
@@ -3743,7 +4239,7 @@ Window {
                 filterInput.forceActiveFocus()
                 event.accepted = true; return
             }
-            if (event.text === ":") {
+            if (event.text === ":" && win.chooserMode === "") {
                 palette.open()
                 event.accepted = true; return
             }
@@ -3871,9 +4367,11 @@ Window {
                     win.qaDump("clipboard-cancelled")
                     event.accepted = true; return
                 }
-                if (chooserBar.active && dirModel.sel_count() === 0 && dirModel.filter === "") {
+                if (chooserBar.active && (win.chooserBusy
+                        || (dirModel.sel_count() === 0 && dirModel.filter === ""
+                            && !dirModel.finding && !filterBar.filterActive))) {
                     // Escape in an Open/Save dialog is Cancel, as everywhere.
-                    Qt.quit()
+                    win.chooserCancel()
                     event.accepted = true; return
                 }
                 if (dirModel.finding) {
@@ -3949,25 +4447,7 @@ Window {
                     event.accepted = true; return
                 }
                 if (event.key === Qt.Key_Z) {
-                    const label = dirModel.undo_label()
-                    const err = dirModel.undo_last()
-                    if (err === "") {
-                        win.alertText = ""
-                        hints.message = label === "Undo: remove the link" ? qsTr("Removed the link")
-                                     : label === "Undo: remove the links" ? qsTr("Removed the links")
-                                     : label === "Undo: put owners back" ? qsTr("Owners put back")
-                                     : label === "Undo: remove the pasted image" ? qsTr("Removed the pasted image")
-                                     : label === "Undo: put permissions back" ? qsTr("Permissions put back")
-                                     : label === "Undo: restore the original name" ? qsTr("Restored the original name")
-                                     : /^Undo: put \d+ names? back$/.test(label) ? qsTr("Names put back")
-                                     : label === "Undo: put the tags back" ? qsTr("Tags put back")
-                                     : label.startsWith("Undo: remove") ? "Copies removed"
-                                     : label.startsWith("Undo: move") ? "Moved back"
-                                     : "Restored from Trash"
-                    } else {
-                        win.alertText = "Cannot undo: " + err
-                    }
-                    win.qaDump("undo")
+                    win.doUndo()
                     event.accepted = true; return
                 }
                 if (event.key === Qt.Key_C && (event.modifiers & Qt.ShiftModifier)) {
@@ -4033,6 +4513,33 @@ Window {
                 event.accepted = true
             }
         }
+    }
+
+    // Ctrl+Return accepts from anywhere in a dialog: list, name field, file
+    // type. A window shortcut, so no field has to remember it. It stays on
+    // under an overlay, where chooserAccept refuses: the key must be used up,
+    // because a confirmation's focused button takes Ctrl+Return as Return.
+    // The rename card is the exception, its own Ctrl+Return applies.
+    Shortcut {
+        sequences: ["Ctrl+Return", "Ctrl+Enter"]
+        enabled: win.chooserMode !== "" && !renameCard.open
+        onActivated: win.chooserAccept()
+    }
+
+    // The primary button's words. Selection, cursor, folder and filter each
+    // reach the model differently; dataChanged carries the selection flags,
+    // and a row's own change, so this is every way the answer can change.
+    Connections {
+        target: win.chooserMode !== "" ? dirModel : null
+        function onCursorChanged() { Qt.callLater(win.refreshChooserTarget) }
+        function onCountChanged() { Qt.callLater(win.refreshChooserTarget) }
+        function onDataChanged() { Qt.callLater(win.refreshChooserTarget) }
+        function onModelReset() { Qt.callLater(win.refreshChooserTarget) }
+        function onLocationChanged() {
+            win.chooserForgetCheck()
+            Qt.callLater(win.refreshChooserTarget)
+        }
+        function onChooser_checked(token, status) { win.chooserChecked(token, status) }
     }
 
     // Poll the worker thread. The UI thread never touches the filesystem;
@@ -4148,6 +4655,7 @@ Window {
 
     CommandPalette {
         id: palette
+        picker: win.chooserMode !== ""
         model: dirModel
         onVisibleChanged: win.qaDump("palette")
         // Also dump when the RESULTS change, not only when the palette
@@ -4165,7 +4673,7 @@ Window {
         onOpenRequested: (path) => {
             const err = dirModel.open_path(path)
             recentPanel.error = err
-            if (err === "") { hints.message = qsTr("Opened ") + path; recentPanel.hide() }
+            if (err === "") { hints.message = ""; recentPanel.hide() }
             win.qaDump("recent-open")
         }
         onRevealRequested: (path) => { recentPanel.hide(); dirModel.reveal(path); win.qaDump("recent-reveal") }
@@ -4174,6 +4682,7 @@ Window {
 
     ConnectPanel {
         id: connectPanel
+        picker: win.chooserMode !== ""
         places: win.placesInfo
         onConnectRequested: (kind, name, target, user) => {
             win.connectPlace(kind, name, target, user)
@@ -4231,6 +4740,7 @@ Window {
 
     SettingsPanel {
         id: settingsPanel
+        onCurrentChanged: win.qaDump("settings-row")
         // Bound, never assigned: every published snapshot reaches the panel.
         s: win.prefs
         status: win.prefsStatus
@@ -4318,6 +4828,7 @@ Window {
 
     ContextMenu {
         id: contextMenu
+        onHeightChanged: if (open) win.qaDump("context-menu")
         onChosen: (a) => win.runAction(a)
         onFinished: (a) => { if (win.dropMenuModel) win.releaseDropDrag() }
         onHighlightMoved: win.qaDump("context-menu")
@@ -4417,7 +4928,8 @@ Window {
         onClosed: {
             // The keyboard returns to the panel the question was asked over;
             // focusList() leaves an open panel alone on purpose.
-            if (connectPanel.open) connectPanel.refocus()
+            if (confirm.purpose === "chooser-replace") chooserFooter.focusName()
+            else if (connectPanel.open) connectPanel.refocus()
             else if (settingsPanel.open) settingsPanel.refocus()
             else win.focusList()
             // A close still waiting on preferences did not ask over this
@@ -4425,6 +4937,10 @@ Window {
             if (win.prefsClosing) Qt.callLater(win.prefsClose, null)
         }
         onAccepted: {
+            if (confirm.purpose === "chooser-replace") {
+                win.chooserReplaceConfirmed()
+                return
+            }
             if (confirm.purpose === "run" || confirm.purpose === "allow-run") {
                 const model = win.pendingRunModel
                 const token = win.pendingRunToken
@@ -4528,6 +5044,11 @@ Window {
             win.qaDump("trashed")
         }
         onRejected: {
+            if (confirm.purpose === "chooser-replace") {
+                win.chooserAsked = null
+                win.qaDump("chooser-replace-cancelled")
+                return
+            }
             if (confirm.purpose === "run" || confirm.purpose === "allow-run") {
                 if (win.pendingRunModel) win.pendingRunModel.run_discard(win.pendingRunToken)
                 win.pendingRunModel = null
@@ -4644,8 +5165,14 @@ Window {
         win.qaWrite(win.qaTakePending())
     }
 
+    function qaPoint(item, x = item.width / 2) {
+        const p = item.mapToItem(null, x, item.height / 2)
+        return [Math.round(p.x), Math.round(p.y)]
+    }
+
     function qaWrite(pending) {
         const tag = pending.tag
+        const upButton = navButtons.itemAt(2)
         const payload = {
             tag: tag,
             tags: pending.tags,
@@ -4671,6 +5198,9 @@ Window {
             filterBarActive: filterBar.filterActive,
             searchBarActive: filterBar.searchActive,
             searchText: searchInput.text,
+            searchFieldEdges: [win.qaPoint(searchInput, 0)[0], win.qaPoint(searchInput, searchInput.width)[0]],
+            searchTextFits: searchInput.contentWidth > 0 && searchInput.contentWidth < searchInput.width,
+            searchHintShown: searchHint.visible,
             finding: dirModel.finding,
             findNeedle: dirModel.findNeedle,
             tabCount: win.tabCount,
@@ -4753,6 +5283,7 @@ Window {
             hintsOverflow: Math.round(hints.mapToItem(null, 0, hints.height).y - win.height),
             jobPaused: win.job ? !!win.job.paused : false,
             jobPausePoint: jobDrawer.pausePoint(),
+            menuEdges: contextMenu.open ? contextMenu.horizontalEdges() : [],
             menuPoints: contextMenu.open ? contextMenu.itemPoints() : ({}),
             placePoints: sidebar.placePoints(),
             crumbPoints: crumbs.crumbPoints(),
@@ -4840,7 +5371,19 @@ Window {
             canForward: win.canForward,
             chooserMode: chooserBar.mode,
             chooserError: chooserBar.error,
+            chooserLabel: chooserBar.primaryLabel,
+            chooserCanAccept: chooserBar.canAccept,
+            chooserBusy: win.chooserBusy,
+            chooserAnswered: win.chooserAnswered,
+            chooserTarget: win.chooserTarget,
+            chooserName: chooserFooter.name,
+            chooserFilter: chooserFooter.filterIndex,
+            chooserPoints: chooserBar.active
+                ? Object.assign(chooserBar.points(), chooserFooter.points()) : null,
             settingsOpen: settingsPanel.open,
+            settingsPoints: settingsPanel.open ? { close: win.qaPoint(settingsPanel.closeButton) } : {},
+            settingsOptionPoints: settingsPanel.open ? settingsPanel.visibleOptionPoints() : {},
+            settingsScrollY: settingsPanel.scrollY,
             trashOpen: trashPanel.open,
             recentOpen: recentPanel.open,
             deleteTotal: dirModel.delete_total,
@@ -4863,6 +5406,7 @@ Window {
             keyPreset: win.keyPreset,
             sidebarVisible: win.sidebarVisible,
             density: Tokens.density,
+            spacingScale: Tokens.spacingScale,
             bookmarks: win.bookmarkList.map(b => b.label + "=" + b.path),
             jobState: win.job ? win.job.state : "",
             jobBytes: win.job ? (win.job.bytes_text || "") : "",
@@ -4913,6 +5457,15 @@ Window {
             windowHeight: win.height,
             places: win.placesInfo,
             tabCenters: win.tabCenters(),
+            visibleTabLabels: win.visibleTabLabels(),
+            tabDisclosure: tabPathTip.visible && tabPathTip.tab ? {
+                path: tabPathTip.text, accessibleName: tabPathTip.tab.Accessible.name,
+                truncated: tabPathTip.tab.caption.truncated,
+                center: win.qaPoint(tabPathTip),
+                right: tabPathTip.x + tabPathTip.width, left: tabPathTip.x,
+                top: tabStrip.y + tabPathTip.y, bottom: tabStrip.y + tabPathTip.y + tabPathTip.height,
+                atEnd: tabPathTip.atEnd
+            } : null,
             confirmTitle: confirm.title,
             confirmBody: confirm.body,
             confirmButtons: confirm.visible ? confirm.buttonCenters() : null,
@@ -4936,10 +5489,19 @@ Window {
                 const it = win.activePaneItem()
                 return it && it.iconInfo ? it.iconInfo() : []
             })(),
-            sortButtonPoint: (function () {
-                const p = sortButton.mapToItem(null, sortButton.width / 2, sortButton.height / 2)
-                return [Math.round(p.x), Math.round(p.y)]
-            })(),
+            sortButtonPoint: win.qaPoint(sortButton),
+            navButtonSize: [upButton.width, upButton.height],
+            toolbarPoints: {
+                sidebar: win.qaPoint(sidebarButton),
+                back: win.qaPoint(navButtons.itemAt(0)), forward: win.qaPoint(navButtons.itemAt(1)),
+                up: win.qaPoint(upButton), settings: win.qaPoint(settingsButton),
+                upEnd: win.qaPoint(upButton, upButton.width),
+                moreStart: win.qaPoint(moreButton, 0),
+                more: win.qaPoint(moreButton), search: win.qaPoint(searchButton),
+                newFolder: win.qaPoint(newFolderButton),
+                searchStart: win.qaPoint(searchButton, 0),
+                pathStart: win.qaPoint(crumbs, 0), pathEnd: win.qaPoint(crumbs, crumbs.width)
+            },
             sortButtonText: sortText.text,
             model: JSON.parse(dirModel.state_json())
         }
@@ -5016,7 +5578,17 @@ Window {
         function onRevisionChanged() { win.qaDump("theme") }
     }
 
+    onActiveFocusItemChanged: if (win.chooserMode !== "") win.qaDump("chooser-focus")
+
     Component.onCompleted: {
+        // A dialog's size, for when no compositor rule sets one (a rule wins,
+        // it resizes the window after this). Omarchy's floating windows are
+        // this size, so a dialog looks the same with and without the rule.
+        win.chooserMode = dirModel.chooser_mode()
+        if (win.chooserMode !== "") {
+            win.width = 875
+            win.height = 600
+        }
         // The model does not list anything until it is told to: construction
         // must not do I/O. This is the one explicit kick at startup — or the
         // first restored tab, when Settings asks for last time's tabs.
@@ -5034,7 +5606,8 @@ Window {
         const startupNotice = dirModel.startup_notice()
         if (startupNotice !== "") win.alertText = startupNotice
         // After a crash, say what was interrupted — read once, here.
-        try { interruptedNotice.items = JSON.parse(dirModel.interrupted_jobs()) } catch (e) {}
+        if (win.chooserMode === "")
+            try { interruptedNotice.items = JSON.parse(dirModel.interrupted_jobs()) } catch (e) {}
         // A local read of the kernel's own view: no daemon, no network.
         dirModel.request_devices()
         dirModel.watch_devices()
@@ -5043,9 +5616,14 @@ Window {
         chooserBar.mode = dirModel.chooser_mode()
         if (chooserBar.active) {
             chooserBar.title = dirModel.chooser_title()
-            chooserBar.name = dirModel.chooser_name()
+            chooserBar.acceptLabel = dirModel.chooser_accept_label()
+            chooserFooter.name = dirModel.chooser_name()
+            chooserFooter.fileCount = dirModel.chooser_file_count()
+            try { chooserFooter.filters = JSON.parse(dirModel.chooser_filter_names()) } catch (e) {}
+            chooserFooter.filterIndex = dirModel.chooser_filter_index()
             win.title = Qt.binding(() => (chooserBar.title || qsTr("Choose")) + " — Gust")
-            if (chooserBar.mode === "save") Qt.callLater(chooserBar.focusName)
+            win.refreshChooserTarget()
+            if (win.chooserMode === "save") Qt.callLater(chooserFooter.focusName)
         }
         qaStatePath = qaWriter.env_path("GUST_QA_STATE")
         // Started by a tab detach: take the view it had, then tell the

@@ -41,7 +41,7 @@ TestCase {
         panel.show()
         waitForRendering(panel)
     }
-    function cleanup() { panel.hide() }
+    function cleanup() { panel.hide(); test.height = 700 }
 
     function rowIndex(key) { return panel.rows.findIndex(r => r.key === key) }
     function statusLine() { return findChild(panel, "settingsStatus") }
@@ -101,12 +101,12 @@ TestCase {
         // Rows do not depend on the snapshot, so they are never rebuilt.
         compare(panel.rows.length, 9)
         const omarchy = findChild(panel, "settingsNote-omarchy_keys")
-        compare(omarchy.text, "Reversible")
+        compare(omarchy.text, "You can switch back any time")
         test.snap = Object.assign({}, test.snap, { is_omarchy: false })
         compare(omarchy.text, "Needs Omarchy")
         compare(findChild(panel, "settingsNote-omarchy_keys"), omarchy, "the same row, updated in place")
         test.snap = Object.assign({}, test.snap, { renderer_now: "software" })
-        compare(note("renderer"), "Next start. Now: software")
+        compare(note("renderer"), "Applies the next time Gust starts. Now: software")
     }
 
     function test_an_integration_change_is_not_requested_twice() {
@@ -149,5 +149,44 @@ TestCase {
         thief.forceActiveFocus()
         panel.refocus()
         verify(thief.activeFocus, "a closed panel does not take the keyboard")
+    }
+
+    function test_header_and_selected_row_stay_visible_at_minimum_height() {
+        test.height = 320
+        const close = findChild(panel, "settingsClose")
+        const top = () => close.mapToItem(panel, 0, 0).y
+        waitForRendering(panel)
+        const headerY = top()
+        verify(headerY >= 0 && headerY + close.height <= panel.height,
+               "Close spans y=" + headerY + " to " + (headerY + close.height))
+        const body = findChild(panel, "settingsBody")
+        const inBody = item => {
+            const y = item.mapToItem(body, 0, 0).y
+            return y >= 0 && y + item.height <= body.height
+        }
+        for (let i = 1; i < panel.rows.length; ++i) keyClick(Qt.Key_Down)
+        const lastNote = findChild(panel, "settingsNote-omarchy_keys")
+        verify(inBody(lastNote), "the last row follows the keyboard into view")
+        test.status = "unsaved"
+        mouseWheel(body, body.width / 2, body.height / 2, 0, -960)
+        tryVerify(() => !body.moving && inBody(statusLine()))
+        mouseClick(statusLine())
+        compare(retry.count, 1, "the status below the last row can be reached by mouse")
+        compare(top(), headerY)
+        mouseClick(close)
+        verify(!panel.open)
+        panel.show()
+        const firstNote = findChild(panel, "settingsNote-key_preset")
+        verify(inBody(firstNote), "reopening starts at the first row")
+    }
+
+    function test_the_close_button_closes_like_escape() {
+        panel.show()
+        verify(panel.open)
+        const close = findChild(panel, "settingsClose")
+        verify(close !== null)
+        compare(close.Accessible.name, "Close")
+        mouseClick(close)
+        verify(!panel.open)
     }
 }

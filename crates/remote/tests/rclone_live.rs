@@ -10,8 +10,10 @@
 //!   cargo test -p gust-remote --test rclone_live -- --test-threads=1
 
 use gust_remote::cloud::*;
+use std::io;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::process::Command;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 fn root() -> PathBuf {
     PathBuf::from(
@@ -33,6 +35,104 @@ fn rc_addr() -> String {
         .and_then(|p| p.parse().ok())
         .unwrap_or(8188);
     format!("http://127.0.0.1:{}", port + 1)
+}
+
+fn fixture_rc(method: &str) -> io::Result<serde_json::Value> {
+    let result = Command::new("rclone")
+        .arg("rc")
+        .args(rc_client_args(&rc_addr()))
+        .args(["--timeout", "5s", "--contimeout", "5s", method])
+        .output()?;
+    if !result.status.success() {
+        return Err(io::Error::other(format!(
+            "{method} exited {}",
+            result.status
+        )));
+    }
+    Ok(serde_json::from_slice(&result.stdout)?)
+}
+
+// Allow up to 90 seconds to start new polls. A probe already in progress can finish later.
+fn upload_timeout(writeback: Duration) -> Option<Duration> {
+    (writeback <= Duration::from_secs(60)).then(|| writeback + Duration::from_secs(30))
+}
+
+fn upload_deadline() -> Instant {
+    // Ask the running mount: the fixture can be started in another shell.
+    let stats = fixture_rc("vfs/stats").expect("read mount options");
+    let delay = stats["opt"]["WriteBack"]
+        .as_u64()
+        .expect("writeback delay in nanoseconds");
+    let timeout = upload_timeout(Duration::from_nanos(delay)).expect(
+        "invalid rclone fixture setup: use GUST_RCLONE_WRITEBACK of at most 60s; off is unsupported",
+    );
+    Instant::now() + timeout
+}
+
+fn is_upload_for(transfer: &serde_json::Value, name: &str) -> bool {
+    transfer["name"] == name
+        && match transfer.get("what") {
+            Some(kind) => kind == "transferring",
+            // rclone 1.70 distinguishes transfers from checks with this flag alone.
+            None => transfer["checked"] == false,
+        }
+}
+
+#[test]
+fn fixture_upload_wait_has_a_finite_budget() {
+    assert_eq!(
+        upload_timeout(Duration::from_secs(10)),
+        Some(Duration::from_secs(40))
+    );
+    let limit = Duration::from_secs(60);
+    assert_eq!(upload_timeout(limit), Some(Duration::from_secs(90)));
+    assert_eq!(upload_timeout(limit + Duration::from_nanos(1)), None);
+    // rclone encodes "off" as the largest signed duration in nanoseconds.
+    assert_eq!(upload_timeout(Duration::from_nanos(i64::MAX as u64)), None);
+}
+
+#[test]
+fn transfer_history_requires_a_matching_upload_in_either_format() {
+    use serde_json::json;
+
+    for (record, expected) in [
+        (json!({"name":"item", "what":"transferring"}), true),
+        (
+            json!({"name":"item", "what":"checking", "checked":false}),
+            false,
+        ),
+        (json!({"name":"item", "checked":false}), true),
+        (json!({"name":"other", "checked":false}), false),
+        (json!({"name":"item", "checked":true}), false),
+        (json!({"name":"item"}), false),
+    ] {
+        assert_eq!(is_upload_for(&record, "item"), expected, "{record}");
+    }
+}
+
+fn wait_for_rejected_upload(name: &str, deadline: Instant) -> io::Result<()> {
+    while Instant::now() < deadline {
+        let history = fixture_rc("core/transferred")?;
+        let transfers = history["transferred"]
+            .as_array()
+            .ok_or_else(|| io::Error::other("missing transfer history"))?;
+        if let Some(upload) = transfers.iter().find(|t| is_upload_for(t, name)) {
+            if upload["error"]
+                .as_str()
+                .is_some_and(|error| !error.is_empty())
+            {
+                return Ok(());
+            }
+            return Err(io::Error::other(format!(
+                "transfer of {name} finished without an error"
+            )));
+        }
+        std::thread::sleep(Duration::from_millis(400));
+    }
+    Err(io::Error::new(
+        io::ErrorKind::TimedOut,
+        format!("no rejected upload for {name}"),
+    ))
 }
 
 /// Skip rather than fail when the fixture is not running: these tests need a
@@ -117,6 +217,7 @@ fn a_missing_remote_says_which_one() {
 #[test]
 fn cached_is_not_uploaded() {
     need_fixture!();
+    let deadline = upload_deadline();
     let name = "cached-not-uploaded.txt";
     let body = b"this has not reached the backend yet";
     let file = mount().join(name);
@@ -143,7 +244,6 @@ fn cached_is_not_uploaded() {
     );
 
     // After the write-back interval, the backend really does have it.
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
     let mut confirmed = false;
     while std::time::Instant::now() < deadline {
         let now = backend_listing("gustcloud", "", Some(&config())).expect("backend listing");
@@ -165,7 +265,7 @@ fn cached_is_not_uploaded() {
 fn an_empty_queue_proves_nothing() {
     need_fixture!();
     // Let any earlier work drain.
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let deadline = upload_deadline();
     while std::time::Instant::now() < deadline {
         let p = vfs_pending(&rc_addr(), Duration::from_secs(5)).expect("vfs/stats");
         if !p.has_pending() {
@@ -194,10 +294,15 @@ fn an_empty_queue_proves_nothing() {
 #[test]
 fn an_upload_that_cannot_finish_is_never_confirmed() {
     need_fixture!();
-    let name = "doomed.txt";
+    // Transfer history survives individual tests on a reused mount.
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let name = format!("doomed-{}-{nonce}.txt", std::process::id());
     let body = b"this upload will not succeed";
-    let file = mount().join(name);
-    let _ = std::fs::remove_file(&file);
+    let file = mount().join(&name);
+    let deadline = upload_deadline();
 
     // Make the backend directory unwritable so the WebDAV server cannot
     // store the object. The mount still accepts the write into its cache.
@@ -211,23 +316,24 @@ fn an_upload_that_cannot_finish_is_never_confirmed() {
     }
     std::fs::set_permissions(&b, ro).unwrap();
 
-    let wrote = std::fs::write(&file, body);
-    std::thread::sleep(Duration::from_secs(8));
+    let rejected =
+        std::fs::write(&file, body).and_then(|()| wait_for_rejected_upload(&name, deadline));
+    let listing = backend_listing("gustcloud", "", Some(&config()));
+    // Cancel the queued retry before making the backend writable again.
+    let removed = std::fs::remove_file(&file);
+    std::fs::set_permissions(&b, orig).expect("restore backend permissions");
 
-    // Whatever happened locally, the backend must not claim to hold it.
-    let restored = {
-        std::fs::set_permissions(&b, orig).unwrap();
-        backend_listing("gustcloud", "", Some(&config()))
-    };
-    if let Ok(entries) = restored {
-        assert!(
-            !confirmed_on_backend(&entries, name, body.len() as u64),
-            "a file that could not be uploaded was reported as on the backend"
-        );
-    }
-    // The local write may itself have failed, which is also honest.
-    let _ = wrote;
-    std::fs::remove_file(&file).ok();
+    rejected.expect("expected rclone to record the failed upload");
+    let entries = listing.expect("list the read-only backend");
+    assert!(
+        !entries.iter().any(|e| e.name == name),
+        "the backend contains {name} after a rejected upload"
+    );
+    assert!(
+        !confirmed_on_backend(&entries, &name, body.len() as u64),
+        "Gust confirmed a rejected upload"
+    );
+    removed.expect("remove the cached file");
 }
 
 #[test]

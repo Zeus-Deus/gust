@@ -89,7 +89,7 @@ Item {
                 Rectangle {
                     id: crumbBox
                     width: crumbText.implicitWidth + Tokens.spaceLg
-                    height: Tokens.controlHeight - Tokens.spaceSm
+                    height: Math.max(0, root.height - Tokens.spaceSm)
                     color: hover.hovered ? Tokens.withAlpha(Tokens.foreground, 0.08) : "transparent"
                     radius: Tokens.radius
 

@@ -22,6 +22,11 @@ Rectangle {
     /// something did not happen. Outranks the selection count, which is only
     /// ambient state, and is cleared by the next action.
     property string alert: ""
+    property bool showingOpenFailure: false
+    property int queuedOpenFailures: 0
+    readonly property string alertAction: root.queuedOpenFailures > 0 ? qsTr("Next")
+                                          : root.showingOpenFailure ? qsTr("Dismiss") : ""
+    signal dismissAlert()
     /// A modal dialog is up: its keys, not the list's, are what work now
     /// (a stale "Enter open" under a Run prompt would mislead).
     property bool dialog: false
@@ -30,6 +35,9 @@ Rectangle {
         { k: "Enter", d: "press it" },
         { k: "Esc", d: "cancel" }
     ]
+    /// Replaces the preset's list where the general keys do not apply: in an
+    /// Open or Save dialog Enter chooses, and half the list is not there.
+    property var pickerKeys: []
     /// The key labels shown now, for tests.
     readonly property string shownKeys: {
         const m = root.dialog ? root.dialogKeys : hintRep.model
@@ -37,7 +45,10 @@ Rectangle {
     }
 
     readonly property string displayText:
-        root.alert !== "" ? root.alert
+        root.alert !== "" && root.queuedOpenFailures > 0
+            ? root.alert + qsTr(" (%1 more) · %2").arg(root.queuedOpenFailures).arg(root.alertAction)
+        : root.showingOpenFailure ? root.alert + qsTr(" · %1").arg(root.alertAction)
+        : root.alert !== "" ? root.alert
         : root.messageAboutSelection && root.message !== "" ? root.message
         : (root.selection !== "" ? root.selection
            : (root.message !== "" ? root.message : root.status))
@@ -76,15 +87,17 @@ Rectangle {
 
         Repeater {
             id: hintRep
-            model: root.dialog ? root.dialogKeys : root.preset === "vim"
+            model: root.dialog ? root.dialogKeys
+                : root.pickerKeys.length > 0 ? root.pickerKeys
+                : root.preset === "vim"
                 ? [
                     { k: "j k", d: "move" },
                     { k: "l", d: "open" },
                     { k: "h", d: "up" },
                     { k: "Space", d: "quick look" },
                     { k: "/", d: "filter" },
-                    { k: ":", d: "command" },
-                    { k: "?", d: "keys" }
+                    { k: ":", d: "commands" },
+                    { k: "?", d: "shortcuts" }
                   ]
                 : [
                     { k: "↑ ↓", d: "move" },
@@ -92,8 +105,8 @@ Rectangle {
                     { k: "Backspace", d: "up" },
                     { k: "Space", d: "quick look" },
                     { k: "/", d: "filter" },
-                    { k: ":", d: "command" },
-                    { k: "F1", d: "keys" }
+                    { k: ":", d: "commands" },
+                    { k: "F1", d: "shortcuts" }
                   ]
 
             delegate: Row {
@@ -126,8 +139,9 @@ Rectangle {
         anchors.right: parent.right
         anchors.rightMargin: Tokens.rowPaddingX
         anchors.verticalCenter: parent.verticalCenter
-        // Never wider than two thirds of the strip; a long path elides.
-        width: Math.min(implicitWidth, Math.round(root.width * 0.66))
+        // Make room for the failure and its next action before eliding either.
+        width: Math.min(implicitWidth, root.alertAction !== ""
+                        ? root.width - 2 * Tokens.rowPaddingX : Math.round(root.width * 0.66))
         elide: Text.ElideMiddle
         horizontalAlignment: Text.AlignRight
         text: root.displayText
@@ -136,6 +150,21 @@ Rectangle {
         font.family: Tokens.fontFamily
         font.pixelSize: Tokens.fontCaption
         objectName: "statusText"
+    }
+
+    Item {
+        anchors.left: statusText.left
+        anchors.right: statusText.right
+        height: parent.height
+        visible: root.alertAction !== ""
+        TapHandler {
+            cursorShape: Qt.PointingHandCursor
+            onTapped: root.dismissAlert()
+        }
+        Accessible.role: Accessible.Button
+        Accessible.name: root.alertAction
+        Accessible.description: root.alert
+        Accessible.onPressAction: if (visible) root.dismissAlert()
     }
 
     Accessible.role: Accessible.StaticText

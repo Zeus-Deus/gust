@@ -28,6 +28,7 @@ impl qobject::DirModel {
             request: self.request_revision,
             selection_revision: self.selection_revision,
             query: self.filter.to_string(),
+            chooser_globs: Arc::from(chooser_globs()),
             sort: self.sort_spec(),
             sort_revision: self.sort_request_revision,
             hidden: self.show_hidden,
@@ -54,6 +55,7 @@ impl qobject::DirModel {
             || (r.frame.sort != r.sort_spec() || r.frame.sort_revision != r.sort_request_revision);
         let filtering = r.frame.all.generation != r.generation
             || r.frame.query != r.filter.to_string()
+            || r.frame.chooser_globs.as_ref() != chooser_globs()
             || r.frame.hidden != r.show_hidden;
         let selection = r.runtime.pending_selection();
         self.as_mut().set_sort_pending(sorting);
@@ -126,6 +128,7 @@ impl qobject::DirModel {
         let layout = moved
             && Arc::ptr_eq(&frame.all, &self.as_ref().frame.all)
             && frame.query == self.as_ref().frame.query
+            && frame.chooser_globs == self.as_ref().frame.chooser_globs
             && frame.hidden == self.as_ref().frame.hidden
             && (frame.sort != self.as_ref().frame.sort
                 || frame.sort_revision != self.as_ref().frame.sort_revision);
@@ -256,6 +259,10 @@ impl qobject::DirModel {
             let status_phase = metrics.publish_phases.status.timer();
             let display = frame.all.key.display_path();
             let location_changed_by_token = old.all.key != frame.all.key;
+            if location_changed_by_token {
+                self.as_mut()
+                    .set_tab_disclosure_path(QString::from(&frame.all.key.tab_path()));
+            }
             let same_display = self.as_ref().location.to_string() == display;
             self.as_mut().set_location(QString::from(&display));
             if location_changed_by_token && same_display {
