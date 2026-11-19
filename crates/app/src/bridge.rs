@@ -2173,10 +2173,10 @@ impl qobject::DirModel {
     /// the columns. Every result is tagged with a generation, so a late
     /// answer for a directory the user already left is dropped.
     fn load_current(self: Pin<&mut Self>) {
-        self.load_current_cached(true);
+        self.load_current_cached(true, 0);
     }
 
-    fn load_current_cached(mut self: Pin<&mut Self>, reuse: bool) {
+    fn load_current_cached(mut self: Pin<&mut Self>, reuse: bool, keep: i32) {
         // Requested navigation precedes displayed-location publication. Retire
         // its Save check now, before a late answer can hold up the new rows.
         let checked = self
@@ -2222,7 +2222,7 @@ impl qobject::DirModel {
         }
         self.as_mut().set_settled(false);
         self.as_mut().set_status(QString::from("reading…"));
-        self.as_mut().queue_projection(0);
+        self.as_mut().queue_projection(keep);
         let r = self.as_ref();
         r.runtime.load(crate::projection::Load {
             key,
@@ -6582,12 +6582,16 @@ impl qobject::DirModel {
         !self.forward.is_empty()
     }
 
-    fn reload(mut self: Pin<&mut Self>) {
+    fn reload(self: Pin<&mut Self>) {
+        self.reload_current(0);
+    }
+
+    fn reload_current(mut self: Pin<&mut Self>, keep: i32) {
         if self.as_ref().defer_origin_relist() {
             self.as_mut().rust_mut().live_dirty = true;
             return;
         }
-        self.load_current_cached(false);
+        self.load_current_cached(false, keep);
     }
 
     /// Ctrl+R: the user asked for fresh facts, so folders are re-measured
@@ -6596,7 +6600,7 @@ impl qobject::DirModel {
     fn reload_all(mut self: Pin<&mut Self>) {
         self.as_mut().rust_mut().size_cancel.cancel();
         self.as_mut().rust_mut().dir_sizes.clear();
-        self.load_current_cached(false);
+        self.load_current_cached(false, 0);
     }
 
     fn toggle_hidden(mut self: Pin<&mut Self>) {
@@ -7260,7 +7264,7 @@ impl qobject::DirModel {
         let modes = std::mem::take(&mut self.as_mut().rust_mut().last_modes);
         if !modes.is_empty() {
             let (back, refused) = gust_ops::attrs::undo_modes(&modes);
-            self.as_mut().reload();
+            self.as_mut().reload_after_mode_change();
             let msg = if refused.is_empty() {
                 format!(
                     "Permissions put back on {back} item{}",
@@ -9731,6 +9735,14 @@ impl qobject::DirModel {
         }
     }
 
+    fn reload_after_mode_change(self: Pin<&mut Self>) {
+        if self.requested_key == self.key {
+            // Follow the current row for this refresh. A later navigation
+            // submits its own cursor policy with the new load generation.
+            self.reload_current(1);
+        }
+    }
+
     /// Record a permissions outcome for Ctrl+Z and say what happened in the
     /// status line. "" unless nothing changed because every item failed.
     fn finish_mode_change(mut self: Pin<&mut Self>, out: gust_ops::attrs::ModeOutcome) -> QString {
@@ -9744,7 +9756,7 @@ impl qobject::DirModel {
             r.last_bulk_rename.clear();
             r.last_trashed_batch.clear();
         }
-        self.as_mut().reload();
+        self.as_mut().reload_after_mode_change();
         if !out.failed.is_empty() && n == 0 {
             return QString::from(&out.failed.join("; "));
         }

@@ -293,6 +293,7 @@ fn actual_qt_navigation_layout_persistent_mapping_metadata_and_hold() {
             .contains("Invalid destination token"));
     }
     typed_destination_tokens_match_actual_navigation(app, &mut model, &fixture);
+    permission_refresh_focus_stays_in_its_folder(app, &mut model, &fixture);
     newer_focus_survives_held_relist(app, &mut model, &fixture);
     asked_for_hidden_entry_takes_the_cursor(app, &mut model, &fixture);
     equal_viewport_filter_measures_new_folders(app, &mut model, &fixture);
@@ -1401,6 +1402,77 @@ fn publication_attribution_reenters_qt(app: &QCoreApplication, fixture: &Fixture
         model.pin_mut().stop_watch();
         drop(model);
         app.process_events();
+    }
+}
+
+fn permission_refresh_focus_stays_in_its_folder(
+    app: &QCoreApplication,
+    model: &mut cxx::UniquePtr<qobject::DirModel>,
+    fixture: &Fixture,
+) {
+    let origin = fixture.0.join("permission-origin");
+    let destination = fixture.0.join("permission-destination");
+    for folder in [&origin, &destination] {
+        std::fs::create_dir(folder).unwrap();
+        for name in ["a-first", "c-shared"] {
+            std::fs::write(folder.join(name), b"").unwrap();
+        }
+    }
+    std::fs::write(destination.join("b-revealed"), b"").unwrap();
+
+    model.pin_mut().navigate_path(origin.clone());
+    wait(app, model, |m| m.settled && m.count == 2);
+    model.pin_mut().stop_watch();
+    model.pin_mut().focus_row(1);
+    assert_eq!(
+        model.path_of_row(model.cursor),
+        Some(origin.join("c-shared"))
+    );
+    std::fs::write(origin.join("b-inserted"), b"").unwrap();
+    model.pin_mut().reload_after_mode_change();
+    wait(app, model, |m| m.settled && m.count == 3);
+    assert_eq!(
+        model.path_of_row(model.cursor),
+        Some(origin.join("c-shared"))
+    );
+
+    model.pin_mut().focus_on_name("b-inserted".into());
+    model.pin_mut().reload_after_mode_change();
+    wait(app, model, |m| m.settled);
+    assert_eq!(
+        model.path_of_row(model.cursor),
+        Some(origin.join("b-inserted"))
+    );
+
+    for reveal in [false, true] {
+        model.pin_mut().navigate_path(origin.clone());
+        wait(app, model, |m| {
+            m.settled && m.key == LocationKey::local(&origin)
+        });
+        model.pin_mut().focus_row(2);
+        assert_eq!(
+            model.path_of_row(model.cursor),
+            Some(origin.join("c-shared"))
+        );
+        model.pin_mut().hold_live_updates(true);
+        model.pin_mut().reload_after_mode_change();
+        wait(app, model, |m| m.runtime.slots()["completion"] == true);
+
+        let expected = if reveal {
+            let file = destination.join("b-revealed");
+            model
+                .pin_mut()
+                .reveal(&QString::from(file.to_str().unwrap()));
+            file
+        } else {
+            model.pin_mut().navigate_path(destination.clone());
+            destination.join("a-first")
+        };
+        model.pin_mut().hold_live_updates(false);
+        wait(app, model, |m| {
+            m.settled && m.key == LocationKey::local(&destination)
+        });
+        assert_eq!(model.path_of_row(model.cursor), Some(expected));
     }
 }
 

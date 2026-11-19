@@ -40,7 +40,9 @@ def main():
                       block(place, "pub struct ArchiveClaim"), block(place, "impl ArchiveWork"),
                       block(place, "impl Drop for ArchiveClaim"), block(place, "fn lock<T>(")])
     methods = {"@FINISH_MODE_CHANGE@": block(bridge, "    fn finish_mode_change("),
-               "@RELOAD@": block(bridge, "    fn reload(mut self: Pin<&mut Self>)"),
+               "@RELOAD_AFTER_MODE_CHANGE@": block(bridge, "    fn reload_after_mode_change("),
+               "@RELOAD@": block(bridge, "    fn reload(self: Pin<&mut Self>)"),
+               "@RELOAD_CURRENT@": block(bridge, "    fn reload_current("),
                "@REFUSE_PENDING_SELECTION@": block(inputs[names[-1]].decode(),
                                                    "    pub(super) fn refuse_pending_selection("),
                "@RUN_PREPARE@": block(bridge, "    fn run_prepare(mut self:"),
