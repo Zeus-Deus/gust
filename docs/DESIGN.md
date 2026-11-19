@@ -2447,9 +2447,12 @@ is exactly what a person wants for an image.
 ### Launching
 
 The `Exec` line is parsed, not handed to a shell. Field codes are expanded
-per the freedesktop spec — `%f`/`%F` become the path, `%u`/`%U` its file URI,
-and `%i`/`%c`/`%k` are dropped — and every remaining word becomes one argv
-entry. A file called `; rm -rf ~` is one argument and nothing else.
+per the freedesktop spec — `%f`/`%F` become the path, `%u`/`%U` its
+percent-encoded file URI, `%%` a percent sign, and `%i`/`%c`/`%k` and the
+deprecated codes are dropped — and every remaining word becomes one argv
+entry; a double-quoted argument (with `\"`, `` \` ``, `\$`, `\\` escapes) is
+one word. A file called `; rm -rf ~` is one argument and nothing else, and
+paths stay raw OS bytes, so a name that is not UTF-8 still opens.
 
 `Terminal=true` entries are launched through a terminal, because an editor
 with no terminal simply vanishes.

@@ -9,6 +9,7 @@
 //! so a file called `; rm -rf ~` is one argument and nothing else.
 
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 /// An application that says it can open a type.
@@ -382,51 +383,151 @@ pub fn handlers_in(mime: &str, look: &Lookup) -> Vec<Handler> {
     out
 }
 
+/// One piece of an `Exec` argument: literal text or a `%x` field code.
+enum Piece {
+    Text(String),
+    Code(char),
+}
+
+/// Split an `Exec` value into arguments, per the desktop-entry spec.
+///
+/// Arguments are separated by spaces unless double-quoted; inside quotes a
+/// backslash escapes `"`, `` ` ``, `$` and `\`. `%%` is a literal percent and
+/// any other `%x` is a field code, left for the caller to expand. This is a
+/// tokenizer, not a shell: nothing it produces is ever evaluated.
+fn exec_args(exec: &str) -> Vec<Vec<Piece>> {
+    // The value is a desktop-entry string first, with its own escapes.
+    let mut value = String::with_capacity(exec.len());
+    let mut raw = exec.chars();
+    while let Some(c) = raw.next() {
+        if c != '\\' {
+            value.push(c);
+            continue;
+        }
+        match raw.next() {
+            Some('s') => value.push(' '),
+            Some('n') => value.push('\n'),
+            Some('t') => value.push('\t'),
+            Some('r') => value.push('\r'),
+            Some('\\') => value.push('\\'),
+            Some(other) => {
+                value.push('\\');
+                value.push(other);
+            }
+            None => value.push('\\'),
+        }
+    }
+
+    fn text(arg: &mut Vec<Piece>, c: char) {
+        match arg.last_mut() {
+            Some(Piece::Text(t)) => t.push(c),
+            _ => arg.push(Piece::Text(c.to_string())),
+        }
+    }
+
+    let mut args = Vec::new();
+    // None between arguments, so `""` is still an (empty) argument.
+    let mut current: Option<Vec<Piece>> = None;
+    let mut quoted = false;
+    let mut chars = value.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '"' {
+            quoted = !quoted;
+            current.get_or_insert_with(Vec::new);
+            continue;
+        }
+        if !quoted && c.is_whitespace() {
+            args.extend(current.take());
+            continue;
+        }
+        let arg = current.get_or_insert_with(Vec::new);
+        match c {
+            '\\' if quoted => match chars.peek() {
+                Some(&next) if matches!(next, '"' | '`' | '$' | '\\') => {
+                    chars.next();
+                    text(arg, next);
+                }
+                _ => text(arg, '\\'),
+            },
+            '%' => match chars.next() {
+                Some('%') => text(arg, '%'),
+                Some(code) => arg.push(Piece::Code(code)),
+                None => {}
+            },
+            other => text(arg, other),
+        }
+    }
+    args.extend(current);
+    args
+}
+
+/// What a file field code stands for: the path, or its `file://` URI.
+fn file_arg(code: char, path: &Path) -> OsString {
+    if matches!(code, 'u' | 'U') {
+        // Percent-encoded from the raw bytes: a `#` or a space in a name
+        // would otherwise cut the URI short at the receiving end.
+        crate::clipboard::path_to_uri(path).into()
+    } else {
+        path.as_os_str().to_owned()
+    }
+}
+
+/// Expand every argument of `exec` over `paths`; also says whether any file
+/// code was present.
+fn expand(exec: &str, paths: &[impl AsRef<Path>]) -> (Vec<OsString>, bool) {
+    let mut out = Vec::new();
+    let mut substituted = false;
+    for arg in exec_args(exec) {
+        // A list code standing alone becomes one argument per file.
+        if let [Piece::Code(code @ ('F' | 'U'))] = arg[..] {
+            substituted = true;
+            out.extend(paths.iter().map(|p| file_arg(code, p.as_ref())));
+            continue;
+        }
+        let mut word = OsString::new();
+        // An argument made only of dropped codes disappears with them.
+        let mut kept = arg.is_empty();
+        for piece in &arg {
+            match piece {
+                Piece::Text(t) => {
+                    word.push(t);
+                    kept = true;
+                }
+                // A code embedded in a longer word, e.g. --file=%f.
+                Piece::Code(code @ ('f' | 'F' | 'u' | 'U')) => {
+                    substituted = true;
+                    if let Some(first) = paths.first() {
+                        word.push(file_arg(*code, first.as_ref()));
+                        kept = true;
+                    }
+                }
+                // Icon, caption and entry-path codes carry nothing Gust
+                // needs; the deprecated ones (%d %D %n %N %v %m) and
+                // anything unknown are removed, as the spec requires.
+                Piece::Code(_) => {}
+            }
+        }
+        if kept {
+            out.push(word);
+        }
+    }
+    (out, substituted)
+}
+
 /// Expand a desktop `Exec` line into argv.
 ///
 /// Field codes per the freedesktop spec: `%f`/`%F` the path, `%u`/`%U` its
-/// URI, and `%i`/`%c`/`%k` dropped. Nothing is passed through a shell, so a
-/// path containing shell metacharacters stays one argument.
-pub fn exec_argv(exec: &str, path: &Path) -> Vec<String> {
-    let p = path.to_string_lossy().to_string();
-    let uri = format!("file://{p}");
-    let mut out = Vec::new();
-    let mut substituted = false;
-
-    for word in exec.split_whitespace() {
-        // A quoted word in Exec is one argument; strip the quotes the spec
-        // allows without letting them turn into shell quoting.
-        let w = word.trim_matches('"');
-        match w {
-            "%f" | "%F" => {
-                out.push(p.clone());
-                substituted = true;
-            }
-            "%u" | "%U" => {
-                out.push(uri.clone());
-                substituted = true;
-            }
-            // Icon, comment and entry-path codes carry nothing Gust needs.
-            "%i" | "%c" | "%k" => {}
-            other => {
-                // A code embedded in a longer word, e.g. --file=%f.
-                if other.contains("%f") || other.contains("%F") {
-                    out.push(other.replace("%F", &p).replace("%f", &p));
-                    substituted = true;
-                } else if other.contains("%u") || other.contains("%U") {
-                    out.push(other.replace("%U", &uri).replace("%u", &uri));
-                    substituted = true;
-                } else {
-                    out.push(other.to_string());
-                }
-            }
-        }
-    }
+/// percent-encoded URI, `%%` a percent sign, and `%i`/`%c`/`%k` and the
+/// deprecated codes dropped. Nothing is passed through a shell, so a path
+/// containing shell metacharacters stays one argument, and the path is never
+/// re-encoded, so a name that is not UTF-8 still names the same file.
+pub fn exec_argv(exec: &str, path: &Path) -> Vec<OsString> {
+    let (mut out, substituted) = expand(exec, &[path]);
 
     // An Exec with no field code still has to receive the file, or "open
     // with" opens the application and not the document.
     if !substituted {
-        out.push(p);
+        out.push(path.as_os_str().to_owned());
     }
     out
 }
@@ -439,37 +540,18 @@ pub fn exec_argv(exec: &str, path: &Path) -> Vec<String> {
 /// passing five paths to a `%f` program opens the first and silently drops
 /// four, so the files *look* opened.
 pub fn takes_many(exec: &str) -> bool {
-    exec.split_whitespace()
-        .any(|w| w.contains("%F") || w.contains("%U"))
+    exec_args(exec)
+        .iter()
+        .flatten()
+        .any(|piece| matches!(piece, Piece::Code('F' | 'U')))
 }
 
 /// Expand an `Exec` line for several files at once.
 ///
 /// Only valid when [`takes_many`] is true; the caller launches once per file
-/// otherwise.
-pub fn exec_argv_many(exec: &str, paths: &[PathBuf]) -> Vec<String> {
-    let mut out = Vec::new();
-    for word in exec.split_whitespace() {
-        let w = word.trim_matches('"');
-        match w {
-            "%F" => out.extend(paths.iter().map(|p| p.to_string_lossy().to_string())),
-            "%U" => out.extend(
-                paths
-                    .iter()
-                    .map(|p| format!("file://{}", p.to_string_lossy())),
-            ),
-            "%i" | "%c" | "%k" => {}
-            // A single-file code inside a multi-file launch would only ever
-            // carry the first path; the caller must not be here at all.
-            "%f" | "%u" => {
-                if let Some(first) = paths.first() {
-                    out.push(first.to_string_lossy().to_string());
-                }
-            }
-            other => out.push(other.to_string()),
-        }
-    }
-    out
+/// otherwise. A single-file code here would only ever carry the first path.
+pub fn exec_argv_many(exec: &str, paths: &[PathBuf]) -> Vec<OsString> {
+    expand(exec, paths).0
 }
 
 /// Launch `handler` on `path`.
@@ -481,12 +563,13 @@ pub fn launch(handler: &Handler, path: &Path) -> Result<String, super::OpenRefus
     if argv.is_empty() {
         return Err(super::OpenRefusal::Failed("empty command".into()));
     }
-    let program = argv[0].clone();
-    let args: Vec<String> = argv[1..].to_vec();
+    // The program comes from the Exec text, so it is always UTF-8; only the
+    // file arguments have to stay raw.
+    let program = argv[0].to_string_lossy().into_owned();
+    let args = &argv[1..];
 
     if handler.terminal {
-        let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-        return super::run_in_terminal(&program, &refs).map(|_| handler.name.clone());
+        return super::run_in_terminal(&program, args).map(|_| handler.name.clone());
     }
 
     if super::which(&program).is_none() {
@@ -495,7 +578,7 @@ pub fn launch(handler: &Handler, path: &Path) -> Result<String, super::OpenRefus
         )));
     }
     std::process::Command::new(&program)
-        .args(&args)
+        .args(args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -559,7 +642,7 @@ pub fn launch_many(handler: &Handler, paths: &[PathBuf]) -> MultiOpen {
         if argv.is_empty() {
             return MultiOpen::Refused("empty command".into());
         }
-        let program = argv[0].clone();
+        let program = argv[0].to_string_lossy().into_owned();
         if super::which(&program).is_none() {
             return MultiOpen::Refused(format!("{program} is not installed"));
         }
@@ -1033,13 +1116,90 @@ mod tests {
         assert_eq!(argv.len(), 2, "got {argv:?}");
         assert_eq!(argv[1], "/tmp/; rm -rf ~");
         // And nothing is ever joined back into one string.
-        assert!(!argv[0].contains(' '));
+        assert_eq!(argv[0], "imv");
     }
 
     #[test]
     fn an_embedded_code_is_expanded_in_place() {
         let argv = exec_argv("app --file=%f", Path::new("/tmp/x"));
         assert_eq!(argv, vec!["app", "--file=/tmp/x"]);
+    }
+
+    #[test]
+    fn a_quoted_program_path_with_a_space_is_one_argument() {
+        let argv = exec_argv(r#""/opt/My App/app" --new-window %U"#, Path::new("/tmp/a"));
+        assert_eq!(
+            argv,
+            vec!["/opt/My App/app", "--new-window", "file:///tmp/a"]
+        );
+    }
+
+    #[test]
+    fn quoted_escapes_are_undone_without_a_shell() {
+        // Inside double quotes a backslash escapes " ` $ and \ only; the
+        // result is still plain argv, so $1 and `x` are never evaluated.
+        let argv = exec_argv(
+            r#"app "say \"hi\" \$1 \`x\` C:\\\\dir" %f"#,
+            Path::new("/tmp/x"),
+        );
+        assert_eq!(argv, vec!["app", r#"say "hi" $1 `x` C:\dir"#, "/tmp/x"]);
+    }
+
+    #[test]
+    fn a_doubled_percent_is_a_literal_percent() {
+        let argv = exec_argv("app --zoom=100%% %f", Path::new("/tmp/x"));
+        assert_eq!(argv, vec!["app", "--zoom=100%", "/tmp/x"]);
+        assert!(!takes_many("app %%F %f"), "%%F is the text %F, not a list");
+    }
+
+    #[test]
+    fn deprecated_codes_are_dropped() {
+        let argv = exec_argv("app %d %D %n %N %v %m %f", Path::new("/tmp/x"));
+        assert_eq!(argv, vec!["app", "/tmp/x"]);
+    }
+
+    #[test]
+    fn a_uri_is_percent_encoded() {
+        // An unencoded # starts a fragment: the browser would open "Report ".
+        let p = PathBuf::from("/tmp/Report #1.html");
+        let one = exec_argv("browser %u", &p);
+        assert_eq!(one, vec!["browser", "file:///tmp/Report%20%231.html"]);
+        let many = exec_argv_many("browser %U", &[p, PathBuf::from("/tmp/100%.html")]);
+        assert_eq!(
+            many,
+            vec![
+                "browser",
+                "file:///tmp/Report%20%231.html",
+                "file:///tmp/100%25.html"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_name_that_is_not_utf8_reaches_the_program_unchanged() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+        let raw: &[u8] = b"/tmp/caf\xe9.txt";
+        let p = PathBuf::from(OsStr::from_bytes(raw));
+
+        let argv = exec_argv("ed %f", &p);
+        assert_eq!(OsStr::new(&argv[1]).as_bytes(), raw);
+        let argv = exec_argv("ed --file=%f", &p);
+        assert_eq!(OsStr::new(&argv[1]).as_bytes(), b"--file=/tmp/caf\xe9.txt");
+        let argv = exec_argv_many("ed %F", std::slice::from_ref(&p));
+        assert_eq!(OsStr::new(&argv[1]).as_bytes(), raw);
+        let argv = exec_argv("browser %u", &p);
+        assert_eq!(argv[1], "file:///tmp/caf%E9.txt");
+    }
+
+    #[test]
+    fn a_hostile_filename_stays_one_argument_inside_quotes_too() {
+        let p = Path::new("/tmp/a\" ; rm -rf ~ \"$(x)`y` %f %%");
+        for exec in ["imv %f", "imv \"%f\"", "imv %F"] {
+            let argv = exec_argv(exec, p);
+            assert_eq!(argv.len(), 2, "{exec}: {argv:?}");
+            assert_eq!(OsString::from(&argv[1]), p.as_os_str(), "{exec}");
+        }
     }
 
     #[test]
