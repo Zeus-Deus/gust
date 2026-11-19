@@ -6,6 +6,7 @@ import com.gust.app
 Rectangle {
     id: root
     property var model
+    property bool picker: false
     signal navigateRequested(string path)
     signal actionRequested(string action)
     /// Emitted whenever the palette stops being visible, so the window can put
@@ -78,7 +79,7 @@ Rectangle {
     }
 
     readonly property var allActions: [
-        { id: "search",       label: "Search here and below", hint: "Ctrl+F" },
+        { id: "search",       label: "Search here and below", hint: "Ctrl+F", picker: true },
         { id: "tag-1",        label: "Tag red",                hint: "Alt+1" },
         { id: "tag-2",        label: "Tag orange",             hint: "Alt+2" },
         { id: "tag-3",        label: "Tag yellow",             hint: "Alt+3" },
@@ -98,15 +99,15 @@ Rectangle {
         { id: "device-send",  label: "Send a copy to a device…", hint: "" },
         { id: "device-sharing", label: "Share with iPhone, iPad or another device…", hint: "" },
         { id: "device-share-here", label: "Let devices open this folder…", hint: "" },
-        { id: "view-rows",    label: "View: Rows",            hint: "" },
-        { id: "sort-name",    label: "Sort by name",          hint: "" },
-        { id: "sort-kind",    label: "Sort by kind",          hint: "" },
-        { id: "sort-size",    label: "Sort by size",          hint: "" },
-        { id: "sort-modified",label: "Sort by date",          hint: "" },
-        { id: "view-grid",    label: "View: Grid",            hint: "" },
-        { id: "view-columns", label: "View: Columns",         hint: "" },
-        { id: "toggle-hidden",label: "Toggle hidden files",   hint: "Ctrl+H" },
-        { id: "new-folder",   label: "New folder",            hint: "Ctrl+N" },
+        { id: "view-rows",    label: "View: Rows",            hint: "", picker: true },
+        { id: "sort-name",    label: "Sort by name",          hint: "", picker: true },
+        { id: "sort-kind",    label: "Sort by kind",          hint: "", picker: true },
+        { id: "sort-size",    label: "Sort by size",          hint: "", picker: true },
+        { id: "sort-modified",label: "Sort by date",          hint: "", picker: true },
+        { id: "view-grid",    label: "View: Grid",            hint: "", picker: true },
+        { id: "view-columns", label: "View: Columns",         hint: "", picker: true },
+        { id: "toggle-hidden",label: "Toggle hidden files",   hint: "Ctrl+H", picker: true },
+        { id: "new-folder",   label: "New folder",            hint: "Ctrl+N", picker: true },
         { id: "new-file",     label: "New file",              hint: "Ctrl+Shift+N" },
         { id: "make-link",    label: "Make link",             hint: "" },
         { id: "run",          label: "Run program…",          hint: "" },
@@ -114,8 +115,8 @@ Rectangle {
         { id: "owner",        label: "Owner…",                hint: "" },
         { id: "paste-image",  label: "Paste image as file",   hint: "" },
         { id: "open-admin",   label: "Open as administrator", hint: "" },
-        { id: "invert-selection", label: "Invert selection",  hint: "Ctrl+I" },
-        { id: "deselect-all", label: "Select nothing",        hint: "Ctrl+Shift+A" },
+        { id: "invert-selection", label: "Invert selection",  hint: "Ctrl+I", picker: true },
+        { id: "deselect-all", label: "Select nothing",        hint: "Ctrl+Shift+A", picker: true },
         { id: "rename",       label: "Rename",                hint: "F2" },
         { id: "duplicate",    label: "Duplicate",             hint: "Ctrl+D" },
         { id: "copy",         label: "Copy",                  hint: "Ctrl+C" },
@@ -123,8 +124,8 @@ Rectangle {
         { id: "paste",        label: "Paste here",            hint: "Ctrl+V" },
         { id: "terminal",     label: "Open terminal here",    hint: "" },
         { id: "trash",        label: "Move to Trash",         hint: "Delete" },
-        { id: "reload",       label: "Reload this folder",    hint: "Ctrl+R" },
-        { id: "up",           label: "Go up one folder",      hint: "" },
+        { id: "reload",       label: "Reload this folder",    hint: "Ctrl+R", picker: true },
+        { id: "up",           label: "Go up one folder",      hint: "", picker: true },
         { id: "keys",         label: "Show all keys",         hint: "?" },
         { id: "settings",     label: "Settings",              hint: "Ctrl+," },
         { id: "trash-view",   label: "Open the Trash",        hint: "" },
@@ -157,10 +158,7 @@ Rectangle {
         root.resultsChanged()
     }
 
-    function rebuild(text) {
-        results.clear()
-        const t = text.trim()
-
+    function appendBrowserSuggestions(t) {
         // Remote places the user's config mentions. Listing them opens no
         // connection — "connect" is always a separate, deliberate choice.
         if (t.toLowerCase().startsWith("connect") || t.toLowerCase().startsWith("remote")) {
@@ -179,7 +177,7 @@ Rectangle {
             results.append({ kind: "action",
                              label: "Connect… (computers, Tailscale devices, cloud storage)",
                              payload: "connect" })
-            return
+            return true
         }
 
         // Cloud remotes the INSTALLED rclone has configured. Reading its
@@ -191,13 +189,13 @@ Rectangle {
             // user simply has no cloud storage.
             if (remotes.length === 1 && remotes[0].unavailable) {
                 results.append({ kind: "action", label: remotes[0].why, payload: "noop" })
-                return
+                return true
             }
             if (remotes.length === 0) {
                 results.append({ kind: "action",
                                  label: "No cloud storage configured — set one up with rclone",
                                  payload: "cloud-setup" })
-                return
+                return true
             }
             for (let i = 0; i < remotes.length; i++) {
                 const c = remotes[i]
@@ -209,7 +207,7 @@ Rectangle {
             results.append({ kind: "action",
                              label: "Add cloud storage (opens rclone config)",
                              payload: "cloud-setup" })
-            return
+            return true
         }
 
         // "Open with" lists what the SYSTEM says can open this file. Not a
@@ -222,7 +220,7 @@ Rectangle {
                 results.append({ kind: "action",
                                  label: "No application is registered for this file",
                                  payload: "noop" })
-                return
+                return true
             }
             for (let i = 0; i < apps.length; i++) {
                 const a = apps[i]
@@ -231,7 +229,7 @@ Rectangle {
                                         + (a.default ? "  (default)" : ""),
                                  payload: "openwith:" + a.id })
             }
-            return
+            return true
         }
 
         // A shared folder is asked for, never guessed: discovery can be
@@ -254,7 +252,7 @@ Rectangle {
             results.append({ kind: "action",
                              label: "Add a shared folder (SMB)",
                              payload: "share-add" })
-            return
+            return true
         }
 
         // Devices the kernel reports. Listing them mounts nothing.
@@ -265,7 +263,7 @@ Rectangle {
                 results.append({ kind: "action",
                                  label: "No removable devices attached",
                                  payload: "noop" })
-                return
+                return true
             }
             for (let i = 0; i < devs.length; i++) {
                 const dv = devs[i]
@@ -283,8 +281,17 @@ Rectangle {
                                      payload: "device-mount:" + dv.path })
                 }
             }
-            return
+            return true
         }
+
+        return false
+    }
+
+    function rebuild(text) {
+        results.clear()
+        const t = text.trim()
+
+        if (!root.picker && appendBrowserSuggestions(t)) return
 
         // "find NAME" searches this folder AND BELOW — a different, explicit
         // scope from the filter, which only ever touches the current folder.
@@ -322,16 +329,19 @@ Rectangle {
         if (root.jumpFirst) for (const f of folders) results.append(f)
         for (var i = 0; i < allActions.length; i++) {
             const a = allActions[i]
+            if (root.picker && !a.picker) continue
             if (lower === "" || a.label.toLowerCase().indexOf(lower) !== -1)
                 results.append({ kind: "action", label: a.label, payload: a.id,
                                  hint: a.hint })
         }
         // The user's own actions that fit the selection.
-        let custom = []
-        try { custom = JSON.parse(root.model.custom_actions_json()).actions } catch (e) { custom = [] }
-        for (const c of custom)
-            if (lower === "" || c.name.toLowerCase().indexOf(lower) !== -1)
-                results.append({ kind: "action", label: c.name, payload: "custom:" + c.id, hint: "action" })
+        if (!root.picker) {
+            let custom = []
+            try { custom = JSON.parse(root.model.custom_actions_json()).actions } catch (e) { custom = [] }
+            for (const c of custom)
+                if (lower === "" || c.name.toLowerCase().indexOf(lower) !== -1)
+                    results.append({ kind: "action", label: c.name, payload: "custom:" + c.id, hint: "action" })
+        }
         if (!root.jumpFirst) for (const f of folders) results.append(f)
         // Scope is stated explicitly — never an implicit recursive crawl.
         if (t.length > 0) {

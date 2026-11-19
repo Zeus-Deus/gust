@@ -34,6 +34,28 @@ Item {
         /// Answer inside the call, as a refused name does.
         property string answerNow: ""
         property var dirs: [true, false, false]
+        property bool show_hidden: false
+        property int jump_rev: 0
+        property string jump_completion: ""
+        property string searched: ""
+        property var launches: []
+        function can_paste() { return false }
+        function jump_prepare() {}
+        function jump_stop() {}
+        function jump_query(query, limit) {
+            return query === "docs" ? '[{"path":"/docs","shown":"docs","source":"bookmark"}]' : "[]"
+        }
+        function cloud_suggestions() { return "[]" }
+        function open_with_list(row) { return '[{"id":"viewer","name":"Test viewer"}]' }
+        function custom_actions_json() { return '{"actions":[{"id":"mock","name":"Test action"}]}' }
+        function record(action) { launches = launches.concat([action]); return "" }
+        function cloud_setup() { record("cloud-setup") }
+        function open_terminal() { return record("terminal") }
+        function open_as_admin() { return record("open-admin") }
+        function open_with_id(row, id) { return record("openwith:" + id) }
+        function run_custom_action(id) { return record("custom:" + id) }
+        function grep_start(needle) { searched = "grep:" + needle }
+        function find_start(needle) { searched = "find:" + needle }
         function chooser_target() { return JSON.stringify(target) }
         function chooser_check(name) {
             checks += 1
@@ -88,6 +110,19 @@ Item {
         QtObject { id: keyMapPanel; property bool open: false }
         QtObject { id: renameCard; property bool open: false }
 
+        property int paneCount: 1
+        property var dropMenuModel: null
+        property var connectionOwner: fake
+        function requireSupport(key) { return true }
+        function beginPlaceFeedback(op, name, message) { return true }
+        function askRun(row) { fake.record("run") }
+        QtObject { id: connectPanel; property bool busy: false; property string supportKey: "" }
+        QtObject { id: filterBar; property bool filterActive: false }
+        QtObject { id: filterInput; property string text: "" }
+        Item { id: actionTools }
+        QtObject { id: windowLayout; property int controlHeight: Tokens.controlHeight }
+        QtObject { id: headerBar; property int toolWidth: Tokens.controlHeight }
+
 @WIRING@
 
         Column {
@@ -100,6 +135,15 @@ Item {
                 dialog: confirm.visible
             }
         }
+
+        Item {
+            // Keep the toolbar button clear of the dialog controls in this fixture.
+            anchors.centerIn: parent
+            width: headerBar.toolWidth
+            height: windowLayout.controlHeight
+@MORE_BUTTON@
+        }
+@MENUS@
 
         ConfirmDialog {
             id: confirm
@@ -858,6 +902,80 @@ Item {
             // These run a program, and the ids are not in any list.
             verify(!win.chooserFits("openwith:firefox.desktop"))
             verify(!win.chooserFits("custom:compress"))
+        }
+
+        function chooseMore(label) {
+            mouseClick(moreButton)
+            verify(contextMenu.open)
+            waitForRendering(contextMenu)
+            const point = contextMenu.itemPoints()[label]
+            verify(point !== undefined, label)
+            mouseClick(contextMenu, point[0], point[1])
+            verify(palette.visible)
+        }
+
+        function test_73_picker_palette() {
+            start("open")
+            chooseMore("All commands…")
+            const labels = palette.resultLabels()
+            verify(labels.includes("Go up one folder"))
+            for (const label of ["Run program…", "Open terminal here", "Open as administrator",
+                                 "Test action", "Settings", "Split: two panes"])
+                verify(!labels.includes(label), label)
+
+            const input = find(palette, "paletteInput")
+            for (const query of ["cloud", "open with", "connect", "remote", "nas", "share",
+                                 "device", "eject", "Test action", "terminal"]) {
+                input.text = query
+                compare(palette.resultLabels(), ['Filter this folder for "' + query + '"'])
+            }
+            keyClick(Qt.Key_Return)
+            compare(filterInput.text, "terminal")
+
+            chooseMore("Search inside files…")
+            compare(input.text, "grep ")
+            input.text = "cloud"
+            compare(palette.resultLabels(), ['Filter this folder for "cloud"'])
+            input.text = "grep invoice"
+            keyClick(Qt.Key_Return)
+            compare(fake.searched, "grep:invoice")
+
+            verify(win.runKeyAction("jump"))
+            input.text = "open with"
+            compare(palette.resultLabels(), ['Filter this folder for "open with"'])
+            input.text = "docs"
+            compare(palette.resultLabels()[0], "Go to docs")
+            keyClick(Qt.Key_Return)
+            compare(fake.navigated, ["/docs"])
+            verify(win.runKeyAction("jump"))
+            input.text = "/some/path"
+            keyClick(Qt.Key_Return)
+            compare(fake.location, "/some/path")
+            verify(win.runKeyAction("jump"))
+            input.text = "find report"
+            keyClick(Qt.Key_Return)
+            compare(fake.searched, "find:report")
+        }
+
+        function test_74_launch_dispatch_is_browser_only() {
+            start("save")
+            const launches = ["cloud-setup", "terminal", "open-admin", "run", "openwith:viewer", "custom:mock"]
+            fake.launches = []
+            for (const action of launches) win.runAction(action)
+            compare(fake.launches, [])
+
+            win.chooserMode = ""
+            chooseMore("All commands…")
+            verify(palette.resultLabels().includes("Test action"))
+            verify(palette.resultLabels().includes("Open terminal here"))
+            const input = find(palette, "paletteInput")
+            input.text = "open with"
+            compare(palette.resultLabels(), ["Open with Test viewer"])
+            input.text = "cloud"
+            compare(palette.resultLabels(), ["No cloud storage configured — set one up with rclone"])
+            keyClick(Qt.Key_Return)
+            for (const action of launches.slice(1)) win.runAction(action)
+            compare(fake.launches, launches)
         }
     }
 }

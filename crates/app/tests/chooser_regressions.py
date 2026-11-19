@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
 """Run the exact Main.qml Open/Save dialog flow in Qt against a stand-in model.
 
-Inserts the window's real chooser state, functions, Ctrl+Return shortcut,
-change-signal wiring and ChooserBar/ChooserFooter instances into a fixture, with
-the actual ChooserBar, ChooserFooter, ConfirmDialog and HintStrip. Proves the
-button's words, the replace confirmation, stale answers, double accepts and
-which keys accept. The worker, the stat and the result file are proven by the
-Rust tests in crates/core/tests/chooser.rs. Theme tokens are a stub, the model
-is synthetic and `Qt.quit()` is counted.
+Exercises the production chooser controls, More menu, palette and dispatcher
+with a synthetic model, theme and counted Qt.quit(). Covers confirmation,
+stale answers, keyboard acceptance, picker suggestions and launch refusal.
+Rust tests in crates/core/tests/chooser.rs cover worker and result-file I/O.
 """
 from pathlib import Path
 import argparse
@@ -48,6 +45,13 @@ QtObject {
     readonly property int spaceLg: 8
     readonly property int spaceXl: 10
     readonly property int spaceXxl: 14
+    readonly property bool nerdGlyphs: false
+    readonly property int fontHeading: 16
+    readonly property int rowHeight: 24
+    readonly property int animFast: 80
+    readonly property real selectedAlpha: 0.4
+    readonly property color selectedBackground: "#444444"
+    readonly property color selectedText: "#ffffff"
     readonly property int rowPaddingX: 12
     readonly property int controlHeight: 28
     function withAlpha(c, a) { return Qt.rgba(c.r, c.g, c.b, a) }
@@ -56,7 +60,8 @@ QtObject {
 
 FUNCTIONS = ["selectionSettling", "refreshChooserTarget", "chooserAccept", "chooserChecked", "chooserForgetCheck",
              "chooserAskReplace", "chooserReplaceConfirmed", "chooserAnswer", "chooserCancel",
-             "chooserActivate", "chooserReturn", "chooserFits", "chooserMenu", "chooserFilterPage"]
+             "chooserActivate", "chooserReturn", "chooserFits", "chooserMenu", "chooserFilterPage",
+             "openMoreMenu", "runAction", "runKeyAction"]
 
 
 def main():
@@ -69,7 +74,8 @@ def main():
     if output.exists():
         raise RuntimeError("Use a new evidence directory for every run")
     output.mkdir(parents=True, mode=0o700)
-    copies = ["ui/ChooserBar.qml", "ui/ChooserFooter.qml", "ui/ConfirmDialog.qml", "ui/HintStrip.qml"]
+    copies = ["ui/ChooserBar.qml", "ui/ChooserFooter.qml", "ui/ConfirmDialog.qml", "ui/HintStrip.qml",
+              "ui/BarButton.qml", "ui/Glyph.qml", "ui/ContextMenu.qml", "ui/CommandPalette.qml", "ui/WheelScroll.qml"]
     names = ["ui/Main.qml", "ui/tests/tst_chooser_bar.qml.in",
              "crates/app/tests/chooser_regressions.py",
              "crates/app/tests/tab_model_regressions.py"] + copies
@@ -90,6 +96,10 @@ def main():
     fixture = replace_once(fixture, "@FUNCTIONS@",
                            "\n".join(block(text, "function " + n + "(") for n in FUNCTIONS))
     fixture = replace_once(fixture, "@WIRING@", "\n".join(wiring))
+    fixture = replace_once(fixture, "@MORE_BUTTON@", block(text, "BarButton {\n                    id: moreButton"))
+    menus = [block(text, "ContextMenu {\n        id: contextMenu"),
+             block(text, "CommandPalette {\n        id: palette")]
+    fixture = replace_once(fixture, "@MENUS@", "\n".join(menus))
     fixture = replace_once(fixture, "@BARS@", "\n".join(bars))
     fixture = replace_once(fixture, "@CONFIRM_CLOSED@", block(confirm, "onClosed:"))
     accepted = block(confirm, "onAccepted:")
@@ -101,11 +111,14 @@ def main():
         raise ValueError("Expected the production quit call in the extracted flow")
     fixture = fixture.replace("Qt.quit()", "win.quitCalls += 1")
     (output / "tst_chooser_bar.qml").write_text(fixture)
-    for name in copies:
-        shutil.copyfile(source / name, output / Path(name).name)
     module = output / "com/gust/app"
     module.mkdir(parents=True)
-    (module / "qmldir").write_text("module com.gust.app\nsingleton Tokens 1.0 Tokens.qml\n")
+    types = ["module com.gust.app", "singleton Tokens 1.0 Tokens.qml"]
+    for name in copies:
+        component = source / name
+        shutil.copyfile(component, module / component.name)
+        types.append(f"{component.stem} 1.0 {component.name}")
+    (module / "qmldir").write_text("\n".join(types) + "\n")
     (module / "Tokens.qml").write_text(TOKENS)
 
     for directory in ["home", "runtime", "tmp"]:
@@ -127,7 +140,7 @@ def main():
     receipt = {"argv": argv, "exit": p.returncode, "source_hashes": hashes,
                "source_unchanged": unchanged,
                "scope": "exact Main.qml dialog flow and actual ChooserBar/ChooserFooter/ConfirmDialog/"
-                        "HintStrip; model and theme synthetic, Qt.quit counted"}
+                        "HintStrip/More menu/CommandPalette; model and theme synthetic, Qt.quit counted"}
     (output / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
     print(log, end="")
     return p.returncode if unchanged else 1

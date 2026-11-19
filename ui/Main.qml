@@ -2240,7 +2240,7 @@ Window {
     readonly property var chooserRefused: [
         "settings", "trash-view", "recent", "new-tab", "open-tab", "bm-open-tab", "rp-open-tab",
         "open-other-pane", "split", "unsplit", "toggle-split", "send-copy", "send-move",
-        "open-with", "run", "terminal", "open-admin", "device-share-here",
+        "open-with", "run", "terminal", "open-admin", "cloud-setup", "device-share-here",
         "device-share-folder", "device-send"
     ]
     function chooserFits(a) {
@@ -4652,6 +4652,7 @@ Window {
 
     CommandPalette {
         id: palette
+        picker: win.chooserMode !== ""
         model: dirModel
         onVisibleChanged: win.qaDump("palette")
         // Also dump when the RESULTS change, not only when the palette
