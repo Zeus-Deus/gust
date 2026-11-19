@@ -49,7 +49,9 @@ rm -f "$STATE"
 
 # A run that dies must not leave the app it started behind.
 cleanup() { pkill -x gust 2>/dev/null || true; }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 if [[ ! -x "$BIN" ]]; then
   echo "gust qa: no binary at $BIN" >&2
@@ -285,9 +287,8 @@ fi
 say "fixture"
 # A completed or interrupted run may still contain evidence or mounts.
 # Honour explicit roots only when the fixture builder admits them.
-FIXTURE="${GUST_FIXTURE:-$(mktemp -d /tmp/gust-fixture.XXXXXXXX)}" || exit 1
-"$HERE/make-fixture.sh" "$FIXTURE" >/dev/null || exit 1
+source "$HERE/qa-fixture.sh"
+prepare_fixture || exit 1
 mkdir -p "$FIXTURE/.local/share" "$FIXTURE/.cache"
 rm -f /tmp/gust-fixture-EXECUTED
 [[ -d "$FIXTURE/Projects" ]] && ok "fixture built at $FIXTURE" || bad "fixture missing"
-

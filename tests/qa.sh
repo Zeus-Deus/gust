@@ -2745,3 +2745,4 @@ say "summary"
 printf '%s\n' "${RESULTS[@]}" > "$OUTDIR/results.txt"
 printf '\n  passed: %d\n  failed: %d\n  shots:  %s\n' "$PASS" "$FAIL" "$OUTDIR"
 [[ "$FAIL" -eq 0 ]] || exit 1
+finish_fixture

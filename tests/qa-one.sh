@@ -12,4 +12,5 @@ if grep -qiE "TypeError|is not a function|ReferenceError|QML .*: error" "$LOG" 2
 fi
 printf '%s\n' "${RESULTS[@]}" > "$OUTDIR/results.txt"
 printf '\n  passed: %d\n  failed: %d\n' "$PASS" "$FAIL"
-[[ "$FAIL" -eq 0 ]]
+[[ "$FAIL" -eq 0 ]] || exit 1
+finish_fixture

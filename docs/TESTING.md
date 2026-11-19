@@ -209,6 +209,14 @@ some global process termination. Do not use them on a shared/human desktop or
 as the native release gate. Their old evidence does not qualify a new artifact.
 No native/theme or benchmark acceptance is run automatically on public hosted CI.
 
+The two legacy desktop QA runners create a fresh directory under `/tmp` for each
+run. A passing run removes its generated fixture after checking for mounts in a
+private mount namespace. Set `GUST_KEEP_FIXTURE=1` to keep it. Failed and
+interrupted runs leave the fixture path in the run log for inspection. An
+explicit `GUST_FIXTURE` must be a new or empty directory under `/tmp` and
+stays in place after the run. Screenshots and results are written to the
+separate output directory.
+
 ### Focused remote listing state journey
 
 ```sh

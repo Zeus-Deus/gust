@@ -242,6 +242,44 @@ class FixtureContainmentTests(unittest.TestCase):
                 self.assertEqual(sentinel.read_text(), "preserve this data")
             self.assertFalse((root / "Projects").exists())
 
+    def test_fixture_cleanup_preserves_mounts_and_checks_directory_identity(self):
+        namespace = ["unshare", "--user", "--map-root-user", "--mount", "--propagation", "private"]
+        cleanup_namespace = ["unshare", "--user", "--map-current-user", "--mount", "--propagation", "private"]
+        if (not shutil.which("unshare")
+                or subprocess.run([*namespace, *cleanup_namespace, "true"], capture_output=True).returncode):
+            self.skipTest("private user and mount namespaces unavailable")
+        with tempfile.TemporaryDirectory(prefix="gust-fixture-cleanup-") as temporary:
+            parent = Path(temporary)
+            run = parent / "run"
+            mountpoint = run / "nested mount"
+            mountpoint.mkdir(parents=True)
+            peer = parent / "peer"
+            peer.mkdir()
+            (peer / "sentinel").write_text("outside")
+            (run / "local").write_text("inside")
+            subprocess.run([*namespace, "bash", "-euc", """
+                source "$1"
+                unset GUST_KEEP_FIXTURE
+                qa_run_dir="$2/run"
+                qa_run_dir_id=$(stat -c '%d:%i' -- "$qa_run_dir")
+                mount --bind "$2/peer" "$qa_run_dir/nested mount"
+                finish_fixture
+                test -f "$qa_run_dir/local"
+                test -f "$2/peer/sentinel"
+                umount "$qa_run_dir/nested mount"
+
+                mv "$qa_run_dir" "$2/original"
+                mkdir "$qa_run_dir"
+                finish_fixture
+                test -d "$qa_run_dir"
+                rmdir "$qa_run_dir"
+                mv "$2/original" "$qa_run_dir"
+                finish_fixture
+                test ! -e "$qa_run_dir"
+            """, "fixture-cleanup", str(ROOT / "tests/qa-fixture.sh"), temporary],
+                           check=True, timeout=20)
+            self.assertEqual((peer / "sentinel").read_text(), "outside")
+
     def test_root_and_home_are_rejected_before_mutation(self):
         for destination in ("/", str(Path.home()), str(ROOT), "/tmp"):
             result = subprocess.run([str(ROOT / "tests/make-fixture.sh"), destination],
