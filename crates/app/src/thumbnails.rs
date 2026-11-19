@@ -165,6 +165,10 @@ impl Work {
         self.active
     }
 
+    pub fn completed(&self, window: (u64, usize, usize)) -> bool {
+        !self.active && self.window == Some(window)
+    }
+
     pub fn request(&mut self, window: (u64, usize, usize)) -> Admission {
         if self.window == Some(window) {
             return Admission::Unchanged;
@@ -333,14 +337,19 @@ mod tests {
     #[test]
     fn rapid_scroll_waits_for_the_cancelled_helper_and_keeps_only_the_latest_request() {
         let mut work = Work::default();
+        assert!(!work.completed((1, 0, 20)));
         assert_eq!(work.request((1, 0, 20)), Admission::Start);
+        assert!(!work.completed((1, 0, 20)));
         for row in 1..=100 {
             assert_eq!(work.request((1, row, row + 20)), Admission::Pending);
         }
         assert_eq!(work.request((1, 100, 120)), Admission::Unchanged);
         assert!(work.finish());
+        assert!(!work.completed((1, 100, 120)));
         assert_eq!(work.request((1, 100, 120)), Admission::Start);
         assert!(!work.finish());
+        assert!(work.completed((1, 100, 120)));
+        assert!(!work.completed((2, 100, 120)));
         assert_eq!(work.request((1, 100, 120)), Admission::Unchanged);
     }
 

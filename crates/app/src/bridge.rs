@@ -282,6 +282,9 @@ pub mod qobject {
         fn acknowledge_interrupted(self: &DirModel);
         #[qinvokable]
         fn toggle_hidden(self: Pin<&mut DirModel>);
+        #[qsignal]
+        fn thumbnail_pass_finished(self: Pin<&mut DirModel>);
+
         /// QML reports whether the current view displays thumbnails.
         #[qinvokable]
         fn request_thumbnails(self: Pin<&mut DirModel>, enabled: bool);
@@ -2088,6 +2091,7 @@ impl qobject::DirModel {
         self.as_mut().rust_mut().thumb_cancel.cancel();
         if want.is_empty() {
             self.as_mut().rust_mut().thumb_work.finish();
+            self.as_mut().thumbnail_pass_finished();
             return;
         }
 
@@ -2121,6 +2125,8 @@ impl qobject::DirModel {
                 let _ = thread.queue(move |mut model| {
                     if model.as_mut().rust_mut().thumb_work.finish() {
                         model.as_mut().start_thumbnails();
+                    } else {
+                        model.as_mut().thumbnail_pass_finished();
                     }
                 });
             });
@@ -6635,6 +6641,7 @@ impl qobject::DirModel {
             })
             .collect();
         QString::from(&serde_json::json!({"thumbs":self.thumbs.len(),"visible_thumbnails":visible_thumbnails,"location":self.location.to_string(),"count":self.count,"cursor":self.cursor,
+            "full_thumbnail_pass_complete":self.thumb_work.completed((self.frame.all.listing, 0, self.visible.len())),
             "cursor_name":self.entry_at(self.cursor).map(Entry::display_name).unwrap_or_default(),"filter":self.filter.to_string(),
             "show_hidden":self.show_hidden,"sort_field":self.sort_field.to_string(),"sort_ascending":self.sort_ascending,
             "settled":self.settled,"status":self.status.to_string(),"meta_known":self.all.meta_known.load(std::sync::atomic::Ordering::Relaxed),

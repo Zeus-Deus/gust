@@ -878,11 +878,13 @@ LEFT="$(find "$RO/dest" -maxdepth 1 -name '.gust-staging-*' | wc -l)"
 say "10q · Thumbnails: only safe kinds, produced in a sandbox, UI stays live"
 TH="$FIXTURE/pictures"
 rm -rf "$TH"; mkdir -p "$TH"
-if command -v magick >/dev/null 2>&1; then
+images=()
+if command -v magick >/dev/null 2>&1 && command -v bwrap >/dev/null 2>&1; then
+  images=(wide.png tall.jpg)
   magick -size 800x600 gradient:navy-orange "$TH/wide.png" 2>/dev/null
   magick -size 600x800 gradient:green-yellow "$TH/tall.jpg" 2>/dev/null
 else
-  ok "(magick absent — thumbnail rendering skipped, refusals still checked)"
+  echo "magick or bwrap unavailable — checking thumbnail refusals only"
 fi
 # Things that must NEVER be handed to an image helper.
 echo "just text" > "$TH/notes.txt"
@@ -902,51 +904,15 @@ key Return
 wait_for "d['view']" "grid" 20 >/dev/null
 expect "grid view is active" "d['view']" "grid"
 
-# A source can have several cache sizes, and previous sections share this
-# cache. Resolve the freedesktop cache key for each specific fixture file.
-if command -v magick >/dev/null 2>&1 && command -v bwrap >/dev/null 2>&1; then
-  if python3 - "$TH" "$FIXTURE/.cache/thumbnails" <<'PYTHUMB'
-import hashlib
-import sys
-import time
-from pathlib import Path
-
-pictures, cache = map(Path, sys.argv[1:])
-def thumbnails(name):
-    uri = (pictures / name).as_uri()
-    key = hashlib.md5(uri.encode()).hexdigest()
-    return [p for size in ("normal", "large", "x-large", "xx-large")
-            if (p := cache / size / (key + ".png")).is_file()]
-
-deadline = time.monotonic() + 15
-for name in ("wide.png", "tall.jpg"):
-    while not (files := thumbnails(name)):
-        if time.monotonic() >= deadline:
-            sys.exit(f"missing thumbnail for {name}")
-        time.sleep(0.1)
-    for f in files:
-        with f.open("rb") as image:
-            if image.read(8) != b"\x89PNG\r\n\x1a\n" or f.stat().st_size > 8 * 1024 * 1024:
-                sys.exit(f"invalid cached thumbnail for {name}: {f}")
-
-for name in ("corrupt.png", "logo.svg", "notes.txt", "program"):
-    if thumbnails(name):
-        sys.exit(f"unexpected thumbnail for {name}")
-PYTHUMB
-  then
-    ok "both source images have bounded PNG thumbnails and the four refused files have none"
-  else
-    bad "thumbnail cache did not match the source files"
-  fi
-fi
-
-# The window must stay usable while thumbnails render.
+# Exercise the Grid before waiting for all thumbnail work to finish.
 key End
-sleep 0.5
-CUR="$(state "d['model']['cursor']")"
-[[ "$CUR" != "0" && "$CUR" != "None" ]] \
-  && ok "the list still responds while thumbnails render (cursor=$CUR)" \
-  || bad "the UI stalled during thumbnailing (cursor=$CUR)"
+expect "End selects the last Grid item" "d['model']['cursor'] == d['model']['count'] - 1 and d['model']['count'] > 1" "True"
+
+if python3 "$HERE/assert_grid_cache.py" "$STATE" "$TH" "$FIXTURE/.cache/thumbnails" "${images[@]}"; then
+  ok "completed Grid pass displayed the expected images and left both caches clear for refused files"
+else
+  bad "thumbnail results did not match the picture fixtures"
+fi
 
 # Leaving the folder must abandon the pass.
 vm wtype -M ctrl -k l -m ctrl >/dev/null 2>&1; sleep 0.8
