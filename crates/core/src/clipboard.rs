@@ -76,8 +76,12 @@ pub fn text_payload(paths: &[PathBuf]) -> String {
 pub fn path_to_uri(path: &Path) -> String {
     // The raw bytes, not a lossy string: a name that is not valid UTF-8
     // must still name the same file on the other side.
-    let raw = path.as_os_str().as_encoded_bytes();
     let mut out = String::from("file://");
+    push_uri_path(&mut out, path.as_os_str().as_encoded_bytes());
+    out
+}
+
+pub(crate) fn push_uri_path(out: &mut String, raw: &[u8]) {
     for &b in raw {
         let safe = b.is_ascii_alphanumeric() || matches!(b, b'/' | b'-' | b'_' | b'.' | b'~');
         if safe {
@@ -86,7 +90,6 @@ pub fn path_to_uri(path: &Path) -> String {
             out.push_str(&format!("%{b:02X}"));
         }
     }
-    out
 }
 
 /// Turn a `file://` URI back into a path.

@@ -1157,6 +1157,10 @@ Nothing is shared between tabs except the window itself.
 - Hovering a tab reveals its full path before selection or close. The strip
   exposes the same path as the tab's accessible name. For a background or
   restored tab, the unopened target supplies the display text without I/O.
+  Show ordinary absolute local paths verbatim. When a local path contains
+  invalid UTF-8 or needs display escaping, show its byte-preserving file URI.
+  Provider-qualified locations use their own provider and percent-encoded
+  location bytes. Navigation continues to use the original key.
 - Closing the last tab closes nothing — the window keeps one tab, because a
   file manager with no tab has nothing to show.
 - **A running job belongs to the tab that started it.** Closing that tab

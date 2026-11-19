@@ -186,6 +186,62 @@ PYTABS
   expect "the inspected 2025 tab opens the disclosed folder" "d['activeTabPath']" "$FIXTURE/release-2025-build"
 }
 
+inspect_exact_tab_paths() {
+  local test_home index path root_uri
+  test_home="$(mktemp -d "$FIXTURE/tab-bytes-XXXXXXXX")" || return 1
+  local FIXTURE="$test_home" REAL_STATE="$test_home/theme"
+  mkdir -p "$FIXTURE/.config/gust" "$FIXTURE/.local/state/gust" "$REAL_STATE"
+  echo 'restore_tabs = true' > "$FIXTURE/.config/gust/settings.toml"
+  python3 - "$FIXTURE" <<'PYTABS' || return 1
+import os, sys
+from pathlib import Path
+home = Path(sys.argv[1])
+with (home / ".local/state/gust/tabs.toml").open("w") as session:
+    for index, name in enumerate((b"Aloe", b"release\n", b"release<U+000A>", b"release\xfe", b"release\xff")):
+        folder = home / os.fsdecode(name)
+        folder.mkdir()
+        (folder / f"marker-{index}").touch()
+        print(f'tab = "local:{os.fsencode(folder).hex()} rows"', file=session)
+PYTABS
+  start_gust || return 1
+  vm hyprctl dispatch 'hl.dsp.window.float()' >/dev/null
+  vm hyprctl dispatch 'hl.dsp.window.resize({ x = 900, y = 320 })' >/dev/null
+
+  wait_for "d['windowWidth']" 900 || return 1
+  root_uri="$(python3 -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).as_uri())' "$FIXTURE")" || return 1
+  local -a paths=("" "$root_uri/release%0A" "$FIXTURE/release<U+000A>"
+                  "$root_uri/release%FE" "$root_uri/release%FF")
+  for index in 1 2 3 4; do
+    path="${paths[index]}"
+    hover_tab "$index" || return 1
+    wait_for "bool(d['tabDisclosure'])" True || return 1
+    expect "hover identifies unopened tab $index" "d['tabDisclosure']['path']" "$path"
+    expect "accessibility identifies unopened tab $index" "d['tabDisclosure']['accessibleName']" "$path"
+    expect "inspecting tab $index leaves every tab in place" "(d['activeTab'], d['tabCount'])" "(0, 5)"
+    shot "50-tab-bytes-$index"
+  done
+
+  # After the hovered FF tab closes, the FE tab must still open its own folder.
+  toolbar_click tabCenters 4 middle || return 1
+  expect "middle-click closes only the FF tab" "(d['activeTab'], d['tabCount'])" "(0, 4)"
+  for index in 3 1; do
+    toolbar_click tabCenters "$index" || return 1
+    wait_for "'marker-$index' in d['rowPoints']" True || { bad "tab $index opened the wrong folder"; return 1; }
+    hover_tab 0 && hover_tab "$index" || return 1
+    wait_for "bool(d['tabDisclosure'])" True || return 1
+    expect "hover identifies opened tab $index" "d['tabDisclosure']['path']" "${paths[index]}"
+    expect "accessibility identifies opened tab $index" "d['tabDisclosure']['accessibleName']" "${paths[index]}"
+  done
+
+  # The listing's display path stays the same across this navigation.
+  goto "$FIXTURE/release<U+000A>" || return 1
+  wait_for "'marker-2' in d['rowPoints']" True || { bad "did not reach the literal marker folder"; return 1; }
+  hover_tab 0 && hover_tab 1 || return 1
+  wait_for "bool(d['tabDisclosure'])" True || return 1
+  expect "a changed key refreshes the opened tab's hover path" "d['tabDisclosure']['path']" "${paths[2]}"
+  expect "a changed key refreshes the opened tab's accessible name" "d['tabDisclosure']['accessibleName']" "${paths[2]}"
+}
+
 second_tab_toolbar() {
   local index point x y
   local -a names=(Aloe Fern Moss Iris Reed Pine Sage Rose)
@@ -381,6 +437,7 @@ minimum_toolbar() {
 
 say "50 · minimum-size toolbar and panels at default and increased text"
 if [[ "$MOUSE_OK" == 1 ]]; then
+  inspect_exact_tab_paths || bad "byte-exact tab path journey did not finish"
   minimum_toolbar 1 12 1 1.1 1.6 || bad "minimum-size toolbar journey did not finish"
   minimum_toolbar 2 12 1.6 || bad "doubled-spacing toolbar journey did not finish"
   minimum_toolbar 2 28 1.6 || bad "large-font second-tab toolbar journey did not finish"

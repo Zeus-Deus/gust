@@ -40,8 +40,9 @@ Window {
                 return (cut >= 0 && cut < p.length - 1) ? p.substring(cut + 1) : p
             }
             readonly property string tabPath: {
-                if (everActivated || startPath === "") return location
-                return startPath.startsWith("token:") ? display_for_token(startPath.substring(6)) : startPath
+                if (everActivated || startPath === "") return tab_disclosure_path
+                const token = startPath.startsWith("token:") ? startPath.substring(6) : token_for(startPath)
+                return tab_path_for_token(token)
             }
             onTabPathChanged: win.refreshTabLabels()
             onTabLabelChanged: win.refreshTabLabels()
