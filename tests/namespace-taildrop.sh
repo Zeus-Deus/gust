@@ -112,10 +112,18 @@ for node in desk studio; do
         tailscale --socket="$socket" up --auth-key=file:/dev/stdin --hostname="$node" \
             --login-server=http://10.88.0.1:8080 --accept-dns=false --timeout=20s
 done
-for _ in {1..60}; do
-    if tailscale file cp --targets | grep -qw studio; then break; fi
-    sleep 0.2
-done
+wait_for_studio() {
+    for _ in {1..60}; do
+        # Online targets have two columns. An offline or unknown target has a third.
+        if tailscale file cp --targets | grep -Ex $'[^\t]+\tstudio' >/dev/null; then
+            return 0
+        fi
+        sleep 0.2
+    done
+    echo "Taildrop fixture timed out waiting for studio to appear online" >&2
+    return 1
+}
+wait_for_studio
 
 python3 - <<'PY'
 import json
