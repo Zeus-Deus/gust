@@ -4,9 +4,11 @@ import QtTest
 Item {
     width: 1180
     height: 720
+    property alias dirModel: win.dirModel
     Item {
         id: win
         anchors.fill: parent
+        property string chooserMode: ""
         property var placesInfo: ({})
         property var deviceList: []
         property var connectedPlaces: []
@@ -76,13 +78,15 @@ Item {
         function refreshActiveModel() {}
         function removeModel(index, object) { @OBJECT_REMOVED@ }
         function refreshPlaces() {}
+        function focusList() {}
         @CONNECTION_FUNCTIONS@
         function qaDump(tag) {}
         function runningJobModels() { return [] }
         @PLACES_ARRIVED@
-        ConnectPanel { id: connectPanel; places: win.placesInfo; @CONNECT_HANDLER@ @ACTION_HANDLER@ }
+        @CONNECT_PANEL@
     }
     ConfirmDialog { id: recovery; preferCancel: true }
+    SignalSpy { id: panelActions; target: connectPanel; signalName: "actionRequested" }
     SignalSpy { id: accepted; target: recovery; signalName: "accepted" }
     SignalSpy { id: rejected; target: recovery; signalName: "rejected" }
     TestCase {
@@ -94,6 +98,7 @@ Item {
                 connected: true, lost: lost, online: true, available: true}
     }
     function init() {
+        win.chooserMode = ""
         win.seenLostRoutes = []; win.recoveryOpened = 0
         win.filterInput = {activeFocus: false}; win.searchInput = {activeFocus: false}
         accepted.clear(); rejected.clear()
@@ -249,11 +254,47 @@ Item {
         compare(connectPanel.statusTitle, "Set up Apple devices")
         verify(connectPanel.missingSupport)
     }
+    function test_chooser_hides_install_and_refuses_stale_install_requests() {
+        win.chooserMode = "open"
+        win.placesInfo = {setup: [{key: "ssh", packages: ["sshfs"], installable: true}]}
+        connectPanel.showSupport("ssh")
+        waitForRendering(connectPanel)
+        verify(connectPanel.missingSupport && connectPanel.requirement.installable)
+        const install = findChild(connectPanel, "connectionInstallSupport")
+        verify(install && !install.visible)
+
+        panelActions.clear()
+        fakeModel.installCalls = 0
+        connectPanel.installSupport()
+        compare(panelActions.count, 0)
+        // Even a stale install request reaching the window must stop at dispatch.
+        connectPanel.actionRequested("setup-install:ssh")
+        compare(fakeModel.installCalls, 0)
+        verify(!connectPanel.busy)
+    }
+    function test_chooser_keyboard_browses_configured_cloud_without_setup_row() {
+        win.chooserMode = "open"
+        win.placesInfo = {cloud: [{name: "Archive", connected: true, path: "/fixture/archive"}]}
+        connectPanel.show()
+        verify(!connectPanel.rows.some(r => r.action === "cloud-setup"))
+        tryCompare(connectPanel, "selectionKey", "cloud:Archive")
+        keyClick(Qt.Key_Down)
+        compare(connectPanel.selectionKey, "action:share-add")
+        keyClick(Qt.Key_Up)
+        compare(connectPanel.selectionKey, "cloud:Archive")
+        fakeModel.navigationCalls = 0
+        keyClick(Qt.Key_Return)
+        compare(fakeModel.navigationCalls, 1)
+        verify(!connectPanel.open)
+    }
     function test_install_action_uses_initiating_owner_and_never_connects() {
         fakeModel.installCalls = 0
         win.placesInfo = {sshfs: true, setup: [{key: "apple", packages: ["gvfs-afc"], installable: true}]}
-        connectPanel.showSupport("apple"); wait(0)
-        connectPanel.installSupport()
+        connectPanel.showSupport("apple")
+        waitForRendering(connectPanel)
+        const install = findChild(connectPanel, "connectionInstallSupport")
+        verify(install && install.visible)
+        mouseClick(install)
         compare(fakeModel.installCalls, 1, "The actual panel action must reach the installer bridge")
         compare(fakeModel.connectCalls, 0)
         compare(connectPanel.busy, true)

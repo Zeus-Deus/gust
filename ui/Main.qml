@@ -1204,6 +1204,7 @@ Window {
         }
     }
     function installSupport(key) {
+        if (win.chooserMode) return
         if (connectPanel.busy) { connectPanel.showFeedback("", "", false); return }
         connectPanel.showSupport(key)
         if (!connectPanel.missingSupport || !connectPanel.requirement.installable) return
@@ -4679,6 +4680,7 @@ Window {
 
     ConnectPanel {
         id: connectPanel
+        picker: win.chooserMode !== ""
         places: win.placesInfo
         onConnectRequested: (kind, name, target, user) => {
             win.connectPlace(kind, name, target, user)
