@@ -455,6 +455,7 @@ Window {
         // Admission and older worker notifications are not this refresh's answer.
         if (win.integrationRefreshTarget !== ""
                 && win.revisionAtLeast(String(win.prefs.integration_refresh || "0"), win.integrationRefreshTarget)) {
+            settingsPanel.revealAfterLayout(settingsPanel.busyKey)
             settingsPanel.busyKey = ""
             win.integrationRefreshTarget = ""
         }

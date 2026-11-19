@@ -14,9 +14,10 @@ Item {
         property int requests: 0
         property int refreshes: 0
         property string renderer: "auto"
+        property bool isDefault: false
         function settings_json() {
             return JSON.stringify({ ready: true, revision: "1", saved_revision: "1", integration_refresh: ack,
-                                    renderer: renderer, renderer_now: "gpu" })
+                                    is_default: isDefault, renderer: renderer, renderer_now: "gpu" })
         }
         function preferences_refresh() { refreshes++; return next }
         function set_default_file_manager(on) { requests++; return response }
@@ -123,6 +124,53 @@ Item {
             verifyChoice("software")
             keyClick(Qt.Key_Left)
             verifyChoice("auto")
+        }
+        function waitForDeferredCallbacks() {
+            let ran = false
+            Qt.callLater(() => { ran = true })
+            tryVerify(() => ran)
+        }
+        function test_delayed_default_ack_data() {
+            return [{tag: "same row"}, {tag: "other row"}, {tag: "closed"}]
+        }
+        function test_delayed_default_ack(data) {
+            dirModel.ack = "1"
+            dirModel.next = "2"
+            dirModel.isDefault = true
+            showNarrowSettings(28)
+            const row = settingsPanel.rows.findIndex(r => r.key === "default")
+            for (let i = 0; i < row; ++i) keyClick(Qt.Key_Down)
+            keyClick(Qt.Key_Right)
+            compare(settingsPanel.busyKey, "default")
+
+            // Deliver the worker's answer only after the keypress reveal has run.
+            waitForDeferredCallbacks()
+            verify("true" in settingsPanel.visibleOptionPoints())
+            verify(!("false" in settingsPanel.visibleOptionPoints()))
+
+            if (data.tag === "closed") {
+                keyClick(Qt.Key_Escape)
+                verify(!settingsPanel.open)
+                tryCompare(settingsPanel, "scrollY", 0)
+            }
+            dirModel.isDefault = false
+            dirModel.ack = dirModel.next
+            win.prefsPublished()
+            compare(settingsPanel.busyKey, "")
+            compare(settingsPanel.valueOf("default"), "false")
+            if (data.tag === "same row") {
+                tryVerify(() => "false" in settingsPanel.visibleOptionPoints(), 1000,
+                          "Previous app is fully visible after acknowledgement")
+                return
+            }
+            // Leave before any deferred reveal. A manual scroll on the new
+            // row must survive the previous row's acknowledgement.
+            if (data.tag === "other row") {
+                settingsPanel.moveRow(-1)
+                findChild(settingsPanel, "settingsBody").contentY = 0
+            }
+            waitForDeferredCallbacks()
+            compare(settingsPanel.scrollY, 0)
         }
     }
     TestCase {

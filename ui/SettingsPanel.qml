@@ -142,6 +142,10 @@ Item {
         root.current = Math.max(0, Math.min(root.rows.length - 1, root.current + dir))
         revealSelection()
     }
+    function revealAfterLayout(key) {
+        const row = rowRepeater.itemAt(root.current)
+        if (row && row.modelData.key === key) Qt.callLater(row.revealIfCurrent)
+    }
     function step(dir) {
         const r = root.rows[root.current]
         const cur = valueOf(r.key)
@@ -149,7 +153,7 @@ Item {
         i = Math.max(0, Math.min(r.options.length - 1, i + dir))
         if (r.options[i][0] !== cur) choose(root.current, r.options[i][0])
         // Applying a preference can change the layout (for example, density).
-        Qt.callLater(revealSelection)
+        revealAfterLayout(r.key)
     }
 
     Rectangle {
@@ -246,6 +250,13 @@ Item {
                         id: rowItem
                         required property var modelData
                         required property int index
+                        function revealIfCurrent() {
+                            if (!root.open || root.current !== index) return
+                            // The bold choice and the restored note can both reflow.
+                            options.forceLayout()
+                            col.forceLayout()
+                            root.revealSelection()
+                        }
                         width: col.width
                         readonly property alias buttons: optionRepeater
                         readonly property real availableWidth: width - Tokens.spaceSm * 2
