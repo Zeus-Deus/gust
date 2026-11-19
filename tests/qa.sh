@@ -344,6 +344,19 @@ opener_expect() {
   wait_for "$expr" "$want" || opener_fail "$label: expected '$want', got '$(state "$expr")'"
   ok "$label"
 }
+active_gust_address() {
+  vm hyprctl activewindow -j | python3 -c '
+import json, sys
+window = json.load(sys.stdin)
+print(window.get("address", "") if window.get("class") == "gust" else "")
+'
+}
+opener_key() {
+  local active
+  active="$(active_gust_address)" || opener_fail "could not check keyboard focus before $1"
+  [[ "$active" == "$opener_window" ]] || opener_fail "opener window lost keyboard focus before $1"
+  key "$1"
+}
 
 opener_bin="$OPEN/.opener"
 mkdir "$opener_bin" || opener_fail "could not create the opener directory"
@@ -357,9 +370,11 @@ chmod +x "$opener_bin/xdg-open" || opener_fail "could not make the opener execut
 rm "$opener_bin/xdg-open.args" || opener_fail "could not reset the opener receipt"
 QA_PATH_PREPEND="$opener_bin" start_gust "$OPEN" || exit 1
 wait_for "d['model']['settled']" "True" || opener_fail "the opener fixture did not settle"
-key Home
+opener_window="$(active_gust_address)" || opener_fail "could not identify the active opener window"
+[[ -n "$opener_window" ]] || opener_fail "the opener window did not have keyboard focus"
+opener_key Home
 opener_expect "the document is focused" "d['model']['cursor_name']" "document.txt"
-key Return
+opener_key Return
 for _ in {1..50}; do
   [[ -s "$opener_bin/xdg-open.args" ]] && break
   sleep 0.1
@@ -369,16 +384,16 @@ cmp -s "$opener_bin/xdg-open.args" <(printf '%s\0' "$OPEN/document.txt") \
   || opener_fail "the desktop opener did not receive exactly the document path"
 
 for script in noexec.sh trap.sh; do
-  key Down
+  opener_key Down
   opener_expect "cursor on $script" "d['model']['cursor_name']" "$script"
-  key Return
+  opener_key Return
   opener_expect "a confirmation is visible for $script" "d['confirmOpen']" "True"
   if [[ "$script" == noexec.sh ]]; then
     opener_expect "an unpermitted script asks first" "d['confirmTitle']" "Allow noexec.sh to run?"
   else
     opener_expect "an executable script asks first" "d['confirmTitle']" "Run trap.sh?"
   fi
-  key Escape
+  opener_key Escape
   opener_expect "the prompt was dismissed" "d['confirmOpen']" "False"
 done
 [[ ! -f /tmp/gust-fixture-EXECUTED ]] \
