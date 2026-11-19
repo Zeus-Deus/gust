@@ -40,6 +40,8 @@ Item {
         property string searched: ""
         property var launches: []
         function can_paste() { return false }
+        function sel_count() { return 1 }
+        function prepare_device_send(row) { return record("prepare-send") }
         function jump_prepare() {}
         function jump_stop() {}
         function jump_query(query, limit) {
@@ -116,7 +118,16 @@ Item {
         function requireSupport(key) { return true }
         function beginPlaceFeedback(op, name, message) { return true }
         function askRun(row) { fake.record("run") }
-        QtObject { id: connectPanel; property bool busy: false; property string supportKey: "" }
+        QtObject {
+            id: connectPanel
+            property bool busy: false
+            property string supportKey: ""
+            function hide() { fake.record("hide-connect") }
+        }
+        QtObject {
+            id: deviceSharing
+            function show(model, selection, folder, device, mode) { fake.record("show-sharing:" + device) }
+        }
         QtObject { id: filterBar; property bool filterActive: false }
         QtObject { id: filterInput; property string text: "" }
         Item { id: actionTools }
@@ -976,6 +987,20 @@ Item {
             keyClick(Qt.Key_Return)
             for (const action of launches.slice(1)) win.runAction(action)
             compare(fake.launches, launches)
+        }
+
+        function test_75_device_sharing_dispatch_is_browser_only_data() {
+            return [{tag: "generic", action: "device-sharing", device: ""},
+                    {tag: "mobile", action: "device-share:fixture-ipad", device: "fixture-ipad"}]
+        }
+        function test_75_device_sharing_dispatch_is_browser_only(row) {
+            start("open")
+            fake.launches = []
+            win.runAction(row.action)
+            compare(fake.launches, [])
+            win.chooserMode = ""
+            win.runAction(row.action)
+            compare(fake.launches, ["hide-connect", "prepare-send", "show-sharing:" + row.device])
         }
     }
 }

@@ -272,11 +272,14 @@ Item {
         compare(fakeModel.installCalls, 0)
         verify(!connectPanel.busy)
     }
-    function test_chooser_keyboard_browses_configured_cloud_without_setup_row() {
+    function test_chooser_keyboard_browses_configured_cloud_without_setup_or_sharing_rows() {
         win.chooserMode = "open"
-        win.placesInfo = {cloud: [{name: "Archive", connected: true, path: "/fixture/archive"}]}
+        win.placesInfo = {mobile: [{name: "fixture-ipad", online: true}],
+                          cloud: [{name: "Archive", connected: true, path: "/fixture/archive"}]}
         connectPanel.show()
         verify(!connectPanel.rows.some(r => r.action === "cloud-setup"))
+        verify(!connectPanel.rows.some(r => r.action === "device-sharing"))
+        verify(!connectPanel.rows.some(r => r.kind === "mobile"))
         tryCompare(connectPanel, "selectionKey", "cloud:Archive")
         keyClick(Qt.Key_Down)
         compare(connectPanel.selectionKey, "action:share-add")

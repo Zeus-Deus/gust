@@ -211,7 +211,7 @@ Item {
         }
 
         const mobile = p.mobile || []
-        if (mobile.length > 0) {
+        if (!root.picker && mobile.length > 0) {
             out.push({ type: "head", text: qsTr("Phones and tablets") })
             for (const device of mobile)
                 out.push(Object.assign({}, device, { type: "place", kind: "mobile", label: device.name,
@@ -231,7 +231,8 @@ Item {
         if (!root.picker)
             out.push({ type: "action", action: "cloud-setup", text: qsTr("Add cloud storage…") })
         out.push({ type: "action", action: "share-add", text: qsTr("Add a Windows or NFS share…") })
-        out.push({ type: "action", action: "device-sharing", text: qsTr("Send or get files…") })
+        if (!root.picker)
+            out.push({ type: "action", action: "device-sharing", text: qsTr("Send or get files…") })
         return out
     }
     /// The height of the rows, summed by type, BEFORE any delegate exists

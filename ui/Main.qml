@@ -2242,12 +2242,11 @@ Window {
         "settings", "trash-view", "recent", "new-tab", "open-tab", "bm-open-tab", "rp-open-tab",
         "open-other-pane", "split", "unsplit", "toggle-split", "send-copy", "send-move",
         "open-with", "run", "terminal", "open-admin", "cloud-setup", "device-share-here",
-        "device-share-folder", "device-send"
+        "device-share-folder", "device-send", "device-sharing"
     ]
     function chooserFits(a) {
         if (win.chooserMode === "") return true
-        // Both run a program: an Open with handler, or a user's custom action.
-        if (a.startsWith("openwith:") || a.startsWith("custom:")) return false
+        if (a.startsWith("openwith:") || a.startsWith("custom:") || a.startsWith("device-share:")) return false
         return win.chooserRefused.indexOf(a) < 0
     }
 
