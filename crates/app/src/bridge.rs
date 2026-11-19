@@ -1990,10 +1990,10 @@ impl qobject::DirModel {
     /// the columns. Every result is tagged with a generation, so a late
     /// answer for a directory the user already left is dropped.
     fn load_current(self: Pin<&mut Self>) {
-        self.load_current_cached(true);
+        self.load_current_cached(true, 0);
     }
 
-    fn load_current_cached(mut self: Pin<&mut Self>, reuse: bool) {
+    fn load_current_cached(mut self: Pin<&mut Self>, reuse: bool, keep: i32) {
         self.as_mut().preferences_subscribe();
         self.as_mut().projection_subscribe();
         let key = self.as_ref().requested_key.clone();
@@ -2025,7 +2025,7 @@ impl qobject::DirModel {
         }
         self.as_mut().set_settled(false);
         self.as_mut().set_status(QString::from("reading…"));
-        self.as_mut().queue_projection(0);
+        self.as_mut().queue_projection(keep);
         let r = self.as_ref();
         r.runtime.load(crate::projection::Load {
             key,
@@ -6127,12 +6127,16 @@ impl qobject::DirModel {
         !self.forward.is_empty()
     }
 
-    fn reload(mut self: Pin<&mut Self>) {
+    fn reload(self: Pin<&mut Self>) {
+        self.reload_current(0);
+    }
+
+    fn reload_current(mut self: Pin<&mut Self>, keep: i32) {
         if self.as_ref().defer_origin_relist() {
             self.as_mut().rust_mut().live_dirty = true;
             return;
         }
-        self.load_current_cached(false);
+        self.load_current_cached(false, keep);
     }
 
     /// Ctrl+R: the user asked for fresh facts, so folders are re-measured
@@ -6141,7 +6145,7 @@ impl qobject::DirModel {
     fn reload_all(mut self: Pin<&mut Self>) {
         self.as_mut().rust_mut().size_cancel.cancel();
         self.as_mut().rust_mut().dir_sizes.clear();
-        self.load_current_cached(false);
+        self.load_current_cached(false, 0);
     }
 
     fn toggle_hidden(mut self: Pin<&mut Self>) {
@@ -9268,19 +9272,12 @@ impl qobject::DirModel {
         }
     }
 
-    fn reload_after_mode_change(mut self: Pin<&mut Self>) {
-        let model = self.as_ref();
-        if model.requested_key != model.key {
-            return;
+    fn reload_after_mode_change(self: Pin<&mut Self>) {
+        if self.requested_key == self.key {
+            // Follow the current row for this refresh. A later navigation
+            // submits its own cursor policy with the new load generation.
+            self.reload_current(1);
         }
-        // Quick Look holds live updates. Refresh the mode even during that
-        // hold, preserving the current file across the full listing reset.
-        if !model.defer_origin_relist() && model.focus_name.is_none() {
-            if let Some(name) = model.entry_at(model.cursor).map(|entry| entry.name.clone()) {
-                self.as_mut().focus_on_name(name);
-            }
-        }
-        self.reload();
     }
 
     /// Record a permissions outcome for Ctrl+Z and say what happened in the

@@ -102,8 +102,6 @@ struct Model {
     pending_run: Option<(gust_core::open::RunTarget, String)>,
     key: u32,
     requested_key: u32,
-    cursor: i32,
-    focus_name: Option<std::ffi::OsString>,
     directory: Option<PathBuf>,
     entries: Vec<Entry>,
     live_hold: bool,
@@ -132,7 +130,7 @@ impl Model {
     }
     // Synchronous publication seam. The native journey additionally exercises
     // real load_current_cached -> apply_snapshot, including liveHold bypass.
-    fn load_current_cached(mut self: Pin<&mut Self>, _: bool) {
+    fn load_current_cached(mut self: Pin<&mut Self>, _: bool, _: i32) {
         if let Some(dir) = &self.directory {
             let cancel = gust_core::lister::CancelToken::new();
             let mut snap = gust_core::lister::list_names(&gust_core::location::LocationKey::local(dir), 1, &cancel, |_| {});
@@ -146,10 +144,10 @@ impl Model {
     // The search runtime is outside this worker fixture. Exercise both
     // decisions through the exact production reload method below.
     fn defer_origin_relist(&self) -> bool { self.defer_relist }
-    fn focus_on_name(mut self: Pin<&mut Self>, name: std::ffi::OsString) { self.focus_name = Some(name); }
 @RELOAD_AFTER_MODE_CHANGE@
 @FINISH_MODE_CHANGE@
 @RELOAD@
+@RELOAD_CURRENT@
 @RUN_PREPARE@
 @RUN_CONFIRM@
 @RUN_DISCARD@
@@ -199,7 +197,7 @@ fn model() -> (Model, mpsc::Receiver<Reply>) {
         last_extra: UndoExtra::None, last_link: None, last_job: None,
         last_bulk_rename: Vec::new(), last_trashed_batch: Vec::new(),
         run_token: 0, pending_run: None, directory: None, entries: Vec::new(),
-        key: 0, requested_key: 0, cursor: 0, focus_name: None,
+        key: 0, requested_key: 0,
         live_hold: false, selection_pending: false, defer_relist: false, live_dirty: false,
         launched: Vec::new(),
         thread: Thread(tx),
@@ -425,25 +423,19 @@ fn pending_selection_preserves_the_run_prompt_until_it_can_be_accepted() {
 }
 
 #[test]
-fn permission_refresh_respects_navigation_and_an_existing_focus_request() {
+fn permission_refresh_skips_navigation_in_flight() {
     let f = Fixture::new();
     let (mut m, _) = model();
-    let a = f.script("a.sh", 0o644);
+    f.script("a.sh", 0o644);
     m.directory = Some(f.0.clone());
     Pin::new(&mut m).reload();
     f.script("b.sh", 0o644);
     m.requested_key = 1;
     Pin::new(&mut m).reload_after_mode_change();
     assert_eq!(m.entries.len(), 1);
-    assert!(m.focus_name.is_none());
     m.requested_key = m.key;
-    m.focus_name = Some("b.sh".into());
     Pin::new(&mut m).reload_after_mode_change();
     assert_eq!(m.entries.len(), 2);
-    assert_eq!(m.focus_name.as_deref(), Some(std::ffi::OsStr::new("b.sh")));
-    m.focus_name = None;
-    Pin::new(&mut m).reload_after_mode_change();
-    assert_eq!(m.focus_name.as_deref(), a.file_name());
 }
 
 #[test]
