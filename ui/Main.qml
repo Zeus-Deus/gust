@@ -1571,6 +1571,32 @@ Window {
         hints.message = ""
         // A menu waiting for another tab's selection never opens over this one.
         if (win.menuIntent && win.menuIntent.model !== dirModel) win.menuIntent = null
+        win.syncFilterBar()
+    }
+
+    /// The filter bar shows the filter of the list on screen. Going to
+    /// another folder clears the model's filter and switching tab or pane
+    /// swaps the model; the bar used to keep the old text over a list that
+    /// was no longer filtered (or stay hidden over one that was).
+    function syncFilterBar() {
+        if (!dirModel || filterBar.searchActive) return
+        const text = dirModel.filter
+        if (text === filterInput.text && filterBar.filterActive === (text !== "" || filterInput.activeFocus))
+            return
+        filterBar.syncing = true
+        filterInput.text = text
+        filterBar.syncing = false
+        if (text !== "") {
+            filterBar.filterActive = true
+        } else if (filterBar.filterActive) {
+            const typing = filterInput.activeFocus
+            filterBar.filterActive = false
+            if (typing) win.focusList()
+        }
+    }
+    Connections {
+        target: dirModel
+        function onFilterChanged() { win.syncFilterBar() }
     }
 
     // Back/Forward availability. can_go_back() is a call, which QML never
@@ -3471,6 +3497,8 @@ Window {
             // question. The filter narrows this folder; search walks this
             // folder and below, on a worker, ranked (DESIGN §6.3).
             property bool searchActive: false
+            // The field is being set FROM the model: not a keystroke to send back.
+            property bool syncing: false
             onFilterActiveChanged: win.qaDump("filterbar")
             onSearchActiveChanged: win.qaDump("searchbar")
 
@@ -3500,7 +3528,7 @@ Window {
                     selectByMouse: true
                     // While this field has focus it owns every key: h/j/k/l,
                     // / and : are text here, not commands.
-                    onTextChanged: dirModel.set_filter_text(text)
+                    onTextChanged: if (!filterBar.syncing) dirModel.set_filter_text(text)
                     Keys.onEscapePressed: {
                         text = ""
                         dirModel.set_filter_text("")
