@@ -19,10 +19,6 @@ Item {
     /// [{label, hint, action, danger, enabled}] or {separator: true}
     property var items: []
     property int current: -1
-    // Where the pointer was when the menu appeared; hover counts only
-    // once it has moved away from there.
-    property bool pointerSeen: false
-    property point pointerOrigin: Qt.point(0, 0)
     readonly property bool open: visible
 
     signal chosen(string action)
@@ -38,16 +34,17 @@ Item {
         highlightMoved()
     }
 
-    /// Scroll so entry `i` is inside the frame (keyboard travel in a menu
-    /// taller than the window).
+    /// Keep the scroll offset in range and the current entry inside the frame.
     function reveal(i) {
-        if (i < 0 || i >= items.length || !menu.scrolls) return
-        let top = padY
-        for (let k = 0; k < i; k++) top += items[k].separator ? sepH : rowH
-        const bottom = top + rowH
-        if (top - padY < scroller.contentY) scroller.contentY = top - padY
-        else if (bottom + padY > scroller.contentY + scroller.height)
-            scroller.contentY = bottom + padY - scroller.height
+        let y = scroller.contentY
+        if (i >= 0 && i < items.length) {
+            let top = 0
+            for (let k = 0; k < i; k++) top += items[k].separator ? sepH : rowH
+            const bottom = top + rowH + 2 * padY
+            if (top < y) y = top
+            else if (bottom > y + menu.height) y = bottom - menu.height
+        }
+        scroller.contentY = Math.max(0, Math.min(y, menu.fullHeight - menu.height))
     }
     signal closed()
 
@@ -88,18 +85,10 @@ Item {
             wh = Math.max(wh, hintMetrics.advanceWidth)
         }
         menu.preferredWidth = Math.ceil(Tokens.rowPaddingX * 2 + wl + (wh > 0 ? Tokens.spaceXxl * 2 + wh : 0))
-        const m = Tokens.spaceSm
-        // Never taller than the window: a long menu in a short (tiled) or
-        // zoomed window used to run off the bottom, taking its last
-        // entries (Move to Trash) out of reach. It scrolls instead.
         menu.fullHeight = Math.ceil(h)
-        menu.height = Math.min(menu.fullHeight, Math.max(rowH + padY * 2, root.height - m * 2))
         scroller.contentY = 0
-        menu.y = py + menu.height + m <= root.height
-                 ? py
-                 : Math.max(m, py - menu.height)
         current = -1
-        pointerSeen = false
+        hover.seen = false
         visible = true
         keys.forceActiveFocus()
     }
@@ -153,6 +142,23 @@ Item {
         onWheel: root.close()
     }
 
+    // Track motion in window coordinates. A row moving under a parked
+    // pointer during scrolling or resizing must preserve keyboard selection.
+    HoverHandler {
+        id: hover
+        property bool seen: false
+        property point lastPosition
+        onPointChanged: {
+            const p = point.position
+            if (seen && Math.abs(p.x - lastPosition.x) + Math.abs(p.y - lastPosition.y) < 3) return
+            lastPosition = p
+            if (!seen) { seen = true; return }
+            const local = entries.mapFromItem(root, p)
+            const entry = scroller.contains(scroller.mapFromItem(root, p)) ? entries.childAt(local.x, local.y) : null
+            root.current = entry && root.isPickable(entry.index) ? entry.index : -1
+        }
+    }
+
     Item {
         id: keys
         focus: true
@@ -185,7 +191,13 @@ Item {
         radius: Tokens.radius
         /// The height every entry needs; `height` is capped to the window.
         property real fullHeight: 0
-        readonly property bool scrolls: fullHeight > height + 1
+        height: Math.min(fullHeight, Math.max(0, root.height - 2 * Tokens.spaceSm))
+        // Prefer to open below the anchor. A resize can put even the anchor
+        // outside the window, so clamp the flipped position at both edges.
+        readonly property real maxY: root.height - height - Tokens.spaceSm
+        y: Math.max(Tokens.spaceSm, root.lastAt.y <= maxY ? root.lastAt.y
+                                                          : Math.min(root.lastAt.y - height, maxY))
+        readonly property bool scrolls: fullHeight > height
 
         // Clicks inside the frame but between rows must not fall through
         // to the dismiss area.
@@ -207,8 +219,10 @@ Item {
             interactive: menu.scrolls
             boundsBehavior: Flickable.StopAtBounds
             clip: menu.scrolls
+            onHeightChanged: if (root.visible) root.reveal(root.current)
 
         Column {
+            id: entries
             y: root.padY - Math.max(1, Tokens.borderWidth)
             width: parent.width
 
@@ -291,23 +305,7 @@ Item {
                     MouseArea {
                         visible: !modelData.separator
                         anchors.fill: parent
-                        hoverEnabled: true
                         acceptedButtons: Qt.LeftButton | Qt.RightButton
-                        // Movement, not mere presence: a menu opened by the
-                        // keyboard can appear under a resting pointer, and
-                        // that pointer must not pick the entry Enter runs.
-                        onPositionChanged: (mouse) => {
-                            const g = mapToItem(root, mouse.x, mouse.y)
-                            if (!root.pointerSeen) {
-                                root.pointerSeen = true
-                                root.pointerOrigin = g
-                                return
-                            }
-                            if (Math.abs(g.x - root.pointerOrigin.x) + Math.abs(g.y - root.pointerOrigin.y) < 3)
-                                return
-                            root.current = root.isPickable(index) ? index : -1
-                        }
-                        onExited: if (root.current === index) root.current = -1
                         onClicked: root.pick(index)
                     }
 

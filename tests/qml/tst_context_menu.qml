@@ -35,7 +35,11 @@ TestCase {
         return [top - scroller().contentY, top + menu.rowH - scroller().contentY]
     }
 
-    function cleanup() { menu.close(); chosen.clear() }
+    function cleanup() {
+        menu.close()
+        chosen.clear()
+        test.height = 200
+    }
 
     function test_a_menu_that_fits_is_not_capped_and_does_not_scroll() {
         menu.popup(10, 10, entries(3))
@@ -78,6 +82,80 @@ TestCase {
         verify(f.y >= 0, "top edge above the window: " + f.y)
         verify(f.y + f.height <= test.height, "bottom edge below the window: " + (f.y + f.height))
         verify(scroller().interactive)
+    }
+
+    function openTallMenu() {
+        test.height = 700
+        menu.popup(10, test.height - 20, entries(19))
+        compare(frame().height, frame().fullHeight)
+        verify(!scroller().interactive)
+        verify(frame().y > Tokens.spaceSm)
+    }
+
+    function shrinkOpenMenu() {
+        test.height = 320
+        tryCompare(frame(), "height", test.height - 2 * Tokens.spaceSm)
+        compare(frame().y, Tokens.spaceSm)
+        verify(menu.open && scroller().interactive)
+    }
+
+    function test_resize_preserves_keyboard_selection_and_bounds_scroll() {
+        openTallMenu()
+        keyClick(Qt.Key_End)
+        const last = menu.items.length - 1
+        shrinkOpenMenu()
+        tryVerify(() => span(last)[1] <= frame().height)
+        compare(menu.current, last)
+        for (const height of [450, 700]) {
+            test.height = height
+            tryVerify(() => scroller().contentY <= Math.max(0, scroller().contentHeight - scroller().height))
+            verify(span(last)[0] >= 0 && span(last)[1] <= frame().height)
+        }
+        compare(scroller().contentY, 0)
+        shrinkOpenMenu()
+        keyClick(Qt.Key_Home)
+        keyClick(Qt.Key_End)
+        compare(menu.current, last)
+        verify(span(last)[1] <= frame().height)
+        keyClick(Qt.Key_Return)
+        compare(chosen.count, 1)
+        compare(chosen.signalArguments[0][0], "trash")
+    }
+
+    function test_parked_pointer_preserves_selection_when_the_menu_moves() {
+        test.height = 700
+        menu.popup(10, 120, entries(19))
+        waitForRendering(menu)
+        const first = menu.itemPoints()["Entry 0"]
+        mouseMove(test, first[0], first[1])
+        mouseMove(test, first[0] + 8, first[1])
+        compare(menu.current, 0)
+        keyClick(Qt.Key_Home)
+        shrinkOpenMenu()
+        waitForRendering(menu)
+        compare(menu.current, 0)
+        const second = menu.itemPoints()["Entry 1"]
+        mouseMove(test, second[0], second[1])
+        compare(menu.current, 1)
+    }
+
+    function test_resize_allows_wheeling_to_and_clicking_the_last_action() {
+        openTallMenu()
+        shrinkOpenMenu()
+        compare(scroller().contentY, 0)
+        const x = frame().x + frame().width / 2
+        for (let i = 0; i < 12 && !scroller().atYEnd; i++) {
+            const before = scroller().contentY
+            mouseWheel(test, x, test.height / 2, 0, -120)
+            tryVerify(() => scroller().contentY > before)
+        }
+        tryCompare(scroller(), "atYEnd", true)
+        tryCompare(scroller(), "moving", false)
+        const last = menu.itemPoints()["Move to Trash"]
+        verify(last[1] > 0 && last[1] < test.height)
+        mouseClick(test, last[0], last[1])
+        compare(chosen.count, 1)
+        compare(chosen.signalArguments[0][0], "trash")
     }
 
     function test_keyboard_travel_brings_the_last_entry_into_view_and_runs_it() {

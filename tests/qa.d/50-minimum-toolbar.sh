@@ -5,7 +5,8 @@ toolbar_point() {
   point="$(python3 - "$STATE" "$1" "$2" <<'PY'
 import json, sys
 with open(sys.argv[1]) as f:
-    print(*json.load(f)[sys.argv[2]][sys.argv[3]])
+    points = json.load(f)[sys.argv[2]]
+    print(*points[int(sys.argv[3]) if isinstance(points, list) else sys.argv[3]])
 PY
 )" || return 1
   read -r x y <<<"$point"
@@ -21,7 +22,7 @@ toolbar_click() {
   local point x y
   point="$(toolbar_point "$@")" || return 1
   read -r x y <<<"$point"
-  mouse click "$x" "$y"
+  mouse click "$x" "$y" "${3:-left}"
 }
 
 toolbar_menu_click() {
@@ -31,6 +32,22 @@ toolbar_menu_click() {
 check_more_width() {
   expect "both More popup edges fit inside the client" \
     "0 < d['menuEdges'][0] < d['menuEdges'][1] < d['windowWidth']" "True"
+}
+
+# At default zoom More fits in a tall window. Shrink it while it is open
+# in each input journey, so opening directly at minimum size cannot mask clipping.
+open_more_at_minimum_height() {
+  local zoom="$1"
+  if [[ "$zoom" == 1 ]]; then
+    vm hyprctl dispatch 'hl.dsp.window.resize({ x = 520, y = 700 })' >/dev/null || return 1
+  fi
+  toolbar_click toolbarPoints more || return 1
+  if [[ "$zoom" == 1 ]]; then
+    expect "the open More menu initially fits" \
+      "d['windowHeight'] == 700 and 320 < d['menuPoints']['Keyboard shortcuts'][1] < 700" "True"
+    vm hyprctl dispatch 'hl.dsp.window.resize({ x = 520, y = 320 })' >/dev/null || return 1
+    wait_for "d['menuOpen'] and d['windowHeight'] == 320" "True" || return 1
+  fi
 }
 
 check_search_query() {
@@ -101,12 +118,17 @@ compact_toolbar_actions() {
 }
 
 second_tab_toolbar() {
+  local index point x y
   key Down
   key Right
   expect "Roomy density takes effect" "d['settings']['density']" "roomy"
   toolbar_click settingsPoints close || return 1
   ctrl t
   expect "second tab is active" "(d['tabCount'], d['activeTab'])" "(2, 1)"
+  for index in 0 1 0 1; do
+    toolbar_click tabCenters "$index" || return 1
+    expect "tab $index takes its click at minimum size" "d['activeTab']" "$index"
+  done
   shot "50-second-tab-roomy"
 
   toolbar_click toolbarPoints more || return 1
@@ -122,6 +144,30 @@ second_tab_toolbar() {
   expect "Settings opens with two tabs" "d['settingsOpen']" "True"
   toolbar_click settingsPoints close || return 1
   expect "Close returns to the second tab" "(d['settingsOpen'], d['activeTab'])" "(False, 1)"
+
+  for index in {2..7}; do ctrl t; done
+  expect "the eighth tab opens in view" \
+    "d['activeTab'] == 7 and 0 < d['tabCenters'][7][0] < d['windowWidth']" "True"
+  ctrl Tab
+  expect "cycling back reveals the first tab" \
+    "d['activeTab'] == 0 and 0 < d['tabCenters'][0][0] < d['windowWidth']" "True"
+  point="$(toolbar_point tabCenters 0)" || return 1
+  read -r x y <<<"$point"
+  mouse wheel "$x" "$y" -12 || return 1
+  toolbar_click tabCenters 7 || return 1
+  expect "scrolling the tab strip makes the eighth tab clickable" "d['activeTab']" "7"
+  toolbar_click tabCenters 6 middle || return 1
+  expect "middle-click closes the adjacent tab and keeps the last active" \
+    "(d['tabCount'], d['activeTab'])" "(7, 6)"
+  vm hyprctl dispatch 'hl.dsp.window.resize({ x = 900, y = 320 })' >/dev/null || return 1
+  wait_for "d['windowWidth']" "900" || return 1
+  toolbar_click tabCenters 0 || return 1
+  expect "widening exposes the first tab again" "d['activeTab']" "0"
+  toolbar_click tabCenters 6 || return 1
+  vm hyprctl dispatch 'hl.dsp.window.resize({ x = 520, y = 320 })' >/dev/null || return 1
+  wait_for "d['windowWidth']" "520" || return 1
+  expect "shrinking keeps the active tab in view" \
+    "d['activeTab'] == 6 and 0 < d['tabCenters'][6][0] < d['windowWidth']" "True"
 }
 
 minimum_toolbar() {
@@ -202,7 +248,7 @@ minimum_toolbar() {
       expect "the adjacent New folder button takes its click" "d['promptOpen']" "True"
       key Escape
     fi
-    toolbar_click toolbarPoints more || return 1
+    open_more_at_minimum_height "$zoom" || return 1
     expect "More opens at zoom $zoom" "d['menuOpen']" "True"
     check_more_width
     if [[ "$zoom" == 1.6 ]]; then shot "50-overflow-$zoom"; fi
@@ -212,8 +258,10 @@ minimum_toolbar() {
     # Reopen at the top. Reach the same bottom action using only the mouse.
     last="$(toolbar_point menuPoints "Keyboard shortcuts")" || return 1
     read -r x y <<<"$last"
+    key Return
+    expect "the last More action takes Enter" "d['keyMapOpen']" "True"
     key Escape
-    toolbar_click toolbarPoints more || return 1
+    open_more_at_minimum_height "$zoom" || return 1
     mouse wheel "$x" "$y" -12 || return 1
     mouse click "$x" "$y" || return 1
     expect "the last More action takes a pointer click" "d['keyMapOpen']" "True"

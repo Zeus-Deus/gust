@@ -2957,94 +2957,143 @@ Window {
                 color: Tokens.withAlpha(Tokens.border, Tokens.borderAlpha)
             }
 
-            Row {
-                anchors.left: parent.left
+            Flickable {
+                id: tabViewport
+                anchors.fill: parent
                 anchors.leftMargin: Tokens.rowPaddingX
-                anchors.verticalCenter: parent.verticalCenter
-                spacing: Tokens.spaceSm
+                anchors.rightMargin: Tokens.rowPaddingX
+                contentWidth: tabRow.width
+                contentHeight: height
+                clip: true
+                flickableDirection: Flickable.HorizontalFlick
+                boundsBehavior: Flickable.StopAtBounds
 
-                Repeater {
-                    id: tabRepeater
-                    model: tabList
-                    delegate: Rectangle {
-                        // Only this pane's tabs. A strip mixing both panes
-                        // makes a click jump the user across the window.
-                        required property int pane
-                        visible: pane === win.activePane
-                        // `index` is supplied by the Repeater; `label` comes
-                        // from the ListModel role. Both must be declared or
-                        // the delegate fails to create — silently, leaving an
-                        // empty strip and one line in the log.
-                        required property int index
-                        required property string label
-                        readonly property bool current: index === win.activeTab
+                // Fit the active pane's tabs into the strip. Once a tab would
+                // be narrower than the strip is tall, scroll to keep it usable.
+                readonly property int tabCount: Math.max(1, win.activePaneTabCount)
+                readonly property real tabBudget: Math.max(height,
+                    (width - (tabCount - 1) * tabRow.spacing) / tabCount)
 
-                        implicitWidth: Math.min(Math.round(Tokens.rowHeight * 7),
-                                                Math.max(Math.round(Tokens.rowHeight * 3),
-                                                         tabText.implicitWidth
-                                                         + Tokens.spaceLg * 2))
-                        width: implicitWidth
-                        height: Math.round(tabStrip.height * 0.8)
-                        radius: Tokens.radius
-                        color: current ? Tokens.withAlpha(Tokens.foreground, 0.12)
-                                       : "transparent"
-                        border.width: current ? Math.max(1, Tokens.borderWidth) : 0
-                        border.color: Tokens.withAlpha(Tokens.border, Tokens.borderAlpha)
+                function scrollTo(x) {
+                    contentX = Math.max(0, Math.min(x, contentWidth - width))
+                }
+                function revealActive() {
+                    const tab = tabRepeater.itemAt(win.activeTab)
+                    if (!tab || !tab.visible) return
+                    const right = tab.x + tab.width
+                    scrollTo(Math.max(right - width, Math.min(tab.x, contentX)))
+                }
+                onWidthChanged: {
+                    Qt.callLater(revealActive)
+                    if (visible) win.qaDump("tab-strip")
+                }
+                onMovementEnded: win.qaDump("tab-strip")
+                // A mouse wheel supplies vertical deltas even on a horizontal strip.
+                WheelHandler {
+                    enabled: tabViewport.contentWidth > tabViewport.width
+                    target: null
+                    acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
+                    onWheel: (event) => {
+                        const delta = event.pixelDelta.y || event.angleDelta.y / 120 * tabStrip.height
+                        tabViewport.scrollTo(tabViewport.contentX - delta)
+                        win.qaDump("tab-strip")
+                    }
+                }
+                Connections {
+                    target: win
+                    function onActiveTabChanged() { Qt.callLater(tabViewport.revealActive) }
+                }
 
-                        Text {
-                            textFormat: Text.PlainText
-                            id: tabText
-                            anchors.centerIn: parent
-                            width: parent.width - Tokens.spaceLg
-                            horizontalAlignment: Text.AlignHCenter
-                            elide: Text.ElideMiddle
-                            text: parent.label
-                            color: parent.current ? Tokens.foreground
-                                                  : Tokens.foregroundDim
-                            font.family: Tokens.fontFamily
-                            font.pixelSize: Tokens.fontCaption
-                        }
+                Row {
+                    id: tabRow
+                    onPositioningComplete: tabViewport.revealActive()
+                    anchors.verticalCenter: parent.verticalCenter
+                    spacing: Tokens.spaceSm
 
-                        MouseArea {
-                            id: tabMouse
-                            anchors.fill: parent
-                            acceptedButtons: Qt.LeftButton | Qt.MiddleButton
-                            // A few pixels before a click becomes a drag, so
-                            // a slightly imprecise click is still a click —
-                            // the same threshold the file list uses.
-                            property point pressAt: Qt.point(0, 0)
-                            property bool dragging: false
+                    Repeater {
+                        id: tabRepeater
+                        model: tabList
+                        delegate: Rectangle {
+                            // Only this pane's tabs. A strip mixing both panes
+                            // makes a click jump the user across the window.
+                            required property int pane
+                            visible: pane === win.activePane
+                            // `index` is supplied by the Repeater; `label` comes
+                            // from the ListModel role. Both must be declared or
+                            // the delegate fails to create — silently, leaving an
+                            // empty strip and one line in the log.
+                            required property int index
+                            required property string label
+                            readonly property bool current: index === win.activeTab
 
-                            onPressed: (mouse) => {
-                                tabMouse.pressAt = Qt.point(mouse.x, mouse.y)
-                                tabMouse.dragging = false
+                            implicitWidth: Math.min(Math.round(Tokens.rowHeight * 7),
+                                                    Math.max(Math.round(Tokens.rowHeight * 3),
+                                                             tabText.implicitWidth
+                                                             + Tokens.spaceLg * 2))
+                            width: Math.min(implicitWidth, tabViewport.tabBudget)
+                            height: Math.round(tabStrip.height * 0.8)
+                            radius: Tokens.radius
+                            color: current ? Tokens.withAlpha(Tokens.foreground, 0.12)
+                                           : "transparent"
+                            border.width: current ? Math.max(1, Tokens.borderWidth) : 0
+                            border.color: Tokens.withAlpha(Tokens.border, Tokens.borderAlpha)
+
+                            Text {
+                                textFormat: Text.PlainText
+                                id: tabText
+                                anchors.centerIn: parent
+                                width: Math.max(0, parent.width - Tokens.spaceLg)
+                                horizontalAlignment: Text.AlignHCenter
+                                elide: Text.ElideMiddle
+                                text: parent.label
+                                color: parent.current ? Tokens.foreground
+                                                      : Tokens.foregroundDim
+                                font.family: Tokens.fontFamily
+                                font.pixelSize: Tokens.fontCaption
                             }
-                            onPositionChanged: (mouse) => {
-                                if (!(mouse.buttons & Qt.LeftButton)) return
-                                const dx = mouse.x - tabMouse.pressAt.x
-                                const dy = mouse.y - tabMouse.pressAt.y
-                                if (!tabMouse.dragging
-                                    && Math.abs(dx) + Math.abs(dy) < 8) return
-                                tabMouse.dragging = true
-                                const p = tabMouse.mapToItem(null, mouse.x, mouse.y)
-                                win.tabDragMoved(parent.index, p.x, p.y)
-                            }
-                            onReleased: (mouse) => {
-                                if (!tabMouse.dragging) return
-                                tabMouse.dragging = false
-                                const p = tabMouse.mapToItem(null, mouse.x, mouse.y)
-                                win.tabDragDropped(parent.index, p.x, p.y)
-                            }
-                            onCanceled: {
-                                tabMouse.dragging = false
-                                win.tabDragEnded()
-                            }
-                            onClicked: (mouse) => {
-                                if (tabMouse.dragging) return
-                                if (mouse.button === Qt.MiddleButton)
-                                    win.closeTab(parent.index)
-                                else
-                                    win.activateTab(parent.index)
+
+                            MouseArea {
+                                id: tabMouse
+                                anchors.fill: parent
+                                acceptedButtons: Qt.LeftButton | Qt.MiddleButton
+                                preventStealing: true
+                                // A few pixels before a click becomes a drag, so
+                                // a slightly imprecise click is still a click —
+                                // the same threshold the file list uses.
+                                property point pressAt: Qt.point(0, 0)
+                                property bool dragging: false
+
+                                onPressed: (mouse) => {
+                                    tabMouse.pressAt = Qt.point(mouse.x, mouse.y)
+                                    tabMouse.dragging = false
+                                }
+                                onPositionChanged: (mouse) => {
+                                    if (!(mouse.buttons & Qt.LeftButton)) return
+                                    const dx = mouse.x - tabMouse.pressAt.x
+                                    const dy = mouse.y - tabMouse.pressAt.y
+                                    if (!tabMouse.dragging
+                                        && Math.abs(dx) + Math.abs(dy) < 8) return
+                                    tabMouse.dragging = true
+                                    const p = tabMouse.mapToItem(null, mouse.x, mouse.y)
+                                    win.tabDragMoved(parent.index, p.x, p.y)
+                                }
+                                onReleased: (mouse) => {
+                                    if (!tabMouse.dragging) return
+                                    tabMouse.dragging = false
+                                    const p = tabMouse.mapToItem(null, mouse.x, mouse.y)
+                                    win.tabDragDropped(parent.index, p.x, p.y)
+                                }
+                                onCanceled: {
+                                    tabMouse.dragging = false
+                                    win.tabDragEnded()
+                                }
+                                onClicked: (mouse) => {
+                                    if (tabMouse.dragging) return
+                                    if (mouse.button === Qt.MiddleButton)
+                                        win.closeTab(parent.index)
+                                    else
+                                        win.activateTab(parent.index)
+                                }
                             }
                         }
                     }
@@ -4349,6 +4398,7 @@ Window {
 
     ContextMenu {
         id: contextMenu
+        onHeightChanged: if (open) win.qaDump("context-menu")
         onChosen: (a) => win.runAction(a)
         onFinished: (a) => { if (win.dropMenuModel) win.releaseDropDrag() }
         onHighlightMoved: win.qaDump("context-menu")
