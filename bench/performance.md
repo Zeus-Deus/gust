@@ -143,3 +143,84 @@ cargo run --release -p gust-thumbs --example performance -- \
 Compare alternating release builds on the same fixture, preserve the raw output
 locally, and verify ordering before interpreting the timing. The listing
 example prints phase timings and an order checksum, without filenames.
+
+## Content search in plain text
+
+On a generated 32-file corpus, the median release time for the entire
+`grep_with_report` walk fell from 129.7 ms to 65.3 ms. Nine alternating-order
+pairs on the same warm tmpfs fixture all read 33,554,848 bytes and found all
+32 files. The ranges were 125.1–151.4 ms and 62.0–87.6 ms. This measures the
+Rust backend including file I/O, matching and snippet creation. The native
+search journey separately checked activation, deferred rename and byte-exact
+undo. The walk continues to report its existing partial-coverage status.
+
+A second run compared the original corpus with an early hit at byte zero of
+each file's single long ASCII line. Both corpora had the same file sizes and
+query. The table shows whole-search medians and ranges in milliseconds for
+nine alternating pairs per fixture on warm tmpfs.
+
+| Fixture | Baseline (`f81702f`) | ASCII fast path (`1f178a0`) |
+| --- | ---: | ---: |
+| Short lines, match on the final line | 115.7 (111.8–127.4) | 59.4 (54.6–71.6) |
+| Single long line, match at byte zero | 24.7 (23.8–26.6) | 25.0 (23.8–33.8) |
+
+With the early hit, the candidate still scans the line to establish that it
+is ASCII. Its median was 0.3 ms higher on this corpus, and the ranges overlap.
+
+To repeat from the root of the candidate checkout, build the same example twice.
+The baseline predates the example, so copy just its source into a detached
+baseline worktree. Separate target directories keep both executables available.
+The measurements used warm tmpfs. For the two corpora, choose a writable tmpfs
+with at least 65 MiB free. The recipe defaults to `/dev/shm` and checks the
+filesystem before building. The worktree and builds use the usual temporary
+directory, which can be on disk.
+
+```bash
+set -eu
+fixture_parent=${GUST_BENCH_TMPFS:-/dev/shm}
+if [[ $(stat -f -c %T -- "$fixture_parent") != tmpfs ]]; then
+    echo "Set GUST_BENCH_TMPFS to a writable tmpfs directory." >&2
+    exit 1
+fi
+fixtures=$(mktemp -d -- "$fixture_parent/gust-content-search.XXXXXXXX")
+run=$(mktemp -d)
+git worktree add --detach "$run/baseline" f81702f11aad253e9dfdc541393de68cf225f897
+cp crates/core/examples/bench_content_search.rs "$run/baseline/crates/core/examples/"
+for build in baseline candidate; do
+    source_dir=$PWD
+    if [[ $build == baseline ]]; then source_dir="$run/baseline"; fi
+    flock /tmp/gust-build.lock cargo build --locked --release \
+        --manifest-path "$source_dir/Cargo.toml" --target-dir "$run/$build-target" \
+        -p gust-core --example bench_content_search
+done
+
+python3 - "$fixtures" <<'PYTHON'
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+line = b"Project notes about searching ordinary documentation and code.\n"
+late = line * 16644 + b"Find NEEDLE here\n"
+# One equally long file with the match at byte zero of a single ASCII line.
+early = b"NEEDLE" + b"x" * (len(late) - 7) + b"\n"
+for case, data in [("final-line", late), ("early-hit", early)]:
+    folder = root / case
+    folder.mkdir()
+    for index in range(32):
+        (folder / f"{index}.txt").write_bytes(data)
+PYTHON
+
+for fixture in final-line early-hit; do
+    for round in {0..9}; do
+        order=(baseline candidate)
+        if (( round % 2 == 0 )); then order=(candidate baseline); fi
+        for build in "${order[@]}"; do
+            printf '%s %s %s ' "$fixture" "$round" "$build"
+            "$run/$build-target/release/examples/bench_content_search" "$fixtures/$fixture" needle
+        done
+    done
+done
+```
+
+Round zero warms both builds. Compare the median of the nine remaining runs
+per build and fixture. Each run should report 32 hits and 33,554,848 bytes.
