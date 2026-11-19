@@ -23,8 +23,11 @@ Rectangle {
     /// something did not happen. Outranks the selection count, which is only
     /// ambient state, and is cleared by the next action.
     property string alert: ""
+    property bool showingOpenFailure: false
     property int queuedOpenFailures: 0
-    signal nextOpenFailure()
+    readonly property string alertAction: root.queuedOpenFailures > 0 ? qsTr("Next")
+                                          : root.showingOpenFailure ? qsTr("Dismiss") : ""
+    signal dismissAlert()
     /// A modal dialog is up: its keys, not the list's, are what work now
     /// (a stale "Enter open" under a Run prompt would mislead).
     property bool dialog: false
@@ -41,7 +44,8 @@ Rectangle {
 
     readonly property string displayText:
         root.alert !== "" && root.queuedOpenFailures > 0
-            ? root.alert + qsTr(" (%1 more · click for next)").arg(root.queuedOpenFailures)
+            ? root.alert + qsTr(" (%1 more) · %2").arg(root.queuedOpenFailures).arg(root.alertAction)
+        : root.showingOpenFailure ? root.alert + qsTr(" · %1").arg(root.alertAction)
         : root.alert !== "" ? root.alert
         : root.messageAboutSelection && root.message !== "" ? root.message
         : (root.selection !== "" ? root.selection
@@ -132,7 +136,7 @@ Rectangle {
         anchors.rightMargin: Tokens.rowPaddingX
         anchors.verticalCenter: parent.verticalCenter
         // Make room for the failure and its next action before eliding either.
-        width: Math.min(implicitWidth, root.queuedOpenFailures > 0
+        width: Math.min(implicitWidth, root.alertAction !== ""
                         ? root.width - 2 * Tokens.rowPaddingX : Math.round(root.width * 0.66))
         elide: Text.ElideMiddle
         horizontalAlignment: Text.AlignRight
@@ -142,15 +146,23 @@ Rectangle {
         font.family: Tokens.fontFamily
         font.pixelSize: Tokens.fontCaption
         objectName: "statusText"
-
-        TapHandler {
-            enabled: root.queuedOpenFailures > 0
-            cursorShape: Qt.PointingHandCursor
-            onTapped: root.nextOpenFailure()
-        }
     }
 
-    Accessible.role: root.queuedOpenFailures > 0 ? Accessible.Button : Accessible.StaticText
-    Accessible.onPressAction: if (root.queuedOpenFailures > 0) root.nextOpenFailure()
+    Item {
+        anchors.left: statusText.left
+        anchors.right: statusText.right
+        height: parent.height
+        visible: root.alertAction !== ""
+        TapHandler {
+            cursorShape: Qt.PointingHandCursor
+            onTapped: root.dismissAlert()
+        }
+        Accessible.role: Accessible.Button
+        Accessible.name: root.alertAction
+        Accessible.description: root.alert
+        Accessible.onPressAction: if (visible) root.dismissAlert()
+    }
+
+    Accessible.role: Accessible.StaticText
     Accessible.name: "Keyboard hints and status: " + root.displayText
 }

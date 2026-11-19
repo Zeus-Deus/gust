@@ -3651,8 +3651,9 @@ Window {
             // stale behind a message some earlier keystroke left here.
             selection: win.selectionText
             alert: win.actionAlert || win.prefsNotice || dirModel.notice
+            showingOpenFailure: win.currentOpenFailure !== ""
             queuedOpenFailures: win.pendingOpenFailures.length
-            onNextOpenFailure: win.dismissAlert()
+            onDismissAlert: { win.dismissAlert(); win.qaDump("hint") }
             dialog: confirm.visible || connectionRecovery.visible
             onStatusChanged: win.qaDump("hint")
             onMessageChanged: win.qaDump("hint")

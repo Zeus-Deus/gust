@@ -44,15 +44,41 @@ done
 # The opener starts, then finds no application: that must be said, not
 # left looking like a successful open.
 printf 'content fixture\n' > "$d48/orphan.nohandler"
-sleep 1
-key Escape; typ "orphan.nohandler"
-expect "cursor on orphan.nohandler" "d['model']['cursor_name']" "orphan.nohandler"
-key Return
-wait_for "'orphan.nohandler' in d['hintAlert']" "True" 20 >/dev/null
-# An opener failure names the file and offers a way to choose an app.
-expect_contains "a file the desktop could not open says so" "d['hintAlert']" 'open "orphan.nohandler"'
-shot 48-no-application
-key Escape
+wait_for "'orphan.nohandler' in d['rowPoints']" "True" 20 >/dev/null
+# The status text is right-aligned in the bottom strip.
+click_open_alert() {
+  local x y w h row_height
+  read -r x y w h <<<"$(win_geo)"
+  row_height="$(state "d['rowHeight']")"
+  mouse click $((x + w - row_height)) $((y + h - row_height / 2))
+}
+if [[ "$MOUSE_OK" -eq 1 ]]; then
+  read -r wx wy _ _ <<<"$(win_geo)"
+  read -r rx ry <<<"$(state "' '.join(map(str, d['rowPoints']['orphan.nohandler']))")"
+  mouse doubleclick $((wx + rx)) $((wy + ry))
+  wait_for "'orphan.nohandler' in d['hintAlert']" "True" 20 >/dev/null
+  expect_contains "a file the desktop could not open says so" "d['hintAlert']" 'open "orphan.nohandler"'
+  shot 48-no-application
+
+  # Use the folder's menu below its last row while the lone failure is visible.
+  row_height="$(state "d['rowHeight']")"
+  last_y="$(state "max(p[1] for p in d['rowPoints'].values())")"
+  mouse click $((wx + rx)) $((wy + last_y + row_height)) right
+  if wait_for "'Copy folder path' in d['menuPoints']" "True" 10; then
+    read -r mx my <<<"$(state "' '.join(map(str, d['menuPoints']['Copy folder path']))")"
+    mouse click $((wx + mx)) $((wy + my))
+  else
+    bad "the folder menu did not offer Copy folder path"
+  fi
+  expect_contains "copying the folder path produced feedback" "d['hintStatus']" "Copied path $d48"
+  expect_contains "the open failure remains until clicked" "d['hintShown']" 'orphan.nohandler'
+  expect_contains "the lone failure offers Dismiss" "d['hintShown']" 'Dismiss'
+  click_open_alert
+  expect "mouse dismissal reveals the folder action's feedback" "d['hintShown']" "Copied path $d48"
+  shot 48-mouse-dismissed
+else
+  bad "single open failure mouse journey did not run: no pointer injection"
+fi
 
 key Escape; typ "IMG_0001.JPG"
 palette_run "Run program"
@@ -208,10 +234,12 @@ wait_for "'1 more' in d['hintShown']" "True" 20 >/dev/null
 expect_contains "first launcher failure survives the second" "d['hintShown']" 'Could not open "fix.patch"'
 expect_contains "the strip indicates another failure is waiting" "d['hintShown']" '1 more'
 shot 48-two-launch-failures-first
-key Home
+expect_contains "queued failures offer Next" "d['hintShown']" 'Next'
+if [[ "$MOUSE_OK" -eq 1 ]]; then click_open_alert; else key Home; fi
 expect_contains "the second launcher failure is readable" "d['hintShown']" 'Could not open "report.PDF"'
 shot 48-two-launch-failures-second
-key End
+expect_contains "the last queued failure offers Dismiss" "d['hintShown']" 'Dismiss'
+if [[ "$MOUSE_OK" -eq 1 ]]; then click_open_alert; else key End; fi
 expect "both failures have been dismissed" "d['hintAlert']" ""
 
 # Hold an image paste on its worker until both launcher errors have arrived.
