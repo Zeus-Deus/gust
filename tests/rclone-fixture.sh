@@ -40,7 +40,7 @@ EOF
   rclone serve webdav "$BACKEND" \
       --addr "127.0.0.1:$PORT" \
       --log-file "$LOG/serve.log" --log-level INFO \
-      >/dev/null 2>&1 &
+      >>"$LOG/serve.log" 2>&1 &
   echo $! > "$ROOT/serve.pid"
 
   for _ in $(seq 1 40); do
@@ -62,7 +62,7 @@ EOF
       --cache-dir "$CACHE" \
       --rc --rc-addr "127.0.0.1:$((PORT + 1))" --rc-no-auth \
       --log-file "$LOG/mount.log" --log-level INFO \
-      >/dev/null 2>&1 &
+      >>"$LOG/mount.log" 2>&1 &
   echo $! > "$ROOT/mount.pid"
 
   for _ in $(seq 1 40); do

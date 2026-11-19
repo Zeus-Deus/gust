@@ -373,3 +373,15 @@ filters, audio seeking and stopping, PDF pages, Up/Down zoom in the viewer
 and preview, and Quick Look in Rows, Grid and Columns. It needs mpv, wtype,
 hyprctl, grim, ImageMagick, ffmpeg, Poppler and the sandbox/audio helpers
 used by Quick Look.
+
+### Local SSHFS and WebDAV peers
+
+On Arch Linux, run `tests/namespace-peers.sh` with bubblewrap, FUSE 3,
+sshfs, OpenSSH client tools, rclone and iproute2 installed. The driver builds
+the three integration binaries under the build lease. Each runs in a fresh
+unprivileged user, network, PID and mount namespace with its own loopback and
+temporary storage. Only the guest can reach its SFTP or WebDAV server. Its
+mount capability applies within that user namespace. The host needs
+unprivileged user namespaces and a readable/writable `/dev/fuse`.
+The independent SFTP backing directory and the WebDAV VFS cache exercise
+different completion semantics. Neither fixture requires a provider account.
