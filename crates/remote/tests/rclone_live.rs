@@ -52,13 +52,62 @@ fn fixture_rc(method: &str) -> io::Result<serde_json::Value> {
     Ok(serde_json::from_slice(&result.stdout)?)
 }
 
+// Allow slow local peers while keeping each live upload check within 90 seconds.
+fn upload_timeout(writeback: Duration) -> Option<Duration> {
+    (writeback <= Duration::from_secs(60)).then(|| writeback + Duration::from_secs(30))
+}
+
 fn upload_deadline() -> Instant {
     // Ask the running mount: the fixture can be started in another shell.
     let stats = fixture_rc("vfs/stats").expect("read mount options");
     let delay = stats["opt"]["WriteBack"]
         .as_u64()
         .expect("writeback delay in nanoseconds");
-    Instant::now() + Duration::from_nanos(delay) + Duration::from_secs(30)
+    let timeout = upload_timeout(Duration::from_nanos(delay)).expect(
+        "invalid rclone fixture setup: use GUST_RCLONE_WRITEBACK of at most 60s; off is unsupported",
+    );
+    Instant::now() + timeout
+}
+
+fn is_upload_for(transfer: &serde_json::Value, name: &str) -> bool {
+    transfer["name"] == name
+        && match transfer.get("what") {
+            Some(kind) => kind == "transferring",
+            // rclone 1.70 distinguishes transfers from checks with this flag alone.
+            None => transfer["checked"] == false,
+        }
+}
+
+#[test]
+fn fixture_upload_wait_has_a_finite_budget() {
+    assert_eq!(
+        upload_timeout(Duration::from_secs(10)),
+        Some(Duration::from_secs(40))
+    );
+    let limit = Duration::from_secs(60);
+    assert_eq!(upload_timeout(limit), Some(Duration::from_secs(90)));
+    assert_eq!(upload_timeout(limit + Duration::from_nanos(1)), None);
+    // rclone encodes "off" as the largest signed duration in nanoseconds.
+    assert_eq!(upload_timeout(Duration::from_nanos(i64::MAX as u64)), None);
+}
+
+#[test]
+fn transfer_history_requires_a_matching_upload_in_either_format() {
+    use serde_json::json;
+
+    for (record, expected) in [
+        (json!({"name":"item", "what":"transferring"}), true),
+        (
+            json!({"name":"item", "what":"checking", "checked":false}),
+            false,
+        ),
+        (json!({"name":"item", "checked":false}), true),
+        (json!({"name":"other", "checked":false}), false),
+        (json!({"name":"item", "checked":true}), false),
+        (json!({"name":"item"}), false),
+    ] {
+        assert_eq!(is_upload_for(&record, "item"), expected, "{record}");
+    }
 }
 
 fn wait_for_rejected_upload(name: &str, deadline: Instant) -> io::Result<()> {
@@ -67,10 +116,7 @@ fn wait_for_rejected_upload(name: &str, deadline: Instant) -> io::Result<()> {
         let transfers = history["transferred"]
             .as_array()
             .ok_or_else(|| io::Error::other("missing transfer history"))?;
-        if let Some(upload) = transfers
-            .iter()
-            .find(|t| t["name"] == name && t["what"] == "transferring")
-        {
+        if let Some(upload) = transfers.iter().find(|t| is_upload_for(t, name)) {
             if upload["error"]
                 .as_str()
                 .is_some_and(|error| !error.is_empty())
@@ -171,6 +217,7 @@ fn a_missing_remote_says_which_one() {
 #[test]
 fn cached_is_not_uploaded() {
     need_fixture!();
+    let deadline = upload_deadline();
     let name = "cached-not-uploaded.txt";
     let body = b"this has not reached the backend yet";
     let file = mount().join(name);
@@ -197,7 +244,6 @@ fn cached_is_not_uploaded() {
     );
 
     // After the write-back interval, the backend really does have it.
-    let deadline = upload_deadline();
     let mut confirmed = false;
     while std::time::Instant::now() < deadline {
         let now = backend_listing("gustcloud", "", Some(&config())).expect("backend listing");
