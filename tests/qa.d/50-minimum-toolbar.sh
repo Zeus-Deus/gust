@@ -28,8 +28,10 @@ toolbar_menu_click() {
   toolbar_click toolbarPoints more && toolbar_click menuPoints "$1"
 }
 
-compact_toolbar_actions() {
-  local folder="$1" view
+compact_toolbar_navigation() {
+  local folder="$1"
+  expect "Up ends before More begins" \
+    "d['toolbarPoints']['upEnd'][0] <= d['toolbarPoints']['moreStart'][0]" "True"
   toolbar_click toolbarPoints up || return 1
   expect "Up takes its click" "d['model']['location']" "$folder"
   toolbar_click toolbarPoints back || return 1
@@ -42,7 +44,10 @@ compact_toolbar_actions() {
   expect "the sidebar toggle hides the sidebar" "d['sidebarVisible']" "False"
   expect "Settings takes its click beside More" "d['settingsOpen']" "True"
   toolbar_click settingsPoints close || return 1
+}
 
+compact_toolbar_actions() {
+  local view
   toolbar_menu_click "Search" || return 1
   expect "Search from More opens the search bar" "d['searchBarActive']" "True"
   typ "q"
@@ -62,14 +67,21 @@ compact_toolbar_actions() {
 }
 
 minimum_toolbar() {
-  local test_home
+  local spacing="$1" test_home
+  shift
   test_home="$(mktemp -d "$FIXTURE/toolbar-XXXXXXXX")" || return 1
   # Keep font metrics and preferences deterministic across desktop themes.
   local FIXTURE="$test_home" REAL_STATE="$test_home/theme"
   local folder="$FIXTURE/long-directory-name-to-force-breadcrumb-overflow/p"
-  local zoom last x y step
+  local zoom last x y step shot_suffix=""
   mkdir -p "$folder/q" "$REAL_STATE"
-  for zoom in 1 1.1 1.6; do
+  if [[ "$spacing" == 2 ]]; then
+    shot_suffix="-spacing-$spacing"
+    mkdir -p "$REAL_STATE/current/theme"
+    echo 'mode = "dark"' > "$REAL_STATE/current/theme/colors.toml"
+    printf '[spacing]\nscale = 2.0\n' > "$REAL_STATE/current/theme/shell.toml"
+  fi
+  for zoom in "$@"; do
     start_gust "$folder/q" || return 1
     vm hyprctl dispatch 'hl.dsp.window.float()' >/dev/null
     vm hyprctl dispatch 'hl.dsp.window.resize({ x = 520, y = 320 })' >/dev/null
@@ -82,10 +94,26 @@ minimum_toolbar() {
     expect "Settings opens at zoom $zoom" "d['settingsOpen']" "True"
     expect "minimum client size" "(d['windowWidth'], d['windowHeight'])" "(520, 320)"
     expect "text zoom" "d['zoom']" "$zoom"
-    shot "50-settings-$zoom"
+    expect "theme spacing scale" "d['spacingScale']" "$spacing"
+    shot "50-settings-$zoom$shot_suffix"
     toolbar_click settingsPoints close || return 1
     expect "Close dismisses Settings" "d['settingsOpen']" "False"
-    shot "50-breadcrumbs-$zoom"
+    shot "50-breadcrumbs-$zoom$shot_suffix"
+    if [[ "$spacing" == 2 ]]; then
+      expect "the crowded controls keep their vertical hit area" \
+        "0 < d['navButtonSize'][0] < d['navButtonSize'][1]" "True"
+      compact_toolbar_navigation "$folder" || return 1
+      shot "50-navigation-$zoom$shot_suffix"
+      toolbar_menu_click "Search" || return 1
+      expect "Search from More takes its click at doubled spacing" "d['searchBarActive']" "True"
+      key Escape
+      vm hyprctl dispatch 'hl.dsp.window.resize({ x = 900, y = 320 })' >/dev/null
+      ctrl comma
+      toolbar_click settingsPoints close || return 1
+      expect "widening restores the themed navigation width" \
+        "d['navButtonSize'][0] == d['navButtonSize'][1]" "True"
+      continue
+    fi
     if [[ "$zoom" == 1 ]]; then
       toolbar_click crumbPoints "$folder" || return 1
       wait_for "d['model']['location']" "$folder" || { bad "visible parent breadcrumb missed"; return 1; }
@@ -96,7 +124,8 @@ minimum_toolbar() {
       expect "the cut mark leaves the folder open" "d['model']['location']" "$folder/q"
     fi
     if [[ "$zoom" == 1.6 ]]; then
-      compact_toolbar_actions "$folder" || return 1
+      compact_toolbar_navigation "$folder" || return 1
+      compact_toolbar_actions || return 1
     else
       expect "the path hitbox ends before Search" \
         "0 < d['toolbarPoints']['pathStart'][0] < d['toolbarPoints']['pathEnd'][0] <= d['toolbarPoints']['searchStart'][0]" "True"
@@ -140,7 +169,8 @@ minimum_toolbar() {
 
 say "50 · minimum-size toolbar and panels at default and increased text"
 if [[ "$MOUSE_OK" == 1 ]]; then
-  minimum_toolbar || bad "minimum-size toolbar journey did not finish"
+  minimum_toolbar 1 1 1.1 1.6 || bad "minimum-size toolbar journey did not finish"
+  minimum_toolbar 2 1.6 || bad "doubled-spacing toolbar journey did not finish"
 else
   bad "minimum-size toolbar journey needs pointer injection"
 fi

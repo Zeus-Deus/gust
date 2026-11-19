@@ -3052,6 +3052,17 @@ Window {
             height: Math.round(Tokens.controlHeight * 1.5)
             color: Tokens.barBackground
 
+            // Keep the themed button sizes until the two persistent rows
+            // would touch. Then shrink their horizontal padding and gaps
+            // together, leaving the glyphs and vertical hit areas unchanged.
+            readonly property real preferredToolsWidth:
+                (1 + navButtons.count + menuTools.children.length) * Tokens.controlHeight
+                + navButtons.count * Tokens.spaceSm + (menuTools.children.length - 1) * Tokens.spaceXs
+                + 2 * Tokens.spaceLg
+            readonly property real horizontalFit: Math.min(1, width / Math.max(1, preferredToolsWidth))
+            readonly property int toolWidth: Math.floor(Tokens.controlHeight * horizontalFit)
+            readonly property int sideMargin: Math.floor(Tokens.spaceLg * horizontalFit)
+
             Rectangle {
                 anchors.bottom: parent.bottom
                 width: parent.width
@@ -3062,13 +3073,14 @@ Window {
             Row {
                 id: leftTools
                 anchors.left: parent.left
-                anchors.leftMargin: Tokens.spaceLg
+                anchors.leftMargin: headerBar.sideMargin
                 anchors.verticalCenter: parent.verticalCenter
-                spacing: Tokens.spaceSm
+                spacing: Math.floor(Tokens.spaceSm * headerBar.horizontalFit)
 
                 // Sidebar toggle — the visible restore control for the rail.
                 BarButton {
                     id: sidebarButton
+                    width: headerBar.toolWidth
                     objectName: "sidebarToggle"
                     icon: "sidebar"
                     label: win.sidebarVisible ? qsTr("Hide sidebar") : qsTr("Show sidebar")
@@ -3084,6 +3096,7 @@ Window {
                     ]
                     delegate: BarButton {
                         objectName: "nav-" + modelData.act
+                        width: headerBar.toolWidth
                         icon: modelData.act
                         label: modelData.nm
                         available: modelData.act === "back" ? win.canBack
@@ -3206,13 +3219,14 @@ Window {
             Row {
                 id: menuTools
                 anchors.right: parent.right
-                anchors.rightMargin: Tokens.spaceLg
+                anchors.rightMargin: headerBar.sideMargin
                 anchors.verticalCenter: parent.verticalCenter
-                spacing: Tokens.spaceXs
+                spacing: Math.floor(Tokens.spaceXs * headerBar.horizontalFit)
 
                 // Everything else the window can do, in words.
                 BarButton {
                     id: moreButton
+                    width: headerBar.toolWidth
                     objectName: "moreButton"
                     icon: "more"
                     label: qsTr("More")
@@ -3222,6 +3236,7 @@ Window {
                 // Settings: a visible control, never only a shortcut.
                 BarButton {
                     id: settingsButton
+                    width: headerBar.toolWidth
                     objectName: "settingsButton"
                     icon: "settings"
                     label: win.prefsStatus === "unsaved" ? qsTr("Settings — not saved")
@@ -4642,6 +4657,7 @@ Window {
 
     function qaWrite(pending) {
         const tag = pending.tag
+        const upButton = navButtons.itemAt(2)
         const payload = {
             tag: tag,
             tags: pending.tags,
@@ -4860,6 +4876,7 @@ Window {
             keyPreset: win.keyPreset,
             sidebarVisible: win.sidebarVisible,
             density: Tokens.density,
+            spacingScale: Tokens.spacingScale,
             bookmarks: win.bookmarkList.map(b => b.label + "=" + b.path),
             jobState: win.job ? win.job.state : "",
             jobBytes: win.job ? (win.job.bytes_text || "") : "",
@@ -4934,10 +4951,13 @@ Window {
                 return it && it.iconInfo ? it.iconInfo() : []
             })(),
             sortButtonPoint: win.qaPoint(sortButton),
+            navButtonSize: [upButton.width, upButton.height],
             toolbarPoints: {
                 sidebar: win.qaPoint(sidebarButton),
                 back: win.qaPoint(navButtons.itemAt(0)), forward: win.qaPoint(navButtons.itemAt(1)),
-                up: win.qaPoint(navButtons.itemAt(2)), settings: win.qaPoint(settingsButton),
+                up: win.qaPoint(upButton), settings: win.qaPoint(settingsButton),
+                upEnd: win.qaPoint(upButton, upButton.width),
+                moreStart: win.qaPoint(moreButton, 0),
                 more: win.qaPoint(moreButton), search: win.qaPoint(searchButton),
                 newFolder: win.qaPoint(newFolderButton),
                 searchStart: win.qaPoint(searchButton, 0),
