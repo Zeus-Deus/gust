@@ -12,7 +12,8 @@
 //! order, which is a protocol rather than a prompt.
 
 use std::io::Write;
-use std::path::PathBuf;
+use std::os::unix::ffi::OsStringExt;
+use std::path::{Component, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -147,27 +148,14 @@ impl Share {
         format!("{} on {}", self.share, self.server)
     }
 
-    /// Where GVfs puts this share once mounted.
-    ///
-    /// GVfs names the directory after the connection parameters, so the
-    /// mount point can be predicted rather than scraped out of stdout.
-    pub fn mount_point(&self, runtime_dir: &str) -> PathBuf {
-        let name = match self.kind {
-            ShareKind::Smb => {
-                format!("smb-share:server={},share={}", self.server, self.share)
-            }
-            // Measured against a real GVfs NFS mount, not guessed: the
-            // directory is `prefix=<url-encoded absolute export path>`.
-            // An earlier version said `export=<share>` and was simply wrong.
-            ShareKind::Nfs => {
-                let path = if self.share.starts_with('/') {
-                    self.share.clone()
-                } else {
-                    format!("/{}", self.share)
-                };
-                format!("nfs:host={},prefix={}", self.server, percent_encode(&path))
-            }
+    /// GVfs names an NFS mount after the exact export path.
+    pub fn nfs_mount_point(&self, runtime_dir: &str) -> PathBuf {
+        let path = if self.share.starts_with('/') {
+            self.share.clone()
+        } else {
+            format!("/{}", self.share)
         };
+        let name = format!("nfs:host={},prefix={}", self.server, percent_encode(&path));
         PathBuf::from(runtime_dir).join("gvfs").join(name)
     }
 }
@@ -217,24 +205,84 @@ pub fn mount(
     }
     mount_with_command(
         share,
-        share.mount_point(runtime_dir),
+        runtime_dir,
         mount_command(share, password.is_empty()),
         password,
         timeout,
+        smb_local_path,
     )
 }
 
 fn mount_with_command(
     share: &Share,
-    mount_point: PathBuf,
+    runtime_dir: &str,
+    command: Command,
+    password: String,
+    timeout: Duration,
+    resolve_smb: impl Fn(&str, Duration) -> Option<PathBuf>,
+) -> Result<PathBuf, ShareError> {
+    let deadline = Instant::now() + timeout;
+    let remaining = || deadline.saturating_duration_since(Instant::now());
+    let smb_uri = share.uri();
+    let nfs_path = (share.kind == ShareKind::Nfs).then(|| share.nfs_mount_point(runtime_dir));
+
+    let existing_mount = || {
+        if let Some(path) = &nfs_path {
+            return path.is_dir().then(|| Ok(path.clone()));
+        }
+
+        // Look up the share root even if the requested subfolder is missing
+        // or inaccessible. Its presence says nothing about the login used.
+        let (root_uri, nested) = match share.share.split_once('/') {
+            Some((root, _)) => (format!("smb://{}/{root}", share.server), true),
+            None => (smb_uri.clone(), false),
+        };
+        let lookup = Instant::now() + remaining().min(Duration::from_secs(1));
+        let path = resolve_smb(&root_uri, lookup.saturating_duration_since(Instant::now()))?;
+        let folder = nested
+            .then(|| resolve_smb(&smb_uri, lookup.saturating_duration_since(Instant::now())))
+            .flatten()
+            .unwrap_or(path);
+        Some(Err(ShareError::AlreadyMounted(folder)))
+    };
+    if let Some(existing) = existing_mount() {
+        return existing;
+    }
+
+    if let Err(error) = run_mount_command(share, command, password, remaining()) {
+        return existing_mount().unwrap_or(Err(error));
+    }
+    if let Some(path) = nfs_path {
+        return Ok(path);
+    }
+
+    let ready_by = Instant::now() + remaining().min(Duration::from_secs(1));
+    let time_left = || ready_by.saturating_duration_since(Instant::now());
+    let path = loop {
+        if let Some(path) = resolve_smb(&smb_uri, time_left()) {
+            break path;
+        }
+        if time_left().is_zero() {
+            return Err(ShareError::Refused(
+                "The share is mounted, but GIO could not resolve its local folder.".into(),
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(25).min(time_left()));
+    };
+    wait_for_smb_folder(path, time_left())
+}
+
+fn run_mount_command(
+    share: &Share,
     mut command: Command,
     password: String,
     timeout: Duration,
-) -> Result<PathBuf, ShareError> {
-    if mount_point.is_dir() {
-        return use_existing_mount(share.kind, mount_point);
+) -> Result<(), ShareError> {
+    if timeout.is_zero() {
+        return Err(ShareError::Refused(
+            "The server did not answer in time.".into(),
+        ));
     }
-
     let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -265,18 +313,7 @@ fn mount_with_command(
                     let _ = e.read_to_string(&mut err);
                 }
                 if status.success() {
-                    return match share.kind {
-                        ShareKind::Smb => wait_for_smb_folder(
-                            mount_point,
-                            timeout
-                                .saturating_sub(started.elapsed())
-                                .min(Duration::from_secs(1)),
-                        ),
-                        ShareKind::Nfs => Ok(mount_point),
-                    };
-                }
-                if mount_point.is_dir() {
-                    return use_existing_mount(share.kind, mount_point);
+                    return Ok(());
                 }
                 return Err(classify(&err));
             }
@@ -321,12 +358,46 @@ fn wait_for_smb_folder(path: PathBuf, timeout: Duration) -> Result<PathBuf, Shar
     )))
 }
 
-fn use_existing_mount(kind: ShareKind, mount_point: PathBuf) -> Result<PathBuf, ShareError> {
-    // Guest and named SMB logins share the same GVfs path.
-    match kind {
-        ShareKind::Smb => Err(ShareError::AlreadyMounted(mount_point)),
-        ShareKind::Nfs => Ok(mount_point),
+/// Ask GIO for the local path of exactly this URI. Request only the type
+/// so no remote-supplied display name or attribute enters the output.
+fn smb_local_path(uri: &str, timeout: Duration) -> Option<PathBuf> {
+    let cancel = gust_core::lister::CancelToken::new();
+    let ctx = crate::helper::CallContext {
+        cancel: &cancel,
+        timeout,
+    };
+    let mut command = Command::new("gio");
+    command
+        .args(["info", "--attributes=standard::type", "--", uri])
+        .env("LC_ALL", "C.UTF-8")
+        .env_remove("LANGUAGE");
+    let output = crate::helper::run(command, &[], &ctx).ok()?;
+    output
+        .status
+        .success()
+        .then(|| parse_smb_local_path(&output.stdout))
+        .flatten()
+}
+
+fn parse_smb_local_path(output: &[u8]) -> Option<PathBuf> {
+    let mut lines = output.split(|&byte| byte == b'\n');
+    if lines.next()? != b"type: directory" || !lines.next()?.starts_with(b"uri: smb://") {
+        return None;
     }
+    let raw = lines.next()?.strip_prefix(b"local path: ")?;
+    // GIO flattens newlines for display. Refuse that ambiguous spelling
+    // rather than opening a different path with a literal arrow in its name.
+    let flattened_line_break = " ↵ ".as_bytes();
+    if raw.contains(&0)
+        || raw
+            .windows(flattened_line_break.len())
+            .any(|window| window == flattened_line_break)
+    {
+        return None;
+    }
+    let path = PathBuf::from(std::ffi::OsString::from_vec(raw.to_vec()));
+    (path.is_absolute() && !path.components().any(|part| part == Component::ParentDir))
+        .then_some(path)
 }
 
 fn mount_command(share: &Share, password_empty: bool) -> Command {
@@ -414,13 +485,12 @@ mod tests {
         named.user = Some("reader".into());
         let nfs = parse_address("nfs://nas/export", ShareKind::Nfs).unwrap();
         let runtime_dir = runtime.to_str().unwrap();
-        assert_eq!(
-            guest.mount_point(runtime_dir),
-            named.mount_point(runtime_dir)
-        );
-
         for share in [&guest, &named, &nfs] {
-            let path = share.mount_point(runtime_dir);
+            let path = match share.kind {
+                ShareKind::Smb => runtime.join("gvfs/smb-share:server=nas,share=public"),
+                ShareKind::Nfs => share.nfs_mount_point(runtime_dir),
+            };
+            let resolved = |_: &str, _: Duration| path.is_dir().then(|| path.clone());
             let expected = match share.kind {
                 ShareKind::Smb => Err(ShareError::AlreadyMounted(path.clone())),
                 ShareKind::Nfs => Ok(path.clone()),
@@ -431,10 +501,11 @@ mod tests {
             assert_eq!(
                 mount_with_command(
                     share,
-                    path.clone(),
+                    runtime_dir,
                     unused,
                     String::new(),
-                    Duration::from_secs(3)
+                    Duration::from_secs(3),
+                    resolved,
                 ),
                 expected,
                 "an existing mount must be handled before running the command"
@@ -449,10 +520,11 @@ mod tests {
             assert_eq!(
                 mount_with_command(
                     share,
-                    path.clone(),
+                    runtime_dir,
                     failed,
                     String::new(),
-                    Duration::from_secs(3)
+                    Duration::from_secs(3),
+                    resolved,
                 ),
                 expected,
                 "a failed command must also respect the reuse policy"
@@ -472,10 +544,19 @@ mod tests {
 
         let unready = mount_with_command(
             &share,
-            path.clone(),
+            runtime.to_str().unwrap(),
             Command::new("true"),
             String::new(),
             Duration::from_millis(200),
+            {
+                let queries = std::cell::Cell::new(0);
+                let folder = path.clone();
+                move |_: &str, _: Duration| {
+                    let attempts = queries.get();
+                    queries.set(attempts + 1);
+                    (attempts > 0).then(|| folder.clone())
+                }
+            },
         );
         assert!(unready.unwrap_err().message().contains("still unavailable"));
 
@@ -529,13 +610,22 @@ mod tests {
     }
 
     #[test]
-    fn the_mount_point_is_predicted_not_scraped() {
-        let s = parse_address("//127.0.0.1/shared", ShareKind::Smb).unwrap();
-        let mp = s.mount_point("/run/user/1000");
+    fn gio_resolves_the_canonical_smb_path_without_losing_subfolders() {
+        let info = "type: directory\nuri: smb://nas/public/Release%20Notes\nlocal path: /run/user/1000/gvfs/smb-share:server=nas,share=public/Release Notes\nattributes:\n  standard::type: 2\n";
         assert_eq!(
-            mp.to_string_lossy(),
-            "/run/user/1000/gvfs/smb-share:server=127.0.0.1,share=shared"
+            parse_smb_local_path(info.as_bytes()),
+            Some(PathBuf::from(
+                "/run/user/1000/gvfs/smb-share:server=nas,share=public/Release Notes"
+            ))
         );
+        for unusable in [
+            info.replace("local path: /", "local path: "),
+            info.replace("Release Notes", "Release ↵ Notes"),
+            info.replace("type: directory", "type: regular"),
+            info.replace("uri: smb://", "uri: file://"),
+        ] {
+            assert_eq!(parse_smb_local_path(unusable.as_bytes()), None);
+        }
     }
 
     #[test]
@@ -543,7 +633,7 @@ mod tests {
         let s = parse_address("//nas/export", ShareKind::Nfs).unwrap();
         assert_eq!(s.uri(), "nfs://nas/export");
         let mp = s
-            .mount_point("/run/user/1000")
+            .nfs_mount_point("/run/user/1000")
             .to_string_lossy()
             .to_string();
         assert!(mp.contains("nfs:host=nas"), "got {mp}");
@@ -557,7 +647,7 @@ mod tests {
         // Captured from a live mount of 127.0.0.1:/tmp/gust-nfs-fixture/export.
         let s = parse_address("//127.0.0.1/tmp/gust-nfs-fixture/export", ShareKind::Nfs).unwrap();
         assert_eq!(
-            s.mount_point("/run/user/1000").to_string_lossy(),
+            s.nfs_mount_point("/run/user/1000").to_string_lossy(),
             "/run/user/1000/gvfs/nfs:host=127.0.0.1,\
 prefix=%2Ftmp%2Fgust-nfs-fixture%2Fexport"
                 .replace("\\\n", "")

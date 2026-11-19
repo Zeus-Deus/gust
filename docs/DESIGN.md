@@ -2157,15 +2157,19 @@ Entering a username continues to send credentials through stdin. Submitting
 the username by keyboard requires a fresh press, so holding Enter at the
 address step cannot select automatic login on the next step.
 
-The GVfs SMB directory name identifies a server and share, but carries no
-login identity. If an SMB mount already exists, Gust shows its folder path
-without opening it. The user can open that path in the address bar to use the
-existing connection, or disconnect it before retrying. A failed SMB mount
-command never takes the presence of a directory as proof of a successful
-login. After GIO accepts an SMB mount, Gust briefly waits for the GVfs
-folder to become usable before opening it. During a quick reconnect, the FUSE
-path can return an I/O error even after GIO can list the share. NFS can
-reuse an existing mount because it has no login step.
+Gust asks GIO for the local path of the original SMB URI. GVfs owns the
+mapping, including the case-folded server and share and the requested
+subdirectory. The directory name identifies the share but carries no login
+identity. If the share is already mounted, Gust shows the resolved folder
+without opening it. Users can explicitly open that path in the address bar
+or disconnect before retrying. If a requested subfolder cannot be resolved
+on an existing share, Gust shows the share root. A failed mount command
+never counts as a successful login.
+
+After GIO accepts an SMB mount, Gust briefly waits for its reported local
+folder to become usable. During a quick reconnect, the FUSE path can return
+an I/O error even after GIO can list the share. NFS can reuse an existing
+mount because it has no login step.
 
 ### NFS asks for nothing
 
