@@ -29,7 +29,7 @@ depends=(
   'gvfs' 'gvfs-afc' 'gvfs-smb' 'gvfs-nfs' 'gvfs-mtp' 'gvfs-gphoto2' 'gvfs-dnssd'
   'usbmuxd' 'polkit'
   # Clipboard, Open with, terminal and folder jump.
-  'wl-clipboard' 'xdg-utils' 'xdg-terminal-exec' 'zoxide'
+  'wl-clipboard' 'xdg-utils' 'xdg-terminal-exec>=0.13.0' 'zoxide'
   # Sandboxed thumbnails and Quick Look previews.
   'bubblewrap' 'util-linux' 'imagemagick' 'ffmpegthumbnailer' 'ffmpeg'
   'pipewire-audio' 'poppler'

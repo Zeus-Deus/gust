@@ -159,6 +159,10 @@ pub mod qobject {
         #[qsignal]
         fn place_done(self: Pin<&mut DirModel>, op: QString, name: QString, message: QString);
 
+        /// A requested application or terminal launch finished on a worker.
+        #[qsignal]
+        fn launch_done(self: Pin<&mut DirModel>, success: bool, message: QString);
+
         /// A worker finished file-clipboard admission for this exact model.
         #[qsignal]
         fn paste_ready(self: Pin<&mut DirModel>, message: QString, allow_image: bool);
@@ -321,7 +325,7 @@ pub mod qobject {
         /// Launch `rclone config` in a terminal. Gust never asks for a cloud
         /// credential itself and never sees one.
         #[qinvokable]
-        fn cloud_setup(self: &DirModel) -> QString;
+        fn cloud_setup(self: Pin<&mut DirModel>);
         /// Install an allowlisted capability on a worker through polkit.
         /// No device is connected, trusted or browsed by installation.
         #[qinvokable]
@@ -3301,6 +3305,25 @@ impl qobject::DirModel {
 
     // --- opening several files (DESIGN §6.18) ----------------------------
 
+    fn launch_on_worker(
+        &self,
+        launch: impl FnOnce() -> Result<String, String> + Send + 'static,
+    ) -> Result<(), String> {
+        let thread = <Self as cxx_qt::Threading>::qt_thread(self);
+        std::thread::Builder::new()
+            .name("gust-launch".into())
+            .spawn(move || {
+                let result = launch();
+                let success = result.is_ok();
+                let message = result.unwrap_or_else(|error| error);
+                let _ = thread.queue(move |model| {
+                    model.launch_done(success, QString::from(message));
+                });
+            })
+            .map(|_| ())
+            .map_err(|e| format!("Could not start the launch worker: {e}"))
+    }
+
     /// Open the whole selection with its default handler.
     ///
     /// Returns "" when this is not a multi-file situation, so the caller
@@ -3365,17 +3388,18 @@ impl qobject::DirModel {
         }
 
         let handlers = gust_core::open::with::handlers_for(&mime);
-        let Some(handler) = handlers.first() else {
+        let Some(handler) = handlers.into_iter().next() else {
             return QString::default();
         };
-        let outcome = gust_core::open::with::launch_many(handler, &paths);
-        let msg = outcome.message();
-        match outcome {
-            gust_core::open::with::MultiOpen::Refused(_) => QString::from(msg),
-            _ => {
-                self.as_mut().set_status(QString::from(&msg));
-                QString::from(format!("OK:{msg}"))
+        match self.launch_on_worker(move || {
+            let outcome = gust_core::open::with::launch_many(&handler, &paths);
+            match outcome {
+                gust_core::open::with::MultiOpen::Refused(reason) => Err(reason),
+                _ => Ok(outcome.message()),
             }
+        }) {
+            Ok(()) => QString::from("pending"),
+            Err(e) => QString::from(e),
         }
     }
 
@@ -3470,29 +3494,19 @@ impl qobject::DirModel {
         let Some(path) = self.path_of_row(row) else {
             return QString::from("That item is no longer there.");
         };
-        let Some(mime) = Self::mime_of(&path) else {
-            return QString::from("Unknown file type.");
-        };
         let wanted = id.to_string();
-
-        // The handler must be one the SYSTEM says can open this type. A
-        // desktop id arriving from anywhere else is not a licence to launch
-        // an arbitrary program.
-        let Some(handler) = gust_core::open::with::handlers_for(&mime)
-            .into_iter()
-            .find(|h| h.id == wanted)
-        else {
-            return QString::from("That application is no longer available.");
-        };
-
-        match gust_core::open::with::launch(&handler, &path) {
-            Ok(name) => {
-                // Reported, not silent: the window does not change, so
-                // without a line here nothing appears to have happened.
-                QString::from(format!("OK:Opened with {name}"))
-            }
-            Err(e) => QString::from(format!("{e}")),
-        }
+        let launch = self.launch_on_worker(move || {
+            let mime = Self::mime_of(&path).ok_or("Unknown file type.")?;
+            // Only a handler registered for this file type may be launched.
+            let handler = gust_core::open::with::handlers_for(&mime)
+                .into_iter()
+                .find(|h| h.id == wanted)
+                .ok_or("That application is no longer available.")?;
+            gust_core::open::with::launch(&handler, &path)
+                .map(|name| format!("Opened with {name}"))
+                .map_err(|e| e.to_string())
+        });
+        QString::from(launch.err().unwrap_or_default())
     }
 
     // --- archives (DESIGN §6.15) -----------------------------------------
@@ -6465,17 +6479,26 @@ impl qobject::DirModel {
     /// Launch rclone's own configuration tool. Every provider's setup
     /// differs and Drive's OAuth is not a template for Proton or Filen
     /// (plan §3), so Gust delegates rather than reimplementing any of it.
-    fn cloud_setup(&self) -> QString {
-        if !gust_remote::cloud::rclone_available() {
-            return QString::from(gust_remote::cloud::CloudError::NotInstalled.message());
-        }
-        let (bin, args) = gust_remote::cloud::config_command();
-        match gust_core::open::run_in_terminal(bin, &args) {
-            Ok(_) => QString::default(),
-            Err(_) => {
-                QString::from("No terminal found. Run rclone config yourself, then :cloud again.")
-            }
-        }
+    fn cloud_setup(self: Pin<&mut Self>) {
+        self.place_op(
+            "cloud-setup",
+            String::new(),
+            "Opening a terminal…".into(),
+            || {
+                if !gust_remote::cloud::rclone_available() {
+                    return PlaceOutcome::Failed(
+                        gust_remote::cloud::CloudError::NotInstalled.message(),
+                    );
+                }
+                let (bin, args) = gust_remote::cloud::config_command();
+                match gust_core::open::run_in_terminal(bin, &args) {
+                    Ok(_) => PlaceOutcome::Done("Opened a terminal for cloud setup".into()),
+                    Err(_) => PlaceOutcome::Failed(
+                        "No terminal found. Run rclone config yourself, then :cloud again.".into(),
+                    ),
+                }
+            },
+        );
     }
 
     /// Open a terminal in the current folder.
@@ -6489,10 +6512,13 @@ impl qobject::DirModel {
         let Some(dir) = self.key.as_path() else {
             return QString::from("this location is not a local folder");
         };
-        match gust_core::open::open_terminal_here(dir) {
-            Ok(term) => QString::from(&format!("Opened {term}")),
-            Err(e) => QString::from(&format!("{e}")),
-        }
+        let dir = dir.to_owned();
+        let launch = self.launch_on_worker(move || {
+            gust_core::open::open_terminal_here(&dir)
+                .map(|term| format!("Opened {term}"))
+                .map_err(|e| e.to_string())
+        });
+        QString::from(launch.err().unwrap_or_default())
     }
 
     fn breadcrumbs(&self) -> QStringList {

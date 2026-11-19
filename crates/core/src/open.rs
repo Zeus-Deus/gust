@@ -201,16 +201,6 @@ pub fn which(program: &str) -> Option<PathBuf> {
     })
 }
 
-/// Open a terminal in `dir`, for the "Open terminal here" action.
-///
-/// Honours `$TERMINAL` first, then the terminals an Omarchy install is
-/// likely to have. Never falls back to a shell string.
-/// The command that opens the user's own terminal in `dir`.
-///
-/// Omarchy (and any desktop following the xdg-terminal-exec spec) records
-/// the chosen terminal there — its Super+Return uses it — so it comes
-/// first. `--dir` is a separate argument: the path is never parsed by a
-/// shell.
 /// The argv that runs an executable file deliberately (the "Run…" action,
 /// always behind a confirmation). It runs in the user's default terminal,
 /// held open so its output can be read, with its own folder as the working
@@ -307,86 +297,74 @@ pub fn program_state(path: &Path, mode: u32, is_regular: bool) -> ProgramState {
     ProgramState::NotAProgram
 }
 
-pub fn terminal_command(dir: &Path, have: impl Fn(&str) -> bool) -> Option<Command> {
-    if have("xdg-terminal-exec") {
-        let mut c = Command::new("xdg-terminal-exec");
-        c.arg(format!("--dir={}", dir.display()));
-        return Some(c);
-    }
-    None
+const XDG_TERMINAL: &str = "xdg-terminal-exec";
+
+/// The launcher's print mode (since 0.13.0) exits before exec. A terminal
+/// may return its target's exit status, so only this lookup can be retried.
+fn desktop_terminal_resolves(program: &str) -> bool {
+    crate::childenv::for_user_app(&mut Command::new(program))
+        .arg("--print-id")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .is_ok_and(|o| o.status.success() && !o.stdout.trim_ascii().is_empty())
 }
 
+fn terminal_in_dir(term: &str, dir: &Path) -> Command {
+    let mut cmd = Command::new(term);
+    let flag = match Path::new(term).file_name().and_then(OsStr::to_str) {
+        Some(XDG_TERMINAL) => "--dir=",
+        Some("kitty" | "ghostty") => "--working-directory=",
+        _ => {
+            cmd.arg("--working-directory").arg(dir);
+            return cmd;
+        }
+    };
+    let mut arg = OsString::from(flag);
+    arg.push(dir);
+    cmd.arg(arg);
+    cmd
+}
+
+/// Build the desktop launcher's command for opening a folder.
+pub fn terminal_command(dir: &Path, have: impl Fn(&str) -> bool) -> Option<Command> {
+    have(XDG_TERMINAL).then(|| terminal_in_dir(XDG_TERMINAL, dir))
+}
+
+/// Open a terminal in a folder. Resolve and spawn on a worker.
 pub fn open_terminal_here(dir: &Path) -> Result<String, OpenRefusal> {
     if !dir.is_dir() {
         return Err(OpenRefusal::Failed("not a folder".into()));
     }
-    if let Some(mut cmd) = terminal_command(dir, |p| which(p).is_some()) {
-        crate::childenv::for_user_app(&mut cmd)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        if let Ok(child) = cmd.spawn() {
-            reap(child);
-            return Ok("xdg-terminal-exec".into());
-        }
-    }
-    let mut candidates: Vec<String> = Vec::new();
-    if let Some(t) = std::env::var_os("TERMINAL") {
-        candidates.push(t.to_string_lossy().into_owned());
-    }
-    for t in ["alacritty", "kitty", "foot", "ghostty", "wezterm"] {
-        candidates.push(t.to_string());
-    }
-
-    for term in candidates {
-        if which(&term).is_none() {
-            continue;
-        }
-        let mut cmd = Command::new(&term);
-        // Every one of these accepts a working directory flag; none of them
-        // needs a shell to receive it.
-        match term.as_str() {
-            "kitty" | "ghostty" => {
-                cmd.arg(format!("--working-directory={}", dir.display()));
-            }
-            _ => {
-                cmd.arg("--working-directory").arg(dir);
-            }
-        }
-        crate::childenv::for_user_app(&mut cmd)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        if let Ok(child) = cmd.spawn() {
-            reap(child);
-            return Ok(term);
-        }
-    }
-    Err(OpenRefusal::NoHandler)
+    start_terminal(|term, _| terminal_in_dir(term, dir))
 }
 
-/// Run a fixed, known command in a terminal.
-///
-/// Used only for `rclone config`, whose whole job is to ask the user for
-/// credentials that Gust must never see or touch. The command is a compiled-in
-/// constant and its arguments are passed as separate argv entries: no shell is
-/// involved, so nothing here can be turned into command injection, and no
-/// secret ever passes through Gust.
+/// Run a desktop application's Exec argv or the cloud configuration tool
+/// inside the user's terminal. Resolve and spawn on a worker.
 pub fn run_in_terminal(program: &str, args: &[impl AsRef<OsStr>]) -> Result<String, OpenRefusal> {
     if which(program).is_none() {
         return Err(OpenRefusal::NoHandler);
     }
-    let terminal = std::env::var_os("TERMINAL").map(|t| t.to_string_lossy().into_owned());
+    start_terminal(|term, lead| {
+        let mut cmd = Command::new(term);
+        cmd.arg(lead).arg(program).args(args);
+        cmd
+    })
+}
+
+fn start_terminal(command: impl Fn(&str, &str) -> Command) -> Result<String, OpenRefusal> {
+    let terminal = std::env::var("TERMINAL").ok();
     for (term, lead) in terminal_candidates(terminal.as_deref(), |p| which(p).is_some()) {
-        let mut cmd = Command::new(&term);
-        crate::childenv::for_user_app(&mut cmd)
-            .arg(lead)
-            .arg(program)
-            .args(args)
+        if lead == "--" && !desktop_terminal_resolves(&term) {
+            continue;
+        }
+        let mut cmd = command(&term, lead);
+        if let Ok(child) = crate::childenv::for_user_app(&mut cmd)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        if let Ok(child) = cmd.spawn() {
+            .stderr(Stdio::null())
+            .spawn()
+        {
             reap(child);
             return Ok(term);
         }
@@ -407,9 +385,14 @@ pub fn terminal_candidates(
     terminal_env: Option<&str>,
     have: impl Fn(&str) -> bool,
 ) -> Vec<(String, &'static str)> {
-    let mut candidates = vec![("xdg-terminal-exec".to_string(), "--")];
-    if let Some(t) = terminal_env.filter(|t| !t.is_empty()) {
-        candidates.push((t.to_string(), "-e"));
+    let mut candidates = vec![(XDG_TERMINAL.to_string(), "--")];
+    if let Some(t) = terminal_env.filter(|t| !t.is_empty() && *t != XDG_TERMINAL) {
+        let lead = if Path::new(t).file_name() == Some(OsStr::new(XDG_TERMINAL)) {
+            "--"
+        } else {
+            "-e"
+        };
+        candidates.push((t.to_string(), lead));
     }
     for t in ["alacritty", "kitty", "foot", "ghostty", "wezterm"] {
         candidates.push((t.to_string(), "-e"));

@@ -2457,7 +2457,11 @@ paths stay raw OS bytes, so a name that is not UTF-8 still opens.
 `Terminal=true` entries are launched through a terminal, because an editor
 with no terminal simply vanishes. That holds for a multi-file launch too, and
 the terminal is the desktop's own (`xdg-terminal-exec`) before `$TERMINAL` or
-a guess at an installed one.
+a guess at an installed one. For terminal apps, cloud setup and opening a
+terminal in a folder, a worker asks `xdg-terminal-exec --print-id` to resolve
+the desktop entry before dispatch (reference launcher 0.13.0 or newer).
+If the lookup fails, Gust tries the next candidate. Once a terminal starts,
+Gust reaps it without retrying the command.
 
 ### What it will not do
 

@@ -51,6 +51,11 @@ Window {
             // Mounts and connections finish on a worker; every tab reports
             // here, so a result still lands if the user switched tabs.
             onPlace_done: (op, name, message) => win.placeDone(op, name, message, tabModel)
+            onLaunch_done: (success, message) => {
+                if (success) hints.message = message
+                else win.queueOpenFailure(message)
+                win.qaDump("launch-done")
+            }
             onPaste_ready: (message, allowImage) => win.pasteFinished(tabModel, message, allowImage)
             onPermissions_done: (token, error, message, partial) => {
                 if (token !== 0) return
@@ -1160,6 +1165,13 @@ Window {
         if (!win.connectionOwner || (owner && owner !== win.connectionOwner)) return
         if (connectPanel.completeFeedback(op, name, message)) {
             win.connectionOwner = null
+            if (op === "cloud-setup") {
+                connectPanel.feedbackTitle = message !== "" ? qsTr("Cloud storage setup needs attention") : qsTr("Continue setup in your terminal")
+                if (message === "") {
+                    connectPanel.feedbackBody = qsTr("Finish rclone config in the terminal, then check again.")
+                    hints.message = connectPanel.feedbackBody
+                }
+            }
             if (op === "setup-install") {
                 connectPanel.feedbackTitle = message === "" ? qsTr("Connection support is installed") : qsTr("Setup did not finish")
                 if (message === "") connectPanel.feedbackBody = name === "apple"
@@ -1975,6 +1987,7 @@ Window {
         if (win.selectionSettling()) return
         if (dirModel.sel_count() > 1) {
             const many = dirModel.activate_selection()
+            if (many === "pending") return
             if (many.startsWith("OK:")) {
                 hints.message = many.substring(3)
                 win.qaDump("activate-many")
@@ -2293,10 +2306,7 @@ Window {
         else if (a === "noop") { /* nothing to do */ }
         else if (a.startsWith("openwith:")) {
             const msg = dirModel.open_with_id(dirModel.cursor, a.substring(9))
-            // "OK:" marks success: the window does not change, so
-            // without a line here nothing appears to have happened.
-            if (msg.startsWith("OK:")) hints.message = msg.substring(3)
-            else if (msg !== "") win.alertText = msg
+            if (msg !== "") win.alertText = msg
             win.qaDump("open-with")
         }
         else if (a === "bulk") {
@@ -2370,14 +2380,8 @@ Window {
             if (connectPanel.busy) { connectPanel.showFeedback("", "", false); return }
             if (!win.requireSupport("cloud")) return
             connectPanel.supportKey = "cloud"
-            // rclone's own config tool, in a terminal. Gust never asks
-            // for a cloud password and never sees one.
-            const serr = dirModel.cloud_setup()
-            if (serr !== "") win.alertText = serr
-            const instruction = qsTr("Finish rclone config in the terminal, then check again.")
-            connectPanel.showFeedback(serr !== "" ? qsTr("Cloud storage setup needs attention") : qsTr("Continue setup in your terminal"),
-                serr || instruction, serr !== "")
-            if (serr === "") hints.message = instruction
+            if (!win.beginPlaceFeedback("cloud-setup", "", qsTr("Opening a terminal…"))) return
+            win.connectionOwner.cloud_setup()
             win.qaDump("cloud-setup")
         }
         else if (a.startsWith("remote-on:")) {
