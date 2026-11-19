@@ -52,7 +52,7 @@ fn fixture_rc(method: &str) -> io::Result<serde_json::Value> {
     Ok(serde_json::from_slice(&result.stdout)?)
 }
 
-// Allow slow local peers while keeping each live upload check within 90 seconds.
+// Allow up to 90 seconds to start new polls. A probe already in progress can finish later.
 fn upload_timeout(writeback: Duration) -> Option<Duration> {
     (writeback <= Duration::from_secs(60)).then(|| writeback + Duration::from_secs(30))
 }
