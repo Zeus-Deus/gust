@@ -42,16 +42,19 @@ fn wait(
         std::thread::sleep(Duration::from_millis(1));
     }
 }
-#[test]
-fn smb_consent_survives_same_folder_reload_and_is_discarded_on_navigation() {
-    let app = QCoreApplication::new();
-    let app = app.as_ref().unwrap();
-    let fixture = Fixture::new();
-    let origin = fixture.0.join("a");
-    let share = fixture.0.join("b");
+fn smb_consent_survives_same_folder_reload_and_is_discarded_on_navigation(
+    app: &QCoreApplication,
+    fixture: &Fixture,
+) {
+    let origin = fixture.0.join("smb-consent-origin");
+    let share = fixture.0.join("smb-consent-share");
+    std::fs::create_dir(&origin).unwrap();
+    std::fs::create_dir(&share).unwrap();
     let mut model = qobject::gust_test_new_model();
     model.pin_mut().navigate_path(origin.clone());
-    wait(app, &model, |m| m.settled && m.count == 1000);
+    wait(app, &model, |m| {
+        m.settled && m.key == LocationKey::local(&origin)
+    });
 
     let mount_path = share.clone();
     let (finish_mount, mount_ready) = std::sync::mpsc::channel();
@@ -90,6 +93,7 @@ fn smb_consent_survives_same_folder_reload_and_is_discarded_on_navigation() {
     wait(app, &model, |m| {
         m.settled && m.key == LocationKey::local(&origin)
     });
+    model.pin_mut().stop_watch();
 }
 
 #[test]
@@ -282,6 +286,7 @@ fn actual_qt_navigation_layout_persistent_mapping_metadata_and_hold() {
     model.pin_mut().stop_watch();
     drop(model);
     app.process_events();
+    smb_consent_survives_same_folder_reload_and_is_discarded_on_navigation(app, &fixture);
 }
 
 // Keep one QCoreApplication for the real QObject tests in this process.
