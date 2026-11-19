@@ -25,7 +25,7 @@ def completed_grid(state, pictures, names):
     sys.exit(f"thumbnail pass did not finish for {pictures} within 15 seconds")
 
 
-def check_png(path):
+def check_png(path, source_name):
     from PIL import Image
 
     if not path.is_file() or path.stat().st_size > 8 * 1024 * 1024:
@@ -34,6 +34,10 @@ def check_png(path):
         if max(image.size) > 128:
             sys.exit(f"oversized normal thumbnail: {path} ({image.size})")
         image.load()
+        if source_name == "wide.png" and image.width <= image.height:
+            sys.exit(f"expected a landscape thumbnail for {source_name}: {path} ({image.size})")
+        if source_name == "tall.jpg" and image.height <= image.width:
+            sys.exit(f"expected a portrait thumbnail for {source_name}: {path} ({image.size})")
 
 
 def main():
@@ -53,8 +57,8 @@ def main():
         displayed = Path(unquote(url.path))
         if displayed != cache / "gust-grid" / "normal" / f"{key}-{digest(versions[0])}.png":
             sys.exit(f"unexpected Grid thumbnail path for {name}: {displayed}")
-        check_png(displayed)
-        check_png(cache / "normal" / f"{key}.png")
+        check_png(displayed, name)
+        check_png(cache / "normal" / f"{key}.png", name)
 
     for name in sorted(refused):
         key = digest((pictures / name).as_uri())
